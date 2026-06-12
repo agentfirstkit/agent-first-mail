@@ -14,6 +14,8 @@ dependencies = [
 [[package]]
 name = "agent-first-data"
 version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b589ad4423a92ef6a206538c5ccca19505ea87e1240cce1dbe9f97089e01ba2e"
 dependencies = [
  "chrono",
  "clap",
