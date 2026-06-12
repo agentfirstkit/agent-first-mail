@@ -1,0 +1,16 @@
+---
+kind: archive_message
+message_id: {{ message_id }}
+archive_uid: {{ archive_uid }}
+archive_name: {{ archive_name }}
+archived_rfc3339: "{{ archived_rfc3339 }}"
+generated_rfc3339: "{{ generated_rfc3339 }}"
+---
+
+# {% if title %}{{ title }}{% else %}归档消息{% endif %}
+
+归档: {{ archive_name }}（`{{ archive_uid }}`）
+
+摘要: {{ summary }}
+
+{{ conversation }}

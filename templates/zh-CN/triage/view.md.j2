@@ -1,0 +1,33 @@
+---
+kind: triage_view
+message_id: {{ message_id }}
+message_ids:
+  - {{ message_id }}
+generated_rfc3339: "{{ generated_rfc3339 }}"
+message_count: 1
+attachment_count: {{ attachment_count }}
+{% if suggested_case_uids | length > 0 %}suggested_case_uids:
+{% for case_uid in suggested_case_uids %}  - {{ case_uid }}
+{% endfor %}{% if suggested_reason %}suggested_reason: "{{ suggested_reason_yaml }}"
+{% endif %}{% endif %}---
+
+# {% if title %}{{ title }}{% else %}新邮件{% endif %}
+{% if suggested_case_uids | length > 0 %}
+
+建议事项 ID: {% for case_uid in suggested_case_uids %}{% if not loop.first %}, {% endif %}`{{ case_uid }}`{% endfor %}
+{% endif %}{% if related_messages | length > 0 %}
+
+## 相关消息
+
+这些消息通过 RFC 头（`In-Reply-To` / `References`）关联。处置前请把它们明确加入同一个事项。
+
+| 消息 | 方向 | 发件人 | 主题 | 时间 | 工作区状态 |
+| --- | --- | --- | --- | --- | --- |
+{% for item in related_messages %}| `{{ item.message_id }}` | {{ item.direction }} | {{ item.from }} | {{ item.subject }} | {{ item.time }} | {{ item.status }} |
+{% endfor %}{% endif %}
+
+<!-- afmail:conversation:start -->
+
+{{ conversation }}
+
+<!-- afmail:conversation:end -->

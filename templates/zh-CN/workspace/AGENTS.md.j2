@@ -1,0 +1,20 @@
+# 邮箱代理备注
+
+这是一个 afmail 邮箱工作区。请在这里记录邮箱专用的代理行为、优先级、
+回复风格、升级规则和用户偏好。请把自定义说明保留在下面的 afmail
+managed block 之外。
+
+<!-- BEGIN afmail managed -->
+## afmail 工作区规则
+
+执行 afmail 操作时，请遵循已安装的 `agent-first-mail` skill。如果 skill
+缺失，请运行 `afmail skill install`，然后重启代理以重新加载 skills。
+
+不要手动编辑 `.afmail/`，`.afmail/templates/` 除外；其他文件是机器管理
+状态。请使用 `afmail` 处理消息处置、事项归属、归档变更、推送队列变更
+和远端效果。
+
+代理撰写的原因、事项/归档名称、摘要、备注和草稿正文，默认应匹配
+`.afmail/config.json` 的 `workspace.language_bcp47`，除非用户要求其他语言。
+邮箱专用例外请写在本文件的用户可编辑区域。
+<!-- END afmail managed -->

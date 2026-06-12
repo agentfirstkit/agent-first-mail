@@ -1,0 +1,19 @@
+---
+kind: {{ frontmatter_kind }}
+status: {{ status }}
+generated_rfc3339: "{{ generated_rfc3339 }}"
+message_count: {{ message_count }}
+---
+
+# {{ title }}
+
+{% if items | length == 0 %}_没有邮件。_
+{% else %}{% for item in items %}## {{ loop.index }}. {{ item.action_label }}{% if item.display_title %}: {{ item.display_title }}{% endif %}
+
+{% if item.display_contact %}- {{ item.contact_label }}: {{ item.display_contact }}
+{% endif %}- 邮件: [{{ item.message_id }}]({{ item.link }})
+- 工作区状态: {{ status_label }} (`{{ status }}`)
+{% if item.time.datetime %}- 时间: {{ item.time.datetime }}
+{% endif %}
+
+{% endfor %}{% endif %}

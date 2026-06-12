@@ -1,0 +1,12 @@
+---
+kind: {{ frontmatter_kind }}
+message_id: {{ message_id }}
+status: {{ status }}
+generated_rfc3339: "{{ generated_rfc3339 }}"
+---
+
+# {% if title %}{{ title }}{% else %}{{ status_label }} message{% endif %}
+
+Workspace status: {{ status_label }} (`{{ status }}`)
+
+{{ conversation }}

@@ -1,0 +1,29 @@
+### {{ display_heading }}
+
+Message: `{{ message_id }}`
+From: {% if from %}{{ from }}{% else %}unknown{% endif %}
+{% if subject %}Subject: {{ subject }}
+{% endif %}{% if to | length > 0 %}To: {{ to | join(", ") }}
+{% endif %}{% if cc | length > 0 %}Cc: {{ cc | join(", ") }}
+{% endif %}{% if bcc | length > 0 %}Bcc: {{ bcc | join(", ") }}
+{% endif %}{% set auth = security.authentication %}{% set has_auth_warnings = auth.check and (auth.spf != "pass" or auth.dkim != "pass" or auth.dmarc != "pass" or auth.alignment == "mismatch") %}{% if has_auth_warnings %}Warnings:
+{% if auth.spf != "pass" %}- Authentication: SPF {% if auth.spf == "missing" %}is missing{% else %}did not pass ({{ auth.spf }}){% endif %}
+{% endif %}{% if auth.dkim != "pass" %}- Authentication: DKIM {% if auth.dkim == "missing" %}is missing{% else %}did not pass ({{ auth.dkim }}){% endif %}
+{% endif %}{% if auth.dmarc != "pass" %}- Authentication: DMARC {% if auth.dmarc == "missing" %}is missing{% else %}did not pass ({{ auth.dmarc }}){% endif %}
+{% endif %}{% if auth.alignment == "mismatch" %}- Authentication: authenticated domain {% if auth.authenticated_domain %}{{ auth.authenticated_domain }}{% else %}unknown{% endif %} does not match From domain {% if auth.from_domain %}{{ auth.from_domain }}{% else %}unknown{% endif %}
+{% endif %}{% endif %}{% set has_notes = security.possible_bcc or security.reply_to_differs or security.sender_differs or security.mailing_list or security.mailing_list_headers %}{% if has_notes %}Notes:
+{% if security.possible_bcc %}- Possibly Bcc'd to me: To/Cc does not include this account, but delivery headers match
+{% endif %}{% if security.reply_to_differs %}- Reply-To differs from From: {{ security.reply_to_recipients }}
+{% endif %}{% if security.sender_differs %}- Sender differs from From: {{ security.sender }}
+{% endif %}{% if security.mailing_list %}- Mailing list: {{ security.mailing_list }}
+{% elif security.mailing_list_headers %}- Mailing list headers: {{ security.mailing_list_headers }}
+{% endif %}{% endif %}
+{{ body_text_fence }}text
+{{ body_text_visible_block }}{{ body_text_fence }}
+{% if attachments | length > 0 %}
+Attachments:
+{% for attachment in attachments %}- {{ attachment.display_filename }} (`{{ attachment.content_type }}`, {{ attachment.size_bytes }} bytes; `{{ message_id }}`, part `{{ attachment.part_id }}`, {% if attachment.file_path %}fetched: `{{ attachment.file_path }}`{% else %}not fetched{% endif %})
+{% if attachment.preview_path %}
+![{{ attachment.image_alt }}](<{{ attachment.preview_path }}>)
+{% endif %}
+{% endfor %}{% endif %}

@@ -1,0 +1,29 @@
+### {{ display_heading }}
+
+消息: `{{ message_id }}`
+发件人: {% if from %}{{ from }}{% else %}未知{% endif %}
+{% if subject %}主题: {{ subject }}
+{% endif %}{% if to | length > 0 %}收件人: {{ to | join(", ") }}
+{% endif %}{% if cc | length > 0 %}抄送: {{ cc | join(", ") }}
+{% endif %}{% if bcc | length > 0 %}密送: {{ bcc | join(", ") }}
+{% endif %}{% set auth = security.authentication %}{% set has_auth_warnings = auth.check and (auth.spf != "pass" or auth.dkim != "pass" or auth.dmarc != "pass" or auth.alignment == "mismatch") %}{% if has_auth_warnings %}警告:
+{% if auth.spf != "pass" %}- 认证：SPF {% if auth.spf == "missing" %}缺失{% else %}未通过（{{ auth.spf }}）{% endif %}
+{% endif %}{% if auth.dkim != "pass" %}- 认证：DKIM {% if auth.dkim == "missing" %}缺失{% else %}未通过（{{ auth.dkim }}）{% endif %}
+{% endif %}{% if auth.dmarc != "pass" %}- 认证：DMARC {% if auth.dmarc == "missing" %}缺失{% else %}未通过（{{ auth.dmarc }}）{% endif %}
+{% endif %}{% if auth.alignment == "mismatch" %}- 认证：已认证域 {% if auth.authenticated_domain %}{{ auth.authenticated_domain }}{% else %}未知{% endif %} 与发件域 {% if auth.from_domain %}{{ auth.from_domain }}{% else %}未知{% endif %} 不一致
+{% endif %}{% endif %}{% set has_notes = security.possible_bcc or security.reply_to_differs or security.sender_differs or security.mailing_list or security.mailing_list_headers %}{% if has_notes %}提示:
+{% if security.possible_bcc %}- 可能是密送给我：To/Cc 未包含本账号，但投递头匹配
+{% endif %}{% if security.reply_to_differs %}- Reply-To 与 From 不同：{{ security.reply_to_recipients }}
+{% endif %}{% if security.sender_differs %}- Sender 与 From 不同：{{ security.sender }}
+{% endif %}{% if security.mailing_list %}- 邮件列表：{{ security.mailing_list }}
+{% elif security.mailing_list_headers %}- 邮件列表头：{{ security.mailing_list_headers }}
+{% endif %}{% endif %}
+{{ body_text_fence }}text
+{{ body_text_visible_block }}{{ body_text_fence }}
+{% if attachments | length > 0 %}
+附件:
+{% for attachment in attachments %}- {{ attachment.display_filename }} (`{{ attachment.content_type }}`, {{ attachment.size_bytes }} bytes; `{{ message_id }}`, part `{{ attachment.part_id }}`, {% if attachment.file_path %}已获取: `{{ attachment.file_path }}`{% else %}未获取{% endif %})
+{% if attachment.preview_path %}
+![{{ attachment.image_alt }}](<{{ attachment.preview_path }}>)
+{% endif %}
+{% endfor %}{% endif %}

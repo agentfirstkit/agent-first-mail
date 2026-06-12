@@ -1,0 +1,11 @@
+# 归档消息：{{ archive_name }}（`{{ archive_uid }}`）
+
+{% if items | length == 0 %}_没有消息。_
+{% else %}{% for item in items %}## {{ loop.index }}. {{ item.action_label }}{% if item.display_title %}: {{ item.display_title }}{% endif %}
+
+{% if item.display_contact %}- {{ item.contact_label }}: {{ item.display_contact }}
+{% endif %}- 消息: [{{ item.message_id }}]({{ item.link }})
+{% if item.time.datetime %}- 时间: {{ item.time.datetime }}
+{% endif %}
+
+{% endfor %}{% endif %}

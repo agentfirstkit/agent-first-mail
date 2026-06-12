@@ -1,0 +1,22 @@
+# {{ case_name }}
+
+Case: {{ case_uid }} · Status: {{ status }} · Messages: {{ message_count }}
+
+{% if items | length == 0 %}_No messages._
+{% else %}{% for item in items %}## {{ loop.index }}. {{ item.action_label }}{% if item.display_title %}: {{ item.display_title }}{% endif %}
+
+{% if item.display_contact %}- {{ item.contact_label }}: {{ item.display_contact }}
+{% endif %}- Message: [{{ item.message_id }}]({{ item.link }})
+{% if item.time.datetime %}- Time: {{ item.time.datetime }}
+{% endif %}
+
+{% endfor %}{% endif %}
+{% if conversation %}
+## Conversation
+
+<!-- afmail:conversation:start -->
+
+{{ conversation }}
+
+<!-- afmail:conversation:end -->
+{% endif %}

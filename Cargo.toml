@@ -1,0 +1,43 @@
+[package]
+name = "agent-first-mail"
+version = "0.1.0"
+edition = "2021"
+description = "Give your AI agent a mailbox it can actually work in — your mail pulled down into plain files it reads, triages, drafts, and files entirely on your machine, with nothing sent or changed on the real mailbox until you confirm."
+license = "MIT"
+repository = "https://github.com/agentfirstkit/agent-first-mail"
+readme = "README.md"
+exclude = [".github/"]
+
+[[bin]]
+name = "afmail"
+path = "src/main.rs"
+
+[dependencies]
+# The inline path lets cargo read the local monorepo manifest
+# (skill-admin lives there); release strips `, path = ...` for the registry build.
+agent-first-data = { version = "0.13.1", features = ["cli-help", "cli-help-markdown", "skill-admin"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+imap = { version = "2.4", default-features = false }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls", "pool"] }
+mail-parser = { version = "0.11", features = ["full_encoding"] }
+rustls-connector = { version = "0.23", default-features = false, features = ["webpki-root-certs", "rustls--ring"] }
+serde_yaml = "0.9.34"
+minijinja = "2"
+mime_guess = { version = "2", default-features = false }
+fs4 = "1.1"
+atomic-write-file = "0.3"
+ring = "0.17.14"
+sanitize-filename = "0.6"
+
+[dev-dependencies]
+imap-codec = "1"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stdout = "deny"
+print_stderr = "deny"

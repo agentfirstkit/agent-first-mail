@@ -1,0 +1,18 @@
+---
+kind: case_message
+case_uid: {{ case_uid }}
+case_name: {{ case_name }}
+message_id: {{ message_id }}
+generated_rfc3339: "{{ generated_rfc3339 }}"
+---
+
+# {% if title %}{{ title }}{% else %}事项消息{% endif %}
+
+事项: {{ case_name }}（`{{ case_uid }}`）
+消息: `{{ message_id }}`
+
+<!-- afmail:conversation:start -->
+
+{{ conversation }}
+
+<!-- afmail:conversation:end -->

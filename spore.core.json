@@ -1,0 +1,38 @@
+{
+  "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
+  "id": "agent-first-mail",
+  "name": "Agent-First Mail",
+  "version": "0.1.0",
+  "domain": "agentfirstkit.com",
+  "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
+  "synopsis": "Give your AI agent a mailbox it can actually work in — your mail pulled down into plain files it reads, triages, drafts, and files entirely on your machine, with nothing sent or changed on the real mailbox until you confirm.",
+  "intent": [
+    "Give AI agents a local-first email workspace where pulled messages become editable case files rather than a traditional inbox UI",
+    "Preserve raw RFC822 mail while exposing mechanically cleaned text, message metadata, active cases, archived cases, direct-message archive categories, drafts, notes, and files through stable filesystem conventions",
+    "Keep the CLI focused on side effects such as read-only pull with case suggestions, explicit triage assignment, case moves, archive and restore operations, attachment fetches, reply draft scaffolding, draft validation, local push queuing, explicit push operations including read/unread flag work, audit log inspection, and local push queue cleanup"
+  ],
+  "license": "MIT",
+  "mutations": [
+    "Initial release of Agent-First Mail (afmail) — a git-shaped, file-first mailbox workspace where your agent reads, triages, drafts, and files mail entirely in local files.",
+    "Acquisition and effects are separate verbs: read-only pull imports mail into local files, while every remote effect — send, reply, archive, delete — is queued and applied only through an explicit push (a bare push previews as a dry run; push --confirm applies).",
+    "Output follows Agent-First Data conventions — structured output, field suffixes, secret handling, and JSONL audit events."
+  ],
+  "bonds": [
+    {
+      "relation": "depends_on",
+      "uri": "cmn://agentfirstkit.com/b3.2evoUgQ3aJHXXc3MHmhJkGEg2rMRLdvKtQKZBDno4UM4",
+      "id": "agent-first-data",
+      "reason": "All structured output, field suffixes, secret handling, and JSONL events follow Agent-First Data conventions"
+    }
+  ],
+  "tree": {
+    "algorithm": "blob_tree_blake3_nfc",
+    "exclude_names": [
+      ".git",
+      ".cmn"
+    ],
+    "follow_rules": [
+      ".gitignore"
+    ]
+  }
+}
