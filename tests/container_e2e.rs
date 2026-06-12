@@ -86,6 +86,14 @@ fn docker_greenmail_pull_reply_send_e2e() {
     assert_eq!(remote["code"], "remote_test_result");
     assert_eq!(remote["capabilities"]["move"], true);
 
+    // GreenMail's `setup.test.all` only provisions INBOX, so create the standard
+    // mail folders the workspace config pins by name (drafts/sent/archive/junk/
+    // trash). GreenMail doesn't advertise RFC 6154 special-use, so these plain
+    // named folders are what pull resolves against.
+    for folder in ["Drafts", "Sent", "Archive", "Junk", "Trash"] {
+        create_remote_folder(imap_port, ME_LOGIN, PASSWORD, folder);
+    }
+
     ensure_remote_folder(root.path(), "Drafts");
     ensure_remote_folder(root.path(), "Sent");
     ensure_remote_folder(root.path(), "Archive");
@@ -218,8 +226,8 @@ fn docker_greenmail_pull_reply_send_e2e() {
         root.path(),
         &[
             "message",
-            &old_spam_message_id,
             "spam",
+            &old_spam_message_id,
             "--reason",
             "real spam message",
         ],
@@ -304,12 +312,15 @@ fn test_config(imap_port: u16, smtp_port: u16) -> Value {
             "password_secret": PASSWORD
         },
         "mailboxes": {
+            // GreenMail does not advertise RFC 6154 special-use attributes, so
+            // pin folders by name (pull resolves mailbox_name directly). The
+            // matching folders are created over IMAP in the test setup.
             "inbox": {"mailbox_name": "INBOX", "special_use": null},
-            "sent": {"mailbox_name": null, "special_use": "\\Sent"},
-            "archive": {"mailbox_name": null, "special_use": "\\Archive"},
-            "junk": {"mailbox_name": null, "special_use": "\\Junk"},
-            "trash": {"mailbox_name": null, "special_use": "\\Trash"},
-            "drafts": {"mailbox_name": null, "special_use": "\\Drafts"}
+            "sent": {"mailbox_name": "Sent", "special_use": null},
+            "archive": {"mailbox_name": "Archive", "special_use": null},
+            "junk": {"mailbox_name": "Junk", "special_use": null},
+            "trash": {"mailbox_name": "Trash", "special_use": null},
+            "drafts": {"mailbox_name": "Drafts", "special_use": null}
         },
         "actions": {
             "pull": {
@@ -323,7 +334,10 @@ fn test_config(imap_port: u16, smtp_port: u16) -> Value {
                     "drafts": {"import_as": "triage", "direction": "outbound"}
                 }
             },
-            "case.add": {"steps": [{"add_flags": ["\\Seen"]}]},
+            // case.add queues a "case" push item that no `push` subcommand
+            // drains (categories are drafts/archive/spam/trash), so keep it
+            // effect-free — matching afmail's default — or the queue never empties.
+            "case.add": {"steps": []},
             "draft.save": {"steps": [{"append_to_mailbox_id": "drafts"}]},
             "draft.send": {"steps": [
                 {"smtp_send": {}},
@@ -574,6 +588,15 @@ fn imap_login(port: u16, username: &str, password: &str) -> Option<imap::Session
     client.login(username, password).ok()
 }
 
+// Create an IMAP mailbox if it doesn't already exist (idempotent: an
+// "already exists" error from a re-run is ignored).
+fn create_remote_folder(port: u16, username: &str, password: &str, folder: &str) {
+    if let Some(mut session) = imap_login(port, username, password) {
+        let _ = session.create(folder);
+        let _ = session.logout();
+    }
+}
+
 fn wait_until<F>(timeout: Duration, mut predicate: F) -> bool
 where
     F: FnMut() -> bool,
@@ -715,54 +738,49 @@ fn write_json(path: &Path, value: &Value) {
     assert!(fs::write(path, data).is_ok());
 }
 
-fn single_message_id(root: &Path, direction: &str) -> String {
-    let mut ids = fs::read_dir(root.join(".afmail/messages"))
+// Enumerate every local message id from its `.state.json` record. `direction`
+// and `subject` are not persisted on these records — they come from
+// `message show` — so the helpers below pair this with that command.
+fn message_ids(root: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = fs::read_dir(root.join(".afmail/messages"))
         .map(|entries| {
             entries
                 .filter_map(|entry| entry.ok())
                 .filter_map(|entry| {
-                    let path = entry.path();
-                    if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                        return None;
-                    }
-                    let text = fs::read_to_string(path).ok()?;
-                    let value = serde_json::from_str::<Value>(&text).ok()?;
-                    if value["direction"].as_str() == Some(direction) {
-                        value["message_id"].as_str().map(ToString::to_string)
-                    } else {
-                        None
-                    }
+                    entry
+                        .file_name()
+                        .to_str()?
+                        .strip_suffix(".state.json")
+                        .map(ToString::to_string)
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     ids.sort();
+    ids.dedup();
+    ids
+}
+
+// Resolve the message ids matching a `message show` field (e.g. direction or
+// subject), expecting exactly one.
+fn message_ids_where(root: &Path, field: &str, expected: &str) -> Vec<String> {
+    message_ids(root)
+        .into_iter()
+        .filter(|id| {
+            let (status, stdout) = run(root, &["message", "show", id]);
+            status == 0 && parse_one(&stdout)[field].as_str() == Some(expected)
+        })
+        .collect()
+}
+
+fn single_message_id(root: &Path, direction: &str) -> String {
+    let ids = message_ids_where(root, "direction", direction);
     assert_eq!(ids.len(), 1, "expected one {direction} message: {ids:?}");
     ids.into_iter().next().unwrap_or_default()
 }
 
 fn message_id_by_subject(root: &Path, subject: &str) -> String {
-    let mut ids = fs::read_dir(root.join(".afmail/messages"))
-        .map(|entries| {
-            entries
-                .filter_map(|entry| entry.ok())
-                .filter_map(|entry| {
-                    let path = entry.path();
-                    if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                        return None;
-                    }
-                    let text = fs::read_to_string(path).ok()?;
-                    let value = serde_json::from_str::<Value>(&text).ok()?;
-                    if value["subject"].as_str() == Some(subject) {
-                        value["message_id"].as_str().map(ToString::to_string)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    ids.sort();
+    let ids = message_ids_where(root, "subject", subject);
     assert_eq!(
         ids.len(),
         1,
