@@ -1,12 +1,14 @@
-# Mailbox Agent Notes
+# Agent-First Mail Notes
 
-This is an afmail mailbox workspace. Write mailbox-specific agent behavior,
-priorities, reply style, escalation rules, and user preferences here.
+This repository contains the afmail spore. Follow the installed
+`agent-first-mail` skill for mailbox workspace operations.
 
-For afmail operations, follow the installed `agent-first-mail` skill. If the
-skill is missing, run `afmail skill install` and restart the agent so it reloads
-skills.
+For repo-local Codex use, install the skill with:
 
-Do not manually edit `.afmail/` except `.afmail/templates/`; other files are
-machine-managed state. Use `afmail` for message disposition, case membership,
-archive changes, push queue changes, and remote effects.
+```bash
+afmail skill install --agent codex --scope project
+```
+
+Do not manually edit `.afmail/`; it is machine-managed state. Generated
+Markdown template overrides live under `templates/` inside each afmail
+workspace.

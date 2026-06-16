@@ -144,6 +144,12 @@ impl Workspace {
                 message.workspace.origin = None;
                 message.workspace.remote_sync = None;
                 message.workspace.push = None;
+                self.set_message_disposition(
+                    MessageStatus::DeletedRemote,
+                    &id,
+                    None,
+                    &now_rfc3339(),
+                )?;
                 self.write_message_artifacts(&message)?;
                 deleted_remote_message_ids.push(id);
             }
@@ -716,15 +722,15 @@ impl Workspace {
         references: &mut Vec<String>,
     ) -> Result<()> {
         for (_, case_path) in self.all_case_entries()? {
-            let messages_path = case_messages_json_path(&case_path);
-            if messages_path.exists() {
-                let data = read_to_string(&messages_path, "read case messages")?;
+            let data_path = case_json_path(&case_path);
+            if data_path.exists() {
+                let data = read_to_string(&data_path, "read case metadata")?;
                 if json_contains_any_id(
                     &serde_json::from_str::<Value>(&data)
-                        .map_err(|e| AppError::json("parse case messages", &e))?,
+                        .map_err(|e| AppError::json("parse case metadata", &e))?,
                     ids,
                 ) {
-                    references.push(rel_path(&self.root, &messages_path));
+                    references.push(rel_path(&self.root, &data_path));
                 }
             }
         }
@@ -737,18 +743,18 @@ impl Workspace {
         references: &mut Vec<String>,
     ) -> Result<()> {
         for (_, case_path) in self.all_case_entries()? {
-            let messages_path = case_messages_json_path(&case_path);
-            if !messages_path.exists() {
+            let data_path = case_json_path(&case_path);
+            if !data_path.exists() {
                 continue;
             }
-            let data = read_to_string(&messages_path, "read case messages")?;
+            let data = read_to_string(&data_path, "read case metadata")?;
             let value = serde_json::from_str::<Value>(&data)
-                .map_err(|e| AppError::json("parse case messages", &e))?;
+                .map_err(|e| AppError::json("parse case metadata", &e))?;
             if !json_contains_any_id(&value, ids) {
                 continue;
             }
             if case_status(&case_path)? != "archived" {
-                references.push(rel_path(&self.root, &messages_path));
+                references.push(rel_path(&self.root, &data_path));
             }
         }
         Ok(())

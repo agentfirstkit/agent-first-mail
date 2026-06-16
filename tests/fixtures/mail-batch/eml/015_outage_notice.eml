@@ -1,0 +1,9 @@
+Message-ID: <outage_notice@fixtures.afmail.local>
+From: DBA Team <dba@example.org>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 12:45:00 +0000
+Subject: Scheduled database maintenance
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Maintenance window is Saturday 02:00-03:00 UTC. No action needed unless your service has jobs then.

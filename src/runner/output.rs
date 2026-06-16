@@ -137,7 +137,7 @@ pub(super) fn output_format_name(output: OutputFormat) -> &'static str {
 
 pub(super) fn command_name(command: &Command) -> &'static str {
     match command {
-        Command::Init => "init",
+        Command::Init { .. } => "init",
         Command::Pull { .. } => "pull",
         Command::Config { .. } => "config",
         Command::Remote { .. } => "remote",
@@ -152,5 +152,7 @@ pub(super) fn command_name(command: &Command) -> &'static str {
         Command::Archive { .. } => "archive",
         Command::Render { .. } => "render",
         Command::Log { .. } => "log",
+        #[cfg(feature = "ui")]
+        Command::Ui(_) => "ui",
     }
 }

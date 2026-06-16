@@ -16,22 +16,6 @@ pub(super) fn message_json_paths(root: &Path) -> Result<Vec<PathBuf>> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct MessageStateFile {
-    schema_name: String,
-    schema_version: u64,
-    message_id: String,
-    status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    archive_uid: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    archived_rfc3339: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    origin: Option<String>,
-    updated_rfc3339: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct MessageRemoteFile {
     schema_name: String,
     schema_version: u64,
@@ -73,33 +57,6 @@ pub(super) struct MessageCacheRebuildTotals {
     pub(super) removed_text_cache_count: usize,
 }
 
-impl MessageStateFile {
-    fn from_message(message: &MessageFile) -> Self {
-        Self {
-            schema_name: "message_state".to_string(),
-            schema_version: 1,
-            message_id: message.message_id.clone(),
-            status: message.workspace.status.clone(),
-            archive_uid: message.workspace.archive_uid.clone(),
-            archived_rfc3339: message.workspace.archived_rfc3339.clone(),
-            origin: message.workspace.origin.clone(),
-            updated_rfc3339: now_rfc3339(),
-        }
-    }
-
-    fn workspace(&self) -> Result<WorkspaceState> {
-        let status = MessageStatus::parse(&self.status)?.as_str().to_string();
-        Ok(WorkspaceState {
-            status,
-            archive_uid: self.archive_uid.clone(),
-            archived_rfc3339: self.archived_rfc3339.clone(),
-            origin: self.origin.clone(),
-            remote_sync: None,
-            push: None,
-        })
-    }
-}
-
 impl MessageRemoteFile {
     fn from_message(message: &MessageFile) -> Option<Self> {
         let remote = message.remote.as_ref()?;
@@ -134,45 +91,6 @@ fn message_state_path(root: &Path, message_id: &str) -> PathBuf {
 fn message_remote_path(root: &Path, message_id: &str) -> PathBuf {
     root.join(".afmail/messages")
         .join(format!("{message_id}.remote.json"))
-}
-
-pub(super) fn message_state_updated_rfc3339(
-    root: &Path,
-    message_id: &str,
-) -> Result<Option<String>> {
-    Ok(read_message_state_file(root, message_id)?.map(|state| state.updated_rfc3339))
-}
-
-fn read_message_state_file(root: &Path, message_id: &str) -> Result<Option<MessageStateFile>> {
-    let path = message_state_path(root, message_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let data = read_to_string(&path, "read message state")?;
-    let state: MessageStateFile =
-        serde_json::from_str(&data).map_err(|e| AppError::json("parse message state", &e))?;
-    if state.schema_name != "message_state"
-        || state.schema_version != 1
-        || state.message_id != message_id
-    {
-        return Err(AppError::new(
-            "message_state_invalid",
-            format!("invalid message state sidecar: {}", rel_path(root, &path)),
-        ));
-    }
-    MessageStatus::parse(&state.status)?;
-    Ok(Some(state))
-}
-
-fn write_message_state_file(root: &Path, state: &MessageStateFile) -> Result<()> {
-    let path = message_state_path(root, &state.message_id);
-    if let Some(parent) = path.parent() {
-        create_dir_all(parent)?;
-    }
-    let mut normalized = state.clone();
-    normalized.schema_name = "message_state".to_string();
-    normalized.schema_version = 1;
-    write_json_pretty(&path, &normalized)
 }
 
 fn read_message_remote_file(root: &Path, message_id: &str) -> Result<Option<MessageRemoteFile>> {
@@ -326,11 +244,6 @@ pub(super) fn message_reply_header_ids(message: &MessageFile) -> Vec<String> {
 }
 
 impl Workspace {
-    pub(crate) fn persist_message_state(&self, message: &MessageFile) -> Result<()> {
-        let state = MessageStateFile::from_message(message);
-        write_message_state_file(&self.root, &state)
-    }
-
     pub(crate) fn persist_message_remote(&self, message: &MessageFile) -> Result<()> {
         let path = message_remote_path(&self.root, &message.message_id);
         if let Some(remote) = MessageRemoteFile::from_message(message) {
@@ -349,6 +262,10 @@ impl Workspace {
         if message.eml_path.is_none() {
             message.eml_path = Some(format!(".afmail/messages/{}.eml", message.message_id));
         }
+        let deprecated_state = message_state_path(&self.root, &message.message_id);
+        if deprecated_state.exists() {
+            remove_file(&deprecated_state)?;
+        }
         let path = self.message_path(&message.message_id);
         if let Some(parent) = path.parent() {
             create_dir_all(parent)?;
@@ -357,12 +274,10 @@ impl Workspace {
     }
 
     pub(super) fn write_message_cache(&self, message: &MessageFile) -> Result<()> {
-        self.persist_message_state(message)?;
         self.write_message_materialized_cache(message)
     }
 
     pub(crate) fn write_message_artifacts(&self, message: &MessageFile) -> Result<()> {
-        self.persist_message_state(message)?;
         self.persist_message_remote(message)?;
         self.write_message_materialized_cache(message)
     }
@@ -380,21 +295,15 @@ impl Workspace {
         let eml_path = message_eml_path(&self.root, message_id);
         let raw = fs::read(&eml_path).map_err(|e| AppError::io("read message eml", &e))?;
         let prior = read_message(&self.message_path(message_id)).ok();
-        let state = read_message_state_file(&self.root, message_id)?;
         let remote =
             read_message_remote_file(&self.root, message_id)?.map(|file| file.remote_state());
-        let workspace = state
-            .as_ref()
-            .map(MessageStateFile::workspace)
-            .transpose()?
-            .unwrap_or_else(default_message_workspace);
         let direction = self.infer_materialized_direction(&raw, prior.as_ref(), remote.as_ref());
         let mut parsed = crate::mail::parse_message_with_options(
             message_id.to_string(),
             &raw,
             crate::mail::MessageParseOptions {
                 direction,
-                workspace,
+                workspace: default_message_workspace(),
                 remote,
                 received_rfc3339: prior
                     .as_ref()
@@ -438,7 +347,6 @@ impl Workspace {
         };
         for input in [
             message_eml_path(&self.root, message_id),
-            message_state_path(&self.root, message_id),
             message_remote_path(&self.root, message_id),
         ] {
             if !input.exists() {
@@ -517,8 +425,19 @@ impl Workspace {
         }
     }
 
-    fn apply_materialized_workspace_overlays(&self, message: &mut MessageFile) -> Result<()> {
-        if let Some((archive_uid, archived_rfc3339)) = self
+    pub(super) fn apply_materialized_workspace_overlays(
+        &self,
+        message: &mut MessageFile,
+    ) -> Result<()> {
+        message.workspace.archive_uid = None;
+        message.workspace.archived_rfc3339 = None;
+        let cases = CaseIndex::build(self)?;
+        if let Some((status, _added_rfc3339)) =
+            self.disposition_state_for_message(&message.message_id)?
+        {
+            message.workspace.status = status.as_str().to_string();
+            message.workspace.origin = None;
+        } else if let Some((archive_uid, archived_rfc3339)) = self
             .direct_archive_state_by_message()?
             .get(&message.message_id)
         {
@@ -526,10 +445,37 @@ impl Workspace {
             message.workspace.archive_uid = Some(archive_uid.clone());
             message.workspace.archived_rfc3339 = Some(archived_rfc3339.clone());
             message.workspace.origin = None;
+        } else if cases.has_any_reference(&message.message_id) {
+            message.workspace.status = MessageStatus::Case.as_str().to_string();
+        } else if message.workspace.origin.is_some() {
+            message.workspace.status = MessageStatus::Archived.as_str().to_string();
+        } else {
+            message.workspace.status = MessageStatus::Triage.as_str().to_string();
         }
-        let cases = CaseIndex::build(self)?;
-        message.workspace.status = self.derived_message_status(message, &cases)?;
+        let last_completed_rfc3339 = message
+            .workspace
+            .push
+            .as_ref()
+            .and_then(|push| push.last_completed_rfc3339.clone());
         message.workspace.push = self.pending_push_state_for_message(&message.message_id)?;
+        if let Some(last_completed_rfc3339) = last_completed_rfc3339 {
+            let push = message
+                .workspace
+                .push
+                .get_or_insert_with(WorkspacePushState::default);
+            if push.last_completed_rfc3339.is_none() {
+                push.last_completed_rfc3339 = Some(last_completed_rfc3339);
+            }
+        }
+        if message
+            .workspace
+            .push
+            .as_ref()
+            .is_some_and(|push| !push.pending.is_empty())
+            && MessageStatus::parse(&message.workspace.status)? == MessageStatus::Triage
+        {
+            message.workspace.status = MessageStatus::PushQueued.as_str().to_string();
+        }
         Ok(())
     }
 
@@ -595,10 +541,7 @@ impl Workspace {
         for archive_uid in self.archive_message_category_ids()? {
             let data = self.read_archive_messages(&archive_uid)?;
             for item in data.items {
-                out.insert(
-                    item.message_id,
-                    (archive_uid.clone(), item.archived_rfc3339),
-                );
+                out.insert(item.message_id, (archive_uid.clone(), item.added_rfc3339));
             }
         }
         Ok(out)
@@ -695,15 +638,48 @@ impl Workspace {
         .map_err(|e| AppError::json("serialize message disposition result", &e))
     }
 
-    pub fn unspam_message(&self, message_id: &str, reason: Option<&str>) -> Result<Value> {
-        self.restore_local_message_disposition(
-            message_id,
-            "spam",
-            "message.spam",
-            "message_unspammed",
-            "message_unspammed",
-            reason,
-        )
+    pub fn restore_message(&self, message_id: &str, reason: Option<&str>) -> Result<Value> {
+        self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
+        validate_id("message_id", message_id)?;
+        let message = self.read_message_by_id(message_id)?;
+        match message.workspace.status.as_str() {
+            "spam" => self.restore_local_message_disposition(
+                message_id,
+                "spam",
+                "message.spam",
+                "message_restored",
+                "message_restored",
+                reason,
+            ),
+            "trashed" => self.restore_local_message_disposition(
+                message_id,
+                "trashed",
+                "message.trash",
+                "message_restored",
+                "message_restored",
+                reason,
+            ),
+            "archived" => {
+                let archive_uid = message.workspace.archive_uid.clone().ok_or_else(|| {
+                    AppError::new(
+                        "invalid_request",
+                        format!("message {message_id} is not directly archived"),
+                    )
+                })?;
+                self.restore_direct_archive_message(
+                    &archive_uid,
+                    message_id,
+                    reason,
+                    "message_restored",
+                    "message_restored",
+                )
+            }
+            other => Err(AppError::new(
+                "invalid_request",
+                format!("message {message_id} has no disposition to restore (status: {other})"),
+            )),
+        }
     }
 
     pub fn archive_message(
@@ -814,37 +790,6 @@ impl Workspace {
         .map_err(|e| AppError::json("serialize message disposition result", &e))
     }
 
-    pub fn untrash_message(&self, message_id: &str, reason: Option<&str>) -> Result<Value> {
-        self.restore_local_message_disposition(
-            message_id,
-            "trashed",
-            "message.trash",
-            "message_untrashed",
-            "message_untrashed",
-            reason,
-        )
-    }
-
-    pub fn unarchive_message(&self, message_id: &str, reason: Option<&str>) -> Result<Value> {
-        self.require_workspace()?;
-        let reason = self.checked_reason(reason)?;
-        validate_id("message_id", message_id)?;
-        let message = self.read_message_by_id(message_id)?;
-        let archive_uid = message.workspace.archive_uid.clone().ok_or_else(|| {
-            AppError::new(
-                "invalid_request",
-                format!("message {message_id} is not directly archived"),
-            )
-        })?;
-        self.restore_direct_archive_message(
-            &archive_uid,
-            message_id,
-            reason,
-            "message_unarchived",
-            "message_unarchived",
-        )
-    }
-
     pub(super) fn message_existing_view_path(
         &self,
         message: &MessageFile,
@@ -861,11 +806,10 @@ impl Workspace {
             }
         }
         for (case_uid, case_path) in self.all_case_entries()? {
-            let messages_path = case_messages_json_path(&case_path);
-            let case_messages = read_case_messages(&messages_path, &case_uid);
+            let case_messages = read_case_messages(&case_path, &case_uid);
             if case_messages
                 .as_ref()
-                .map(|messages| messages.message_ids.iter().any(|id| id == message_id))
+                .map(|messages| messages.contains_message(message_id))
                 .unwrap_or(false)
             {
                 let message_view = case_message_view_path(&case_path, message_id);
@@ -1034,9 +978,9 @@ impl Workspace {
         validate_id("message_id", message_id)?;
         let mut msg = self.read_message_by_id(message_id)?;
         let cases = CaseIndex::build(self)?;
-        msg.workspace.status = self.derived_message_status(&msg, &cases)?;
+        self.apply_materialized_workspace_overlays(&mut msg)?;
         msg.workspace.remote_sync = None;
-        self.write_message_cache(&msg)?;
+        self.write_message_materialized_cache(&msg)?;
         if self.triage_candidate(&msg, &cases)? {
             self.write_triage_view(&msg)?;
         } else {
@@ -1053,6 +997,11 @@ impl Workspace {
         let status = MessageStatus::parse(status)?;
         for message_id in message_ids {
             validate_id("message_id", message_id)?;
+            if disposition_spec_for_status(status).is_some() {
+                self.set_message_disposition(status, message_id, None, &now_rfc3339())?;
+            } else {
+                self.clear_message_from_all_dispositions(message_id)?;
+            }
             let mut msg = self.read_message_by_id(message_id)?;
             msg.workspace.status = status.as_str().to_string();
             if matches!(status, MessageStatus::Spam | MessageStatus::Trashed) {
@@ -1061,7 +1010,7 @@ impl Workspace {
                 msg.workspace.origin = None;
             }
             msg.workspace.remote_sync = None;
-            self.write_message_cache(&msg)?;
+            self.write_message_materialized_cache(&msg)?;
             self.remove_triage_view_for_message(message_id)?;
         }
         Ok(())
@@ -1092,9 +1041,10 @@ impl Workspace {
             .iter()
             .map(|item| item.push_id.clone())
             .collect::<Vec<_>>();
+        self.clear_message_disposition(MessageStatus::parse(expected_status)?, message_id)?;
         message.workspace.status = "triage".to_string();
         message.workspace.remote_sync = None;
-        self.write_message_cache(&message)?;
+        self.write_message_materialized_cache(&message)?;
         self.refresh_message_after_ref_change(message_id)?;
         self.clear_message_pending_pushes(message_id, &push_ids, false)?;
         self.refresh_disposition_views()?;
@@ -1134,7 +1084,13 @@ impl Workspace {
             self.materialize_message_cache_if_needed(message_id)?;
         }
         let path = self.message_path(message_id);
-        read_message(&path)
+        let mut message = read_message(&path)?;
+        let original_workspace = message.workspace.clone();
+        self.apply_materialized_workspace_overlays(&mut message)?;
+        if message.workspace != original_workspace {
+            self.write_message_materialized_cache(&message)?;
+        }
+        Ok(message)
     }
 
     pub(crate) fn relocate_message(

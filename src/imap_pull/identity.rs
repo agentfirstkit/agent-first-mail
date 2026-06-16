@@ -102,6 +102,16 @@ pub(super) fn save_remote_message(
         &remote.raw_eml,
         "write eml",
     )?;
+    if let Ok(status) = MessageStatus::parse(target.import_as.as_str()) {
+        if matches!(status, MessageStatus::Spam | MessageStatus::Trashed) {
+            workspace.set_message_disposition(
+                status,
+                &message_id,
+                None,
+                &crate::store::now_rfc3339(),
+            )?;
+        }
+    }
     workspace.write_message_artifacts(&parsed.message)?;
     if target.import_as == PullImportAs::Triage {
         create_dir_all(&root.join("triage"))?;
@@ -205,35 +215,26 @@ pub(super) fn load_case_refs_by_message_id(
             if !case_path.is_dir() {
                 continue;
             }
-            let messages_path = case_path.join("data").join("messages.json");
-            if !messages_path.is_file() {
+            let case_data_path = case_path.join("data").join("case.json");
+            if !case_data_path.is_file() {
                 continue;
             }
-            let data = fs::read_to_string(&messages_path)
-                .map_err(|e| AppError::io("read case messages", &e))?;
-            let value: Value = serde_json::from_str(&data)
-                .map_err(|e| AppError::json("parse case messages", &e))?;
-            let case_uid = value
-                .get("case_uid")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-                .or_else(|| {
-                    case_path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .map(ToString::to_string)
-                })
-                .unwrap_or_default();
-            for message_id in value
-                .get("message_ids")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
+            let data = fs::read_to_string(&case_data_path)
+                .map_err(|e| AppError::io("read case metadata", &e))?;
+            let collection: crate::types::CaseMessages = serde_json::from_str(&data)
+                .map_err(|e| AppError::json("parse case metadata", &e))?;
+            if collection.schema_name != crate::types::CASE_SCHEMA_NAME
+                || collection.schema_version != crate::types::MESSAGE_COLLECTION_SCHEMA_VERSION
             {
-                out.entry(message_id.to_string())
+                return Err(AppError::new(
+                    "case_metadata_invalid",
+                    format!("invalid case metadata schema: {}", case_data_path.display()),
+                ));
+            }
+            for item in collection.items {
+                out.entry(item.message_id)
                     .or_default()
-                    .insert(case_uid.clone());
+                    .insert(collection.collection_uid.clone());
             }
         }
     }
@@ -442,7 +443,6 @@ pub(super) fn unique_message_id(root: &Path, base: &str) -> String {
     let durable_dir = root.join(".afmail/messages");
     let cache_dir = root.join("messages");
     if !durable_dir.join(format!("{base}.eml")).exists()
-        && !durable_dir.join(format!("{base}.state.json")).exists()
         && !durable_dir.join(format!("{base}.remote.json")).exists()
         && !cache_dir.join(format!("{base}.json")).exists()
     {
@@ -451,7 +451,6 @@ pub(super) fn unique_message_id(root: &Path, base: &str) -> String {
     for i in 1..1000 {
         let candidate = format!("{base}_{i}");
         if !durable_dir.join(format!("{candidate}.eml")).exists()
-            && !durable_dir.join(format!("{candidate}.state.json")).exists()
             && !durable_dir
                 .join(format!("{candidate}.remote.json"))
                 .exists()

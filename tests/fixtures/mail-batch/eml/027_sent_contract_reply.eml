@@ -1,0 +1,11 @@
+Message-ID: <sent_contract_reply@fixtures.afmail.local>
+From: Me <me@localhost>
+To: Dana Legal <dana@acme.example>
+Date: Thu, 21 May 2026 14:09:00 +0000
+Subject: Re: Acme renewal contract
+In-Reply-To: <contract_attachment@fixtures.afmail.local>
+References: <contract_attachment@fixtures.afmail.local>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Thanks Dana, I will review the renewal and send edits by Friday.

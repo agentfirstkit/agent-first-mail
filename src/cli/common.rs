@@ -28,51 +28,6 @@ pub enum TriageAction {
 pub enum PushAction {
     /// List queued local push items.
     List,
-    /// Push queued outbound drafts through configured draft.save actions.
-    Drafts {
-        /// Show planned push actions without IMAP/SMTP writes. This is the default.
-        #[arg(long)]
-        dry_run: bool,
-        /// Apply queued IMAP/SMTP effects.
-        #[arg(long)]
-        confirm: bool,
-    },
-    /// Push queued outbound drafts through configured draft.send actions.
-    DraftsSend {
-        /// Show planned push actions without IMAP/SMTP writes. This is the default.
-        #[arg(long)]
-        dry_run: bool,
-        /// Apply queued IMAP/SMTP effects, including sending mail.
-        #[arg(long)]
-        confirm: bool,
-    },
-    /// Push queued archive actions to their configured IMAP mailboxes.
-    Archive {
-        /// Show planned push actions without IMAP writes. This is the default.
-        #[arg(long)]
-        dry_run: bool,
-        /// Apply queued IMAP effects.
-        #[arg(long)]
-        confirm: bool,
-    },
-    /// Push queued spam actions to the configured Junk mailbox.
-    Spam {
-        /// Show planned push actions without IMAP writes. This is the default.
-        #[arg(long)]
-        dry_run: bool,
-        /// Apply queued IMAP effects.
-        #[arg(long)]
-        confirm: bool,
-    },
-    /// Push queued trash actions to the configured Trash mailbox.
-    Trash {
-        /// Show planned push actions without IMAP writes. This is the default.
-        #[arg(long)]
-        dry_run: bool,
-        /// Apply queued IMAP effects.
-        #[arg(long)]
-        confirm: bool,
-    },
 }
 
 #[derive(Subcommand, Debug)]

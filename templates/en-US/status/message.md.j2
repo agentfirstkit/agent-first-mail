@@ -1,12 +1,12 @@
 ---
-kind: {{ frontmatter_kind }}
-message_id: {{ message_id }}
-status: {{ status }}
-generated_rfc3339: "{{ generated_rfc3339 }}"
+kind: {{ frontmatter.kind }}
+message_id: {{ frontmatter.message_id }}
+status: {{ frontmatter.status }}
+generated_rfc3339: "{{ frontmatter.generated_rfc3339 }}"
 ---
 
-# {% if title %}{{ title }}{% else %}{{ status_label }} message{% endif %}
+# {% if view.title %}{{ view.title }}{% else %}{{ view.status_label }} message{% endif %}
 
-Workspace status: {{ status_label }} (`{{ status }}`)
+Workspace status: {{ view.status_label }} (`{{ view.status }}`)
 
-{{ conversation }}
+{{ view.conversation }}

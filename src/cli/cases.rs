@@ -6,7 +6,7 @@ pub enum CaseCommand {
     Create(CaseCreateArgs),
     /// List compact active case locators.
     List,
-    /// Show the active case's case.md without changing workspace state.
+    /// Show a case's case.md (active or archived) without changing workspace state.
     Show {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
@@ -17,6 +17,9 @@ pub enum CaseCommand {
         case_ref: String,
         /// Message id to add.
         message_id: String,
+        /// Short summary for this message in the case.
+        #[arg(long)]
+        summary: Option<String>,
         /// Why this message belongs in this case; required by default.
         #[arg(long)]
         reason: Option<String>,
@@ -80,27 +83,10 @@ pub enum CaseCommand {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Create, validate, attach to, or remove local case drafts.
+    /// Create, edit, validate, queue, or remove local case drafts.
     Draft {
         #[command(subcommand)]
         action: CaseDraftAction,
-    },
-    /// Compose an existing case draft into the local push queue.
-    Compose {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
-        case_ref: String,
-        /// Draft markdown file under the case drafts directory.
-        draft_name: String,
-    },
-    /// Scaffold a reply draft to a message, prefilled and quoting the original.
-    Reply {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
-        case_ref: String,
-        /// Message id in this case to reply to.
-        message_id: String,
-        /// Reply to all original recipients (To and Cc), not just the sender.
-        #[arg(long)]
-        all: bool,
     },
     /// Merge another case into this case.
     Merge {
@@ -125,6 +111,9 @@ pub struct CaseCreateArgs {
     /// Optional first message to add to the case.
     #[arg(long)]
     pub message: Option<String>,
+    /// Short summary for the first message.
+    #[arg(long)]
+    pub summary: Option<String>,
     /// Why this case is being created.
     #[arg(long)]
     pub reason: Option<String>,
@@ -162,17 +151,85 @@ pub enum CaseDraftAction {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
         /// Recipient address. Repeatable.
-        #[arg(long = "to")]
+        #[arg(long = "to", required = true)]
         to: Vec<String>,
         /// Cc address. Repeatable.
         #[arg(long = "cc")]
         cc: Vec<String>,
         /// Draft subject.
         #[arg(long)]
+        subject: String,
+        /// Draft body text.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Path to a file whose contents become the draft body.
+        #[arg(long = "body-file")]
+        body_file: Option<String>,
+    },
+    /// Scaffold a reply draft to a message, prefilled and quoting the original.
+    Reply {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Message id in this case to reply to.
+        message_id: String,
+        /// Draft body text. Replaces the default reply template when provided.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Path to a file whose contents become the draft body.
+        #[arg(long = "body-file")]
+        body_file: Option<String>,
+        /// Reply to all original recipients (To and Cc), not just the sender.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Change an existing editable draft in place.
+    Change {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Draft markdown file under the case drafts directory.
+        draft_name: String,
+        /// Replacement subject.
+        #[arg(long)]
         subject: Option<String>,
+        /// Replacement To list. Repeatable; when provided it replaces all To recipients.
+        #[arg(long = "to")]
+        to: Vec<String>,
+        /// Replacement Cc list. Repeatable; when provided it replaces all Cc recipients.
+        #[arg(long = "cc", conflicts_with = "clear_cc")]
+        cc: Vec<String>,
+        /// Clear all Cc recipients.
+        #[arg(long)]
+        clear_cc: bool,
+        /// Replacement draft body text.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Path to a file whose contents replace the draft body.
+        #[arg(long = "body-file")]
+        body_file: Option<String>,
+    },
+    /// Show an existing draft in a review-friendly JSON shape.
+    Show {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Draft markdown file under the case drafts directory.
+        draft_name: String,
     },
     /// Validate a draft under the case drafts directory.
     Validate {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Draft markdown file under the case drafts directory.
+        draft_name: String,
+    },
+    /// Queue this draft to be saved to the remote Drafts mailbox.
+    Save {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Draft markdown file under the case drafts directory.
+        draft_name: String,
+    },
+    /// Queue this draft to be sent and recorded in the case after push succeeds.
+    Send {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
         /// Draft markdown file under the case drafts directory.

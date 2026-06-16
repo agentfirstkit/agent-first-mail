@@ -1,12 +1,12 @@
-### {{ display_heading }}
+### {{ view.display_heading }}
 
-Message: `{{ message_id }}`
-From: {% if from %}{{ from }}{% else %}unknown{% endif %}
-{% if subject %}Subject: {{ subject }}
-{% endif %}{% if to | length > 0 %}To: {{ to | join(", ") }}
-{% endif %}{% if cc | length > 0 %}Cc: {{ cc | join(", ") }}
-{% endif %}{% if bcc | length > 0 %}Bcc: {{ bcc | join(", ") }}
-{% endif %}{% set auth = security.authentication %}{% set has_auth_warnings = auth.check and (auth.spf != "pass" or auth.dkim != "pass" or auth.dmarc != "pass" or auth.alignment == "mismatch") %}{% if has_auth_warnings %}Warnings:
+Message: `{{ message.message_id }}`
+From: {% if message.from %}{{ message.from }}{% else %}unknown{% endif %}
+{% if message.subject %}Subject: {{ message.subject }}
+{% endif %}{% if message.to %}To: {{ message.to | join(", ") }}
+{% endif %}{% if message.cc %}Cc: {{ message.cc | join(", ") }}
+{% endif %}{% if message.bcc %}Bcc: {{ message.bcc | join(", ") }}
+{% endif %}{% set security = view.security %}{% set auth = security.authentication %}{% set has_auth_warnings = auth.check and (auth.spf != "pass" or auth.dkim != "pass" or auth.dmarc != "pass" or auth.alignment == "mismatch") %}{% if has_auth_warnings %}Warnings:
 {% if auth.spf != "pass" %}- Authentication: SPF {% if auth.spf == "missing" %}is missing{% else %}did not pass ({{ auth.spf }}){% endif %}
 {% endif %}{% if auth.dkim != "pass" %}- Authentication: DKIM {% if auth.dkim == "missing" %}is missing{% else %}did not pass ({{ auth.dkim }}){% endif %}
 {% endif %}{% if auth.dmarc != "pass" %}- Authentication: DMARC {% if auth.dmarc == "missing" %}is missing{% else %}did not pass ({{ auth.dmarc }}){% endif %}
@@ -18,11 +18,11 @@ From: {% if from %}{{ from }}{% else %}unknown{% endif %}
 {% endif %}{% if security.mailing_list %}- Mailing list: {{ security.mailing_list }}
 {% elif security.mailing_list_headers %}- Mailing list headers: {{ security.mailing_list_headers }}
 {% endif %}{% endif %}
-{{ body_text_fence }}text
-{{ body_text_visible_block }}{{ body_text_fence }}
-{% if attachments | length > 0 %}
+{{ view.body_text_fence }}text
+{{ view.body_text_visible_block }}{{ view.body_text_fence }}
+{% if view.attachments | length > 0 %}
 Attachments:
-{% for attachment in attachments %}- {{ attachment.display_filename }} (`{{ attachment.content_type }}`, {{ attachment.size_bytes }} bytes; `{{ message_id }}`, part `{{ attachment.part_id }}`, {% if attachment.file_path %}fetched: `{{ attachment.file_path }}`{% else %}not fetched{% endif %})
+{% for attachment in view.attachments %}- {{ attachment.display_filename }} (`{{ attachment.content_type }}`, {{ attachment.size_bytes }} bytes; `{{ message.message_id }}`, part `{{ attachment.part_id }}`, {% if attachment.file_path %}fetched: `{{ attachment.file_path }}`{% else %}not fetched{% endif %})
 {% if attachment.preview_path %}
 ![{{ attachment.image_alt }}](<{{ attachment.preview_path }}>)
 {% endif %}

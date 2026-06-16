@@ -11,42 +11,19 @@ use crate::error::{AppError, Result};
 use crate::frontmatter::DraftFrontmatter;
 use crate::progress::ProgressCallback;
 use crate::types::{
-    MessageActionPush, MessagePushAction, OutboundPush, PushItem, PushLocation, PushPayload,
-    PushStepState, PushStepStatus,
+    MessageActionPush, MessagePushAction, OutboundAction, OutboundPush, PushItem, PushLocation,
+    PushPayload, PushStepState, PushStepStatus,
 };
-use crate::util::{write_bytes_atomic, write_string_atomic};
+use crate::util::write_string_atomic;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PushMode {
-    All,
-    Drafts,
-    DraftsSend,
-    Archive,
-    Spam,
-    Trash,
-}
-
-impl PushMode {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Drafts => "drafts",
-            Self::DraftsSend => "drafts-send",
-            Self::Archive => "archive",
-            Self::Spam => "spam",
-            Self::Trash => "trash",
-        }
-    }
-}
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub struct RemovedOutbound {
     pub push_id: String,
-    pub eml_path: Option<String>,
+    pub action: OutboundAction,
 }
 
 #[derive(Clone, Debug)]
@@ -56,68 +33,50 @@ pub struct RemovedMessagePush {
 
 pub fn queue_outbound(
     root: &Path,
-    case_path: &Path,
     case_uid: &str,
     draft_name: &str,
-    draft_hash: &str,
-    config: &MailConfig,
+    action: OutboundAction,
 ) -> Result<Value> {
     let existing = find_outbound_item(root, case_uid, draft_name)?;
     let push_id = existing
         .as_ref()
         .map(|item| item.push_id.clone())
         .unwrap_or_else(|| unique_push_id(root));
-    let message_id = existing
-        .as_ref()
-        .and_then(|item| item.outbound())
-        .map(|outbound| outbound.message_id.as_str());
-    let prepared = crate::smtp_send::prepare_outbound(
-        root, case_path, case_uid, draft_name, config, message_id,
-    )?;
-    let draft_text = fs::read_to_string(case_path.join("drafts").join(draft_name))
-        .map_err(|e| AppError::io("read draft", &e))?;
-    let (frontmatter, _) = crate::markdown::read_doc::<DraftFrontmatter>(&draft_text)?;
     let push_dir = root.join(".afmail/push");
     create_dir_all(&push_dir)?;
-    let eml_path = push_dir.join(format!("{push_id}.eml"));
-    write_bytes_atomic(&eml_path, &prepared.raw, "write push eml")?;
     let now = crate::store::now_rfc3339();
+    let existing_outbound = existing.as_ref().and_then(|item| item.outbound());
+    let same_action = existing_outbound.is_some_and(|outbound| outbound.action == action);
+    let step_states = if same_action {
+        existing
+            .as_ref()
+            .map(|item| item.step_states.clone())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let item = PushItem {
         schema_name: "push_item".to_string(),
         schema_version: 1,
         push_id: push_id.clone(),
         payload: PushPayload::Outbound(Box::new(OutboundPush {
+            action,
             case_uid: case_uid.to_string(),
             draft_name: draft_name.to_string(),
-            draft_hash: draft_hash.to_string(),
-            message_id: prepared.message_id.clone(),
-            reply_to_message_id: frontmatter.reply_to_message_id,
-            eml_path: rel_path(root, &eml_path),
-            envelope_from: prepared.envelope_from,
-            envelope_to: prepared.envelope_to,
-            drafts_mailbox_name: config.special_use_folder(SpecialUseKind::Drafts),
-            sent_mailbox_name: config.special_use_folder(SpecialUseKind::Sent),
-            draft_uid_validity: existing
-                .as_ref()
-                .and_then(|item| item.outbound())
-                .and_then(|outbound| outbound.draft_uid_validity),
-            draft_uid: existing
-                .as_ref()
-                .and_then(|item| item.outbound())
-                .and_then(|outbound| outbound.draft_uid),
-            draft_save_steps: config.actions.draft_save.steps.clone(),
-            draft_send_steps: config.actions.draft_send.steps.clone(),
+            draft_uid_validity: existing_outbound.and_then(|outbound| outbound.draft_uid_validity),
+            draft_uid: existing_outbound.and_then(|outbound| outbound.draft_uid),
         })),
         created_rfc3339: existing
             .as_ref()
             .map(|item| item.created_rfc3339.clone())
             .unwrap_or_else(|| now.clone()),
         updated_rfc3339: now,
-        attempt_count: existing.as_ref().map_or(0, |item| item.attempt_count),
-        step_states: existing
-            .as_ref()
-            .map(|item| item.step_states.clone())
-            .unwrap_or_default(),
+        attempt_count: if same_action {
+            existing.as_ref().map_or(0, |item| item.attempt_count)
+        } else {
+            0
+        },
+        step_states,
         last_error: None,
     };
     write_item(root, &item)?;
@@ -125,11 +84,18 @@ pub fn queue_outbound(
         "code": "push_queued",
         "push_id": push_id,
         "kind": "outbound",
+        "action": action.as_str(),
         "case_uid": case_uid,
-        "draft_name": draft_name,
-        "draft_hash": draft_hash,
-        "message_id": prepared.message_id
+        "draft_name": draft_name
     }))
+}
+
+pub(crate) fn find_outbound_for_draft(
+    root: &Path,
+    case_uid: &str,
+    draft_name: &str,
+) -> Result<Option<PushItem>> {
+    find_outbound_item(root, case_uid, draft_name)
 }
 
 pub fn queue_action_steps(
@@ -216,24 +182,19 @@ pub(crate) fn pending_items(root: &Path) -> Result<Vec<PushItem>> {
     sorted_items(root)
 }
 
-pub fn push(root: &Path, mode: PushMode, confirmed: bool) -> Result<Value> {
-    push_with_progress(root, mode, confirmed, None)
-}
-
 pub fn push_with_progress(
     root: &Path,
-    mode: PushMode,
     confirmed: bool,
     progress: Option<&mut ProgressCallback<'_>>,
 ) -> Result<Value> {
     let mut progress = progress;
-    let items = filtered_items(root, mode)?;
+    let items = sorted_items(root)?;
+    let config = MailConfig::load(root)?;
     if !confirmed {
         crate::progress::emit(
             &mut progress,
             "push_preview",
             json!({
-                "mode": mode.as_str(),
                 "item_count": items.len(),
             }),
         );
@@ -241,26 +202,26 @@ pub fn push_with_progress(
             .iter()
             .map(|item| {
                 let outbound = item.outbound();
-                json!({
+                Ok(json!({
                     "push_id": item.push_id,
                     "kind": item.kind(),
                     "display_kind": item.display_kind(),
-                    "actions": actions_for(mode, item),
+                    "actions": actions_for(root, &config, item)?,
                     "case_uid": outbound.map(|outbound| outbound.case_uid.as_str()),
-                    "draft_name": outbound.map(|outbound| outbound.draft_name.as_str())
-                })
+                    "draft_name": outbound.map(|outbound| outbound.draft_name.as_str()),
+                    "action": outbound.map(|outbound| outbound.action.as_str())
+                }))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         return Ok(json!({
             "code": "push_dry_run",
             "confirmed": false,
-            "hint": preview_hint(mode),
+            "hint": preview_hint(),
             "items": rendered,
             "count": rendered.len()
         }));
     }
 
-    let config = MailConfig::load(root)?;
     let remote = crate::remote::ImapSmtpRemote::new(&config);
     let mut pushed = 0usize;
     let mut failed = 0usize;
@@ -270,7 +231,6 @@ pub fn push_with_progress(
         &mut progress,
         "push_start",
         json!({
-            "mode": mode.as_str(),
             "item_count": item_count,
         }),
     );
@@ -282,34 +242,10 @@ pub fn push_with_progress(
         crate::progress::emit(
             &mut progress,
             "push_item_start",
-            push_item_progress_fields(mode, &item, index, item_count, None),
+            push_item_progress_fields(&item, index, item_count, None),
         );
-        let result = match (&item.payload, mode) {
-            (PushPayload::Outbound(_), PushMode::DraftsSend) => {
-                ensure_outbound_draft_fresh(root, &item).and_then(|_| {
-                    push_outbound_send(
-                        root,
-                        &config,
-                        &remote,
-                        &mut item,
-                        progress_context,
-                        progress.as_deref_mut(),
-                    )
-                })
-            }
-            (PushPayload::Outbound(_), PushMode::Drafts | PushMode::All) => {
-                ensure_outbound_draft_fresh(root, &item).and_then(|_| {
-                    push_outbound_drafts(
-                        root,
-                        &config,
-                        &remote,
-                        &mut item,
-                        progress_context,
-                        progress.as_deref_mut(),
-                    )
-                })
-            }
-            (PushPayload::MessageAction(_), _) => push_action_steps(
+        let result = match &item.payload {
+            PushPayload::Outbound(_) => push_outbound(
                 root,
                 &config,
                 &remote,
@@ -317,7 +253,14 @@ pub fn push_with_progress(
                 progress_context,
                 progress.as_deref_mut(),
             ),
-            _ => Ok(()),
+            PushPayload::MessageAction(_) => push_action_steps(
+                root,
+                &config,
+                &remote,
+                &mut item,
+                progress_context,
+                progress.as_deref_mut(),
+            ),
         };
         match result {
             Ok(()) => {
@@ -326,18 +269,20 @@ pub fn push_with_progress(
                     "push_commit",
                     vec![
                         format!(".afmail/push/{}.json", item.push_id),
+                        "cases".to_string(),
                         "messages".to_string(),
                     ],
                 )?;
-                workspace.clear_pending_push_item(&item)?;
+                workspace.consume_outbound_draft_after_push(&item, &config)?;
                 delete_item(root, &item)?;
+                workspace.clear_pending_push_item(&item)?;
                 transaction.commit()?;
                 let _ = audit_push(root, "push_succeeded", &item, None);
                 pushed += 1;
                 crate::progress::emit(
                     &mut progress,
                     "push_item_done",
-                    push_item_progress_fields(mode, &item, index, item_count, None),
+                    push_item_progress_fields(&item, index, item_count, None),
                 );
             }
             Err(err) => {
@@ -351,13 +296,13 @@ pub fn push_with_progress(
                 item.attempt_count += 1;
                 item.updated_rfc3339 = crate::store::now_rfc3339();
                 item.last_error = Some(err.to_string());
+                write_item(root, &item)?;
                 crate::store::Workspace::at(root)
                     .mark_pending_push_error(&item, &err.to_string())?;
-                write_item(root, &item)?;
                 crate::progress::emit(
                     &mut progress,
                     "push_item_failed",
-                    push_item_progress_fields(mode, &item, index, item_count, Some(&err)),
+                    push_item_progress_fields(&item, index, item_count, Some(&err)),
                 );
             }
         }
@@ -366,7 +311,6 @@ pub fn push_with_progress(
         &mut progress,
         "push_done",
         json!({
-            "mode": mode.as_str(),
             "item_count": item_count,
             "pushed_count": pushed,
             "failed_count": failed,
@@ -382,14 +326,12 @@ pub fn push_with_progress(
 }
 
 fn push_item_progress_fields(
-    mode: PushMode,
     item: &PushItem,
     index: usize,
     item_count: usize,
     err: Option<&AppError>,
 ) -> Value {
     let mut value = json!({
-        "mode": mode.as_str(),
         "push_id": item.push_id.as_str(),
         "kind": item.kind(),
         "display_kind": item.display_kind(),
@@ -410,7 +352,6 @@ fn audit_push(root: &Path, kind: &str, item: &PushItem, err: Option<&AppError>) 
     let mut targets = vec![json!({"kind": "push", "id": item.push_id.as_str()})];
     if let Some(outbound) = item.outbound() {
         targets.push(json!({"kind": "case", "id": outbound.case_uid.as_str()}));
-        targets.push(json!({"kind": "message", "id": outbound.message_id.as_str()}));
     } else {
         targets.extend(
             item.message_ids()
@@ -431,10 +372,7 @@ fn audit_push(root: &Path, kind: &str, item: &PushItem, err: Option<&AppError>) 
                 "draft_name".to_string(),
                 json!(outbound.draft_name.as_str()),
             );
-            map.insert(
-                "message_id".to_string(),
-                json!(outbound.message_id.as_str()),
-            );
+            map.insert("action".to_string(), json!(outbound.action.as_str()));
         }
     }
     if let Some(err) = err {
@@ -460,20 +398,14 @@ pub fn remove_outbound_for_draft(
             })
         })
         .collect::<Vec<_>>();
-    if let Some(item) = items.iter().find(|item| item.has_started_steps()) {
-        return Err(AppError::new(
-            "push_already_started",
-            format!(
-                "draft has an outbound push item that already started: {}",
-                item.push_id
-            ),
-        ));
-    }
     let mut removed = Vec::new();
     for item in items {
         removed.push(RemovedOutbound {
             push_id: item.push_id.clone(),
-            eml_path: item.outbound().map(|outbound| outbound.eml_path.clone()),
+            action: item
+                .outbound()
+                .map(|outbound| outbound.action)
+                .unwrap_or(OutboundAction::Send),
         });
         delete_item(root, &item)?;
     }
@@ -535,10 +467,6 @@ pub fn remove_pending_message_pushes(
     Ok(removed)
 }
 
-fn preview_hint(mode: PushMode) -> &'static str {
-    if mode == PushMode::DraftsSend {
-        "No mail was sent. Re-run with --confirm to apply queued effects."
-    } else {
-        "No remote changes were made. Re-run with --confirm to apply queued effects."
-    }
+fn preview_hint() -> &'static str {
+    "No remote changes were made. Re-run with --confirm to apply queued effects."
 }

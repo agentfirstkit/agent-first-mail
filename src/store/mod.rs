@@ -14,8 +14,11 @@ mod tests;
 mod transactions;
 mod triage;
 mod util;
+#[cfg(feature = "ui")]
+mod view_model;
 
 use cases::*;
+use disposition_views::*;
 use drafts::*;
 use messages::*;
 use refs::CaseIndex;
@@ -38,9 +41,11 @@ use crate::markdown::{read_doc, render_frontmatter};
 use crate::templates::{language_template_path, MarkdownTemplateRenderer, TemplateKey};
 use crate::types::RemoteSyncState;
 use crate::types::{
-    ArchiveMessageItem, ArchiveMessages, AttachmentRef, CaseMessages, MailDirection, MessageFile,
-    MessageStatus, PushItem, PushLocation, RemoteLocation, RemoteState, WorkspacePendingPush,
-    WorkspacePushState, WorkspaceState,
+    ArchiveMessageItem, ArchiveMessages, AttachmentRef, CaseMessages, MailDirection,
+    MessageCollection, MessageCollectionItem, MessageFile, MessageStatus, OutboundAction, PushItem,
+    PushLocation, RemoteLocation, RemoteState, WorkspacePendingPush, WorkspacePushState,
+    WorkspaceState, ARCHIVE_NOTIFICATION_SCHEMA_NAME, CASE_SCHEMA_NAME,
+    MESSAGE_COLLECTION_SCHEMA_VERSION,
 };
 use crate::util::{canonical_flags, sha256_fingerprint, write_json_pretty, write_string_atomic};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, SecondsFormat, Timelike, Utc};
@@ -56,7 +61,11 @@ use std::time::Instant;
 
 const AFMAIL_GITIGNORE_BEGIN: &str = "# BEGIN afmail managed";
 const AFMAIL_GITIGNORE_END: &str = "# END afmail managed";
-const AFMAIL_GITIGNORE_BODY: &str = r#"# Local mail evidence and runtime state.
+const AFMAIL_AGENT_GITIGNORE_BODY: &str = r#"# Agent-First Mail project skill installed by afmail init.
+.agents/skills/agent-first-mail/
+"#;
+const AFMAIL_WORKSPACE_GITIGNORE_BODY: &str = r#"# Local mail evidence and runtime state.
+.afmail/push/
 .afmail/logs/
 .afmail/transactions/
 .afmail/workspace.lock
@@ -75,11 +84,169 @@ archive/cases/*/views/**/*.md
 archive/notifications/*/archive.md
 archive/notifications/*/views/**/*.md
 "#;
+const AFMAIL_RESERVED_INIT_PATHS: &[&str] = &[
+    "triage",
+    "cases",
+    "archive",
+    "messages",
+    "templates",
+    "spam",
+    "trash",
+    "deleted",
+];
 const AFMAIL_AGENTS_BEGIN: &str = "<!-- BEGIN afmail managed -->";
 const AFMAIL_AGENTS_END: &str = "<!-- END afmail managed -->";
 
+pub(crate) struct DraftChange<'a> {
+    pub(crate) subject: Option<&'a str>,
+    pub(crate) to: &'a [String],
+    pub(crate) cc: &'a [String],
+    pub(crate) clear_cc: bool,
+    pub(crate) body: Option<&'a str>,
+    pub(crate) body_file: Option<&'a str>,
+}
+
 pub fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn resolve_init_target(agent_root: &Path, path: Option<&str>) -> Result<(PathBuf, String)> {
+    let raw = path.unwrap_or(".");
+    let rel = Path::new(raw);
+    if rel.is_absolute() {
+        return Err(AppError::new(
+            "invalid_request",
+            "afmail init PATH must be relative to the current directory",
+        ));
+    }
+    let mut normalized = PathBuf::new();
+    for component in rel.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir => {
+                return Err(AppError::new(
+                    "invalid_request",
+                    "afmail init PATH must not contain ..",
+                ))
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(AppError::new(
+                    "invalid_request",
+                    "afmail init PATH must stay under the current directory",
+                ))
+            }
+        }
+    }
+    let workspace_ref = if normalized.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        let mut value = path_to_string(&normalized);
+        if !value.ends_with('/') {
+            value.push('/');
+        }
+        value
+    };
+    let target = if normalized.as_os_str().is_empty() {
+        agent_root.to_path_buf()
+    } else {
+        agent_root.join(normalized)
+    };
+    Ok((target, workspace_ref))
+}
+
+fn prepare_init_target(root: &Path) -> Result<()> {
+    if root.exists() && !root.is_dir() {
+        return Err(AppError::new(
+            "invalid_request",
+            format!(
+                "afmail init target is not a directory: {}",
+                path_to_string(root)
+            ),
+        ));
+    }
+    if !root.exists() {
+        create_dir_all(root)?;
+    }
+    let afmail_dir = root.join(".afmail");
+    if afmail_dir.exists() && !afmail_dir.is_dir() {
+        return Err(AppError::new(
+            "invalid_request",
+            format!(
+                "afmail init target has a non-directory .afmail path: {}",
+                path_to_string(&afmail_dir)
+            ),
+        ));
+    }
+    if afmail_dir.is_dir() {
+        return Ok(());
+    }
+    let conflicts = reserved_init_conflicts(root);
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "invalid_request",
+        format!(
+            "afmail init target already contains afmail-reserved paths: {}",
+            conflicts.join(", ")
+        ),
+    )
+    .with_hint("Choose a different empty mail workspace directory, or run init in an existing directory that already contains .afmail.")
+    .with_details(json!({ "reserved_paths": conflicts })))
+}
+
+fn reserved_init_conflicts(root: &Path) -> Vec<String> {
+    AFMAIL_RESERVED_INIT_PATHS
+        .iter()
+        .filter_map(|name| {
+            if root.join(name).exists() {
+                Some(format!("{name}/"))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn agent_workspace_paths(agent_root: &Path, workspace_ref: &str) -> Result<Vec<String>> {
+    let mut paths = read_agent_workspace_paths(agent_root)?;
+    if !paths.iter().any(|path| path == workspace_ref) {
+        paths.push(workspace_ref.to_string());
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn read_agent_workspace_paths(agent_root: &Path) -> Result<Vec<String>> {
+    let path = agent_root.join("AGENTS.md");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = read_to_string(&path, "read agent instructions")?;
+    let Some(begin_pos) = text.find(AFMAIL_AGENTS_BEGIN) else {
+        return Ok(Vec::new());
+    };
+    let after_begin = begin_pos + AFMAIL_AGENTS_BEGIN.len();
+    let Some(end_rel) = text[after_begin..].find(AFMAIL_AGENTS_END) else {
+        return Ok(Vec::new());
+    };
+    let body = &text[after_begin..after_begin + end_rel];
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("- `") else {
+            continue;
+        };
+        let Some(end) = rest.find('`') else {
+            continue;
+        };
+        let value = &rest[..end];
+        if !value.is_empty() && !out.iter().any(|existing| existing == value) {
+            out.push(value.to_string());
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Clone, Debug)]
@@ -146,15 +313,24 @@ impl Workspace {
         &self.root
     }
 
+    pub fn init_command(agent_root: &Path, path: Option<&str>) -> Result<Value> {
+        let (workspace_root, workspace_ref) = resolve_init_target(agent_root, path)?;
+        Workspace::at(workspace_root).init_with_agent_root(agent_root, &workspace_ref)
+    }
+
     pub fn init(&self) -> Result<Value> {
+        self.init_with_agent_root(&self.root, ".")
+    }
+
+    fn init_with_agent_root(&self, agent_root: &Path, workspace_ref: &str) -> Result<Value> {
+        prepare_init_target(&self.root)?;
         create_dir_all(&self.root.join(".afmail/messages"))?;
         create_dir_all(&self.root.join(".afmail/push"))?;
         create_dir_all(&self.root.join(".afmail/logs"))?;
         create_dir_all(&self.root.join(".afmail/transactions"))?;
+        create_dir_all(&self.root.join("templates"))?;
         create_dir_all(&self.root.join("messages"))?;
         create_dir_all(&self.root.join("triage"))?;
-        create_dir_all(&self.root.join("spam"))?;
-        create_dir_all(&self.root.join("trash"))?;
         create_dir_all(&self.root.join("cases"))?;
         create_dir_all(&self.root.join("archive/cases"))?;
         create_dir_all(&self.root.join("archive/notifications"))?;
@@ -169,15 +345,51 @@ impl Workspace {
         let language_bcp47 = config.resolved_language_bcp47().to_string();
         let timezone_utc_offset = config.resolved_timezone_utc_offset();
         let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
-        let template_context = json!({"language": language_bcp47});
-        let gitignore_change = ensure_managed_block_file(
-            &self.root.join(".gitignore"),
-            AFMAIL_GITIGNORE_BEGIN,
-            AFMAIL_GITIGNORE_END,
-            "",
-            AFMAIL_GITIGNORE_BODY,
-        )?;
-        let agent_skill_path = self.root.join("AGENTS.md");
+        let workspace_paths = agent_workspace_paths(agent_root, workspace_ref)?;
+        let template_context = json!({
+            "language": language_bcp47,
+            "workspaces": workspace_paths.clone(),
+        });
+
+        let workspace_gitignore_path = self.root.join(".gitignore");
+        let agent_gitignore_path = agent_root.join(".gitignore");
+        let same_root = self.root == agent_root;
+        let combined_gitignore_body;
+        let workspace_gitignore_change = if same_root {
+            combined_gitignore_body = format!(
+                "{}\n{}",
+                trim_surrounding_line_endings(AFMAIL_AGENT_GITIGNORE_BODY),
+                trim_surrounding_line_endings(AFMAIL_WORKSPACE_GITIGNORE_BODY)
+            );
+            ensure_managed_block_file(
+                &workspace_gitignore_path,
+                AFMAIL_GITIGNORE_BEGIN,
+                AFMAIL_GITIGNORE_END,
+                "",
+                &combined_gitignore_body,
+            )?
+        } else {
+            ensure_managed_block_file(
+                &workspace_gitignore_path,
+                AFMAIL_GITIGNORE_BEGIN,
+                AFMAIL_GITIGNORE_END,
+                "",
+                AFMAIL_WORKSPACE_GITIGNORE_BODY,
+            )?
+        };
+        let agent_gitignore_change = if same_root {
+            workspace_gitignore_change
+        } else {
+            ensure_managed_block_file(
+                &agent_gitignore_path,
+                AFMAIL_GITIGNORE_BEGIN,
+                AFMAIL_GITIGNORE_END,
+                "",
+                AFMAIL_AGENT_GITIGNORE_BODY,
+            )?
+        };
+
+        let agent_skill_path = agent_root.join("AGENTS.md");
         let rendered_agents = renderer.render(TemplateKey::WorkspaceAgents, &template_context)?;
         let (agent_skill_prefix, agent_skill_body) = managed_block_template_parts(
             &rendered_agents,
@@ -192,33 +404,52 @@ impl Workspace {
             &agent_skill_prefix,
             &agent_skill_body,
         )?;
+
+        let project_skills_dir = agent_root.join(".agents/skills");
+        let _project_skill = crate::skill_admin::install_codex_project_skill(&project_skills_dir)?;
+        let project_skill_path = project_skills_dir.join("agent-first-mail").join("SKILL.md");
+
         let do_not_edit_path = self.root.join(".afmail/DO_NOT_EDIT.txt");
-        let do_not_edit_created = if do_not_edit_path.exists() {
-            false
-        } else {
-            write_string(
-                &do_not_edit_path,
-                &renderer.render(TemplateKey::WorkspaceDoNotEdit, &template_context)?,
-            )?;
-            true
-        };
+        let do_not_edit_created = !do_not_edit_path.exists();
+        let do_not_edit_rendered =
+            renderer.render(TemplateKey::WorkspaceDoNotEdit, &template_context)?;
+        let do_not_edit_updated = fs::read_to_string(&do_not_edit_path)
+            .map(|existing| existing != do_not_edit_rendered)
+            .unwrap_or(true);
+        if do_not_edit_updated {
+            write_string(&do_not_edit_path, &do_not_edit_rendered)?;
+        }
+
         Ok(json!({
             "code": "workspace_initialized",
             "workspace_path": path_to_string(&self.root),
+            "workspace_ref": workspace_ref,
+            "agent_root_path": path_to_string(agent_root),
             "created_rfc3339": now_rfc3339(),
-            "gitignore_path": ".gitignore",
-            "gitignore_created": gitignore_change.created,
-            "gitignore_updated": gitignore_change.updated,
-            "agent_skill_path": "AGENTS.md",
+            "gitignore_path": rel_path(&self.root, &workspace_gitignore_path),
+            "gitignore_created": workspace_gitignore_change.created,
+            "gitignore_updated": workspace_gitignore_change.updated,
+            "workspace_gitignore_path": rel_path(&self.root, &workspace_gitignore_path),
+            "workspace_gitignore_created": workspace_gitignore_change.created,
+            "workspace_gitignore_updated": workspace_gitignore_change.updated,
+            "agent_gitignore_path": rel_path(agent_root, &agent_gitignore_path),
+            "agent_gitignore_created": agent_gitignore_change.created,
+            "agent_gitignore_updated": agent_gitignore_change.updated,
+            "agent_skill_path": rel_path(agent_root, &agent_skill_path),
             "agent_skill_created": agent_skill_change.created,
             "agent_skill_updated": agent_skill_change.updated,
+            "project_skill_path": rel_path(agent_root, &project_skill_path),
+            "project_skill_installed": true,
             "do_not_edit_path": ".afmail/DO_NOT_EDIT.txt",
             "do_not_edit_created": do_not_edit_created,
+            "do_not_edit_updated": do_not_edit_updated,
+            "workspace_paths": workspace_paths,
             "language_bcp47": config.workspace.language_bcp47.clone(),
             "resolved_language_bcp47": config.resolved_language_bcp47(),
             "timezone_utc_offset": timezone_utc_offset,
             "next_steps": [
-                "Adjust workspace.language_bcp47 or workspace.timezone_utc_offset with afmail config set if needed."
+                format!("Run afmail commands with workdir set to {}.", workspace_ref),
+                "Adjust workspace.language_bcp47 or workspace.timezone_utc_offset with afmail config set if needed.".to_string()
             ]
         }))
     }
@@ -319,18 +550,13 @@ impl Workspace {
         crate::imap_pull::remote_folders(&config, &imap)
     }
 
-    pub fn push(&self, mode: crate::push_queue::PushMode, dry_run: bool) -> Result<Value> {
-        self.push_with_progress(mode, dry_run, None)
-    }
-
     pub fn push_with_progress(
         &self,
-        mode: crate::push_queue::PushMode,
-        dry_run: bool,
+        confirmed: bool,
         progress: Option<&mut crate::progress::ProgressCallback<'_>>,
     ) -> Result<Value> {
         self.require_workspace()?;
-        crate::push_queue::push_with_progress(&self.root, mode, dry_run, progress)
+        crate::push_queue::push_with_progress(&self.root, confirmed, progress)
     }
 
     pub fn push_list(&self) -> Result<Value> {
@@ -405,12 +631,12 @@ impl Workspace {
 
     pub fn render_templates(&self, force: bool) -> Result<Value> {
         self.require_workspace()?;
-        let templates_dir = self.root.join(".afmail/templates");
+        let templates_dir = self.root.join("templates");
         let existed_before = templates_dir.exists();
         if existed_before && !templates_dir.is_dir() {
             return Err(AppError::new(
                 "template_dir_invalid",
-                ".afmail/templates exists but is not a directory",
+                "templates exists but is not a directory",
             ));
         }
 
@@ -457,7 +683,7 @@ impl Workspace {
 
         Ok(json!({
             "code": "render_templates",
-            "template_dir": ".afmail/templates",
+            "template_dir": "templates",
             "template_dir_created": !existed_before,
             "force": force,
             "exported_count": exported_count,

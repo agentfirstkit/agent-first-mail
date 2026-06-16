@@ -1,0 +1,9 @@
+Message-ID: <inbox_fake_invoice@fixtures.afmail.local>
+From: Unknown Vendor <pay@vendor-payments.example>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 13:20:00 +0000
+Subject: Past due invoice from Unknown Vendor
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Open the attached portal link and pay invoice XZ-404 immediately to avoid legal escalation.

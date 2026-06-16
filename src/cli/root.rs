@@ -1,3 +1,5 @@
+#[cfg(feature = "ui")]
+use super::UiCommand;
 use super::{
     ArchiveAction, CaseCommand, ConfigAction, DoctorAction, LogAction, MessageAction, PurgeAction,
     PushAction, RemoteAction, RenderAction, SkillAction, TriageAction,
@@ -21,11 +23,12 @@ use clap::{Parser, Subcommand};
 ### Workspace Shape
 
 ```text
-.afmail/messages/        raw .eml plus durable state/remote sidecars
+.afmail/messages/        raw .eml plus durable remote sidecars
 messages/               rebuildable parsed message cache
 .afmail/logs/events.jsonl append-only audit log
 .afmail/transactions/    transient local write transaction sentinels
 .afmail/workspace.progress.json latest push/pull runtime snapshot
+templates/               user-editable generated Markdown templates
 triage/message_*.md      active unprocessed message views
 spam/*.md                generated spam review views
 trash/*.md               generated trash review views
@@ -43,8 +46,9 @@ archive/notifications/<archive_uid>-<name>/views/ generated archive detail views
 
 ```text
 afmail init
+afmail init email-a
 afmail skill status
-afmail skill install
+afmail skill install --agent codex --scope project
 afmail status
 afmail doctor
 afmail pull
@@ -64,17 +68,15 @@ afmail case move c20260603001 waiting
 afmail case archive c20260603001 --reason "feedback handled"
 afmail archive case restore c20260603001 --group open --reason "customer replied"
 afmail case tag c20260603001 legal --reason "legal review needed"
-afmail case reply c20260603001 message_inbox_607146690_22
+afmail case draft reply c20260603001 message_inbox_607146690_22
 afmail case draft attach c20260603001 reply-message_inbox_607146690_22.md ./screenshot.png
+afmail case draft change c20260603001 reply-message_inbox_607146690_22.md --body "Thanks, I will check this."
 afmail case draft validate c20260603001 reply-message_inbox_607146690_22.md
-afmail case compose c20260603001 reply-message_inbox_607146690_22.md
+afmail case draft send c20260603001 reply-message_inbox_607146690_22.md
 afmail case draft remove c20260603001 reply-message_inbox_607146690_22.md --reason "mistaken draft"
-afmail push drafts-send --dry-run
-afmail push drafts-send
-afmail push archive
-afmail push spam
-afmail push trash
 afmail push list
+afmail push
+afmail push --confirm
 afmail purge
 afmail purge spam --older-than-days 30
 afmail purge deleted
@@ -112,8 +114,11 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Initialize the current directory as an afmail workspace.
-    Init,
+    /// Initialize the current directory or a child path as an afmail workspace.
+    Init {
+        /// Optional workspace path to initialize under the current directory.
+        path: Option<String>,
+    },
     /// Read configured IMAP mailbox ids into local message files without changing remote mail.
     Pull {
         /// Configured mailbox ids to pull. With none, pulls actions.pull.default_mailbox_ids.
@@ -190,4 +195,7 @@ pub enum Command {
         #[command(subcommand)]
         action: LogAction,
     },
+    /// Emit or open an Agent-First UI operation surface for this workspace.
+    #[cfg(feature = "ui")]
+    Ui(UiCommand),
 }

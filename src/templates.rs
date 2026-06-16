@@ -248,9 +248,7 @@ impl<'a> MarkdownTemplateRenderer<'a> {
 
     fn template_source(&self, key: TemplateKey) -> Result<TemplateSource> {
         if let Some(root) = self.root {
-            let rel = PathBuf::from(".afmail")
-                .join("templates")
-                .join(language_template_path(self.language, key));
+            let rel = PathBuf::from("templates").join(language_template_path(self.language, key));
             let path = root.join(&rel);
             if path.exists() {
                 let text =

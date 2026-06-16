@@ -15,7 +15,7 @@ pub(super) fn archive_index_field_value(
         ArchiveMessageIndexField::Subject => message.subject.clone().unwrap_or_default(),
         ArchiveMessageIndexField::Summary => item.summary.clone().unwrap_or_default(),
         ArchiveMessageIndexField::MessageId => item.message_id.clone(),
-        ArchiveMessageIndexField::ArchiveTime => item.archived_rfc3339.clone(),
+        ArchiveMessageIndexField::ArchiveTime => item.added_rfc3339.clone(),
         ArchiveMessageIndexField::Link => String::new(),
     };
     let keep_empty = matches!(
@@ -84,7 +84,7 @@ impl Workspace {
         self.write_archive_messages_named(
             &archive_uid,
             name,
-            &ArchiveMessages::new(&archive_uid, name),
+            &ArchiveMessages::new_notification(&archive_uid, name, &now_rfc3339()),
         )?;
 
         let mut result = json!({
@@ -150,7 +150,7 @@ impl Workspace {
             "message_path_templates": {
                 "archive_path": "archive/notifications/{archive_dir}",
                 "view_path": "archive/notifications/{archive_dir}/archive.md",
-                "data_path": "archive/notifications/{archive_dir}/data/archive.json",
+                "data_path": "archive/notifications/{archive_dir}/data/notification.json",
             },
             "cases": cases,
             "messages": messages,
@@ -181,7 +181,7 @@ impl Workspace {
             "path_templates": {
                 "archive_path": "archive/notifications/{archive_dir}",
                 "view_path": "archive/notifications/{archive_dir}/archive.md",
-                "data_path": "archive/notifications/{archive_dir}/data/archive.json",
+                "data_path": "archive/notifications/{archive_dir}/data/notification.json",
             },
             "items": messages,
         }))
@@ -197,7 +197,7 @@ impl Workspace {
         Ok(json!({
             "code": "archive_message",
             "archive_uid": archive_uid,
-            "archive_name": data.archive_name,
+            "archive_name": data.collection_name,
             "path": rel_path(&self.root, &archive_dir),
             "view_path": rel_path(&self.root, &archive_path),
             "notes_path": rel_path(&self.root, &archive_dir.join("notes.md")),
@@ -323,6 +323,7 @@ impl Workspace {
                 )
             })?;
         let item = old_data.items.remove(pos);
+        old_data.updated_rfc3339 = Some(now_rfc3339());
         self.write_archive_messages(&archive_uid, &old_data)?;
         let old_view = self.archive_message_view_path(&archive_uid, message_id);
         if old_view.exists() {
@@ -331,14 +332,14 @@ impl Workspace {
         let mut message = self.read_message_by_id(message_id)?;
         message.workspace.status = "archived".to_string();
         message.workspace.archive_uid = Some(new_archive_uid.to_string());
-        message.workspace.archived_rfc3339 = Some(item.archived_rfc3339.clone());
+        message.workspace.archived_rfc3339 = Some(item.added_rfc3339.clone());
         message.workspace.remote_sync = None;
         self.write_message_cache(&message)?;
         self.upsert_archive_message_item(
             &new_archive_uid,
             message_id,
             item.summary.as_deref(),
-            &item.archived_rfc3339,
+            &item.added_rfc3339,
         )?;
         self.refresh_archive_message_category(&archive_uid)?;
         self.refresh_archive_message_category(&new_archive_uid)?;
@@ -376,7 +377,7 @@ impl Workspace {
         validate_name("archive_name", name)?;
         let (archive_uid, from) = self.resolve_archive_message_category(archive_ref)?;
         let mut data = self.read_archive_messages(&archive_uid)?;
-        let old_name = data.archive_name.clone();
+        let old_name = data.collection_name.clone();
         let to = self.archive_message_dir_for_name(&archive_uid, name);
         let changed_path = to != from;
         if changed_path && to.exists() {
@@ -395,7 +396,8 @@ impl Workspace {
             fs::rename(&from, &to)
                 .map_err(|e| AppError::io("rename archive message category", &e))?;
         }
-        data.archive_name = name.to_string();
+        data.collection_name = name.to_string();
+        data.updated_rfc3339 = Some(now_rfc3339());
         self.write_archive_messages(&archive_uid, &data)?;
         self.refresh_archive_message_category(&archive_uid)?;
         self.append_audit_event(
@@ -513,7 +515,8 @@ impl Workspace {
         msg.workspace.archived_rfc3339 = Some(archived_rfc3339.clone());
         msg.workspace.origin = None;
         msg.workspace.remote_sync = None;
-        self.write_message_cache(&msg)?;
+        self.clear_message_from_all_dispositions(message_id)?;
+        self.write_message_materialized_cache(&msg)?;
         self.remove_triage_view_for_message(message_id)?;
         Ok(archived_rfc3339)
     }
@@ -555,7 +558,7 @@ impl Workspace {
     pub(super) fn archive_message_json_path(&self, archive_uid: &str) -> PathBuf {
         self.archive_message_dir(archive_uid)
             .join("data")
-            .join("archive.json")
+            .join("notification.json")
     }
 
     pub(super) fn archive_message_view_path(&self, archive_uid: &str, message_id: &str) -> PathBuf {
@@ -569,12 +572,19 @@ impl Workspace {
         validate_archive_uid(archive_uid)?;
         let path = self.archive_message_json_path(archive_uid);
         if !path.exists() {
-            return Ok(ArchiveMessages::new(archive_uid, ""));
+            return Ok(ArchiveMessages::new_notification(
+                archive_uid,
+                "",
+                &now_rfc3339(),
+            ));
         }
         let data = read_to_string(&path, "read archive messages")?;
-        let mut messages: ArchiveMessages = serde_json::from_str(&data)
+        let messages: ArchiveMessages = serde_json::from_str(&data)
             .map_err(|e| AppError::json("parse archive messages", &e))?;
-        if messages.schema_name != "archive_messages" || messages.schema_version != 1 {
+        if messages.schema_name != ARCHIVE_NOTIFICATION_SCHEMA_NAME
+            || messages.schema_version != MESSAGE_COLLECTION_SCHEMA_VERSION
+            || messages.collection_uid != archive_uid
+        {
             return Err(AppError::new(
                 "archive_messages_invalid",
                 format!(
@@ -583,7 +593,6 @@ impl Workspace {
                 ),
             ));
         }
-        messages.archive_uid = archive_uid.to_string();
         Ok(messages)
     }
 
@@ -592,7 +601,7 @@ impl Workspace {
         archive_uid: &str,
         data: &ArchiveMessages,
     ) -> Result<()> {
-        self.write_archive_messages_named(archive_uid, &data.archive_name, data)
+        self.write_archive_messages_named(archive_uid, &data.collection_name, data)
     }
 
     pub(super) fn write_archive_messages_named(
@@ -602,16 +611,7 @@ impl Workspace {
         data: &ArchiveMessages,
     ) -> Result<()> {
         let mut normalized = data.clone();
-        normalized.schema_name = "archive_messages".to_string();
-        normalized.schema_version = 1;
-        normalized.archive_uid = archive_uid.to_string();
-        normalized.archive_name = archive_name.to_string();
-        normalized
-            .items
-            .sort_by(|a, b| a.message_id.cmp(&b.message_id));
-        normalized
-            .items
-            .dedup_by(|a, b| a.message_id == b.message_id);
+        normalized.normalize(ARCHIVE_NOTIFICATION_SCHEMA_NAME, archive_uid, archive_name);
         write_json_pretty(&self.archive_message_json_path(archive_uid), &normalized)
     }
 
@@ -620,7 +620,7 @@ impl Workspace {
         archive_uid: &str,
         message_id: &str,
         summary: Option<&str>,
-        archived_rfc3339: &str,
+        added_rfc3339: &str,
     ) -> Result<()> {
         let mut data = self.read_archive_messages(archive_uid)?;
         let summary = summary
@@ -635,14 +635,15 @@ impl Workspace {
             if summary.is_some() {
                 item.summary = summary;
             }
-            item.archived_rfc3339 = archived_rfc3339.to_string();
+            item.added_rfc3339 = added_rfc3339.to_string();
         } else {
             data.items.push(ArchiveMessageItem {
                 message_id: message_id.to_string(),
                 summary,
-                archived_rfc3339: archived_rfc3339.to_string(),
+                added_rfc3339: added_rfc3339.to_string(),
             });
         }
+        data.updated_rfc3339 = Some(now_rfc3339());
         self.write_archive_messages(archive_uid, &data)
     }
 
@@ -660,6 +661,7 @@ impl Workspace {
                 format!("message {message_id} is not in archive {archive_uid}"),
             ));
         }
+        data.updated_rfc3339 = Some(now_rfc3339());
         self.write_archive_messages(archive_uid, &data)
     }
 
@@ -681,6 +683,7 @@ impl Workspace {
                 )
             })?;
         item.summary = Some(summary.trim().to_string()).filter(|value| !value.is_empty());
+        data.updated_rfc3339 = Some(now_rfc3339());
         self.write_archive_messages(archive_uid, &data)
     }
 
@@ -714,12 +717,16 @@ impl Workspace {
         create_dir_all(&messages_dir)?;
         let mut data = self.read_archive_messages(archive_uid)?;
         if sync_state {
+            let before = data.items.len();
             data.items.retain(|item| {
                 self.read_message_by_id(&item.message_id)
                     .map(|message| message.workspace.archive_uid.as_deref() == Some(archive_uid))
                     .unwrap_or(false)
             });
-            self.write_archive_messages(archive_uid, &data)?;
+            if data.items.len() != before {
+                data.updated_rfc3339 = Some(now_rfc3339());
+                self.write_archive_messages(archive_uid, &data)?;
+            }
         }
         let items = data
             .items
@@ -744,7 +751,7 @@ impl Workspace {
                 &self.render_archive_message_view(
                     &message,
                     archive_uid,
-                    &data.archive_name,
+                    &data.collection_name,
                     item,
                     renderer,
                     view_path.parent(),
@@ -771,7 +778,7 @@ impl Workspace {
             &archive_dir.join("archive.md"),
             &self.render_archive_message_index(
                 archive_uid,
-                &data.archive_name,
+                &data.collection_name,
                 &items,
                 &config,
                 renderer,
@@ -806,20 +813,23 @@ impl Workspace {
                 "message_id": message.message_id.as_str(),
                 "archive_uid": archive_uid,
                 "archive_name": archive_name,
-                "archived_rfc3339": item.archived_rfc3339.as_str(),
+                "added_rfc3339": item.added_rfc3339.as_str(),
                 "generated_rfc3339": generated_rfc3339.as_str(),
             },
-            "language": config.resolved_language_bcp47(),
-            "archive_uid": archive_uid,
-            "archive_name": archive_name,
-            "message_id": message.message_id.as_str(),
-            "title": title,
-            "summary": item.summary.as_deref().unwrap_or(""),
-            "archived_rfc3339": item.archived_rfc3339.as_str(),
-            "generated_rfc3339": generated_rfc3339.as_str(),
-            "conversation": conversation.trim(),
+            "archive": {
+                "archive_uid": archive_uid,
+                "archive_name": archive_name,
+            },
             "message": message_value,
             "item": item_value,
+            "view": {
+                "language": config.resolved_language_bcp47(),
+                "title": title,
+                "summary": item.summary.as_deref().unwrap_or(""),
+                "added_rfc3339": item.added_rfc3339.as_str(),
+                "generated_rfc3339": generated_rfc3339.as_str(),
+                "conversation": conversation.trim(),
+            },
         });
         renderer.render(TemplateKey::ArchiveMessage, &context)
     }
@@ -838,12 +848,12 @@ impl Workspace {
                 .read_message_by_id(&a.message_id)
                 .ok()
                 .and_then(|message| message_time(&message))
-                .unwrap_or_else(|| a.archived_rfc3339.clone());
+                .unwrap_or_else(|| a.added_rfc3339.clone());
             let b_time = self
                 .read_message_by_id(&b.message_id)
                 .ok()
                 .and_then(|message| message_time(&message))
-                .unwrap_or_else(|| b.archived_rfc3339.clone());
+                .unwrap_or_else(|| b.added_rfc3339.clone());
             compare_rfc3339_asc(&b_time, &a_time).then_with(|| a.message_id.cmp(&b.message_id))
         });
         let mut rendered_items = Vec::new();
@@ -897,28 +907,30 @@ impl Workspace {
                 title,
             )?;
             if let Value::Object(map) = &mut rendered_item {
-                map.insert(
-                    "summary".to_string(),
-                    json!(item.summary.as_deref().unwrap_or("")),
-                );
-                map.insert(
-                    "display_summary".to_string(),
-                    json!(item
-                        .summary
-                        .as_deref()
-                        .map(markdown_inline)
-                        .unwrap_or_default()),
-                );
-                map.insert(
-                    "archived_rfc3339".to_string(),
-                    json!(item.archived_rfc3339.as_str()),
-                );
-                map.insert(
-                    "archived_time".to_string(),
-                    time_context(&item.archived_rfc3339, &offset),
-                );
-                map.insert("fields".to_string(), json!(fields));
-                map.insert("secondary".to_string(), json!(second));
+                if let Some(Value::Object(view)) = map.get_mut("view") {
+                    view.insert(
+                        "summary".to_string(),
+                        json!(item.summary.as_deref().unwrap_or("")),
+                    );
+                    view.insert(
+                        "display_summary".to_string(),
+                        json!(item
+                            .summary
+                            .as_deref()
+                            .map(markdown_inline)
+                            .unwrap_or_default()),
+                    );
+                    view.insert(
+                        "added_rfc3339".to_string(),
+                        json!(item.added_rfc3339.as_str()),
+                    );
+                    view.insert(
+                        "added_time".to_string(),
+                        time_context(&item.added_rfc3339, &offset),
+                    );
+                    view.insert("fields".to_string(), json!(fields));
+                    view.insert("secondary".to_string(), json!(second));
+                }
                 map.insert(
                     "item".to_string(),
                     serde_json::to_value(item)
@@ -927,13 +939,18 @@ impl Workspace {
             }
             rendered_items.push(rendered_item);
         }
+        let generated_rfc3339 = now_rfc3339();
         let context = json!({
-            "archive_uid": archive_uid,
-            "archive_name": archive_name,
-            "message_count": rendered_items.len(),
-            "generated_rfc3339": now_rfc3339(),
-            "language": config.resolved_language_bcp47(),
+            "archive": {
+                "archive_uid": archive_uid,
+                "archive_name": archive_name,
+            },
             "items": rendered_items,
+            "view": {
+                "language": config.resolved_language_bcp47(),
+                "message_count": rendered_items.len(),
+                "generated_rfc3339": generated_rfc3339,
+            },
             "config": {
                 "archive": {
                     "message_index": {
@@ -958,7 +975,7 @@ impl Workspace {
             let path = entry.path();
             if path.is_dir() {
                 if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                    if path.join("data").join("archive.json").is_file() {
+                    if path.join("data").join("notification.json").is_file() {
                         if let Some(uid) = archive_uid_from_dir_name(name) {
                             ids.push(uid);
                         }
@@ -978,7 +995,7 @@ impl Workspace {
             let path = self.archive_message_dir(&archive_uid);
             out.push(json!({
                 "archive_uid": archive_uid,
-                "archive_name": data.archive_name,
+                "archive_name": data.collection_name,
                 "archive_dir": path
                     .file_name()
                     .and_then(|s| s.to_str())

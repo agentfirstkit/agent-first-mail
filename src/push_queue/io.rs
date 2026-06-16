@@ -52,25 +52,11 @@ pub(super) fn delete_item(root: &Path, item: &PushItem) -> Result<()> {
     if json_path.exists() {
         fs::remove_file(json_path).map_err(|e| AppError::io("remove push json", &e))?;
     }
-    if let Some(outbound) = item.outbound() {
-        let path = safe_relative_path(root, &outbound.eml_path)?;
-        if path.exists() {
-            fs::remove_file(path).map_err(|e| AppError::io("remove push eml", &e))?;
-        }
-    }
     Ok(())
 }
 
 pub(super) fn push_path(root: &Path, push_id: &str) -> PathBuf {
     root.join(".afmail/push").join(format!("{push_id}.json"))
-}
-
-pub(super) fn read_item_eml(root: &Path, item: &PushItem) -> Result<Vec<u8>> {
-    let outbound = item
-        .outbound()
-        .ok_or_else(|| AppError::new("invalid_request", "push item has no eml_path"))?;
-    fs::read(safe_relative_path(root, &outbound.eml_path)?)
-        .map_err(|e| AppError::io("read push eml", &e))
 }
 
 pub(super) fn find_case_path(root: &Path, case_uid: &str) -> Result<PathBuf> {
@@ -159,22 +145,6 @@ pub(super) fn unique_push_id(root: &Path) -> String {
 
 pub(super) fn create_dir_all(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(|e| AppError::io("create directory", &e))
-}
-
-pub(super) fn safe_relative_path(root: &Path, value: &str) -> Result<PathBuf> {
-    let rel = Path::new(value);
-    let safe = !rel.is_absolute()
-        && rel
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)));
-    if safe {
-        Ok(root.join(rel))
-    } else {
-        Err(AppError::new(
-            "invalid_request",
-            format!("unsafe push path: {value}"),
-        ))
-    }
 }
 
 pub(super) fn path_to_string(path: &Path) -> String {

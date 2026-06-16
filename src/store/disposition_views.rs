@@ -4,6 +4,9 @@ use super::*;
 pub(super) struct DispositionViewSpec {
     status: MessageStatus,
     dir: &'static str,
+    data_file: &'static str,
+    schema_name: &'static str,
+    collection_uid: &'static str,
     title_en: &'static str,
     title_zh: &'static str,
     label_en: &'static str,
@@ -15,6 +18,9 @@ const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
     DispositionViewSpec {
         status: MessageStatus::Spam,
         dir: "spam",
+        data_file: "spam.json",
+        schema_name: "spam",
+        collection_uid: "spam",
         title_en: "Spam",
         title_zh: "垃圾邮件",
         label_en: "Spam",
@@ -24,6 +30,9 @@ const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
     DispositionViewSpec {
         status: MessageStatus::Trashed,
         dir: "trash",
+        data_file: "trash.json",
+        schema_name: "trash",
+        collection_uid: "trash",
         title_en: "Trash",
         title_zh: "废弃邮件",
         label_en: "Trash",
@@ -33,6 +42,9 @@ const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
     DispositionViewSpec {
         status: MessageStatus::DeletedRemote,
         dir: "deleted",
+        data_file: "deleted.json",
+        schema_name: "deleted_remote",
+        collection_uid: "deleted",
         title_en: "Remote Deleted",
         title_zh: "远端已删除",
         label_en: "Remote deleted",
@@ -55,9 +67,158 @@ impl DispositionViewSpec {
             TemplateLanguage::ZhCn => self.label_zh,
         }
     }
+
+    fn empty_collection(self) -> MessageCollection {
+        let now = now_rfc3339();
+        let mut collection = MessageCollection::new(
+            self.schema_name,
+            self.collection_uid,
+            self.title(TemplateLanguage::EnUs),
+        );
+        collection.status = self.status.as_str().to_string();
+        collection.created_rfc3339 = Some(now.clone());
+        collection.updated_rfc3339 = Some(now);
+        collection
+    }
 }
 
 impl Workspace {
+    pub(super) fn read_disposition_messages(
+        &self,
+        spec: DispositionViewSpec,
+    ) -> Result<MessageCollection> {
+        let path = self.disposition_json_path(spec);
+        if !path.exists() {
+            return Ok(spec.empty_collection());
+        }
+        let data = read_to_string(&path, "read disposition messages")?;
+        let messages: MessageCollection = serde_json::from_str(&data)
+            .map_err(|e| AppError::json("parse disposition messages", &e))?;
+        if messages.schema_name != spec.schema_name
+            || messages.schema_version != MESSAGE_COLLECTION_SCHEMA_VERSION
+            || messages.collection_uid != spec.collection_uid
+        {
+            return Err(AppError::new(
+                "disposition_messages_invalid",
+                format!(
+                    "invalid disposition messages schema: {}",
+                    rel_path(&self.root, &path)
+                ),
+            ));
+        }
+        Ok(messages)
+    }
+
+    pub(super) fn write_disposition_messages(
+        &self,
+        spec: DispositionViewSpec,
+        data: &MessageCollection,
+    ) -> Result<()> {
+        let mut normalized = data.clone();
+        normalized.normalize(
+            spec.schema_name,
+            spec.collection_uid,
+            spec.title(TemplateLanguage::EnUs),
+        );
+        normalized.status = spec.status.as_str().to_string();
+        if normalized.created_rfc3339.is_none() {
+            normalized.created_rfc3339 = Some(now_rfc3339());
+        }
+        if normalized.updated_rfc3339.is_none() {
+            normalized.updated_rfc3339 = Some(now_rfc3339());
+        }
+        let path = self.disposition_json_path(spec);
+        if normalized.items.is_empty() && !path.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            create_dir_all(parent)?;
+        }
+        write_json_pretty(&path, &normalized)
+    }
+
+    pub(crate) fn set_message_disposition(
+        &self,
+        status: MessageStatus,
+        message_id: &str,
+        summary: Option<&str>,
+        added_rfc3339: &str,
+    ) -> Result<()> {
+        let spec = disposition_spec_for_status(status).ok_or_else(|| {
+            AppError::new(
+                "invalid_request",
+                format!(
+                    "message status is not a local disposition: {}",
+                    status.as_str()
+                ),
+            )
+        })?;
+        self.clear_message_from_all_dispositions_except(message_id, Some(spec))?;
+        let mut data = self.read_disposition_messages(spec)?;
+        data.upsert_item(message_id, summary, added_rfc3339);
+        data.updated_rfc3339 = Some(now_rfc3339());
+        self.write_disposition_messages(spec, &data)
+    }
+
+    pub(super) fn clear_message_disposition(
+        &self,
+        status: MessageStatus,
+        message_id: &str,
+    ) -> Result<bool> {
+        let Some(spec) = disposition_spec_for_status(status) else {
+            return Ok(false);
+        };
+        self.clear_message_disposition_for_spec(spec, message_id)
+    }
+
+    pub(super) fn clear_message_from_all_dispositions(&self, message_id: &str) -> Result<()> {
+        self.clear_message_from_all_dispositions_except(message_id, None)
+    }
+
+    fn clear_message_from_all_dispositions_except(
+        &self,
+        message_id: &str,
+        keep: Option<DispositionViewSpec>,
+    ) -> Result<()> {
+        for spec in DISPOSITION_VIEW_SPECS {
+            if keep.is_some_and(|keep| keep.dir == spec.dir) {
+                continue;
+            }
+            self.clear_message_disposition_for_spec(spec, message_id)?;
+        }
+        Ok(())
+    }
+
+    fn clear_message_disposition_for_spec(
+        &self,
+        spec: DispositionViewSpec,
+        message_id: &str,
+    ) -> Result<bool> {
+        let mut data = self.read_disposition_messages(spec)?;
+        let before = data.items.len();
+        data.items.retain(|item| item.message_id != message_id);
+        if data.items.len() == before {
+            return Ok(false);
+        }
+        data.message_count = data.items.len();
+        data.updated_rfc3339 = Some(now_rfc3339());
+        self.write_disposition_messages(spec, &data)?;
+        Ok(true)
+    }
+
+    pub(super) fn disposition_state_for_message(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<(MessageStatus, String)>> {
+        for spec in DISPOSITION_VIEW_SPECS {
+            let data = self.read_disposition_messages(spec)?;
+            if let Some(item) = data.items.iter().find(|item| item.message_id == message_id) {
+                return Ok(Some((spec.status, item.added_rfc3339.clone())));
+            }
+        }
+        Ok(None)
+    }
+
     pub(super) fn refresh_disposition_views(&self) -> Result<Value> {
         self.require_workspace()?;
         let config = MailConfig::load(&self.root)?;
@@ -68,30 +229,32 @@ impl Workspace {
         let mut written: BTreeMap<&'static str, usize> = BTreeMap::new();
 
         for spec in DISPOSITION_VIEW_SPECS {
-            create_dir_all(&self.root.join(spec.dir))?;
             groups.insert(spec.dir, Vec::new());
             desired.insert(spec.dir, BTreeSet::new());
             written.insert(spec.dir, 0);
         }
 
-        for path in message_json_paths(&self.root)? {
-            let message = read_message(&path)?;
-            let status = MessageStatus::parse(&message.workspace.status)?;
-            let Some(spec) = disposition_spec_for_status(status) else {
-                continue;
-            };
-            desired
-                .entry(spec.dir)
-                .or_default()
-                .insert(message.message_id.clone());
-            self.write_disposition_message_view_with_renderer(
-                spec,
-                &message,
-                &config,
-                &mut renderer,
-            )?;
-            *written.entry(spec.dir).or_default() += 1;
-            groups.entry(spec.dir).or_default().push(message);
+        for spec in DISPOSITION_VIEW_SPECS {
+            let data = self.read_disposition_messages(spec)?;
+            for item in data.items {
+                let mut message = self.read_message_by_id(&item.message_id)?;
+                message.workspace.status = spec.status.as_str().to_string();
+                message.workspace.archive_uid = None;
+                message.workspace.archived_rfc3339 = None;
+                message.workspace.origin = None;
+                desired
+                    .entry(spec.dir)
+                    .or_default()
+                    .insert(message.message_id.clone());
+                self.write_disposition_message_view_with_renderer(
+                    spec,
+                    &message,
+                    &config,
+                    &mut renderer,
+                )?;
+                *written.entry(spec.dir).or_default() += 1;
+                groups.entry(spec.dir).or_default().push(message);
+            }
         }
 
         let mut stale_spam_removed_count = 0usize;
@@ -108,6 +271,9 @@ impl Workspace {
                 _ => {}
             }
             let mut messages = groups.remove(spec.dir).unwrap_or_default();
+            if messages.is_empty() {
+                continue;
+            }
             self.write_disposition_index_with_renderer(
                 spec,
                 &mut messages,
@@ -148,15 +314,21 @@ impl Workspace {
         let conversation =
             self.message_conversation_with_renderer(message, config, renderer, path.parent())?;
         let context = json!({
-            "frontmatter_kind": spec.frontmatter_kind,
-            "language": config.resolved_language_bcp47(),
-            "message_id": message.message_id.as_str(),
-            "status": message.workspace.status.as_str(),
-            "status_label": spec.label(config.template_language()),
-            "title": message.subject.as_deref().unwrap_or(""),
-            "generated_rfc3339": generated_rfc3339.as_str(),
-            "conversation": conversation.trim(),
+            "frontmatter": {
+                "kind": spec.frontmatter_kind,
+                "message_id": message.message_id.as_str(),
+                "status": message.workspace.status.as_str(),
+                "generated_rfc3339": generated_rfc3339.as_str(),
+            },
             "message": message_template_value(message)?,
+            "view": {
+                "language": config.resolved_language_bcp47(),
+                "status": message.workspace.status.as_str(),
+                "status_label": spec.label(config.template_language()),
+                "title": message.subject.as_deref().unwrap_or(""),
+                "generated_rfc3339": generated_rfc3339.as_str(),
+                "conversation": conversation.trim(),
+            },
         });
         let rendered = renderer.render(TemplateKey::StatusMessage, &context)?;
         write_string(&path, &rendered)
@@ -181,30 +353,34 @@ impl Workspace {
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or(message.message_id.as_str())
                     .to_string();
-                let mut item = thread_item_common(
+                let item = thread_item_common(
                     message,
                     &offset,
                     language,
                     format!("{}.md", message.message_id),
                     title,
                 )?;
-                if let Value::Object(map) = &mut item {
-                    map.insert("message".to_string(), message_template_value(message)?);
-                }
                 Ok(item)
             })
             .collect::<Result<Vec<_>>>()?;
         let generated_rfc3339 = now_rfc3339();
         let context = json!({
-            "frontmatter_kind": format!("{}_index", spec.frontmatter_kind),
-            "language": config.resolved_language_bcp47(),
-            "status": spec.status.as_str(),
-            "status_label": spec.label(language),
-            "status_dir": spec.dir,
-            "title": spec.title(language),
-            "generated_rfc3339": generated_rfc3339.as_str(),
-            "message_count": items.len(),
+            "frontmatter": {
+                "kind": format!("{}_index", spec.frontmatter_kind),
+                "status": spec.status.as_str(),
+                "generated_rfc3339": generated_rfc3339.as_str(),
+                "message_count": items.len(),
+            },
             "items": items,
+            "view": {
+                "language": config.resolved_language_bcp47(),
+                "status": spec.status.as_str(),
+                "status_label": spec.label(language),
+                "status_dir": spec.dir,
+                "title": spec.title(language),
+                "generated_rfc3339": generated_rfc3339.as_str(),
+                "message_count": items.len(),
+            },
         });
         let rendered = renderer.render(TemplateKey::StatusIndex, &context)?;
         write_string(&self.root.join(spec.dir).join("index.md"), &rendered)
@@ -245,6 +421,10 @@ impl Workspace {
         message_id: &str,
     ) -> PathBuf {
         self.root.join(spec.dir).join(format!("{message_id}.md"))
+    }
+
+    pub(super) fn disposition_json_path(&self, spec: DispositionViewSpec) -> PathBuf {
+        self.root.join(spec.dir).join("data").join(spec.data_file)
     }
 }
 

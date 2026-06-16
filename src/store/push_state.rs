@@ -81,7 +81,7 @@ impl Workspace {
             state
                 .pending
                 .retain(|pending| !remove.contains(&pending.push_id));
-            if completed && state.pending.len() != before {
+            if completed && (state.pending.len() != before || before == 0) {
                 state.last_completed_rfc3339 = Some(now_rfc3339());
             }
         })

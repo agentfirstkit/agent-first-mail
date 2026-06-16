@@ -1,0 +1,9 @@
+Message-ID: <archived_delivery@fixtures.afmail.local>
+From: ShipIt <tracking@shipit.example>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 14:02:00 +0000
+Subject: Already handled: delivery update
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+This delivery issue was already handled by support last week.

@@ -7,12 +7,12 @@ pub(super) struct ArchivedCaseEntry {
 }
 
 pub(super) fn case_name(case_path: &Path) -> Result<String> {
-    Ok(read_case_file(case_path)?.case_name)
+    Ok(read_case_file(case_path)?.collection_name)
 }
 
 pub(super) fn update_case_name(case_path: &Path, case_name: &str) -> Result<()> {
     let mut case = read_case_file(case_path)?;
-    case.case_name = case_name.to_string();
+    case.collection_name = case_name.to_string();
     case.updated_rfc3339 = Some(now_rfc3339());
     write_case_file(case_path, &case)
 }
@@ -32,23 +32,16 @@ pub(super) fn update_case_archive_state(case_path: &Path, status: &str) -> Resul
 pub(super) fn new_case_file(
     case_uid: &str,
     case_name: &str,
-    message_ids: &[String],
+    items: Vec<MessageCollectionItem>,
 ) -> CaseFrontmatter {
     let now = now_rfc3339();
-    CaseFrontmatter {
-        kind: "case".to_string(),
-        case_uid: case_uid.to_string(),
-        case_name: case_name.to_string(),
-        status: "active".to_string(),
-        tags: Vec::new(),
-        created_rfc3339: Some(now.clone()),
-        updated_rfc3339: Some(now.clone()),
-        archived_rfc3339: None,
-        message_count: message_ids.len(),
-        thread_count: 0,
-        attachment_count: 0,
-        last_message_rfc3339: Some(now),
+    let mut case = CaseFrontmatter::new_case(case_uid, case_name, &now);
+    case.items = items;
+    case.message_count = case.items.len();
+    if !case.items.is_empty() {
+        case.last_message_rfc3339 = Some(now);
     }
+    case
 }
 
 pub(super) fn new_notes_md(root: &Path, language: TemplateLanguage) -> Result<String> {
@@ -108,20 +101,17 @@ pub(super) fn update_case_counts(
     }
 }
 
-pub(super) fn read_case_messages(path: &Path, case_uid: &str) -> Result<CaseMessages> {
-    if !path.exists() {
-        return Ok(CaseMessages::new(case_uid));
-    }
-    let data = read_to_string(path, "read case messages")?;
-    let mut messages: CaseMessages =
-        serde_json::from_str(&data).map_err(|e| AppError::json("parse case messages", &e))?;
-    if messages.schema_name != "case_messages" || messages.schema_version != 1 {
+pub(super) fn read_case_messages(case_path: &Path, case_uid: &str) -> Result<CaseMessages> {
+    let messages = read_case_file(case_path)?;
+    if messages.collection_uid != case_uid {
         return Err(AppError::new(
             "case_messages_invalid",
-            format!("invalid case messages schema: {}", path_to_string(path)),
+            format!(
+                "invalid case uid in metadata: {}",
+                path_to_string(&case_json_path(case_path))
+            ),
         ));
     }
-    messages.case_uid = case_uid.to_string();
     Ok(messages)
 }
 
@@ -143,6 +133,7 @@ impl Workspace {
         name: &str,
         group: Option<&str>,
         message_id: Option<&str>,
+        summary: Option<&str>,
         reason: Option<&str>,
     ) -> Result<Value> {
         self.require_workspace()?;
@@ -179,20 +170,31 @@ impl Workspace {
         create_dir_all(&case_views_messages_dir(&case_path))?;
         create_dir_all(&case_path.join("drafts"))?;
         create_dir_all(&case_path.join("files"))?;
-        let message_ids = if let Some(message_id) = message_id {
-            vec![message_id.to_string()]
-        } else {
-            Vec::new()
-        };
-        write_case_file(&case_path, &new_case_file(&case_uid, name, &message_ids))?;
-        let mut case_messages = CaseMessages::new(&case_uid);
-        case_messages.merge_ids(&message_ids);
-        write_json_pretty(&case_messages_json_path(&case_path), &case_messages)?;
+        let added_rfc3339 = now_rfc3339();
+        let items = message_id
+            .map(|message_id| {
+                vec![MessageCollectionItem {
+                    message_id: message_id.to_string(),
+                    summary: summary
+                        .or(reason)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string),
+                    added_rfc3339: added_rfc3339.clone(),
+                }]
+            })
+            .unwrap_or_default();
+        let case_data = new_case_file(&case_uid, name, items);
+        write_case_file(&case_path, &case_data)?;
         write_string_new(
             &case_path.join("notes.md"),
             &new_notes_md(&self.root, config.template_language())?,
         )?;
+        let message_ids = case_data.message_ids();
         if !message_ids.is_empty() {
+            for message_id in &message_ids {
+                self.clear_message_from_all_dispositions(message_id)?;
+            }
             self.refresh_messages_after_ref_change(&message_ids)?;
         }
         self.refresh_case_message_views(&case_path)?;
@@ -202,15 +204,15 @@ impl Workspace {
             "case_name": name,
             "group": group,
             "message_ids": message_ids,
-            "message_count": case_messages.message_ids.len(),
+            "message_count": case_data.message_count,
             "case_path": rel_path(&self.root, &case_path)
         });
-        if !case_messages.message_ids.is_empty() {
-            let locations = self.message_remote_locations_any(&case_messages.message_ids)?;
+        if !message_ids.is_empty() {
+            let locations = self.message_remote_locations_any(&message_ids)?;
             let item = crate::push_queue::queue_action_steps(
                 &self.root,
                 "case.add",
-                &case_messages.message_ids,
+                &message_ids,
                 &locations,
                 &config.actions.case_add.steps,
                 None,
@@ -228,7 +230,8 @@ impl Workspace {
                 "case_uid": case_uid,
                 "case_name": name,
                 "group": group,
-                "message_ids": case_messages.message_ids,
+                "message_ids": message_ids,
+                "summary": summary,
                 "case_path": rel_path(&self.root, &case_path),
             }),
         )?;
@@ -239,6 +242,7 @@ impl Workspace {
         &self,
         case_ref: &str,
         message_id: &str,
+        summary: Option<&str>,
         reason: Option<&str>,
     ) -> Result<Value> {
         self.require_workspace()?;
@@ -252,7 +256,12 @@ impl Workspace {
         let case_path = existing.ok_or_else(|| {
             AppError::new("case_not_found", format!("case not found: {case_uid}"))
         })?;
-        let mut result = self.add_message_to_existing_case(&case_uid, message_id, &case_path)?;
+        let mut result = self.add_message_to_existing_case(
+            &case_uid,
+            message_id,
+            summary.or(reason),
+            &case_path,
+        )?;
         let config = MailConfig::load(&self.root)?;
         let message_ids = vec![message_id.to_string()];
         let locations = self.message_remote_locations_any(&message_ids)?;
@@ -278,6 +287,7 @@ impl Workspace {
             json!({
                 "case_uid": case_uid,
                 "message_id": message_id,
+                "summary": summary,
                 "group": result.get("group").and_then(Value::as_str).unwrap_or_default(),
             }),
         )?;
@@ -288,22 +298,28 @@ impl Workspace {
         &self,
         case_uid: &str,
         message_id: &str,
+        summary: Option<&str>,
         case_path: &Path,
     ) -> Result<Value> {
         let related_message_ids = self.related_message_ids(message_id)?;
-        let messages_path = case_messages_json_path(case_path);
-        let mut case_messages = read_case_messages(&messages_path, case_uid)?;
-        let already_present = case_messages
-            .message_ids
-            .iter()
-            .any(|existing| existing == message_id);
+        let mut case = read_case_file(case_path)?;
+        let already_present = case.contains_message(message_id);
         if !already_present {
-            let mut case = read_case_file(case_path)?;
+            let added_rfc3339 = now_rfc3339();
+            case.upsert_item(message_id, summary, &added_rfc3339);
             update_case_counts(&mut case, &[message_id.to_string()], None);
             write_case_file(case_path, &case)?;
-            case_messages.merge_ids(&[message_id.to_string()]);
-            write_json_pretty(&messages_path, &case_messages)?;
+        } else if summary
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+        {
+            let added_rfc3339 = now_rfc3339();
+            case.upsert_item(message_id, summary, &added_rfc3339);
+            case.updated_rfc3339 = Some(added_rfc3339);
+            write_case_file(case_path, &case)?;
         }
+        self.clear_message_from_all_dispositions(message_id)?;
         self.refresh_messages_after_ref_change(&[message_id.to_string()])?;
         self.refresh_case_message_views(case_path)?;
         let group = case_path
@@ -398,14 +414,15 @@ impl Workspace {
             ),
         )
         .with_hint(
-            "Validate and compose drafts to queue them, or remove drafts before archive/merge.",
+            "Queue drafts with `afmail case draft save` or `afmail case draft send`, push them, or remove drafts before archive/merge.",
         )
         .with_details(json!({
             "case_uid": case_uid,
             "draft_names": draft_names,
             "suggested_commands": [
                 format!("afmail case draft validate {case_uid} DRAFT_NAME"),
-                format!("afmail case compose {case_uid} DRAFT_NAME"),
+                format!("afmail case draft save {case_uid} DRAFT_NAME"),
+                format!("afmail case draft send {case_uid} DRAFT_NAME"),
                 format!("afmail case draft remove {case_uid} DRAFT_NAME --reason TEXT")
             ]
         })))
@@ -447,8 +464,8 @@ impl Workspace {
             "case_uid": case_uid,
             "push_ids": push_ids,
             "suggested_commands": [
-                "afmail push drafts-send --dry-run",
-                "afmail push drafts-send --confirm",
+                "afmail push --dry-run",
+                "afmail push --confirm",
                 format!("afmail case draft remove {case_uid} DRAFT_NAME --reason TEXT")
             ]
         })))
@@ -461,7 +478,7 @@ impl Workspace {
         self.ensure_case_has_no_local_drafts(&case_uid, &case_path)?;
         self.ensure_case_has_no_outbound_push(&case_uid)?;
         let from_path = rel_path(&self.root, &case_path);
-        let messages = read_case_messages(&case_messages_json_path(&case_path), &case_uid)?;
+        let messages = read_case_messages(&case_path, &case_uid)?;
         let transaction = self.begin_transaction(
             "case_archive",
             vec![
@@ -471,9 +488,10 @@ impl Workspace {
             ],
         )?;
         let archived_path = self.archive_active_case_workspace(&case_uid, &case_path)?;
-        self.refresh_messages_after_ref_change(&messages.message_ids)?;
+        let message_ids = messages.message_ids();
+        self.refresh_messages_after_ref_change(&message_ids)?;
         self.refresh_case_message_views(&archived_path)?;
-        let queue = self.queue_archive_for_archived_messages(&messages.message_ids, None)?;
+        let queue = self.queue_archive_for_archived_messages(&message_ids, None)?;
         transaction.commit()?;
         self.append_audit_event(
             "case_archived",
@@ -483,13 +501,13 @@ impl Workspace {
                 "case_uid": case_uid,
                 "from_path": from_path,
                 "to_path": rel_path(&self.root, &archived_path),
-                "message_ids": messages.message_ids,
+                "message_ids": message_ids,
             }),
         )?;
         Ok(json!({
             "code": "case_archived",
             "case_uid": case_uid,
-            "message_count": messages.message_ids.len(),
+            "message_count": messages.message_count,
             "eligible_message_ids": queue.eligible_message_ids,
             "location_count": queue.location_count,
             "queued_location_count": queue.queued_location_count,
@@ -505,14 +523,15 @@ impl Workspace {
         self.require_workspace()?;
         let reason = self.checked_reason(reason)?;
         let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
-        let messages = read_case_messages(&case_messages_json_path(&case_path), &case_uid)?;
+        let messages = read_case_messages(&case_path, &case_uid)?;
         self.set_case_status(&case_path, "active")?;
-        self.refresh_messages_after_ref_change(&messages.message_ids)?;
+        let message_ids = messages.message_ids();
+        self.refresh_messages_after_ref_change(&message_ids)?;
         let result = json!({
             "code": "case_reopened",
             "case_uid": case_uid,
             "status": "active",
-            "message_count": messages.message_ids.len(),
+            "message_count": messages.message_count,
             "case_path": rel_path(&self.root, &case_path)
         });
         self.append_audit_event(
@@ -590,15 +609,11 @@ impl Workspace {
         self.ensure_case_has_no_outbound_push(&other_case_uid)?;
         ensure_no_name_conflicts(&primary.join("files"), &other.join("files"), "files")?;
         ensure_no_name_conflicts(&primary.join("drafts"), &other.join("drafts"), "drafts")?;
-        let mut primary_messages =
-            read_case_messages(&case_messages_json_path(&primary), &case_uid)?;
-        let other_messages = read_case_messages(&case_messages_json_path(&other), &other_case_uid)?;
-        primary_messages.merge_ids(&other_messages.message_ids);
-        write_json_pretty(&case_messages_json_path(&primary), &primary_messages)?;
-        let mut primary_case = read_case_file(&primary)?;
-        primary_case.message_count = primary_messages.message_ids.len();
-        primary_case.updated_rfc3339 = Some(now_rfc3339());
-        write_case_file(&primary, &primary_case)?;
+        let mut primary_messages = read_case_messages(&primary, &case_uid)?;
+        let other_messages = read_case_messages(&other, &other_case_uid)?;
+        primary_messages.merge_items(&other_messages.items);
+        primary_messages.updated_rfc3339 = Some(now_rfc3339());
+        write_case_file(&primary, &primary_messages)?;
         merge_case_notes(
             &self.root,
             self.template_language()?,
@@ -614,7 +629,8 @@ impl Workspace {
         if let Some(parent) = other_parent {
             self.remove_empty_case_container_dir(&parent)?;
         }
-        self.refresh_messages_after_ref_change(&other_messages.message_ids)?;
+        let other_message_ids = other_messages.message_ids();
+        self.refresh_messages_after_ref_change(&other_message_ids)?;
         self.refresh_case_message_views(&primary)?;
         self.append_audit_event(
             "case_merged",
@@ -626,14 +642,14 @@ impl Workspace {
             json!({
                 "case_uid": case_uid,
                 "merged_case_uid": other_case_uid,
-                "message_ids": other_messages.message_ids,
+                "message_ids": other_message_ids,
             }),
         )?;
         Ok(json!({
             "code": "case_merged",
             "case_uid": case_uid,
             "merged_case_uid": other_case_uid,
-            "message_count": other_messages.message_ids.len()
+            "message_count": other_messages.message_count
         }))
     }
 
@@ -696,7 +712,12 @@ impl Workspace {
 
     pub fn active_case_show(&self, case_ref: &str) -> Result<Value> {
         self.require_workspace()?;
-        let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
+        // Reads ignore lifecycle: if the ref is not an active case, fall back to
+        // the archived case with the same stable uid.
+        let (case_uid, case_path) = match self.resolve_active_case(case_ref) {
+            Ok(resolved) => resolved,
+            Err(_) => return self.archive_case_show(case_ref),
+        };
         self.refresh_case_message_views(&case_path)?;
         let view_path = case_path.join("case.md");
         let text = read_to_string(&view_path, "read active case")?;
@@ -710,7 +731,7 @@ impl Workspace {
         Ok(json!({
             "code": "case",
             "case_uid": case_uid,
-            "case_name": case.case_name,
+            "case_name": case.collection_name,
             "group": group,
             "case_path": rel_path(&self.root, &case_path),
             "view_path": rel_path(&self.root, &view_path),
@@ -735,7 +756,11 @@ impl Workspace {
     }
 
     pub fn active_case_notes_show(&self, case_ref: &str) -> Result<Value> {
-        let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
+        // Reads ignore lifecycle: fall back to the archived case's notes.
+        let (case_uid, case_path) = match self.resolve_active_case(case_ref) {
+            Ok(resolved) => resolved,
+            Err(_) => return self.archive_case_notes_show(case_ref),
+        };
         self.notes_show(
             "case_notes",
             vec![audit_target("case", &case_uid)],
@@ -804,13 +829,14 @@ impl Workspace {
                 ),
             ));
         }
-        let messages = read_case_messages(&case_messages_json_path(&entry.path), &case_uid)?;
+        let messages = read_case_messages(&entry.path, &case_uid)?;
         update_case_archive_state(&entry.path, "active")?;
         if let Some(parent) = active_path.parent() {
             create_dir_all(parent)?;
         }
         fs::rename(&entry.path, &active_path).map_err(|e| AppError::io("restore case", &e))?;
-        self.refresh_messages_after_ref_change(&messages.message_ids)?;
+        let message_ids = messages.message_ids();
+        self.refresh_messages_after_ref_change(&message_ids)?;
         self.refresh_case_message_views(&active_path)?;
         self.append_audit_event(
             "case_restored",
@@ -1193,7 +1219,7 @@ impl Workspace {
                     continue;
                 }
                 let fm = read_case_file(&case_path)?;
-                out.push((fm.case_uid, case_path));
+                out.push((fm.collection_uid, case_path));
             }
         }
         Ok(out)
@@ -1222,7 +1248,7 @@ impl Workspace {
             }
             let fm = read_case_file(&case_path)?;
             out.push(ArchivedCaseEntry {
-                case_uid: fm.case_uid,
+                case_uid: fm.collection_uid,
                 path: case_path,
             });
         }

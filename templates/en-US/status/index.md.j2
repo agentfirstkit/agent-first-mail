@@ -1,19 +1,19 @@
 ---
-kind: {{ frontmatter_kind }}
-status: {{ status }}
-generated_rfc3339: "{{ generated_rfc3339 }}"
-message_count: {{ message_count }}
+kind: {{ frontmatter.kind }}
+status: {{ frontmatter.status }}
+generated_rfc3339: "{{ frontmatter.generated_rfc3339 }}"
+message_count: {{ frontmatter.message_count }}
 ---
 
-# {{ title }}
+# {{ view.title }}
 
 {% if items | length == 0 %}_No messages._
-{% else %}{% for item in items %}## {{ loop.index }}. {{ item.action_label }}{% if item.display_title %}: {{ item.display_title }}{% endif %}
+{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.action_label }}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
 
-{% if item.display_contact %}- {{ item.contact_label }}: {{ item.display_contact }}
-{% endif %}- Message: [{{ item.message_id }}]({{ item.link }})
-- Workspace status: {{ status_label }} (`{{ status }}`)
-{% if item.time.datetime %}- Time: {{ item.time.datetime }}
+{% if item.view.display_contact %}- {{ item.view.contact_label }}: {{ item.view.display_contact }}
+{% endif %}- Message: [{{ item.message.message_id }}]({{ item.view.link }})
+- Workspace status: {{ view.status_label }} (`{{ view.status }}`)
+{% if item.view.time.datetime %}- Time: {{ item.view.time.datetime }}
 {% endif %}
 
 {% endfor %}{% endif %}

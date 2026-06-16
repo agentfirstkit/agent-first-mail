@@ -1,8 +1,8 @@
 # Agent-First Mail
 
-Give your AI agent a mailbox it can actually work in — your mail pulled down
-into plain files it reads, triages, drafts, and files entirely on your machine,
-with nothing sent or changed on the real mailbox until you confirm.
+Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.
+
+> **Ask your agent:** "Sort this week's inbox and draft replies to anything urgent."
 
 Agent-First Mail — the `afmail` command — isn't an email client, a helpdesk app,
 or an auto-replying bot. It's the **workspace your agent operates in**. It borrows
@@ -12,6 +12,8 @@ the `git` shape — pull from a remote, work in a local worktree, push deliberat
 Supported platforms: macOS, Linux, Windows.
 
 ## How it works: one email, start to finish
+
+<video src="https://github.com/agentfirstkit/agent-first-mail/releases/download/demo-media/afmail-demo.mp4" controls muted playsinline></video>
 
 You don't run afmail — your agent does. You ask for what you want in plain
 language, and afmail is the tool it reaches for. The commands below are the
@@ -33,7 +35,7 @@ afmail push list                                         # pending real-mailbox 
 afmail pull                                              # read-only: mail → local files
 afmail triage list                                       # locators for what came down
 afmail case create --name "Refund request" \
-  --message message_inbox_88213_4 --reason "wants a refund"
+  --message message_inbox_88213_4 --summary "refund request for late order" --reason "wants a refund"
 afmail message show message_inbox_88213_4                # read the request: order #4471, arrived late
 ```
 
@@ -64,18 +66,24 @@ the store's own API:
 refund order #4471   → refunded $79.90 to original card (transaction rf_8c21)
 ```
 
-With the money back, the agent turns to afmail. It drafts the reply confirming the
-refund and queues it, along with the archive — all still local, nothing sent yet:
+With the money back, the agent turns to afmail. It drafts the reply confirming
+the refund and queues it — still local, nothing sent yet:
 
 ```bash
-afmail case reply c20260606001 message_inbox_88213_4     # draft the reply (refund confirmed)
-afmail case compose c20260606001 reply-message_inbox_88213_4.md   # queue the reply
-afmail case archive c20260606001 --reason "refunded order #4471, replied to customer"  # queue the archive
+afmail case draft reply c20260606001 message_inbox_88213_4 --body-file refund-reply.txt
+afmail case draft send c20260606001 reply-message_inbox_88213_4.md # queue the reply
 ```
 
-Sending is the one step that changes your real mailbox, and afmail will not do it
-without an explicit `--confirm`. So the agent stops and shows you the draft to
-review before anything goes out:
+If the queued reply needs correction before sending, edit the draft Markdown or
+use `draft change`; the queued item still points at the latest draft content:
+
+```bash
+afmail case draft change c20260606001 reply-message_inbox_88213_4.md --body-file revised-reply.txt
+```
+
+Pushing is the moment your real mailbox changes, and afmail will not push without
+an explicit `--confirm`. So the agent stops and shows you the draft to review
+before anything goes out:
 
 > **Agent:** Refund's done. Here's the reply before I send it:
 >
@@ -89,7 +97,8 @@ review before anything goes out:
 Only now, with the draft approved, does it push:
 
 ```bash
-afmail push --confirm     # send the reply and file the thread
+afmail case archive c20260606001 --reason "refunded order #4471, replied to customer"
+afmail push --confirm                                    # send the reply and apply the archive in one push
 ```
 
 Then it reports back:
@@ -105,9 +114,9 @@ Then it reports back:
 > Want me to junk the first two and archive the rest?
 
 That is the whole shape: **you ask in plain language and the agent does the work
-in local files — investigating, proposing a plan, drafting — and the one
-irreversible step, sending mail, happens only after you've read the draft and it
-runs an explicit `--confirm`.**
+in local files — investigating, proposing a plan, drafting — and nothing reaches
+your real mailbox until you've reviewed what's queued and it runs an explicit
+`afmail push --confirm`.**
 
 ## Nothing touches your real mailbox until you confirm
 
@@ -115,8 +124,9 @@ Everything your agent does by default is local: replying writes a draft,
 archiving moves a local folder, marking spam/trash removes it from triage and
 adds it to generated `spam/` or `trash/` review views, and remotely deleted mail
 is retained under generated `deleted/` views until `afmail purge` clears old
-local copies. Local filing only *queues* a remote effect. `afmail push` is like `git push` — it previews what is pending, and
-**`--confirm` is the single explicit moment** anything is sent, moved, or flagged.
+local copies. Local filing only *queues* a remote effect. `afmail push` is like `git push` — it
+previews everything pending, and a single **`--confirm` is the one explicit
+moment** all of it is sent, moved, or flagged.
 Every confirmed effect lands in an append-only audit log, so a suggestion is never
 mistaken for a change after the fact.
 
@@ -163,23 +173,39 @@ The fastest way to get going is to let your agent read what afmail is and set it
 up for you. Paste this to your agent:
 
 > Read what Agent-First Mail is at https://agentfirstkit.com/agent-first-mail and
-> tell me in plain terms what it would do for me. If I want it, install it and run
-> `afmail skill install` so you follow its behavior rules. Then set up my mailbox:
-> afmail uses one workspace directory per account, so make a folder, run `afmail
-> init` in it, and help me connect my mailbox.
+> tell me in plain terms what it would do for me. If I want it, install it — the
+> prebuilt package for the quick path, or build from source after a quick security
+> review of the repo if you'd rather read what you run — then run `afmail skill
+> install` so you follow its behavior rules. Then set up my mailbox: afmail uses
+> one workspace directory per account, so make a folder, run `afmail init` in it,
+> and help me connect my mailbox.
 
-Install afmail and its behavior skill (restart the agent afterward so it reloads
-the rules):
+If it's a fit, install it — a prebuilt package, or from source if you want to
+read it first:
 
 ```bash
+# prebuilt binary
+brew install agentfirstkit/tap/afmail   # macOS / Linux
+scoop bucket add agentfirstkit https://github.com/agentfirstkit/scoop-bucket && scoop install afmail   # Windows
+
+# or build from source after reviewing the repo
 git clone https://github.com/agentfirstkit/agent-first-mail
-cargo install --path agent-first-mail
-afmail skill install
-afmail skill status
+cd agent-first-mail
+cargo install --path . --bin afmail --locked --force
+```
+
+Then install the embedded [Agent Skill](skills/agent-first-mail.md) so the agent
+follows afmail's behavior rules, and restart the agent afterward so it reloads
+them:
+
+```bash
+afmail skill install --agent codex --scope project
+afmail skill status --agent codex --scope project
 ```
 
 Then it's **one workspace directory per mailbox**: run `afmail init` in a fresh
-folder, connect the account, and your agent works that mailbox from its files.
+folder or `afmail init email-a` from your agent root, connect the account, and
+your agent works that mailbox from its files.
 See the [Workspace Model](docs/workspace.md).
 
 ## Docs
@@ -188,6 +214,7 @@ See the [Workspace Model](docs/workspace.md).
 - [Workspace Model](docs/workspace.md) — the folder layout and what each part is for
 - [File Formats](docs/file-formats.md) — the exact files a pull and your commands produce
 - [CLI Contract](docs/cli.md) — every command and flag for the `afmail` binary
+- [Code Structure](docs/code-structure.md) — where crate responsibilities live
 - [Agent Skill](skills/agent-first-mail.md) — the behavior contract agents follow
 
 ## License

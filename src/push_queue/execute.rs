@@ -15,7 +15,7 @@ pub(super) struct PushExecutionContext<'a> {
     pub(super) progress: PushProgressContext,
 }
 
-pub(super) fn push_outbound_drafts(
+pub(super) fn push_outbound(
     root: &Path,
     config: &MailConfig,
     remote: &dyn MailRemote,
@@ -26,47 +26,28 @@ pub(super) fn push_outbound_drafts(
     let outbound = item
         .outbound()
         .ok_or_else(|| AppError::new("push_item_invalid", "push item is not outbound"))?;
-    let steps = if outbound.draft_save_steps.is_empty() {
-        vec![ActionStep::append_to_mailbox_id("drafts")]
-    } else {
-        outbound.draft_save_steps.clone()
-    };
-    execute_tracked_steps(
-        PushExecutionContext {
-            root,
-            config,
-            remote,
-            progress: context,
-        },
-        item,
-        &steps,
-        progress,
-        execute_outbound_step,
-    )
-}
-
-pub(super) fn push_outbound_send(
-    root: &Path,
-    config: &MailConfig,
-    remote: &dyn MailRemote,
-    item: &mut PushItem,
-    context: PushProgressContext,
-    progress: Option<&mut ProgressCallback<'_>>,
-) -> Result<()> {
-    let outbound = item
-        .outbound()
-        .ok_or_else(|| AppError::new("push_item_invalid", "push item is not outbound"))?;
-    let steps = if outbound.draft_send_steps.is_empty() {
-        vec![
-            ActionStep::smtp_send(),
-            ActionStep::append_to_mailbox_id("sent"),
-            ActionStep::add_flags_on(
-                vec!["\\Seen".to_string(), "\\Answered".to_string()],
-                ActionStepOn::ReplyToMessage,
-            ),
-        ]
-    } else {
-        outbound.draft_send_steps.clone()
+    let steps = match outbound.action {
+        OutboundAction::SaveDraft => {
+            if config.actions.draft_save.steps.is_empty() {
+                vec![ActionStep::append_to_mailbox_id("drafts")]
+            } else {
+                config.actions.draft_save.steps.clone()
+            }
+        }
+        OutboundAction::Send => {
+            if config.actions.draft_send.steps.is_empty() {
+                vec![
+                    ActionStep::smtp_send(),
+                    ActionStep::append_to_mailbox_id("sent"),
+                    ActionStep::add_flags_on(
+                        vec!["\\Seen".to_string(), "\\Answered".to_string()],
+                        ActionStepOn::ReplyToMessage,
+                    ),
+                ]
+            } else {
+                config.actions.draft_send.steps.clone()
+            }
+        }
     };
     let steps = filter_reply_to_steps(root, item, steps)?;
     execute_tracked_steps(
@@ -107,57 +88,67 @@ pub(super) fn should_skip_reply_to_steps(root: &Path, item: &PushItem) -> Result
     let Some(outbound) = item.outbound() else {
         return Ok(true);
     };
-    if outbound.reply_to_message_id.is_none() {
-        return Ok(true);
-    }
     let case_uid = outbound.case_uid.as_str();
     let draft_name = outbound.draft_name.as_str();
-    let Some(case_path) = find_case_path_any(root, case_uid)? else {
-        return Ok(false);
-    };
+    let case_path = find_case_path(root, case_uid)?;
     let draft_path = case_path.join("drafts").join(draft_name);
-    if !draft_path.is_file() {
-        return Ok(false);
-    }
+    ensure_draft_file_exists(root, case_uid, draft_name, &draft_path)?;
     let draft_text = fs::read_to_string(&draft_path).map_err(|e| AppError::io("read draft", &e))?;
     let (frontmatter, _) = crate::markdown::read_doc::<DraftFrontmatter>(&draft_text)?;
     Ok(frontmatter.send_intent.as_deref() == Some("new")
         || frontmatter.reply_to_message_id.is_none())
 }
 
-pub(super) fn ensure_outbound_draft_fresh(root: &Path, item: &PushItem) -> Result<()> {
+fn ensure_draft_file_exists(
+    root: &Path,
+    case_uid: &str,
+    draft_name: &str,
+    draft_path: &Path,
+) -> Result<()> {
+    if draft_path.is_file() {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "draft_not_found",
+        format!("queued draft file is missing: {draft_name}"),
+    )
+    .with_hint(format!(
+        "Remove the stale push item with `afmail case draft remove {case_uid} {draft_name} --reason TEXT`, or recreate the draft before retrying."
+    ))
+    .with_details(json!({
+        "case_uid": case_uid,
+        "draft_name": draft_name,
+        "draft_path": rel_path(root, draft_path),
+        "suggested_commands": [
+            format!("afmail case draft remove {case_uid} {draft_name} --reason TEXT"),
+            format!("afmail case draft new {case_uid} --to ADDR --subject TEXT")
+        ]
+    })))
+}
+
+pub(super) fn prepare_current_outbound(
+    root: &Path,
+    config: &MailConfig,
+    item: &PushItem,
+) -> Result<crate::smtp_send::PreparedOutbound> {
     let outbound = item
         .outbound()
-        .ok_or_else(|| AppError::new("invalid_request", "push item is not outbound"))?;
+        .ok_or_else(|| AppError::new("push_item_invalid", "push item is not outbound"))?;
     let case_uid = outbound.case_uid.as_str();
     let draft_name = outbound.draft_name.as_str();
-    let Some(case_path) = find_case_path_any(root, case_uid)? else {
-        return Ok(());
-    };
+    let case_path = find_case_path(root, case_uid)?;
     let draft_path = case_path.join("drafts").join(draft_name);
-    if !draft_path.is_file() {
-        return Ok(());
-    }
-    let expected = outbound.draft_hash.as_str();
-    let current = crate::util::file_sha256_fingerprint(&draft_path, "read draft")?;
-    if current != expected {
-        return Err(AppError::new(
-            "draft_changed_since_compose",
-            format!("draft changed since compose: {draft_name}"),
-        )
-        .with_hint(format!(
-            "Re-run `afmail case draft validate {case_uid} {draft_name}`, then `afmail case compose {case_uid} {draft_name}`."
-        ))
-        .with_details(serde_json::json!({
-            "case_uid": case_uid,
-            "draft_name": draft_name,
-            "suggested_commands": [
-                format!("afmail case draft validate {case_uid} {draft_name}"),
-                format!("afmail case compose {case_uid} {draft_name}")
-            ]
-        })));
-    }
-    Ok(())
+    ensure_draft_file_exists(root, case_uid, draft_name, &draft_path)?;
+    let workspace = crate::store::Workspace::at(root);
+    workspace.validate_draft_for_push(case_uid, draft_name, &case_path)?;
+    crate::smtp_send::prepare_outbound(
+        root,
+        &case_path,
+        case_uid,
+        draft_name,
+        config,
+        Some(&crate::smtp_send::message_id_for_push(&item.push_id)),
+    )
 }
 
 pub(super) fn push_action_steps(
@@ -388,39 +379,22 @@ pub(super) fn execute_outbound_step(
     item: &mut PushItem,
     step: &ActionStep,
 ) -> Result<()> {
-    let outbound = item
-        .outbound()
-        .ok_or_else(|| AppError::new("push_item_invalid", "push item is not outbound"))?
-        .clone();
+    item.outbound()
+        .ok_or_else(|| AppError::new("push_item_invalid", "push item is not outbound"))?;
+    let prepared = prepare_current_outbound(context.root, context.config, item)?;
     if step.smtp_send.is_some() {
-        let raw = read_item_eml(context.root, item)?;
-        context
-            .remote
-            .send_raw_message(&outbound.envelope_from, &outbound.envelope_to, &raw)?;
+        context.remote.send_raw_message(
+            &prepared.envelope_from,
+            &prepared.envelope_to,
+            &prepared.raw,
+        )?;
     }
     if let Some(mailbox_id) = &step.append_to_mailbox_id {
-        let raw = read_item_eml(context.root, item)?;
         let folder = context.remote.action_mailbox_folder(mailbox_id)?;
         let draft = mailbox_is_kind(context.config, mailbox_id, SpecialUseKind::Drafts);
-        context.remote.append_message(&folder, &raw, draft)?;
-        if draft {
-            crate::smtp_send::mark_staged(
-                context.root,
-                &outbound.message_id,
-                &raw,
-                &outbound.case_uid,
-            )?;
-        } else if mailbox_is_kind(context.config, mailbox_id, SpecialUseKind::Sent) {
-            let case_path = find_case_path(context.root, &outbound.case_uid)?;
-            crate::smtp_send::mark_sent_and_append_case(
-                context.root,
-                &case_path,
-                &outbound.case_uid,
-                &outbound.message_id,
-                &raw,
-                context.config,
-            )?;
-        }
+        context
+            .remote
+            .append_message(&folder, &prepared.raw, draft)?;
     }
     if !step.add_flags.is_empty() {
         let locations = action_locations(context.root, item, step)?;
@@ -472,16 +446,34 @@ pub(super) fn action_locations(
     step: &ActionStep,
 ) -> Result<Vec<PushLocation>> {
     if step.on == Some(ActionStepOn::ReplyToMessage) {
-        let reply_to = item.reply_to_message_id().ok_or_else(|| {
-            AppError::new(
-                "push_item_invalid",
-                "reply_to_message action has no reply_to_message_id",
-            )
-        })?;
+        let reply_to = reply_to_message_id_for_step(root, item)?;
         let workspace = crate::store::Workspace::at(root);
-        return workspace.message_remote_locations_any(&[reply_to.to_string()]);
+        return workspace.message_remote_locations_any(&[reply_to]);
     }
     Ok(item.locations().to_vec())
+}
+
+fn reply_to_message_id_for_step(root: &Path, item: &PushItem) -> Result<String> {
+    if let Some(reply_to) = item.reply_to_message_id() {
+        return Ok(reply_to.to_string());
+    }
+    let outbound = item.outbound().ok_or_else(|| {
+        AppError::new(
+            "push_item_invalid",
+            "reply_to_message action has no reply_to_message_id",
+        )
+    })?;
+    let case_path = find_case_path(root, &outbound.case_uid)?;
+    let draft_path = case_path.join("drafts").join(&outbound.draft_name);
+    ensure_draft_file_exists(root, &outbound.case_uid, &outbound.draft_name, &draft_path)?;
+    let draft_text = fs::read_to_string(&draft_path).map_err(|e| AppError::io("read draft", &e))?;
+    let (frontmatter, _) = crate::markdown::read_doc::<DraftFrontmatter>(&draft_text)?;
+    frontmatter.reply_to_message_id.ok_or_else(|| {
+        AppError::new(
+            "push_item_invalid",
+            "reply_to_message action has no reply_to_message_id",
+        )
+    })
 }
 
 pub(super) fn execute_add_flags(

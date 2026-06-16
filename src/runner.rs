@@ -3,6 +3,8 @@ mod lock;
 mod output;
 mod purge;
 mod push;
+#[cfg(feature = "ui")]
+mod ui;
 
 pub use dispatch::execute_command;
 pub use output::{emit_result, emit_value};
@@ -21,6 +23,10 @@ pub fn run_command(
     log_filters: &[String],
     argv: &[String],
 ) -> i32 {
+    #[cfg(feature = "ui")]
+    if let Command::Ui(command) = command {
+        return ui::run_ui_command(command, output);
+    }
     let started = Instant::now();
     let command_name = command_name(&command).to_string();
     if log_enabled(log_filters, "startup") {

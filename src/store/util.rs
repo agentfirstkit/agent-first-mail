@@ -379,10 +379,6 @@ pub(super) fn case_json_path(case_path: &Path) -> PathBuf {
     case_data_dir(case_path).join("case.json")
 }
 
-pub(super) fn case_messages_json_path(case_path: &Path) -> PathBuf {
-    case_data_dir(case_path).join("messages.json")
-}
-
 pub(super) fn case_drafts_json_path(case_path: &Path) -> PathBuf {
     case_data_dir(case_path).join("drafts.json")
 }
@@ -398,15 +394,17 @@ pub(super) fn case_message_view_path(case_path: &Path, message_id: &str) -> Path
 pub(super) fn read_case_file(case_path: &Path) -> Result<CaseFrontmatter> {
     let path = case_json_path(case_path);
     let data = read_to_string(&path, "read case metadata")?;
-    let mut case: CaseFrontmatter =
+    let case: CaseFrontmatter =
         serde_json::from_str(&data).map_err(|e| AppError::json("parse case metadata", &e))?;
-    if case.kind.is_empty() {
-        case.kind = "case".to_string();
-    }
-    if case.kind != "case" {
+    if case.schema_name != CASE_SCHEMA_NAME
+        || case.schema_version != MESSAGE_COLLECTION_SCHEMA_VERSION
+    {
         return Err(AppError::new(
             "case_metadata_invalid",
-            format!("invalid case metadata kind: {}", rel_path(case_path, &path)),
+            format!(
+                "invalid case metadata schema: {}",
+                rel_path(case_path, &path)
+            ),
         ));
     }
     Ok(case)
@@ -414,7 +412,9 @@ pub(super) fn read_case_file(case_path: &Path) -> Result<CaseFrontmatter> {
 
 pub(super) fn write_case_file(case_path: &Path, case: &CaseFrontmatter) -> Result<()> {
     let mut normalized = case.clone();
-    normalized.kind = "case".to_string();
+    let uid = normalized.collection_uid.clone();
+    let name = normalized.collection_name.clone();
+    normalized.normalize(CASE_SCHEMA_NAME, &uid, &name);
     write_json_pretty(&case_json_path(case_path), &normalized)
 }
 

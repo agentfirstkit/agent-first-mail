@@ -2,7 +2,7 @@
 
 # afmail CLI Reference
 
-> Regenerate with `afmail --help --recursive --output markdown`.
+> Regenerate with `scripts/projects/agent-first-mail/generate-cli-doc.sh` (runs `afmail --help --recursive --output markdown`).
 
 # afmail - Agent-First Mail: local-first email case workspace for agents.
 
@@ -21,11 +21,12 @@ Agent-First Mail: local-first email case workspace for agents.
 ### Workspace Shape
 
 ```text
-.afmail/messages/        raw .eml plus durable state/remote sidecars
+.afmail/messages/        raw .eml plus durable remote sidecars
 messages/               rebuildable parsed message cache
 .afmail/logs/events.jsonl append-only audit log
 .afmail/transactions/    transient local write transaction sentinels
 .afmail/workspace.progress.json latest push/pull runtime snapshot
+templates/               user-editable generated Markdown templates
 triage/message_*.md      active unprocessed message views
 spam/*.md                generated spam review views
 trash/*.md               generated trash review views
@@ -43,8 +44,9 @@ archive/notifications/<archive_uid>-<name>/views/ generated archive detail views
 
 ```text
 afmail init
+afmail init email-a
 afmail skill status
-afmail skill install
+afmail skill install --agent codex --scope project
 afmail status
 afmail doctor
 afmail pull
@@ -64,17 +66,15 @@ afmail case move c20260603001 waiting
 afmail case archive c20260603001 --reason "feedback handled"
 afmail archive case restore c20260603001 --group open --reason "customer replied"
 afmail case tag c20260603001 legal --reason "legal review needed"
-afmail case reply c20260603001 message_inbox_607146690_22
+afmail case draft reply c20260603001 message_inbox_607146690_22
 afmail case draft attach c20260603001 reply-message_inbox_607146690_22.md ./screenshot.png
+afmail case draft change c20260603001 reply-message_inbox_607146690_22.md --body "Thanks, I will check this."
 afmail case draft validate c20260603001 reply-message_inbox_607146690_22.md
-afmail case compose c20260603001 reply-message_inbox_607146690_22.md
+afmail case draft send c20260603001 reply-message_inbox_607146690_22.md
 afmail case draft remove c20260603001 reply-message_inbox_607146690_22.md --reason "mistaken draft"
-afmail push drafts-send --dry-run
-afmail push drafts-send
-afmail push archive
-afmail push spam
-afmail push trash
 afmail push list
+afmail push
+afmail push --confirm
 afmail purge
 afmail purge spam --older-than-days 30
 afmail purge deleted
@@ -105,11 +105,12 @@ Agent-First Mail: local-first email case workspace for agents.
 ### Workspace Shape
 
 ```text
-.afmail/messages/        raw .eml plus durable state/remote sidecars
+.afmail/messages/        raw .eml plus durable remote sidecars
 messages/               rebuildable parsed message cache
 .afmail/logs/events.jsonl append-only audit log
 .afmail/transactions/    transient local write transaction sentinels
 .afmail/workspace.progress.json latest push/pull runtime snapshot
+templates/               user-editable generated Markdown templates
 triage/message_*.md      active unprocessed message views
 spam/*.md                generated spam review views
 trash/*.md               generated trash review views
@@ -127,8 +128,9 @@ archive/notifications/<archive_uid>-<name>/views/ generated archive detail views
 
 ```text
 afmail init
+afmail init email-a
 afmail skill status
-afmail skill install
+afmail skill install --agent codex --scope project
 afmail status
 afmail doctor
 afmail pull
@@ -148,17 +150,15 @@ afmail case move c20260603001 waiting
 afmail case archive c20260603001 --reason "feedback handled"
 afmail archive case restore c20260603001 --group open --reason "customer replied"
 afmail case tag c20260603001 legal --reason "legal review needed"
-afmail case reply c20260603001 message_inbox_607146690_22
+afmail case draft reply c20260603001 message_inbox_607146690_22
 afmail case draft attach c20260603001 reply-message_inbox_607146690_22.md ./screenshot.png
+afmail case draft change c20260603001 reply-message_inbox_607146690_22.md --body "Thanks, I will check this."
 afmail case draft validate c20260603001 reply-message_inbox_607146690_22.md
-afmail case compose c20260603001 reply-message_inbox_607146690_22.md
+afmail case draft send c20260603001 reply-message_inbox_607146690_22.md
 afmail case draft remove c20260603001 reply-message_inbox_607146690_22.md --reason "mistaken draft"
-afmail push drafts-send --dry-run
-afmail push drafts-send
-afmail push archive
-afmail push spam
-afmail push trash
 afmail push list
+afmail push
+afmail push --confirm
 afmail purge
 afmail purge spam --older-than-days 30
 afmail purge deleted
@@ -176,7 +176,7 @@ afmail message attachment fetch message_inbox_607146690_21 2
 Usage: afmail [OPTIONS] [COMMAND]
 
 Commands:
-  init     Initialize the current directory as an afmail workspace
+  init     Initialize the current directory or a child path as an afmail workspace
   pull     Read configured IMAP mailbox ids into local message files without changing remote mail
   config   Read or update local afmail configuration
   remote   Inspect remote IMAP state for configuring mailboxes
@@ -212,12 +212,16 @@ Options:
           Print help. Add --recursive to expand every nested subcommand; add --output json|yaml|markdown to render this help in another format.
 ```
 
-## afmail init - Initialize the current directory as an afmail workspace
+## afmail init - Initialize the current directory or a child path as an afmail workspace
 
 ```text
-Initialize the current directory as an afmail workspace
+Initialize the current directory or a child path as an afmail workspace
 
-Usage: init
+Usage: init [PATH]
+
+Arguments:
+  [PATH]
+          Optional workspace path to initialize under the current directory
 
 Options:
   -h, --help
@@ -354,13 +358,8 @@ Push queued local work or manage the local push queue
 Usage: push [OPTIONS] [COMMAND]
 
 Commands:
-  list         List queued local push items
-  drafts       Push queued outbound drafts through configured draft.save actions
-  drafts-send  Push queued outbound drafts through configured draft.send actions
-  archive      Push queued archive actions to their configured IMAP mailboxes
-  spam         Push queued spam actions to the configured Junk mailbox
-  trash        Push queued trash actions to the configured Trash mailbox
-  help         Print this message or the help of the given subcommand(s)
+  list  List queued local push items
+  help  Print this message or the help of the given subcommand(s)
 
 Options:
       --dry-run
@@ -381,96 +380,6 @@ List queued local push items
 Usage: list
 
 Options:
-  -h, --help
-          Print help
-```
-
-### afmail push drafts - Push queued outbound drafts through configured draft.save actions
-
-```text
-Push queued outbound drafts through configured draft.save actions
-
-Usage: drafts [OPTIONS]
-
-Options:
-      --dry-run
-          Show planned push actions without IMAP/SMTP writes. This is the default
-
-      --confirm
-          Apply queued IMAP/SMTP effects
-
-  -h, --help
-          Print help
-```
-
-### afmail push drafts-send - Push queued outbound drafts through configured draft.send actions
-
-```text
-Push queued outbound drafts through configured draft.send actions
-
-Usage: drafts-send [OPTIONS]
-
-Options:
-      --dry-run
-          Show planned push actions without IMAP/SMTP writes. This is the default
-
-      --confirm
-          Apply queued IMAP/SMTP effects, including sending mail
-
-  -h, --help
-          Print help
-```
-
-### afmail push archive - Push queued archive actions to their configured IMAP mailboxes
-
-```text
-Push queued archive actions to their configured IMAP mailboxes
-
-Usage: archive [OPTIONS]
-
-Options:
-      --dry-run
-          Show planned push actions without IMAP writes. This is the default
-
-      --confirm
-          Apply queued IMAP effects
-
-  -h, --help
-          Print help
-```
-
-### afmail push spam - Push queued spam actions to the configured Junk mailbox
-
-```text
-Push queued spam actions to the configured Junk mailbox
-
-Usage: spam [OPTIONS]
-
-Options:
-      --dry-run
-          Show planned push actions without IMAP writes. This is the default
-
-      --confirm
-          Apply queued IMAP effects
-
-  -h, --help
-          Print help
-```
-
-### afmail push trash - Push queued trash actions to the configured Trash mailbox
-
-```text
-Push queued trash actions to the configured Trash mailbox
-
-Usage: trash [OPTIONS]
-
-Options:
-      --dry-run
-          Show planned push actions without IMAP writes. This is the default
-
-      --confirm
-          Apply queued IMAP effects
-
   -h, --help
           Print help
 ```
@@ -615,14 +524,14 @@ Options:
 
           Possible values:
           - all:         Manage every agent that supports the requested scope
-          - codex:       Manage the Codex local skill under $CODEX_HOME/skills
+          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .agents/skills
           - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
           - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
 
           [default: all]
 
       --scope <SCOPE>
-          Skill scope. Project scope is supported for Claude Code and opencode, not Codex
+          Skill scope. Project scope installs under the current project's skill directory
 
           Possible values:
           - personal: Install under the user-level skills directory
@@ -650,14 +559,14 @@ Options:
 
           Possible values:
           - all:         Manage every agent that supports the requested scope
-          - codex:       Manage the Codex local skill under $CODEX_HOME/skills
+          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .agents/skills
           - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
           - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
 
           [default: all]
 
       --scope <SCOPE>
-          Skill scope. Project scope is supported for Claude Code and opencode, not Codex
+          Skill scope. Project scope installs under the current project's skill directory
 
           Possible values:
           - personal: Install under the user-level skills directory
@@ -688,14 +597,14 @@ Options:
 
           Possible values:
           - all:         Manage every agent that supports the requested scope
-          - codex:       Manage the Codex local skill under $CODEX_HOME/skills
+          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .agents/skills
           - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
           - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
 
           [default: all]
 
       --scope <SCOPE>
-          Skill scope. Project scope is supported for Claude Code and opencode, not Codex
+          Skill scope. Project scope installs under the current project's skill directory
 
           Possible values:
           - personal: Install under the user-level skills directory
@@ -750,12 +659,9 @@ Usage: message <COMMAND>
 
 Commands:
   show        Show the full local message metadata, body text, and attachment metadata
-  archive     File this message into a direct-message archive category and queue eligible IMAP moves
   spam        Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
-  unspam      Undo a local spam mark before queued remote effects are pushed
   trash       Explicitly discard this message locally, show it under trash/, and queue a Trash move
-  untrash     Undo a local trash mark before queued remote effects are pushed
-  unarchive   Restore a directly archived message to triage
+  restore     Restore a message from spam, trash, or direct archive back to triage
   attachment  Fetch an attachment for this message
   help        Print this message or the help of the given subcommand(s)
 
@@ -780,31 +686,6 @@ Options:
           Print help
 ```
 
-### afmail message archive - File this message into a direct-message archive category and queue eligible IMAP moves
-
-```text
-File this message into a direct-message archive category and queue eligible IMAP moves
-
-Usage: archive [OPTIONS] --summary <SUMMARY> <MESSAGE_ID> <ARCHIVE_REF>
-
-Arguments:
-  <MESSAGE_ID>
-          Message id, for example message_inbox_607146690_22
-
-  <ARCHIVE_REF>
-          Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix
-
-Options:
-      --summary <SUMMARY>
-          Human/agent-authored summary for this archive entry
-
-      --reason <REASON>
-          Why this disposition is correct; required by default
-
-  -h, --help
-          Print help
-```
-
 ### afmail message spam - Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
 
 ```text
@@ -819,25 +700,6 @@ Arguments:
 Options:
       --reason <REASON>
           Why this disposition is correct; required by default
-
-  -h, --help
-          Print help
-```
-
-### afmail message unspam - Undo a local spam mark before queued remote effects are pushed
-
-```text
-Undo a local spam mark before queued remote effects are pushed
-
-Usage: unspam [OPTIONS] <MESSAGE_ID>
-
-Arguments:
-  <MESSAGE_ID>
-          Message id, for example message_inbox_607146690_22
-
-Options:
-      --reason <REASON>
-          Why this spam mark should be undone; required by default
 
   -h, --help
           Print help
@@ -862,12 +724,12 @@ Options:
           Print help
 ```
 
-### afmail message untrash - Undo a local trash mark before queued remote effects are pushed
+### afmail message restore - Restore a message from spam, trash, or direct archive back to triage
 
 ```text
-Undo a local trash mark before queued remote effects are pushed
+Restore a message from spam, trash, or direct archive back to triage
 
-Usage: untrash [OPTIONS] <MESSAGE_ID>
+Usage: restore [OPTIONS] <MESSAGE_ID>
 
 Arguments:
   <MESSAGE_ID>
@@ -875,26 +737,7 @@ Arguments:
 
 Options:
       --reason <REASON>
-          Why this trash mark should be undone; required by default
-
-  -h, --help
-          Print help
-```
-
-### afmail message unarchive - Restore a directly archived message to triage
-
-```text
-Restore a directly archived message to triage
-
-Usage: unarchive [OPTIONS] <MESSAGE_ID>
-
-Arguments:
-  <MESSAGE_ID>
-          Message id, for example message_inbox_607146690_22
-
-Options:
-      --reason <REASON>
-          Why this archive should be undone; required by default
+          Why this restore is correct; required by default
 
   -h, --help
           Print help
@@ -945,7 +788,7 @@ Usage: case <COMMAND>
 Commands:
   create   Create a new case and return its stable UID/ref
   list     List compact active case locators
-  show     Show the active case's case.md without changing workspace state
+  show     Show a case's case.md (active or archived) without changing workspace state
   add      Add a message to this existing case
   move     Move this case to another group
   rename   Rename this active case's human-readable name without changing its UID
@@ -954,9 +797,7 @@ Commands:
   reopen   Reopen this case as active work without changing its tags
   tag      Add a case organization tag
   untag    Remove a case organization tag
-  draft    Create, validate, attach to, or remove local case drafts
-  compose  Compose an existing case draft into the local push queue
-  reply    Scaffold a reply draft to a message, prefilled and quoting the original
+  draft    Create, edit, validate, queue, or remove local case drafts
   merge    Merge another case into this case
   help     Print this message or the help of the given subcommand(s)
 
@@ -982,6 +823,9 @@ Options:
       --message <MESSAGE>
           Optional first message to add to the case
 
+      --summary <SUMMARY>
+          Short summary for the first message
+
       --reason <REASON>
           Why this case is being created
 
@@ -1001,10 +845,10 @@ Options:
           Print help
 ```
 
-### afmail case show - Show the active case's case.md without changing workspace state
+### afmail case show - Show a case's case.md (active or archived) without changing workspace state
 
 ```text
-Show the active case's case.md without changing workspace state
+Show a case's case.md (active or archived) without changing workspace state
 
 Usage: show <CASE_REF>
 
@@ -1032,6 +876,9 @@ Arguments:
           Message id to add
 
 Options:
+      --summary <SUMMARY>
+          Short summary for this message in the case
+
       --reason <REASON>
           Why this message belongs in this case; required by default
 
@@ -1234,16 +1081,21 @@ Options:
           Print help
 ```
 
-### afmail case draft - Create, validate, attach to, or remove local case drafts
+### afmail case draft - Create, edit, validate, queue, or remove local case drafts
 
 ```text
-Create, validate, attach to, or remove local case drafts
+Create, edit, validate, queue, or remove local case drafts
 
 Usage: draft <COMMAND>
 
 Commands:
   new       Scaffold a new outbound draft (not a reply) in this case
+  reply     Scaffold a reply draft to a message, prefilled and quoting the original
+  change    Change an existing editable draft in place
+  show      Show an existing draft in a review-friendly JSON shape
   validate  Validate a draft under the case drafts directory
+  save      Queue this draft to be saved to the remote Drafts mailbox
+  send      Queue this draft to be sent and recorded in the case after push succeeds
   attach    Copy or reference a file and add it to a draft's attachments
   remove    Remove a local draft and any queued outbound item for it
   help      Print this message or the help of the given subcommand(s)
@@ -1258,7 +1110,7 @@ Options:
 ```text
 Scaffold a new outbound draft (not a reply) in this case
 
-Usage: new [OPTIONS] <CASE_REF>
+Usage: new [OPTIONS] --to <TO> --subject <SUBJECT> <CASE_REF>
 
 Arguments:
   <CASE_REF>
@@ -1274,6 +1126,96 @@ Options:
       --subject <SUBJECT>
           Draft subject
 
+      --body <BODY>
+          Draft body text
+
+      --body-file <BODY_FILE>
+          Path to a file whose contents become the draft body
+
+  -h, --help
+          Print help
+```
+
+#### afmail case draft reply - Scaffold a reply draft to a message, prefilled and quoting the original
+
+```text
+Scaffold a reply draft to a message, prefilled and quoting the original
+
+Usage: reply [OPTIONS] <CASE_REF> <MESSAGE_ID>
+
+Arguments:
+  <CASE_REF>
+          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+
+  <MESSAGE_ID>
+          Message id in this case to reply to
+
+Options:
+      --body <BODY>
+          Draft body text. Replaces the default reply template when provided
+
+      --body-file <BODY_FILE>
+          Path to a file whose contents become the draft body
+
+      --all
+          Reply to all original recipients (To and Cc), not just the sender
+
+  -h, --help
+          Print help
+```
+
+#### afmail case draft change - Change an existing editable draft in place
+
+```text
+Change an existing editable draft in place
+
+Usage: change [OPTIONS] <CASE_REF> <DRAFT_NAME>
+
+Arguments:
+  <CASE_REF>
+          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+
+  <DRAFT_NAME>
+          Draft markdown file under the case drafts directory
+
+Options:
+      --subject <SUBJECT>
+          Replacement subject
+
+      --to <TO>
+          Replacement To list. Repeatable; when provided it replaces all To recipients
+
+      --cc <CC>
+          Replacement Cc list. Repeatable; when provided it replaces all Cc recipients
+
+      --clear-cc
+          Clear all Cc recipients
+
+      --body <BODY>
+          Replacement draft body text
+
+      --body-file <BODY_FILE>
+          Path to a file whose contents replace the draft body
+
+  -h, --help
+          Print help
+```
+
+#### afmail case draft show - Show an existing draft in a review-friendly JSON shape
+
+```text
+Show an existing draft in a review-friendly JSON shape
+
+Usage: show <CASE_REF> <DRAFT_NAME>
+
+Arguments:
+  <CASE_REF>
+          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+
+  <DRAFT_NAME>
+          Draft markdown file under the case drafts directory
+
+Options:
   -h, --help
           Print help
 ```
@@ -1284,6 +1226,44 @@ Options:
 Validate a draft under the case drafts directory
 
 Usage: validate <CASE_REF> <DRAFT_NAME>
+
+Arguments:
+  <CASE_REF>
+          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+
+  <DRAFT_NAME>
+          Draft markdown file under the case drafts directory
+
+Options:
+  -h, --help
+          Print help
+```
+
+#### afmail case draft save - Queue this draft to be saved to the remote Drafts mailbox
+
+```text
+Queue this draft to be saved to the remote Drafts mailbox
+
+Usage: save <CASE_REF> <DRAFT_NAME>
+
+Arguments:
+  <CASE_REF>
+          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+
+  <DRAFT_NAME>
+          Draft markdown file under the case drafts directory
+
+Options:
+  -h, --help
+          Print help
+```
+
+#### afmail case draft send - Queue this draft to be sent and recorded in the case after push succeeds
+
+```text
+Queue this draft to be sent and recorded in the case after push succeeds
+
+Usage: send <CASE_REF> <DRAFT_NAME>
 
 Arguments:
   <CASE_REF>
@@ -1336,47 +1316,6 @@ Arguments:
 Options:
       --reason <REASON>
           Why this draft should be removed; required by default
-
-  -h, --help
-          Print help
-```
-
-### afmail case compose - Compose an existing case draft into the local push queue
-
-```text
-Compose an existing case draft into the local push queue
-
-Usage: compose <CASE_REF> <DRAFT_NAME>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-  <DRAFT_NAME>
-          Draft markdown file under the case drafts directory
-
-Options:
-  -h, --help
-          Print help
-```
-
-### afmail case reply - Scaffold a reply draft to a message, prefilled and quoting the original
-
-```text
-Scaffold a reply draft to a message, prefilled and quoting the original
-
-Usage: reply [OPTIONS] <CASE_REF> <MESSAGE_ID>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-  <MESSAGE_ID>
-          Message id in this case to reply to
-
-Options:
-      --all
-          Reply to all original recipients (To and Cc), not just the sender
 
   -h, --help
           Print help
@@ -1472,6 +1411,7 @@ Usage: message <COMMAND>
 
 Commands:
   create       Create a direct-message archive category and optionally file one message
+  add          File an existing message into this direct-message archive category
   show         Show archive category index and entries
   restore      Restore a direct archived message to triage
   move         Move a direct archived message to another archive category
@@ -1504,6 +1444,31 @@ Options:
 
       --reason <REASON>
           Why this archive category is being created
+
+  -h, --help
+          Print help
+```
+
+#### afmail archive message add - File an existing message into this direct-message archive category
+
+```text
+File an existing message into this direct-message archive category
+
+Usage: add [OPTIONS] --summary <SUMMARY> <ARCHIVE_REF> <MESSAGE_ID>
+
+Arguments:
+  <ARCHIVE_REF>
+          Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix
+
+  <MESSAGE_ID>
+          Message id to file
+
+Options:
+      --summary <SUMMARY>
+          Human/agent-authored summary for this archive entry
+
+      --reason <REASON>
+          Why this disposition is correct; required by default
 
   -h, --help
           Print help

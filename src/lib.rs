@@ -15,5 +15,7 @@ pub mod smtp_send;
 pub mod store;
 pub mod templates;
 pub mod types;
+#[cfg(feature = "ui")]
+pub mod ui;
 mod util;
 mod workspace_lock;

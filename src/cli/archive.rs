@@ -31,6 +31,19 @@ pub enum ArchiveListAction {
 pub enum ArchiveMessageCommand {
     /// Create a direct-message archive category and optionally file one message.
     Create(ArchiveMessageCreateArgs),
+    /// File an existing message into this direct-message archive category.
+    Add {
+        /// Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix.
+        archive_ref: String,
+        /// Message id to file.
+        message_id: String,
+        /// Human/agent-authored summary for this archive entry.
+        #[arg(long)]
+        summary: String,
+        /// Why this disposition is correct; required by default.
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Show archive category index and entries.
     Show {
         /// Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix.

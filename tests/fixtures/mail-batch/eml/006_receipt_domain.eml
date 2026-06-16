@@ -1,0 +1,9 @@
+Message-ID: <receipt_domain@fixtures.afmail.local>
+From: Registrar Billing <billing@registrar.example>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 10:42:00 +0000
+Subject: Receipt for domain renewal
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Your domain renewal receipt is attached to your account. Amount paid: $14.99.

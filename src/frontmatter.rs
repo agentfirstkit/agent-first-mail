@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+pub use crate::types::MessageCollection as CaseFrontmatter;
+
 /// Deserialize a sequence that may be written as YAML `null` (a bare `key:`
 /// with no value) into an empty `Vec`. Agents hand-write drafts and frequently
 /// leave `attachments:` / `cc:` empty.
@@ -15,10 +17,6 @@ where
     D: Deserializer<'de>,
 {
     Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
-}
-
-fn default_active() -> String {
-    "active".to_string()
 }
 
 /// Frontmatter of an agent-authored `drafts/*.md`. Shared by draft validation
@@ -52,36 +50,6 @@ pub struct DraftFrontmatter {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub attachments: Vec<String>,
-}
-
-/// Canonical case metadata stored in `data/case.json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CaseFrontmatter {
-    pub kind: String,
-    pub case_uid: String,
-    pub case_name: String,
-    #[serde(default = "default_active")]
-    pub status: String,
-    #[serde(
-        default,
-        deserialize_with = "de_null_seq",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub tags: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_rfc3339: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_rfc3339: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archived_rfc3339: Option<String>,
-    #[serde(default)]
-    pub message_count: usize,
-    #[serde(default)]
-    pub thread_count: usize,
-    #[serde(default)]
-    pub attachment_count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_message_rfc3339: Option<String>,
 }
 
 /// Frontmatter of a generated `triage/message_*.md` view.
@@ -143,20 +111,9 @@ mod tests {
 
     #[test]
     fn case_round_trips_through_render() {
-        let fm = CaseFrontmatter {
-            kind: "case".to_string(),
-            case_uid: "c20260521001".to_string(),
-            case_name: "Acme".to_string(),
-            status: "active".to_string(),
-            tags: vec!["legal".to_string()],
-            created_rfc3339: Some("2026-05-30T00:00:00Z".to_string()),
-            updated_rfc3339: Some("2026-05-30T00:00:00Z".to_string()),
-            archived_rfc3339: None,
-            message_count: 2,
-            thread_count: 0,
-            attachment_count: 1,
-            last_message_rfc3339: None,
-        };
+        let mut fm = CaseFrontmatter::new_case("c20260521001", "Acme", "2026-05-30T00:00:00Z");
+        fm.tags = vec!["legal".to_string()];
+        fm.attachment_count = 1;
         let body = "\n# Title\n\n<!-- afmail:conversation:start -->\nhi\n<!-- afmail:conversation:end -->\n";
         let rendered = render_frontmatter(&fm, body);
         assert!(rendered.is_ok());
@@ -171,12 +128,9 @@ mod tests {
     }
 
     #[test]
-    fn case_defaults_status_active_when_missing() {
-        let text = "---\nkind: case\ncase_uid: c20260530001\ncase_name: Bare\n---\n";
-        let parsed = read_doc::<CaseFrontmatter>(text);
-        assert!(parsed.is_ok());
-        if let Ok((fm, _)) = parsed {
-            assert_eq!(fm.status, "active");
-        }
+    fn case_collection_uses_shared_schema() {
+        let fm = CaseFrontmatter::new_case("c20260530001", "Bare", "2026-05-30T00:00:00Z");
+        assert_eq!(fm.schema_name, crate::types::CASE_SCHEMA_NAME);
+        assert_eq!(fm.status, "active");
     }
 }

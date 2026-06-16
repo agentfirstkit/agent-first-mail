@@ -1,16 +1,16 @@
 ---
-kind: archive_message
-message_id: {{ message_id }}
-archive_uid: {{ archive_uid }}
-archive_name: {{ archive_name }}
-archived_rfc3339: "{{ archived_rfc3339 }}"
-generated_rfc3339: "{{ generated_rfc3339 }}"
+kind: {{ frontmatter.kind }}
+message_id: {{ frontmatter.message_id }}
+archive_uid: {{ frontmatter.archive_uid }}
+archive_name: {{ frontmatter.archive_name }}
+added_rfc3339: "{{ frontmatter.added_rfc3339 }}"
+generated_rfc3339: "{{ frontmatter.generated_rfc3339 }}"
 ---
 
-# {% if title %}{{ title }}{% else %}归档消息{% endif %}
+# {% if view.title %}{{ view.title }}{% else %}归档消息{% endif %}
 
-归档: {{ archive_name }}（`{{ archive_uid }}`）
+归档: {{ archive.archive_name }}（`{{ archive.archive_uid }}`）
 
-摘要: {{ summary }}
+摘要: {{ view.summary }}
 
-{{ conversation }}
+{{ view.conversation }}

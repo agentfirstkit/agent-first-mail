@@ -147,7 +147,7 @@ impl PushItem {
 
     pub fn reply_to_message_id(&self) -> Option<&str> {
         match &self.payload {
-            PushPayload::Outbound(outbound) => outbound.reply_to_message_id.as_deref(),
+            PushPayload::Outbound(_) => None,
             PushPayload::MessageAction(action) => action.reply_to_message_id.as_deref(),
         }
     }
@@ -217,20 +217,7 @@ fn push_payload_key_allowed(kind: &str, key: &str) -> bool {
     match kind {
         "outbound" => matches!(
             key,
-            "case_uid"
-                | "draft_name"
-                | "draft_hash"
-                | "message_id"
-                | "reply_to_message_id"
-                | "eml_path"
-                | "envelope_from"
-                | "envelope_to"
-                | "drafts_mailbox_name"
-                | "sent_mailbox_name"
-                | "draft_uid_validity"
-                | "draft_uid"
-                | "draft_save_steps"
-                | "draft_send_steps"
+            "case_uid" | "action" | "draft_name" | "draft_uid_validity" | "draft_uid"
         ),
         "message_action" => matches!(
             key,
@@ -247,31 +234,32 @@ pub enum PushPayload {
     MessageAction(MessageActionPush),
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundAction {
+    SaveDraft,
+    Send,
+}
+
+impl OutboundAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SaveDraft => "save_draft",
+            Self::Send => "send",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OutboundPush {
+    pub action: OutboundAction,
     pub case_uid: String,
     pub draft_name: String,
-    pub draft_hash: String,
-    pub message_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply_to_message_id: Option<String>,
-    pub eml_path: String,
-    pub envelope_from: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub envelope_to: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub drafts_mailbox_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sent_mailbox_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_uid_validity: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_uid: Option<u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub draft_save_steps: Vec<ActionStep>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub draft_send_steps: Vec<ActionStep>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

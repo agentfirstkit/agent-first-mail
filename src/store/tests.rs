@@ -63,6 +63,20 @@ fn write_sample_message(root: &Path, message_id: &str) {
     write_sample_message_file(root, &msg);
 }
 
+fn case_collection(case_uid: &str, case_name: &str, message_id: &str) -> CaseFrontmatter {
+    let mut case = CaseFrontmatter::new_case(case_uid, case_name, "2026-05-21T10:00:00Z");
+    case.upsert_item(message_id, Some("case summary"), "2026-05-21T10:00:00Z");
+    case.last_message_rfc3339 = Some("2026-05-21T10:00:00Z".to_string());
+    case
+}
+
+fn archive_collection(archive_uid: &str, archive_name: &str, message_id: &str) -> ArchiveMessages {
+    let mut archive =
+        ArchiveMessages::new_notification(archive_uid, archive_name, "2026-05-22T10:00:00Z");
+    archive.upsert_item(message_id, Some("saved notice"), "2026-05-22T10:00:00Z");
+    archive
+}
+
 fn write_sample_message_file(root: &Path, msg: &MessageFile) {
     let dir = root.join(".afmail/messages");
     let _ = fs::create_dir_all(&dir);
@@ -451,16 +465,40 @@ fn message_context_strips_visible_quotes_but_keeps_full_body() {
     )
     .unwrap_or(Value::Null);
     assert_eq!(
-        context["display_heading"],
+        context["message"],
+        message_template_value(&message).unwrap_or(Value::Null)
+    );
+    for key in [
+        "display_heading",
+        "message_action",
+        "display_counterparty",
+        "body_text",
+        "body_text_visible",
+        "has_quoted_reply",
+        "quoted_from",
+        "quoted_at",
+        "attachments",
+        "security",
+    ] {
+        assert!(
+            context.get(key).is_none(),
+            "root alias {key} should be absent"
+        );
+    }
+    assert_eq!(
+        context["view"]["display_heading"],
         "Received from Alice <alice@example.com> - 2026-05-21T10:00:00Z"
     );
-    assert_eq!(context["message_action"], "received");
-    assert_eq!(context["display_counterparty"], "Alice <alice@example.com>");
-    assert_eq!(context["body_text"], body);
-    assert_eq!(context["body_text_visible"], "Fresh reply");
-    assert_eq!(context["has_quoted_reply"], true);
-    assert_eq!(context["quoted_from"], "Bob <bob@example.com>");
-    assert_eq!(context["quoted_at"], "May 20, 2026, at 09:00");
+    assert_eq!(context["view"]["message_action"], "received");
+    assert_eq!(
+        context["view"]["display_counterparty"],
+        "Alice <alice@example.com>"
+    );
+    assert_eq!(context["view"]["body_text"], body);
+    assert_eq!(context["view"]["body_text_visible"], "Fresh reply");
+    assert_eq!(context["view"]["has_quoted_reply"], true);
+    assert_eq!(context["view"]["quoted_from"], "Bob <bob@example.com>");
+    assert_eq!(context["view"]["quoted_at"], "May 20, 2026, at 09:00");
 
     let rendered = render_message_section_with_options(
         &message,
@@ -559,6 +597,37 @@ fn renders_downloaded_images_as_markdown_previews() {
     assert!(rendered.contains("image/png"));
     assert!(rendered.contains("115301 bytes"));
     assert!(rendered.contains("![image0.png](<../.afmail/messages/message_img.files/image0.png>)"));
+
+    let context = message_section_context(
+        Some(Path::new("/workspace")),
+        &message,
+        "Body",
+        TemplateLanguage::EnUs,
+        Some("me@example.com"),
+        Some(Path::new("/workspace/triage")),
+    )
+    .unwrap_or(Value::Null);
+    assert_eq!(
+        context["message"],
+        message_template_value(&message).unwrap_or(Value::Null)
+    );
+    assert!(context.get("attachments").is_none());
+    assert!(context.get("security").is_none());
+    assert_eq!(
+        context["message"]["attachments"][0]["file_path"],
+        ".afmail/messages/message_img.files/image0.png"
+    );
+    assert!(context["message"]["attachments"][0]
+        .get("display_filename")
+        .is_none());
+    assert_eq!(
+        context["view"]["attachments"][0]["preview_path"],
+        "../.afmail/messages/message_img.files/image0.png"
+    );
+    assert_eq!(
+        context["view"]["attachments"][0]["display_filename"],
+        "image0.png"
+    );
 }
 
 #[test]
@@ -576,16 +645,29 @@ fn init_and_status_work() {
         Some(true)
     );
     assert!(root.join("AGENTS.md").is_file());
+    assert!(root
+        .join(".agents/skills/agent-first-mail/SKILL.md")
+        .is_file());
     assert!(root.join(".gitignore").is_file());
     assert!(root.join(".afmail/DO_NOT_EDIT.txt").is_file());
+    assert!(root.join("templates").is_dir());
     assert!(root.join("archive/cases").is_dir());
     assert!(root.join("archive/notifications").is_dir());
     assert!(root.join(".afmail/logs/events.jsonl").is_file());
     assert!(root.join(".afmail/transactions").is_dir());
+    assert!(!root.join("spam").exists());
+    assert!(!root.join("spam/data/spam.json").exists());
+    assert!(!root.join("trash").exists());
+    assert!(!root.join("trash/data/trash.json").exists());
+    assert!(!root.join("deleted").exists());
+    assert!(!root.join("deleted/data/deleted.json").exists());
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
     assert!(gitignore.contains(AFMAIL_GITIGNORE_BEGIN));
     assert!(!gitignore.contains(".afmail/messages/"));
-    assert!(!gitignore.contains(".afmail/push/"));
+    assert!(gitignore.contains(".afmail/push/"));
+    assert!(gitignore.contains(".agents/skills/agent-first-mail/"));
+    assert!(!gitignore.contains(".codex/skills/agent-first-mail/"));
+    assert!(!gitignore.contains(".claude/skills/agent-first-mail/"));
     assert!(gitignore.contains(".afmail/transactions/"));
     assert!(gitignore.contains(".afmail/workspace.progress.json"));
     assert!(gitignore.contains("messages/*.json"));
@@ -594,7 +676,8 @@ fn init_and_status_work() {
     assert!(gitignore.contains("deleted/*.md"));
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
     assert!(agents.contains(AFMAIL_AGENTS_BEGIN));
-    assert!(agents.contains("afmail skill install"));
+    assert!(agents.contains("afmail skill install --agent codex --scope project"));
+    assert!(agents.contains("- `.`"));
     assert!(message_json_paths(&root)
         .map(|paths| paths.is_empty())
         .unwrap_or(false));
@@ -641,7 +724,10 @@ fn init_updates_managed_blocks_and_preserves_user_content() {
     assert!(gitignore.contains("*.tmp"));
     assert!(!gitignore.contains("old generated rule"));
     assert!(!gitignore.contains(".afmail/messages/"));
-    assert!(!gitignore.contains(".afmail/push/"));
+    assert!(gitignore.contains(".afmail/push/"));
+    assert!(gitignore.contains(".agents/skills/agent-first-mail/"));
+    assert!(!gitignore.contains(".codex/skills/agent-first-mail/"));
+    assert!(!gitignore.contains(".claude/skills/agent-first-mail/"));
     assert!(gitignore.contains(".afmail/workspace.progress.json"));
     assert!(gitignore.contains("messages/*.json"));
     assert!(gitignore.contains("spam/*.md"));
@@ -652,7 +738,8 @@ fn init_updates_managed_blocks_and_preserves_user_content() {
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
     assert!(agents.contains("custom mailbox instructions"));
     assert!(!agents.contains("old afmail rule"));
-    assert!(agents.contains("afmail skill install"));
+    assert!(agents.contains("afmail skill install --agent codex --scope project"));
+    assert!(agents.contains("- `.`"));
     assert_eq!(agents.matches(AFMAIL_AGENTS_BEGIN).count(), 1);
 
     let second = ws.init();
@@ -888,7 +975,13 @@ fn case_add_moves_message_to_case_and_updates_message() {
     assert!(ws.init().is_ok());
     write_sample_message(&root, "message_1");
     assert!(ws.refresh_triage_views().is_ok());
-    let result = ws.create_case("case-1", Some("open"), Some("message_1"), Some("case work"));
+    let result = ws.create_case(
+        "case-1",
+        Some("open"),
+        Some("message_1"),
+        Some("case summary"),
+        Some("case work"),
+    );
     assert!(result.is_ok());
     let case_uid = result
         .as_ref()
@@ -914,9 +1007,9 @@ fn case_add_moves_message_to_case_and_updates_message() {
         msg.as_ref().ok().map(|m| m.workspace.status.as_str()),
         Some("case")
     );
-    let case_messages = read_case_messages(&case_dir.join("data/messages.json"), &case_uid);
+    let case_messages = read_case_messages(&case_dir, &case_uid);
     assert_eq!(
-        case_messages.ok().map(|messages| messages.message_ids),
+        case_messages.ok().map(|messages| messages.message_ids()),
         Some(vec!["message_1".to_string()])
     );
     let _ = fs::remove_dir_all(root);
@@ -984,6 +1077,7 @@ fn chinese_case_and_archive_uids_are_supported(
         case_name,
         Some(group),
         Some("message_case"),
+        Some("中文事项摘要"),
         Some("归入中文事项"),
     );
     assert!(result.is_ok(), "{result:?}");
@@ -1002,13 +1096,13 @@ fn chinese_case_and_archive_uids_are_supported(
         .join(format!("{case_uid}-{case_name}"));
     assert!(case_dir.join("case.md").exists());
     assert!(case_dir.join("data/case.json").exists());
-    assert!(case_dir.join("data/messages.json").exists());
+    assert!(!case_dir.join("data/messages.json").exists());
     assert!(case_dir.join("views/messages/message_case.md").exists());
     let case_md = fs::read_to_string(case_dir.join("case.md"))?;
     let case_data: CaseFrontmatter =
         serde_json::from_str(&fs::read_to_string(case_dir.join("data/case.json"))?)?;
-    assert_eq!(case_data.case_uid, case_uid);
-    assert_eq!(case_data.case_name, case_name);
+    assert_eq!(case_data.collection_uid, case_uid);
+    assert_eq!(case_data.collection_name, case_name);
     assert!(!case_md.starts_with("---\n"));
     assert!(case_md.starts_with(&format!("# {case_name}\n")));
     assert!(case_md.contains(&format!("Case: {case_uid} · Status: active · Messages: 1")));
@@ -1039,7 +1133,7 @@ fn chinese_case_and_archive_uids_are_supported(
         .join("archive/notifications")
         .join(format!("{archive_uid}-{archive_name}"));
     assert!(archive_dir.join("archive.md").exists());
-    assert!(archive_dir.join("data/archive.json").exists());
+    assert!(archive_dir.join("data/notification.json").exists());
     assert!(archive_dir
         .join("views/messages/message_notice.md")
         .exists());
@@ -1085,30 +1179,7 @@ fn render_refresh_rebuilds_message_cache_and_preserves_workspace_state(
     assert!(fs::create_dir_all(case_dir.join("data")).is_ok());
     assert!(write_json_pretty(
         &case_dir.join("data/case.json"),
-        &CaseFrontmatter {
-            kind: "case".to_string(),
-            case_uid: "c20260521001".to_string(),
-            case_name: "Case One".to_string(),
-            status: "active".to_string(),
-            tags: Vec::new(),
-            created_rfc3339: Some("2026-05-21T10:00:00Z".to_string()),
-            updated_rfc3339: Some("2026-05-21T10:00:00Z".to_string()),
-            archived_rfc3339: None,
-            message_count: 1,
-            thread_count: 0,
-            attachment_count: 0,
-            last_message_rfc3339: Some("2026-05-21T10:00:00Z".to_string()),
-        },
-    )
-    .is_ok());
-    assert!(write_json_pretty(
-        &case_dir.join("data/messages.json"),
-        &CaseMessages {
-            schema_name: "case_messages".to_string(),
-            schema_version: 1,
-            case_uid: "c20260521001".to_string(),
-            message_ids: vec!["message_case".to_string()],
-        },
+        &case_collection("c20260521001", "Case One", "message_case"),
     )
     .is_ok());
 
@@ -1116,18 +1187,8 @@ fn render_refresh_rebuilds_message_cache_and_preserves_workspace_state(
     let archive_dir = root.join("archive/notifications/a20260521001-notices");
     assert!(fs::create_dir_all(archive_dir.join("data")).is_ok());
     assert!(write_json_pretty(
-        &archive_dir.join("data/archive.json"),
-        &ArchiveMessages {
-            schema_name: "archive_messages".to_string(),
-            schema_version: 1,
-            archive_uid: archive_uid.to_string(),
-            archive_name: "notices".to_string(),
-            items: vec![ArchiveMessageItem {
-                message_id: "message_archive".to_string(),
-                summary: Some("saved notice".to_string()),
-                archived_rfc3339: "2026-05-22T10:00:00Z".to_string(),
-            }],
-        },
+        &archive_dir.join("data/notification.json"),
+        &archive_collection(archive_uid, "notices", "message_archive"),
     )
     .is_ok());
 
@@ -1184,11 +1245,11 @@ fn render_refresh_rebuilds_message_cache_and_preserves_workspace_state(
     assert_eq!(second["message_cache_rebuilt_count"], 0);
 
     std::thread::sleep(std::time::Duration::from_millis(10));
-    let state_path = root.join(".afmail/messages/message_spam.state.json");
-    let state = fs::read_to_string(&state_path).unwrap_or_default();
-    assert!(fs::write(&state_path, state).is_ok());
-    let state_refreshed = ws.render_refresh().unwrap_or(Value::Null);
-    assert_eq!(state_refreshed["message_cache_rebuilt_count"], 1);
+    let spam_data_path = root.join("spam/data/spam.json");
+    let spam_data = fs::read_to_string(&spam_data_path).unwrap_or_default();
+    assert!(fs::write(&spam_data_path, spam_data).is_ok());
+    let disposition_refreshed = ws.render_refresh().unwrap_or(Value::Null);
+    assert_eq!(disposition_refreshed["message_cache_rebuilt_count"], 0);
     assert_eq!(
         read_message(&root.join("messages/message_spam.json"))?
             .workspace
@@ -1276,30 +1337,7 @@ fn relocate_keeps_id_and_updates_locations() {
     .is_ok());
     assert!(write_json_pretty(
         &root.join("cases/open/c20260521001-case-1/data/case.json"),
-        &CaseFrontmatter {
-            kind: "case".to_string(),
-            case_uid: "c20260521001".to_string(),
-            case_name: "case-1".to_string(),
-            status: "active".to_string(),
-            tags: Vec::new(),
-            created_rfc3339: Some("2026-05-21T10:00:00Z".to_string()),
-            updated_rfc3339: Some("2026-05-21T10:00:00Z".to_string()),
-            archived_rfc3339: None,
-            message_count: 1,
-            thread_count: 0,
-            attachment_count: 0,
-            last_message_rfc3339: Some("2026-05-21T10:00:00Z".to_string()),
-        },
-    )
-    .is_ok());
-    assert!(write_json_pretty(
-        &root.join("cases/open/c20260521001-case-1/data/messages.json"),
-        &CaseMessages {
-            schema_name: "case_messages".to_string(),
-            schema_version: 1,
-            case_uid: "c20260521001".to_string(),
-            message_ids: vec!["message_1".to_string()],
-        },
+        &case_collection("c20260521001", "case-1", "message_1"),
     )
     .is_ok());
 
@@ -1334,15 +1372,13 @@ fn relocate_keeps_id_and_updates_locations() {
             .map(|location| location.mailbox_name.as_str()),
         Some("Archive")
     );
-    let case_messages = read_case_messages(
-        &root.join("cases/open/c20260521001-case-1/data/messages.json"),
-        "c20260521001",
-    );
+    let case_messages =
+        read_case_messages(&root.join("cases/open/c20260521001-case-1"), "c20260521001");
     assert_eq!(
         case_messages
             .as_ref()
             .ok()
-            .map(|messages| messages.message_ids.clone()),
+            .map(|messages| messages.message_ids()),
         Some(vec!["message_1".to_string()])
     );
     assert!(

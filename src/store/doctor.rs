@@ -86,10 +86,10 @@ impl Workspace {
         }
         self.ensure_no_incomplete_transactions()?;
         let before = self.doctor_issues()?;
+        let deprecated_state_removed_count = self.remove_deprecated_message_state_sidecars()?;
         let cache = self.rebuild_message_cache_from_eml()?;
         for path in message_json_paths(&self.root)? {
             if let Ok(message) = read_message(&path) {
-                self.persist_message_state(&message)?;
                 self.persist_message_remote(&message)?;
             }
         }
@@ -102,6 +102,7 @@ impl Workspace {
             "after_issue_count": after.len(),
             "message_cache_rebuilt_count": cache.rebuilt_count,
             "text_cache_removed_count": cache.removed_text_cache_count,
+            "deprecated_state_removed_count": deprecated_state_removed_count,
             "render": rendered,
             "remaining_issues": after,
         }))
@@ -161,18 +162,6 @@ impl Workspace {
                     Some(rel_path(&self.root, &eml)),
                 ));
             }
-            let state = self.root.join(format!(
-                ".afmail/messages/{}.state.json",
-                message.message_id
-            ));
-            if !state.is_file() {
-                issues.push(DoctorIssue::warning(
-                    "message_state_missing",
-                    format!("missing state sidecar for {}", message.message_id),
-                    Some(rel_path(&self.root, &state)),
-                    true,
-                ));
-            }
             if message
                 .remote
                 .as_ref()
@@ -197,10 +186,16 @@ impl Workspace {
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            let message_id = name
-                .strip_suffix(".state.json")
-                .or_else(|| name.strip_suffix(".remote.json"));
-            if let Some(message_id) = message_id {
+            if name.ends_with(".state.json") {
+                issues.push(DoctorIssue::warning(
+                    "message_state_deprecated",
+                    format!("deprecated message state sidecar: {name}"),
+                    Some(rel_path(&self.root, &path)),
+                    true,
+                ));
+                continue;
+            }
+            if let Some(message_id) = name.strip_suffix(".remote.json") {
                 if !ids.contains(message_id) && !self.message_path(message_id).is_file() {
                     issues.push(DoctorIssue::warning(
                         "message_sidecar_orphaned",
@@ -214,15 +209,31 @@ impl Workspace {
         Ok(())
     }
 
+    fn remove_deprecated_message_state_sidecars(&self) -> Result<usize> {
+        let mut removed = 0usize;
+        for entry in read_optional_dir(&self.root.join(".afmail/messages"), "read message state")? {
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".state.json"))
+            {
+                remove_file(&path)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     fn check_case_refs(&self, issues: &mut Vec<DoctorIssue>) -> Result<()> {
         for (case_uid, case_path) in self.all_case_entries()? {
-            let messages = read_case_messages(&case_messages_json_path(&case_path), &case_uid)?;
-            for message_id in messages.message_ids {
+            let messages = read_case_messages(&case_path, &case_uid)?;
+            for message_id in messages.message_ids() {
                 if !self.message_path(&message_id).is_file() {
                     let mut issue = DoctorIssue::error(
                         "case_message_ref_broken",
                         format!("case {case_uid} references missing message {message_id}"),
-                        Some(rel_path(&self.root, &case_messages_json_path(&case_path))),
+                        Some(rel_path(&self.root, &case_json_path(&case_path))),
                     );
                     issue.refs = vec![case_uid.clone(), message_id];
                     issues.push(issue);
@@ -311,6 +322,15 @@ impl Workspace {
     }
 
     fn check_templates(&self, issues: &mut Vec<DoctorIssue>) -> Result<()> {
+        let legacy_templates = self.root.join(".afmail/templates");
+        if legacy_templates.exists() {
+            issues.push(DoctorIssue::warning(
+                "legacy_template_dir",
+                ".afmail/templates is obsolete; workspace templates now live under templates/",
+                Some(".afmail/templates".to_string()),
+                false,
+            ));
+        }
         let language = self.template_language()?;
         let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
         for key in TemplateKey::ALL {
@@ -335,59 +355,78 @@ fn read_optional_dir(path: &Path, context: &str) -> Result<Vec<fs::DirEntry>> {
 
 fn minimal_template_context(language: TemplateLanguage) -> Value {
     json!({
-        "language": language.as_str(),
-        "frontmatter": {},
-        "message_id": "message_doctor",
-        "case_uid": "c20260609001",
-        "case_name": "doctor",
-        "archive_uid": "a20260609001",
-        "archive_name": "doctor",
-        "title": "doctor",
-        "status": "active",
-        "message_count": 0,
-        "attachment_count": 0,
-        "generated_rfc3339": "2026-06-09T00:00:00Z",
-        "archived_rfc3339": "2026-06-09T00:00:00Z",
-        "summary": "doctor",
-        "conversation": "",
         "items": [],
         "messages": [],
-        "related_messages": [],
-        "suggested_case_uids": [],
-        "suggested_reason": "",
-        "suggested_reason_yaml": "",
-        "body_text_visible_block": "\n",
-        "body_text_fence": "```",
-        "display_heading": "doctor",
-        "from": "",
-        "subject": "",
-        "to": [],
-        "cc": [],
-        "bcc": [],
-        "security": {
-            "authentication": {
-                "check": false,
-                "has_results": false,
-                "spf": "missing",
-                "dkim": "missing",
-                "dmarc": "missing",
-                "dmarc_policy": null,
-                "authenticated_domain": null,
-                "from_domain": null,
-                "alignment": "unknown",
-            },
-            "possible_bcc": false,
-            "reply_to_differs": false,
-            "reply_to_recipients": "",
-            "sender_differs": false,
-            "sender": "",
-            "mailing_list": "",
-            "mailing_list_headers": "",
+        "workspaces": ["."],
+        "frontmatter": {
+            "kind": "doctor",
+            "message_id": "message_doctor",
+            "message_ids": ["message_doctor"],
+            "case_uid": "c20260609001",
+            "case_name": "doctor",
+            "archive_uid": "a20260609001",
+            "archive_name": "doctor",
+            "status": "active",
+            "message_count": 0,
+            "attachment_count": 0,
+            "generated_rfc3339": "2026-06-09T00:00:00Z",
+            "added_rfc3339": "2026-06-09T00:00:00Z",
+            "suggested_case_uids": [],
+            "suggested_reason": "",
+            "suggested_reason_yaml": "",
         },
-        "hints": [],
-        "attachments": [],
-        "sender": "",
-        "quoted": "",
+        "message": {
+            "schema_name": "message",
+            "schema_version": 1,
+            "message_id": "message_doctor",
+            "from": "",
+            "subject": "",
+            "to": [],
+            "cc": [],
+            "bcc": [],
+            "attachments": [],
+            "workspace": {"status": "triage"},
+        },
+        "view": {
+            "language": language.as_str(),
+            "title": "doctor",
+            "status": "active",
+            "status_label": "active",
+            "message_count": 0,
+            "attachment_count": 0,
+            "generated_rfc3339": "2026-06-09T00:00:00Z",
+            "added_rfc3339": "2026-06-09T00:00:00Z",
+            "summary": "doctor",
+            "conversation": "",
+            "related_messages": [],
+            "suggested_case_uids": [],
+            "suggested_reason": "",
+            "body_text_visible_block": "\n",
+            "body_text_fence": "```",
+            "display_heading": "doctor",
+            "security": {
+                "authentication": {
+                    "check": false,
+                    "has_results": false,
+                    "spf": "missing",
+                    "dkim": "missing",
+                    "dmarc": "missing",
+                    "dmarc_policy": null,
+                    "authenticated_domain": null,
+                    "from_domain": null,
+                    "alignment": "unknown",
+                },
+                "possible_bcc": false,
+                "reply_to_differs": false,
+                "reply_to_recipients": "",
+                "sender_differs": false,
+                "sender": "",
+                "mailing_list": "",
+                "mailing_list_headers": "",
+            },
+            "hints": [],
+            "attachments": [],
+        },
         "config": {
             "archive": {
                 "message_index": {
@@ -395,12 +434,17 @@ fn minimal_template_context(language: TemplateLanguage) -> Value {
                 },
             },
         },
-        "message": {
-            "schema_name": "message",
-            "schema_version": 1,
-            "message_id": "message_doctor",
-            "workspace": {"status": "triage"},
+        "archive": {
+            "archive_uid": "a20260609001",
+            "archive_name": "doctor",
         },
-        "case": {},
+        "case": {
+            "case_uid": "c20260609001",
+            "case_name": "doctor",
+            "collection_uid": "c20260609001",
+            "collection_name": "doctor",
+            "status": "active",
+        },
+        "item": {},
     })
 }

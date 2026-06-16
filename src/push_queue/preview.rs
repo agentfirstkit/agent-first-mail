@@ -1,53 +1,35 @@
 use super::*;
 
-pub(super) fn filtered_items(root: &Path, mode: PushMode) -> Result<Vec<PushItem>> {
-    let mut items = sorted_items(root)?;
-    items.retain(|item| match mode {
-        PushMode::All => true,
-        PushMode::Drafts | PushMode::DraftsSend => item.outbound().is_some(),
-        PushMode::Archive => item
-            .message_action()
-            .is_some_and(|payload| payload.action == MessagePushAction::Archive),
-        PushMode::Spam => item
-            .message_action()
-            .is_some_and(|payload| payload.action == MessagePushAction::Spam),
-        PushMode::Trash => item
-            .message_action()
-            .is_some_and(|payload| payload.action == MessagePushAction::Trash),
-    });
-    Ok(items)
-}
-
-pub(super) fn actions_for(mode: PushMode, item: &PushItem) -> Vec<String> {
+pub(super) fn actions_for(
+    root: &Path,
+    config: &MailConfig,
+    item: &PushItem,
+) -> Result<Vec<String>> {
     if let Some(payload) = item.message_action() {
-        return payload.steps.iter().map(step_label).collect();
+        return Ok(payload.steps.iter().map(step_label).collect());
     }
     if let Some(outbound) = item.outbound() {
-        let steps = match mode {
-            PushMode::DraftsSend => &outbound.draft_send_steps,
-            _ => &outbound.draft_save_steps,
+        let steps = match outbound.action {
+            OutboundAction::SaveDraft => &config.actions.draft_save.steps,
+            OutboundAction::Send => &config.actions.draft_send.steps,
         };
         if !steps.is_empty() {
-            return steps
+            return Ok(filter_reply_to_steps(root, item, steps.clone())?
                 .iter()
-                .filter(|step| {
-                    outbound.reply_to_message_id.is_some()
-                        || step.on != Some(ActionStepOn::ReplyToMessage)
-                })
                 .map(step_label)
-                .collect();
+                .collect());
         }
-        return match mode {
-            PushMode::DraftsSend => {
+        return Ok(match outbound.action {
+            OutboundAction::Send => {
                 vec![
                     "smtp_send".to_string(),
                     "append_to_mailbox_id_sent".to_string(),
                 ]
             }
-            _ => vec!["append_to_mailbox_id_drafts".to_string()],
-        };
+            OutboundAction::SaveDraft => vec!["append_to_mailbox_id_drafts".to_string()],
+        });
     }
-    Vec::new()
+    Ok(Vec::new())
 }
 
 pub(super) fn item_summary_label(item: &PushItem) -> &str {

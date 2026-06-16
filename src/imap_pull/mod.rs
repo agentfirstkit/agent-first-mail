@@ -21,7 +21,7 @@ use crate::imap_client::{
 pub use crate::imap_client::{MailboxInfo, MoveOutcome};
 use crate::mail::parse_inbound_message;
 use crate::progress::ProgressCallback;
-use crate::types::{ImapRef, MessageFile, RemoteLocation, RemoteState};
+use crate::types::{ImapRef, MessageFile, MessageStatus, RemoteLocation, RemoteState};
 #[cfg(test)]
 use crate::util::write_json_pretty;
 use crate::util::{canonical_flags, write_bytes_atomic, write_string_atomic};
@@ -463,6 +463,17 @@ mod tests {
         }
     }
 
+    fn case_collection(
+        case_uid: &str,
+        case_name: &str,
+        message_id: &str,
+    ) -> crate::types::CaseMessages {
+        let mut collection =
+            crate::types::CaseMessages::new_case(case_uid, case_name, "2026-05-22T10:00:00Z");
+        collection.upsert_item(message_id, None, "2026-05-22T10:00:00Z");
+        collection
+    }
+
     #[test]
     fn resolve_special_use_prefers_config_attribute_then_fallback_name() {
         let mut cfg = MailConfig::default();
@@ -519,7 +530,7 @@ mod tests {
         assert!(result.is_ok());
         let id = result.map(|saved| saved.message_id).unwrap_or_default();
         assert!(root.join(format!(".afmail/messages/{id}.eml")).exists());
-        assert!(root
+        assert!(!root
             .join(format!(".afmail/messages/{id}.state.json"))
             .exists());
         assert!(root
@@ -624,22 +635,12 @@ mod tests {
         let _ = fs::create_dir_all(root.join("cases/open/case-one/data"));
         let _ = fs::create_dir_all(root.join("cases/open/case-two/data"));
         let _ = write_json_pretty(
-            &root.join("cases/open/case-one/data/messages.json"),
-            &crate::types::CaseMessages {
-                schema_name: "case_messages".to_string(),
-                schema_version: 1,
-                case_uid: "case-one".to_string(),
-                message_ids: vec!["message_case_1".to_string()],
-            },
+            &root.join("cases/open/case-one/data/case.json"),
+            &case_collection("case-one", "Case One", "message_case_1"),
         );
         let _ = write_json_pretty(
-            &root.join("cases/open/case-two/data/messages.json"),
-            &crate::types::CaseMessages {
-                schema_name: "case_messages".to_string(),
-                schema_version: 1,
-                case_uid: "case-two".to_string(),
-                message_ids: vec!["message_case_2".to_string()],
-            },
+            &root.join("cases/open/case-two/data/case.json"),
+            &case_collection("case-two", "Case Two", "message_case_2"),
         );
         let index = load_existing_remote_index(&root);
         assert!(index.is_ok());

@@ -1,0 +1,9 @@
+Message-ID: <invoice_overdue@fixtures.afmail.local>
+From: Northwind Billing <billing@northwind.example>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 11:31:00 +0000
+Subject: Invoice 8842 overdue reminder
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Invoice 8842 is seven days overdue. Please confirm whether payment is scheduled this week.

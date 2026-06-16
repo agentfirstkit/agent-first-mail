@@ -15,7 +15,8 @@ fetching attachments, and writing audit events.
 - `archive/notifications/<archive_uid>-<name>/` is a direct-message archive category.
 
 Active commands operate on active surfaces. Archived items are addressed through
-`afmail archive ...` commands.
+`afmail archive ...` commands. Reads are exempt: `afmail case show` and
+`afmail case notes show` resolve a case whether it is active or archived.
 
 ## 3. Identity Is Stable
 
@@ -42,8 +43,8 @@ active or archived cases.
 
 Archive commands change local attention/archive state and may queue configured
 remote moves. They do not create IMAP archive category folders and they do not
-mutate remote mail until `afmail push archive --confirm` runs. Bare push
-commands are previews.
+mutate remote mail until `afmail push --confirm` runs. Bare `afmail push`
+previews the whole queue; `--confirm` applies all of it.
 
 Remote archive moves are rule-driven by recorded source mailbox id via
 `actions.message.archive.by_source_mailbox_id.<id>.steps`. Default `inbox` moves to
@@ -60,12 +61,14 @@ notes. Command reasons and machine history belong in
 Generated triage views, case `case.md`, case `views/messages/*.md`, archive
 `archive.md`, and archive `views/messages/*.md` should be reproducible from
 message evidence and canonical `data/*.json` state. Persistent human edits
-belong in notes, drafts, files, or `.afmail/templates/` when the user is
+belong in notes, drafts, files, or `templates/` when the user is
 intentionally customizing generated read-view templates.
 
-Drafts remain ordinary Markdown, but afmail records validation and compose
-fingerprints in case-local `data/drafts.json` files. Do not edit that machine
-state directly; re-run `draft validate` and `compose` after changing a draft.
+Drafts remain ordinary Markdown, and files under `drafts/` are the only
+editable source. afmail records validation metadata in case-local
+`data/drafts.json`, but queued `draft save` / `draft send` items only reference
+the draft by case and filename. Do not edit machine state directly; change the
+Markdown (or use `draft change`) and push will use the latest valid content.
 
 ## 8. Safety Comes From Reference Checks
 

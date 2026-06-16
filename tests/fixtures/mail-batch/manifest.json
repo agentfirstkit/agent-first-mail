@@ -1,0 +1,509 @@
+{
+  "schema_name": "afmail_fixture_mail_batch",
+  "schema_version": 1,
+  "description": "Reusable 30-message mailbox fixture for afmail tests, Docker E2E, demos, and agent-operated inbox recordings.",
+  "accounts": {
+    "primary": {
+      "login": "me",
+      "password_secret": "secret",
+      "address": "me@localhost",
+      "display_name": "Me"
+    },
+    "alice": {
+      "login": "alice",
+      "password_secret": "secret",
+      "address": "alice@localhost",
+      "display_name": "Alice Customer"
+    }
+  },
+  "mailboxes": {
+    "inbox": {
+      "mailbox_name": "INBOX"
+    },
+    "sent": {
+      "mailbox_name": "Sent"
+    },
+    "archive": {
+      "mailbox_name": "Archive"
+    },
+    "junk": {
+      "mailbox_name": "Junk"
+    },
+    "trash": {
+      "mailbox_name": "Trash"
+    },
+    "drafts": {
+      "mailbox_name": "Drafts"
+    }
+  },
+  "messages": [
+    {
+      "fixture_id": "refund_initial",
+      "eml_path": "eml/001_refund_initial.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<refund_initial@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Refund request for order 4471",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "thread",
+          "customer_support",
+          "refund",
+          "demo_case"
+        ]
+      }
+    },
+    {
+      "fixture_id": "refund_followup",
+      "eml_path": "eml/002_refund_followup.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<refund_followup@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Re: Refund request for order 4471",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "thread",
+          "customer_support",
+          "refund",
+          "demo_case"
+        ]
+      }
+    },
+    {
+      "fixture_id": "contract_attachment",
+      "eml_path": "eml/003_contract_attachment.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<contract_attachment@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Acme renewal contract",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "attachment",
+          "contract",
+          "demo_case"
+        ]
+      }
+    },
+    {
+      "fixture_id": "pricing_attachment",
+      "eml_path": "eml/004_pricing_attachment.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<pricing_attachment@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Q3 pricing proposal",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "attachment",
+          "pricing"
+        ]
+      }
+    },
+    {
+      "fixture_id": "receipt_cloud",
+      "eml_path": "eml/005_receipt_cloud.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<receipt_cloud@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Receipt INV-1001 from Cloudbox",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "receipt",
+          "archive_candidate"
+        ]
+      }
+    },
+    {
+      "fixture_id": "receipt_domain",
+      "eml_path": "eml/006_receipt_domain.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<receipt_domain@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Receipt for domain renewal",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "receipt",
+          "archive_candidate"
+        ]
+      }
+    },
+    {
+      "fixture_id": "newsletter_product",
+      "eml_path": "eml/007_newsletter_product.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<newsletter_product@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Weekly Product Brief",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "newsletter",
+          "archive_candidate"
+        ]
+      }
+    },
+    {
+      "fixture_id": "login_code",
+      "eml_path": "eml/008_login_code.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<login_code@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Your login code is 384219",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "security",
+          "short_lived",
+          "trash_candidate"
+        ]
+      }
+    },
+    {
+      "fixture_id": "shipment_update",
+      "eml_path": "eml/009_shipment_update.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<shipment_update@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Order 4471 shipped",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "shipping",
+          "related_refund"
+        ]
+      }
+    },
+    {
+      "fixture_id": "meeting_budget",
+      "eml_path": "eml/010_meeting_budget.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<meeting_budget@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Calendar: budget review",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "meeting",
+          "triage",
+          "trash_candidate"
+        ]
+      }
+    },
+    {
+      "fixture_id": "vip_escalation",
+      "eml_path": "eml/011_vip_escalation.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<vip_escalation@fixtures.afmail.local>",
+      "expected": {
+        "subject": "URGENT escalation from customer",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "urgent",
+          "customer_support"
+        ]
+      }
+    },
+    {
+      "fixture_id": "reply_to_partner",
+      "eml_path": "eml/012_reply_to_partner.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<reply_to_partner@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Case #998 ready for review",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "reply_to",
+          "support"
+        ]
+      }
+    },
+    {
+      "fixture_id": "invoice_overdue",
+      "eml_path": "eml/013_invoice_overdue.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<invoice_overdue@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Invoice 8842 overdue reminder",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "billing",
+          "needs_review"
+        ]
+      }
+    },
+    {
+      "fixture_id": "candidate_resume",
+      "eml_path": "eml/014_candidate_resume.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<candidate_resume@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Candidate resume for backend role",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "recruiting",
+          "triage"
+        ]
+      }
+    },
+    {
+      "fixture_id": "outage_notice",
+      "eml_path": "eml/015_outage_notice.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<outage_notice@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Scheduled database maintenance",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "ops",
+          "archive_candidate"
+        ]
+      }
+    },
+    {
+      "fixture_id": "team_lunch",
+      "eml_path": "eml/016_team_lunch.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<team_lunch@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Team lunch headcount",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "office",
+          "low_priority"
+        ]
+      }
+    },
+    {
+      "fixture_id": "inbox_password_phish",
+      "eml_path": "eml/017_inbox_password_phish.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<inbox_password_phish@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Action required: mailbox password expires",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "spam_candidate",
+          "phishing",
+          "inbox"
+        ]
+      }
+    },
+    {
+      "fixture_id": "inbox_crypto_giveaway",
+      "eml_path": "eml/018_inbox_crypto_giveaway.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<inbox_crypto_giveaway@fixtures.afmail.local>",
+      "expected": {
+        "subject": "You won a crypto bonus",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "spam_candidate",
+          "phishing",
+          "inbox"
+        ]
+      }
+    },
+    {
+      "fixture_id": "inbox_lead_list",
+      "eml_path": "eml/019_inbox_lead_list.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<inbox_lead_list@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Miracle lead list offer",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "spam_candidate",
+          "marketing",
+          "inbox"
+        ]
+      }
+    },
+    {
+      "fixture_id": "inbox_fake_invoice",
+      "eml_path": "eml/020_inbox_fake_invoice.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<inbox_fake_invoice@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Past due invoice from Unknown Vendor",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "spam_candidate",
+          "phishing",
+          "inbox"
+        ]
+      }
+    },
+    {
+      "fixture_id": "inbox_duplicate_alert",
+      "eml_path": "eml/021_inbox_duplicate_alert.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<inbox_duplicate_alert@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Duplicate notification",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "trash_candidate",
+          "duplicate",
+          "inbox"
+        ]
+      }
+    },
+    {
+      "fixture_id": "inbox_old_delivery_failure",
+      "eml_path": "eml/022_inbox_old_delivery_failure.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<inbox_old_delivery_failure@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Delivery failed: old notification",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "trash_candidate",
+          "old",
+          "inbox"
+        ]
+      }
+    },
+    {
+      "fixture_id": "inbox_expired_coupon",
+      "eml_path": "eml/023_inbox_expired_coupon.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<inbox_expired_coupon@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Your coupon expired yesterday",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "trash_candidate",
+          "promo",
+          "inbox"
+        ]
+      }
+    },
+    {
+      "fixture_id": "inbox_calendar_canceled",
+      "eml_path": "eml/024_inbox_calendar_canceled.eml",
+      "mailbox_id": "inbox",
+      "rfc822_message_id": "<inbox_calendar_canceled@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Canceled: old vendor sync",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "trash_candidate",
+          "calendar",
+          "inbox"
+        ]
+      }
+    },
+    {
+      "fixture_id": "archived_policy",
+      "eml_path": "eml/025_archived_policy.eml",
+      "mailbox_id": "archive",
+      "rfc822_message_id": "<archived_policy@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Security policy FY26",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "archive",
+          "policy"
+        ]
+      }
+    },
+    {
+      "fixture_id": "archived_delivery",
+      "eml_path": "eml/026_archived_delivery.eml",
+      "mailbox_id": "archive",
+      "rfc822_message_id": "<archived_delivery@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Already handled: delivery update",
+        "workspace_status": "triage",
+        "direction": "inbound",
+        "tags": [
+          "archive",
+          "shipping"
+        ]
+      }
+    },
+    {
+      "fixture_id": "sent_contract_reply",
+      "eml_path": "eml/027_sent_contract_reply.eml",
+      "mailbox_id": "sent",
+      "rfc822_message_id": "<sent_contract_reply@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Re: Acme renewal contract",
+        "workspace_status": "triage",
+        "direction": "outbound",
+        "tags": [
+          "sent",
+          "thread",
+          "contract"
+        ]
+      }
+    },
+    {
+      "fixture_id": "sent_project_intro",
+      "eml_path": "eml/028_sent_project_intro.eml",
+      "mailbox_id": "sent",
+      "rfc822_message_id": "<sent_project_intro@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Project intro",
+        "workspace_status": "triage",
+        "direction": "outbound",
+        "tags": [
+          "sent",
+          "new_thread"
+        ]
+      }
+    },
+    {
+      "fixture_id": "junk_password_phish",
+      "eml_path": "eml/029_junk_password_phish.eml",
+      "mailbox_id": "junk",
+      "rfc822_message_id": "<junk_password_phish@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Already junked mailbox password phish",
+        "workspace_status": "spam",
+        "direction": "inbound",
+        "tags": [
+          "spam",
+          "phishing",
+          "remote_junk"
+        ]
+      }
+    },
+    {
+      "fixture_id": "trash_duplicate_alert",
+      "eml_path": "eml/030_trash_duplicate_alert.eml",
+      "mailbox_id": "trash",
+      "rfc822_message_id": "<trash_duplicate_alert@fixtures.afmail.local>",
+      "expected": {
+        "subject": "Already trashed duplicate alert",
+        "workspace_status": "trashed",
+        "direction": "inbound",
+        "tags": [
+          "trash",
+          "duplicate",
+          "remote_trash"
+        ]
+      }
+    }
+  ]
+}

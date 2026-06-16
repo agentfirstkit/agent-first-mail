@@ -15,7 +15,7 @@ pub struct SkillTargetArgs {
     /// Agent to manage. Defaults to all personal skill targets.
     #[arg(long = "agent", value_enum, default_value_t = SkillAgentSelection::All)]
     pub agent: SkillAgentSelection,
-    /// Skill scope. Project scope is supported for Claude Code and opencode, not Codex.
+    /// Skill scope. Project scope installs under the current project's skill directory.
     #[arg(long = "scope", value_enum, default_value_t = SkillScope::Personal)]
     pub scope: SkillScope,
     /// Directory that contains skill folders. Requires an explicit single --agent.
@@ -36,7 +36,7 @@ pub struct SkillWriteArgs {
 pub enum SkillAgentSelection {
     /// Manage every agent that supports the requested scope.
     All,
-    /// Manage the Codex local skill under $CODEX_HOME/skills.
+    /// Manage the Codex skill under $CODEX_HOME/skills or .agents/skills.
     Codex,
     /// Manage the Claude Code skill under ~/.claude/skills or .claude/skills.
     #[value(name = "claude-code", alias = "claude")]

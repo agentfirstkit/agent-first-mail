@@ -1,0 +1,20 @@
+Message-ID: <contract_attachment@fixtures.afmail.local>
+From: Dana Legal <dana@acme.example>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 09:21:00 +0000
+Subject: Acme renewal contract
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="afmail-fixture-contract_attachment"
+
+--afmail-fixture-contract_attachment
+Content-Type: text/plain; charset=utf-8
+
+Please review the attached renewal contract before Friday.
+--afmail-fixture-contract_attachment
+Content-Type: text/plain; name="acme-renewal.txt"
+Content-Disposition: attachment; filename="acme-renewal.txt"
+
+Acme renewal term sheet
+Term: 12 months
+Renewal value: 42000 USD
+--afmail-fixture-contract_attachment--

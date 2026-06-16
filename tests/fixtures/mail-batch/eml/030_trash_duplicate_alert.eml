@@ -1,0 +1,9 @@
+Message-ID: <trash_duplicate_alert@fixtures.afmail.local>
+From: Alerts <alerts@example.net>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 15:30:00 +0000
+Subject: Already trashed duplicate alert
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Duplicate alert already resolved in another thread.

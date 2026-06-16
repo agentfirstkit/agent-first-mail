@@ -89,12 +89,8 @@ fn default_hint(error_code: &str) -> Option<&'static str> {
         "archive_not_found" | "archive_entry_not_found" => {
             Some("Check archive refs with `afmail archive list messages`, then retry with the correct ref and message id.")
         }
-        "draft_not_found" => Some("List the case drafts directory or recreate the draft with `afmail case reply` / `afmail case draft new`."),
+        "draft_not_found" => Some("List the case drafts directory or recreate the draft with `afmail case draft reply` / `afmail case draft new`."),
         "draft_invalid" => Some("Fix the draft markdown/frontmatter, then run `afmail case draft validate CASE_REF DRAFT_NAME`."),
-        "draft_validation_required" | "draft_changed_since_validation"
-        | "draft_changed_since_compose" => {
-            Some("Run `afmail case draft validate CASE_REF DRAFT_NAME`, then retry compose.")
-        }
         "imap_connect_failed" | "imap_greeting_failed" | "imap_login_failed" | "imap_tls_failed"
         | "imap_select_failed" | "imap_fetch_failed" | "imap_search_failed" | "imap_list_failed"
         | "imap_capability_failed" | "imap_create_failed" | "imap_append_failed"
@@ -102,7 +98,7 @@ fn default_hint(error_code: &str) -> Option<&'static str> {
             Some("Check IMAP config with `afmail config show`; use `afmail remote test` and `afmail remote folders` to diagnose.")
         }
         "smtp_connect_failed" | "smtp_send_failed" => {
-            Some("Check SMTP config with `afmail config show`; preview queued mail with `afmail push drafts-send --dry-run` before retrying.")
+            Some("Check SMTP config with `afmail config show`; preview queued mail with `afmail push --dry-run` before retrying.")
         }
         _ => None,
     }

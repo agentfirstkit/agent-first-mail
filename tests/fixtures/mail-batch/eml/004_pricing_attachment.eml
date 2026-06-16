@@ -1,0 +1,21 @@
+Message-ID: <pricing_attachment@fixtures.afmail.local>
+From: Victor Sales <victor@example.net>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 09:28:00 +0000
+Subject: Q3 pricing proposal
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="afmail-fixture-pricing_attachment"
+
+--afmail-fixture-pricing_attachment
+Content-Type: text/plain; charset=utf-8
+
+Attached is the Q3 pricing proposal we discussed.
+--afmail-fixture-pricing_attachment
+Content-Type: text/csv; name="q3-pricing.csv"
+Content-Disposition: attachment; filename="q3-pricing.csv"
+
+plan,price
+starter,29
+pro,99
+enterprise,499
+--afmail-fixture-pricing_attachment--

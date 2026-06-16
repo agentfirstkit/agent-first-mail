@@ -9,6 +9,7 @@ use agent_first_data::skill::{
     SkillScope as AfScope, SkillSpec,
 };
 use serde_json::Value;
+use std::path::Path;
 
 /// The embedded skill this binary installs.
 const SPEC: SkillSpec = SkillSpec {
@@ -21,6 +22,23 @@ const SPEC: SkillSpec = SkillSpec {
 pub fn handle_action(action: SkillAction) -> Result<Value> {
     let (af_action, options) = split_action(action);
     let report = skill::run_skill_admin(&SPEC, af_action, &options).map_err(to_app_error)?;
+    serde_json::to_value(&report).map_err(|e| {
+        AppError::new(
+            "internal_error",
+            format!("failed to serialize skill report: {e}"),
+        )
+    })
+}
+
+pub(crate) fn install_codex_project_skill(skills_dir: &Path) -> Result<Value> {
+    let options = SkillOptions {
+        agent: AfSelection::Codex,
+        scope: AfScope::Project,
+        skills_dir: Some(skills_dir.to_string_lossy().to_string()),
+        force: false,
+    };
+    let report =
+        skill::run_skill_admin(&SPEC, AfAction::Install, &options).map_err(to_app_error)?;
     serde_json::to_value(&report).map_err(|e| {
         AppError::new(
             "internal_error",

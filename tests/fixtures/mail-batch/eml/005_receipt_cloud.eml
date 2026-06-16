@@ -1,0 +1,9 @@
+Message-ID: <receipt_cloud@fixtures.afmail.local>
+From: Cloudbox Billing <billing@cloudbox.example>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 10:35:00 +0000
+Subject: Receipt INV-1001 from Cloudbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Receipt INV-1001 for $29.00 paid with card ending 4242.

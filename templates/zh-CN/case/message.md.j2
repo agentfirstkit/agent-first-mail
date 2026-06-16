@@ -1,18 +1,18 @@
 ---
-kind: case_message
-case_uid: {{ case_uid }}
-case_name: {{ case_name }}
-message_id: {{ message_id }}
-generated_rfc3339: "{{ generated_rfc3339 }}"
+kind: {{ frontmatter.kind }}
+case_uid: {{ frontmatter.case_uid }}
+case_name: {{ frontmatter.case_name }}
+message_id: {{ frontmatter.message_id }}
+generated_rfc3339: "{{ frontmatter.generated_rfc3339 }}"
 ---
 
-# {% if title %}{{ title }}{% else %}事项消息{% endif %}
+# {% if view.title %}{{ view.title }}{% else %}事项消息{% endif %}
 
-事项: {{ case_name }}（`{{ case_uid }}`）
-消息: `{{ message_id }}`
+事项: {{ case.case_name }}（`{{ case.case_uid }}`）
+消息: `{{ message.message_id }}`
 
 <!-- afmail:conversation:start -->
 
-{{ conversation }}
+{{ view.conversation }}
 
 <!-- afmail:conversation:end -->

@@ -44,12 +44,9 @@ impl Workspace {
         let mut written_count = 0usize;
         for path in message_json_paths(&self.root)? {
             let mut message = read_message(&path)?;
-            let status = self.derived_message_status(&message, &cases)?;
-            if message.workspace.status != status {
-                message.workspace.status = status;
-                message.workspace.remote_sync = None;
-                self.write_message_cache(&message)?;
-            }
+            self.apply_materialized_workspace_overlays(&mut message)?;
+            message.workspace.remote_sync = None;
+            self.write_message_materialized_cache(&message)?;
             if self.triage_candidate(&message, &cases)? {
                 desired.insert(message.message_id.clone());
                 self.write_triage_view(&message)?;
@@ -76,25 +73,40 @@ pub(crate) fn render_triage_view(
     related_messages: Vec<Value>,
 ) -> Result<String> {
     let generated_rfc3339 = now_rfc3339();
+    let suggested_reason = suggested_reason.as_deref().unwrap_or("");
+    let suggested_reason_yaml = if suggested_reason.is_empty() {
+        String::new()
+    } else {
+        yaml_double_quote(suggested_reason)
+    };
+    let view_suggested_case_uids = suggested_case_uids.clone();
     render_template(
         root,
         language,
         TemplateKey::TriageView,
         &json!({
-            "language": language.as_str(),
-            "message_id": message.message_id.as_str(),
-            "title": message.subject.as_deref().unwrap_or(""),
-            "generated_rfc3339": generated_rfc3339,
-            "attachment_count": message.attachments.len(),
-            "suggested_case_uids": suggested_case_uids,
-            "suggested_reason": suggested_reason.as_deref().unwrap_or(""),
-            "suggested_reason_yaml": suggested_reason
-                .as_deref()
-                .map(yaml_double_quote)
-                .unwrap_or_default(),
-            "related_messages": related_messages,
-            "conversation": conversation.trim(),
+            "frontmatter": {
+                "kind": "triage_view",
+                "message_id": message.message_id.as_str(),
+                "message_ids": [message.message_id.as_str()],
+                "generated_rfc3339": generated_rfc3339.as_str(),
+                "message_count": 1,
+                "attachment_count": message.attachments.len(),
+                "suggested_case_uids": &suggested_case_uids,
+                "suggested_reason": suggested_reason,
+                "suggested_reason_yaml": suggested_reason_yaml,
+            },
             "message": message_template_value(message)?,
+            "view": {
+                "language": language.as_str(),
+                "title": message.subject.as_deref().unwrap_or(""),
+                "generated_rfc3339": generated_rfc3339.as_str(),
+                "attachment_count": message.attachments.len(),
+                "suggested_case_uids": view_suggested_case_uids,
+                "suggested_reason": suggested_reason,
+                "related_messages": related_messages,
+                "conversation": conversation.trim(),
+            },
         }),
     )
 }
@@ -131,8 +143,7 @@ impl Workspace {
             return Ok(CaseViewRefresh::default());
         }
         let case_fm = read_case_file(case_path)?;
-        let case_uid = case_fm.case_uid.clone();
-        let case_messages = read_case_messages(&case_messages_json_path(case_path), &case_uid)?;
+        let case_uid = case_fm.collection_uid.clone();
         let messages_dir = case_views_messages_dir(case_path);
         create_dir_all(&messages_dir)?;
         let config = MailConfig::load(&self.root)?;
@@ -140,8 +151,8 @@ impl Workspace {
         let mut case_conversation = Vec::new();
         let mut messages = Vec::new();
         let mut message_count = 0usize;
-        for message_id in &case_messages.message_ids {
-            let message = self.read_message_by_id(message_id)?;
+        for message_id in case_fm.message_ids() {
+            let message = self.read_message_by_id(&message_id)?;
             desired.insert(message_id.clone());
             case_conversation.push(self.message_conversation_with_renderer(
                 &message,
@@ -149,10 +160,10 @@ impl Workspace {
                 renderer,
                 Some(case_path),
             )?);
-            let view_path = case_message_view_path(case_path, message_id);
+            let view_path = case_message_view_path(case_path, &message_id);
             let view = self.render_case_message_view(
                 &case_uid,
-                &case_fm.case_name,
+                &case_fm.collection_name,
                 &message,
                 renderer,
                 view_path.parent(),
@@ -198,14 +209,17 @@ impl Workspace {
                 "message_id": message.message_id.as_str(),
                 "generated_rfc3339": generated_rfc3339.as_str(),
             },
-            "language": config.resolved_language_bcp47(),
-            "case_uid": case_uid,
-            "case_name": case_name,
-            "message_id": message.message_id.as_str(),
-            "title": title,
-            "generated_rfc3339": generated_rfc3339.as_str(),
-            "conversation": conversation.trim(),
+            "case": {
+                "case_uid": case_uid,
+                "case_name": case_name,
+            },
             "message": message_value,
+            "view": {
+                "language": config.resolved_language_bcp47(),
+                "title": title,
+                "generated_rfc3339": generated_rfc3339.as_str(),
+                "conversation": conversation.trim(),
+            },
         });
         renderer.render(TemplateKey::CaseMessage, &context)
     }
@@ -218,7 +232,7 @@ impl Workspace {
         config: &MailConfig,
         renderer: &mut MarkdownTemplateRenderer<'_>,
     ) -> Result<String> {
-        let case_uid = case_fm.case_uid.as_str();
+        let case_uid = case_fm.collection_uid.as_str();
         let mut case_view = case_fm.clone();
         case_view.message_count = messages.len();
         case_view.attachment_count = messages
@@ -277,7 +291,9 @@ impl Workspace {
                 title,
             )?;
             if let Value::Object(map) = &mut item {
-                map.insert("fields".to_string(), json!(fields));
+                if let Some(Value::Object(view)) = map.get_mut("view") {
+                    view.insert("fields".to_string(), json!(fields));
+                }
             }
             items.push(item);
         }
@@ -292,21 +308,21 @@ impl Workspace {
             "frontmatter": {
                 "kind": "case_index",
                 "case_uid": case_uid,
-                "case_name": case_fm.case_name.as_str(),
+                "case_name": case_fm.collection_name.as_str(),
                 "generated_rfc3339": generated_rfc3339.as_str(),
                 "message_count": items.len(),
             },
-            "language": config.resolved_language_bcp47(),
-            "case_uid": case_uid,
-            "case_name": case_fm.case_name.as_str(),
-            "title": case_fm.case_name.as_str(),
-            "status": case_fm.status.as_str(),
-            "message_count": items.len(),
-            "generated_rfc3339": generated_rfc3339.as_str(),
             "case": case_value,
             "items": items,
             "messages": messages_value,
-            "conversation": conversation.trim(),
+            "view": {
+                "language": config.resolved_language_bcp47(),
+                "title": case_fm.collection_name.as_str(),
+                "status": case_fm.status.as_str(),
+                "message_count": items.len(),
+                "generated_rfc3339": generated_rfc3339.as_str(),
+                "conversation": conversation.trim(),
+            },
         });
         renderer.render(TemplateKey::CaseDocument, &context)
     }
@@ -329,30 +345,6 @@ impl Workspace {
             }
         }
         Ok(())
-    }
-
-    pub(super) fn derived_message_status(
-        &self,
-        message: &MessageFile,
-        cases: &CaseIndex,
-    ) -> Result<String> {
-        let current = MessageStatus::parse(&message.workspace.status)?;
-        if current.is_terminal_local() {
-            return Ok(current.as_str().to_string());
-        }
-        if message.workspace.archive_uid.is_some() || current == MessageStatus::Archived {
-            return Ok(MessageStatus::Archived.as_str().to_string());
-        }
-        if cases.has_active_reference(&message.message_id) {
-            return Ok(MessageStatus::Case.as_str().to_string());
-        }
-        if message.workspace.origin.is_some() {
-            return Ok(MessageStatus::Archived.as_str().to_string());
-        }
-        if cases.has_any_reference(&message.message_id) {
-            return Ok(MessageStatus::Case.as_str().to_string());
-        }
-        Ok(MessageStatus::Triage.as_str().to_string())
     }
 
     pub(super) fn triage_candidate(
@@ -408,13 +400,14 @@ impl Workspace {
                 .or(related.sent_rfc3339.as_deref())
                 .unwrap_or("");
             out.push(json!({
-                "message_id": related.message_id,
-                "direction": markdown_table_cell(related.direction.as_deref().unwrap_or("")),
-                "from": markdown_table_cell(related.from.as_deref().unwrap_or("")),
-                "subject": markdown_table_cell(related.subject.as_deref().unwrap_or("")),
-                "time": markdown_table_cell(time),
-                "status": markdown_table_cell(&related.workspace.status),
                 "message": message_template_value(&related)?,
+                "view": {
+                    "direction": markdown_table_cell(related.direction.as_deref().unwrap_or("")),
+                    "from": markdown_table_cell(related.from.as_deref().unwrap_or("")),
+                    "subject": markdown_table_cell(related.subject.as_deref().unwrap_or("")),
+                    "time": markdown_table_cell(time),
+                    "status": markdown_table_cell(&related.workspace.status),
+                },
             }));
         }
         Ok(out)

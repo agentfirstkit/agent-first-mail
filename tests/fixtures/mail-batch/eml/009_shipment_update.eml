@@ -1,0 +1,9 @@
+Message-ID: <shipment_update@fixtures.afmail.local>
+From: ShipIt <tracking@shipit.example>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 10:03:00 +0000
+Subject: Order 4471 shipped
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Order 4471 shipped by ground service. Tracking number SHIP-4471.

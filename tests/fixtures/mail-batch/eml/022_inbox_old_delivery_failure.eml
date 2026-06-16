@@ -1,0 +1,9 @@
+Message-ID: <inbox_old_delivery_failure@fixtures.afmail.local>
+From: Mailer Daemon <mailer-daemon@example.net>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 13:34:00 +0000
+Subject: Delivery failed: old notification
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+This old delivery failure notification is from a test message last month and can be discarded.

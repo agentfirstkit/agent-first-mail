@@ -1,0 +1,11 @@
+Message-ID: <refund_followup@fixtures.afmail.local>
+From: Alice Customer <alice@localhost>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 09:14:00 +0000
+Subject: Re: Refund request for order 4471
+In-Reply-To: <refund_initial@fixtures.afmail.local>
+References: <refund_initial@fixtures.afmail.local>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Following up because I have not heard back. The order total was $84.12 and the late delivery affected our event.

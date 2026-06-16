@@ -1,0 +1,14 @@
+Message-ID: <refund_initial@fixtures.afmail.local>
+From: Alice Customer <alice@localhost>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 09:07:00 +0000
+Subject: Refund request for order 4471
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hi Me,
+
+Order 4471 arrived two days late and the cold pack was warm. Please refund the shipping fee.
+
+Thanks,
+Alice

@@ -1,4 +1,3 @@
-use super::push::{push_has_confirm, push_has_dry_run};
 use crate::cli::{
     ArchiveAction, ArchiveCaseAction, ArchiveCaseNotesAction, ArchiveMessageCommand,
     ArchiveMessageNotesAction, CaseCommand, CaseNotesAction, Command, ConfigAction, DoctorAction,
@@ -16,7 +15,7 @@ pub(super) struct CommandLock {
 
 pub(super) fn command_lock(command: &Command, cwd: &Path) -> Result<CommandLock> {
     let mode = lock_mode(command);
-    let root = if matches!(command, Command::Init) {
+    let root = if matches!(command, Command::Init { .. }) {
         cwd.to_path_buf()
     } else {
         Workspace::discover(cwd)?.root().to_path_buf()
@@ -26,7 +25,7 @@ pub(super) fn command_lock(command: &Command, cwd: &Path) -> Result<CommandLock>
 
 fn lock_mode(command: &Command) -> LockMode {
     match command {
-        Command::Init | Command::Pull { .. } | Command::Purge { .. } => LockMode::Exclusive,
+        Command::Init { .. } | Command::Pull { .. } | Command::Purge { .. } => LockMode::Exclusive,
         Command::Message { action } => match action {
             MessageAction::Show { .. } => LockMode::Shared,
             _ => LockMode::Exclusive,
@@ -44,8 +43,8 @@ fn lock_mode(command: &Command) -> LockMode {
             action,
         } => match action {
             Some(PushAction::List) => LockMode::Shared,
-            _ if push_has_confirm(*confirm, action) => LockMode::Exclusive,
-            _ => LockMode::Shared,
+            None if *confirm => LockMode::Exclusive,
+            None => LockMode::Shared,
         },
         Command::Status => LockMode::Shared,
         Command::Doctor { action } => match action {
@@ -88,6 +87,8 @@ fn lock_mode(command: &Command) -> LockMode {
             RenderAction::Templates { .. } => LockMode::Exclusive,
         },
         Command::Log { .. } => LockMode::Shared,
+        #[cfg(feature = "ui")]
+        Command::Ui(_) => LockMode::Shared,
     }
 }
 
@@ -97,10 +98,8 @@ pub(super) fn workspace_progress_command(command: &Command) -> Option<&'static s
         Command::Push {
             dry_run,
             confirm,
-            action,
-        } if push_has_confirm(*confirm, action) && !push_has_dry_run(*dry_run, action) => {
-            Some("push")
-        }
+            action: None,
+        } if *confirm && !*dry_run => Some("push"),
         _ => None,
     }
 }

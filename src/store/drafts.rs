@@ -1,19 +1,54 @@
 use super::*;
 
 impl Workspace {
+    pub fn show_draft(&self, case_ref: &str, draft_name: &str) -> Result<Value> {
+        self.require_workspace()?;
+        validate_file_name("draft_name", draft_name)?;
+        let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
+        let draft_path = case_path.join("drafts").join(draft_name);
+        if !draft_path.is_file() {
+            return Err(AppError::new(
+                "draft_not_found",
+                format!("draft not found: {draft_name}"),
+            ));
+        }
+        let text = read_to_string(&draft_path, "read draft")?;
+        let (fm, body) = read_doc::<DraftFrontmatter>(&text).map_err(|e| {
+            AppError::new("draft_invalid", format!("invalid draft frontmatter: {e}"))
+        })?;
+        let queued = crate::push_queue::find_outbound_for_draft(&self.root, &case_uid, draft_name)?;
+        let queued_action = queued
+            .as_ref()
+            .and_then(|item| item.outbound())
+            .map(|outbound| outbound.action.as_str());
+        let push_id = queued.as_ref().map(|item| item.push_id.as_str());
+        let attachments = fm
+            .attachments
+            .iter()
+            .map(|attachment| draft_attachment_show_value(&case_path, attachment))
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "code": "draft_shown",
+            "case_uid": case_uid,
+            "draft_name": draft_name,
+            "draft_path": rel_path(&self.root, &draft_path),
+            "subject": fm.subject,
+            "to": fm.to,
+            "cc": fm.cc,
+            "attachments": attachments,
+            "body": body,
+            "queued_action": queued_action,
+            "push_id": push_id,
+            "remote_changed": false,
+        }))
+    }
+
     pub fn validate_draft(&self, case_ref: &str, draft_name: &str) -> Result<Value> {
         self.require_workspace()?;
         let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
         let validation = self.validate_draft_inner(&case_uid, draft_name, &case_path)?;
         let now = now_rfc3339();
-        let mut draft_state = read_draft_state(&case_path)?;
-        let entry = draft_state
-            .drafts
-            .entry(draft_name.to_string())
-            .or_default();
-        entry.last_validated_hash = Some(validation.draft_hash.clone());
-        entry.last_validated_rfc3339 = Some(now.clone());
-        write_draft_state(&case_path, &draft_state)?;
+        write_draft_validation_state(&case_path, draft_name, &validation, &now)?;
         Ok(json!({
             "code": "draft_valid",
             "case_uid": case_uid,
@@ -126,25 +161,30 @@ impl Workspace {
         validate_file_name("draft_name", draft_name)?;
         let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
         let draft_path = case_path.join("drafts").join(draft_name);
-        if !draft_path.is_file() {
+        let removed_push =
+            crate::push_queue::remove_outbound_for_draft(&self.root, &case_uid, draft_name)?;
+        let mut draft_state = read_draft_state(&case_path)?;
+        let state_removed = draft_state.drafts.remove(draft_name).is_some();
+        let draft_deleted = if draft_path.is_file() {
+            remove_file(&draft_path)?;
+            true
+        } else {
+            false
+        };
+        if !draft_deleted && !state_removed && removed_push.is_empty() {
             return Err(AppError::new(
                 "draft_not_found",
                 format!("draft not found: {draft_name}"),
             ));
         }
-        let removed_push =
-            crate::push_queue::remove_outbound_for_draft(&self.root, &case_uid, draft_name)?;
-        remove_file(&draft_path)?;
-        let mut draft_state = read_draft_state(&case_path)?;
-        let state_removed = draft_state.drafts.remove(draft_name).is_some();
         write_draft_state(&case_path, &draft_state)?;
         let push_ids = removed_push
             .iter()
             .map(|item| item.push_id.clone())
             .collect::<Vec<_>>();
-        let staged_eml_paths = removed_push
+        let actions = removed_push
             .iter()
-            .filter_map(|item| item.eml_path.clone())
+            .map(|item| item.action.as_str())
             .collect::<Vec<_>>();
         self.append_audit_event(
             "draft_removed",
@@ -155,7 +195,8 @@ impl Workspace {
                 "draft_name": draft_name,
                 "draft_path": rel_path(&self.root, &draft_path),
                 "push_ids": push_ids.clone(),
-                "staged_eml_paths": staged_eml_paths.clone(),
+                "actions": actions.clone(),
+                "draft_deleted": draft_deleted,
                 "state_removed": state_removed,
                 "mail_sent": false,
             }),
@@ -165,114 +206,221 @@ impl Workspace {
             "case_uid": case_uid,
             "draft_name": draft_name,
             "draft_path": rel_path(&self.root, &draft_path),
-            "draft_deleted": true,
+            "draft_deleted": draft_deleted,
             "state_removed": state_removed,
             "queued_removed": !push_ids.is_empty(),
             "removed_push_count": push_ids.len(),
             "push_ids": push_ids,
-            "staged_eml_paths": staged_eml_paths,
+            "actions": actions,
             "mail_sent": false
         }))
     }
 
-    pub fn compose_draft(&self, case_ref: &str, draft_name: &str) -> Result<Value> {
+    pub(crate) fn change_draft(
+        &self,
+        case_ref: &str,
+        draft_name: &str,
+        change: DraftChange<'_>,
+    ) -> Result<Value> {
         self.require_workspace()?;
-        let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
         validate_file_name("draft_name", draft_name)?;
+        let body_override = draft_body_override(change.body, change.body_file)?;
+        let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
         let draft_path = case_path.join("drafts").join(draft_name);
-        let draft_hash = draft_file_hash(&draft_path)?;
-        let draft_state = read_draft_state(&case_path)?;
-        let entry = draft_state.drafts.get(draft_name).ok_or_else(|| {
-            AppError::new(
-                "draft_validation_required",
-                format!("draft must be validated before compose: {draft_name}"),
-            )
-            .with_hint(format!(
-                "Run `afmail case draft validate {case_uid} {draft_name}` before composing."
-            ))
-            .with_details(json!({
-                "case_uid": case_uid,
-                "draft_name": draft_name,
-                "suggested_commands": [
-                    format!("afmail case draft validate {case_uid} {draft_name}"),
-                    format!("afmail case compose {case_uid} {draft_name}")
-                ]
-            }))
-        })?;
-        let last_validated_hash = entry.last_validated_hash.as_deref().ok_or_else(|| {
-            AppError::new(
-                "draft_validation_required",
-                format!("draft must be validated before compose: {draft_name}"),
-            )
-            .with_hint(format!(
-                "Run `afmail case draft validate {case_uid} {draft_name}` before composing."
-            ))
-            .with_details(json!({
-                "case_uid": case_uid,
-                "draft_name": draft_name,
-                "suggested_commands": [
-                    format!("afmail case draft validate {case_uid} {draft_name}"),
-                    format!("afmail case compose {case_uid} {draft_name}")
-                ]
-            }))
-        })?;
-        if last_validated_hash != draft_hash {
+        if !draft_path.is_file() {
             return Err(AppError::new(
-                "draft_changed_since_validation",
-                format!("draft changed since validation: {draft_name}"),
-            )
-            .with_hint(format!(
-                "Re-run `afmail case draft validate {case_uid} {draft_name}`, then compose again."
-            ))
-            .with_details(json!({
+                "draft_not_found",
+                format!("draft not found: {draft_name}"),
+            ));
+        }
+        let text = read_to_string(&draft_path, "read draft")?;
+        let (mut fm, mut current_body) = read_doc::<DraftFrontmatter>(&text).map_err(|e| {
+            AppError::new("draft_invalid", format!("invalid draft frontmatter: {e}"))
+        })?;
+        let mut changed_fields = Vec::new();
+        if let Some(subject) = change.subject {
+            let replacement = Some(subject.to_string());
+            if fm.subject != replacement {
+                fm.subject = replacement;
+                changed_fields.push("subject".to_string());
+            }
+        }
+        if !change.to.is_empty() && fm.to != change.to {
+            fm.to = change.to.to_vec();
+            changed_fields.push("to".to_string());
+        }
+        if change.clear_cc {
+            if !fm.cc.is_empty() {
+                fm.cc.clear();
+                changed_fields.push("cc".to_string());
+            }
+        } else if !change.cc.is_empty() && fm.cc != change.cc {
+            fm.cc = change.cc.to_vec();
+            changed_fields.push("cc".to_string());
+        }
+        if let Some(new_body) = body_override {
+            if current_body != new_body {
+                current_body = new_body;
+                changed_fields.push("body".to_string());
+            }
+        }
+        let rendered = render_frontmatter(&fm, &current_body)?;
+        let validation = self.validate_draft_bytes_inner(
+            &case_uid,
+            draft_name,
+            &case_path,
+            rendered.as_bytes(),
+        )?;
+        write_string(&draft_path, &rendered)?;
+        let now = now_rfc3339();
+        write_draft_validation_state(&case_path, draft_name, &validation, &now)?;
+        self.append_audit_event(
+            "draft_changed",
+            vec![audit_target("case", &case_uid)],
+            None,
+            json!({
                 "case_uid": case_uid,
                 "draft_name": draft_name,
-                "suggested_commands": [
-                    format!("afmail case draft validate {case_uid} {draft_name}"),
-                    format!("afmail case compose {case_uid} {draft_name}")
-                ]
-            })));
+                "draft_path": rel_path(&self.root, &draft_path),
+                "changed_fields": changed_fields.clone(),
+                "draft_hash": validation.draft_hash.as_str(),
+            }),
+        )?;
+        Ok(json!({
+            "code": "draft_changed",
+            "case_uid": case_uid,
+            "draft_name": draft_name,
+            "draft_path": rel_path(&self.root, &draft_path),
+            "changed_fields": changed_fields,
+            "draft_hash": validation.draft_hash.as_str(),
+            "last_validated_rfc3339": now,
+        }))
+    }
+
+    pub fn save_draft(&self, case_ref: &str, draft_name: &str) -> Result<Value> {
+        self.queue_draft(case_ref, draft_name, OutboundAction::SaveDraft)
+    }
+
+    pub fn send_draft(&self, case_ref: &str, draft_name: &str) -> Result<Value> {
+        self.queue_draft(case_ref, draft_name, OutboundAction::Send)
+    }
+
+    fn queue_draft(
+        &self,
+        case_ref: &str,
+        draft_name: &str,
+        action: OutboundAction,
+    ) -> Result<Value> {
+        self.require_workspace()?;
+        validate_file_name("draft_name", draft_name)?;
+        let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
+        let draft_path = case_path.join("drafts").join(draft_name);
+        if !draft_path.is_file() {
+            return Err(AppError::new(
+                "draft_not_found",
+                format!("draft not found: {draft_name}"),
+            ));
         }
-        let config = crate::config::MailConfig::load(&self.root)?;
+        let validation = self.validate_draft_inner(&case_uid, draft_name, &case_path)?;
+        let now = now_rfc3339();
         let transaction = self.begin_transaction(
-            "draft_compose",
+            "draft_queue",
             vec![
                 rel_path(&self.root, &draft_path),
                 rel_path(&self.root, &case_drafts_json_path(&case_path)),
                 ".afmail/push".to_string(),
             ],
         )?;
-        let mut queued = crate::push_queue::queue_outbound(
-            &self.root,
-            &case_path,
-            &case_uid,
-            draft_name,
-            &draft_hash,
-            &config,
-        )?;
-        let push_id = queued
-            .get("push_id")
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        let now = now_rfc3339();
-        let mut draft_state = read_draft_state(&case_path)?;
-        let entry = draft_state
-            .drafts
-            .entry(draft_name.to_string())
-            .or_default();
-        entry.last_composed_hash = Some(draft_hash.clone());
-        entry.last_composed_rfc3339 = Some(now.clone());
-        if !push_id.is_empty() {
-            entry.push_id = Some(push_id);
-        }
-        write_draft_state(&case_path, &draft_state)?;
+        write_draft_validation_state(&case_path, draft_name, &validation, &now)?;
+        let mut queued =
+            crate::push_queue::queue_outbound(&self.root, &case_uid, draft_name, action)?;
         if let Some(object) = queued.as_object_mut() {
-            object.insert("draft_hash".to_string(), json!(draft_hash));
-            object.insert("last_composed_rfc3339".to_string(), json!(now));
+            object.insert(
+                "draft_path".to_string(),
+                json!(rel_path(&self.root, &draft_path)),
+            );
+            object.insert("last_validated_rfc3339".to_string(), json!(now));
         }
         transaction.commit()?;
+        self.append_audit_event(
+            "draft_queued",
+            vec![audit_target("case", &case_uid)],
+            None,
+            json!({
+                "case_uid": case_uid,
+                "draft_name": draft_name,
+                "draft_path": rel_path(&self.root, &draft_path),
+                "action": action.as_str(),
+                "push_id": queued.get("push_id").and_then(Value::as_str),
+            }),
+        )?;
         Ok(queued)
+    }
+
+    pub(crate) fn validate_draft_for_push(
+        &self,
+        case_uid: &str,
+        draft_name: &str,
+        case_path: &Path,
+    ) -> Result<()> {
+        self.validate_draft_inner(case_uid, draft_name, case_path)
+            .map(|_| ())
+    }
+
+    pub(crate) fn consume_outbound_draft_after_push(
+        &self,
+        item: &PushItem,
+        config: &MailConfig,
+    ) -> Result<()> {
+        let Some(outbound) = item.outbound() else {
+            return Ok(());
+        };
+        let (case_uid, case_path) = self.resolve_active_case(&outbound.case_uid)?;
+        let draft_path = case_path.join("drafts").join(&outbound.draft_name);
+        if outbound.action == OutboundAction::Send {
+            let prepared = crate::smtp_send::prepare_outbound(
+                &self.root,
+                &case_path,
+                &case_uid,
+                &outbound.draft_name,
+                config,
+                Some(&crate::smtp_send::message_id_for_push(&item.push_id)),
+            )?;
+            crate::smtp_send::mark_sent_and_append_case(
+                &self.root,
+                &case_path,
+                &case_uid,
+                &prepared.message_id,
+                &prepared.raw,
+                config,
+            )?;
+        }
+        let draft_deleted = if draft_path.is_file() {
+            remove_file(&draft_path)?;
+            true
+        } else {
+            false
+        };
+        let mut draft_state = read_draft_state(&case_path)?;
+        let state_removed = draft_state.drafts.remove(&outbound.draft_name).is_some();
+        write_draft_state(&case_path, &draft_state)?;
+        self.append_audit_event(
+            match outbound.action {
+                OutboundAction::SaveDraft => "draft_saved_remote",
+                OutboundAction::Send => "draft_sent",
+            },
+            vec![audit_target("case", &case_uid)],
+            None,
+            json!({
+                "case_uid": case_uid.as_str(),
+                "draft_name": outbound.draft_name.as_str(),
+                "draft_path": rel_path(&self.root, &draft_path),
+                "push_id": item.push_id.as_str(),
+                "action": outbound.action.as_str(),
+                "draft_deleted": draft_deleted,
+                "state_removed": state_removed,
+            }),
+        )
     }
 
     pub fn reply_to_message(
@@ -280,12 +428,15 @@ impl Workspace {
         case_ref: &str,
         message_id: &str,
         reply_all: bool,
+        body: Option<&str>,
+        body_file: Option<&str>,
     ) -> Result<Value> {
         self.require_workspace()?;
+        let body_override = draft_body_override(body, body_file)?;
         validate_id("message_id", message_id)?;
         let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
-        let messages = read_case_messages(&case_messages_json_path(&case_path), &case_uid)?;
-        if !messages.message_ids.iter().any(|id| id == message_id) {
+        let messages = read_case_messages(&case_path, &case_uid)?;
+        if !messages.contains_message(message_id) {
             return Err(AppError::new(
                 "invalid_request",
                 format!("message does not belong to case: {message_id}"),
@@ -349,13 +500,17 @@ impl Workspace {
             cc,
             attachments: Vec::new(),
         };
-        let quoted = self.quoted_message_body(&message)?;
-        let body = render_draft_reply_body(
-            &self.root,
-            config.template_language(),
-            message.from.as_deref(),
-            &quoted,
-        )?;
+        let body = if let Some(body) = body_override {
+            body
+        } else {
+            let quoted = self.quoted_message_body(&message)?;
+            render_draft_reply_body(
+                &self.root,
+                config.template_language(),
+                message.from.as_deref(),
+                &quoted,
+            )?
+        };
         let draft_name = format!("reply-{message_id}.md");
         let draft_path = case_path.join("drafts").join(&draft_name);
         if draft_path.exists() {
@@ -380,9 +535,12 @@ impl Workspace {
         case_ref: &str,
         to: &[String],
         cc: &[String],
-        subject: Option<&str>,
+        subject: &str,
+        body: Option<&str>,
+        body_file: Option<&str>,
     ) -> Result<Value> {
         self.require_workspace()?;
+        let body_override = draft_body_override(body, body_file)?;
         let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
         if to.is_empty() {
             return Err(AppError::new(
@@ -395,15 +553,19 @@ impl Workspace {
             case_uid: case_uid.to_string(),
             send_intent: Some("new".to_string()),
             reply_to_message_id: None,
-            subject: subject.map(ToString::to_string),
+            subject: Some(subject.to_string()),
             to: to.to_vec(),
             cc: cc.to_vec(),
             attachments: Vec::new(),
         };
-        let slug = subject
-            .map(crate::mail::slugify)
-            .filter(|slug| !slug.is_empty())
-            .unwrap_or_else(|| "message".to_string());
+        let slug = {
+            let slug = crate::mail::slugify(subject);
+            if slug.is_empty() {
+                "message".to_string()
+            } else {
+                slug
+            }
+        };
         let drafts_dir = case_path.join("drafts");
         create_dir_all(&drafts_dir)?;
         let mut draft_name = format!("new-{slug}.md");
@@ -414,7 +576,10 @@ impl Workspace {
         }
         let draft_path = drafts_dir.join(&draft_name);
         let language = self.template_language()?;
-        let body = render_draft_new_body(&self.root, language)?;
+        let body = match body_override {
+            Some(body) => body,
+            None => render_draft_new_body(&self.root, language)?,
+        };
         write_string_new(&draft_path, &render_frontmatter(&fm, &body)?)?;
         Ok(json!({
             "code": "draft_created",
@@ -493,8 +658,19 @@ impl Workspace {
         validate_file_name("draft_name", draft_name)?;
         let draft_path = case_path.join("drafts").join(draft_name);
         let draft_bytes = fs::read(&draft_path).map_err(|e| AppError::io("read draft", &e))?;
-        let draft_hash = sha256_fingerprint(&draft_bytes);
-        let draft = std::str::from_utf8(&draft_bytes)
+        self.validate_draft_bytes_inner(case_uid, draft_name, case_path, &draft_bytes)
+    }
+
+    fn validate_draft_bytes_inner(
+        &self,
+        case_uid: &str,
+        draft_name: &str,
+        case_path: &Path,
+        draft_bytes: &[u8],
+    ) -> Result<DraftValidation> {
+        validate_file_name("draft_name", draft_name)?;
+        let draft_hash = sha256_fingerprint(draft_bytes);
+        let draft = std::str::from_utf8(draft_bytes)
             .map_err(|e| AppError::new("draft_invalid", format!("draft is not UTF-8: {e}")))?;
         let (fm, _) = read_doc::<DraftFrontmatter>(draft).map_err(|e| {
             AppError::new("draft_invalid", format!("invalid draft frontmatter: {e}"))
@@ -508,15 +684,20 @@ impl Workspace {
                 "draft case_uid does not match case",
             ));
         }
-        if fm.subject.is_none() {
+        if fm
+            .subject
+            .as_deref()
+            .map(|subject| subject.trim().is_empty())
+            .unwrap_or(true)
+        {
             return Err(AppError::new("draft_invalid", "draft subject is required"));
         }
         if fm.to.is_empty() {
             return Err(AppError::new("draft_invalid", "draft to is required"));
         }
         if let Some(reply_id) = fm.reply_to_message_id.as_ref() {
-            let messages = read_case_messages(&case_messages_json_path(case_path), case_uid)?;
-            if !messages.message_ids.contains(reply_id) {
+            let messages = read_case_messages(case_path, case_uid)?;
+            if !messages.contains_message(reply_id) {
                 return Err(AppError::new(
                     "draft_invalid",
                     format!("reply_to_message_id does not belong to case: {reply_id}"),
@@ -605,6 +786,57 @@ impl Workspace {
     }
 }
 
+fn draft_body_override(body: Option<&str>, body_file: Option<&str>) -> Result<Option<String>> {
+    match (body, body_file) {
+        (Some(_), Some(_)) => Err(AppError::new(
+            "invalid_request",
+            "--body cannot be used with --body-file",
+        )),
+        (Some(body), None) => Ok(Some(body.to_string())),
+        (None, Some(path)) => {
+            let path = resolve_cli_path(path)?;
+            read_to_string(&path, "read draft body file").map(Some)
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+fn write_draft_validation_state(
+    case_path: &Path,
+    draft_name: &str,
+    validation: &DraftValidation,
+    now: &str,
+) -> Result<()> {
+    let mut draft_state = read_draft_state(case_path)?;
+    let entry = draft_state
+        .drafts
+        .entry(draft_name.to_string())
+        .or_default();
+    entry.last_validated_hash = Some(validation.draft_hash.clone());
+    entry.last_validated_rfc3339 = Some(now.to_string());
+    write_draft_state(case_path, &draft_state)
+}
+
+fn draft_attachment_show_value(case_path: &Path, attachment: &str) -> Value {
+    let Ok(path) = draft_attachment_path(case_path, attachment) else {
+        return json!({
+            "path": attachment,
+            "exists": false,
+            "size_bytes": Value::Null,
+        });
+    };
+    let metadata = fs::metadata(&path).ok();
+    let exists = metadata.as_ref().is_some_and(|metadata| metadata.is_file());
+    let size_bytes = metadata
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len());
+    json!({
+        "path": attachment,
+        "exists": exists,
+        "size_bytes": size_bytes,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct DraftValidation {
     draft_hash: String,
@@ -624,12 +856,6 @@ pub(super) struct DraftStateEntry {
     last_validated_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_validated_rfc3339: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_composed_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_composed_rfc3339: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    push_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -784,11 +1010,6 @@ pub(super) fn write_draft_state(case_path: &Path, state: &DraftStateFile) -> Res
     normalized.schema_name = "draft_state".to_string();
     normalized.schema_version = 1;
     write_json_pretty(&case_drafts_json_path(case_path), &normalized)
-}
-
-pub(super) fn draft_file_hash(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).map_err(|e| AppError::io("read draft", &e))?;
-    Ok(sha256_fingerprint(&bytes))
 }
 
 pub(super) fn resolve_cli_path(path: &str) -> Result<PathBuf> {

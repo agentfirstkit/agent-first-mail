@@ -85,7 +85,10 @@ impl Workspace {
         let mut totals = PurgeTotals::default();
 
         for path in message_json_paths(&self.root)? {
-            let message = read_message(&path)?;
+            let Some(message_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let message = self.read_message_by_id(message_id)?;
             let status = MessageStatus::parse(&message.workspace.status)?;
             let Some(target) = targets_by_status.get(&status).copied() else {
                 continue;
@@ -105,6 +108,7 @@ impl Workspace {
             }
             let message_id = message.message_id.clone();
             purge_message_artifacts(&self.root, &message_id)?;
+            self.clear_message_disposition(target.status(), &message_id)?;
             totals.record_purged(target, message_id);
         }
 
@@ -129,7 +133,16 @@ impl Workspace {
     }
 
     fn message_purge_age_time(&self, message: &MessageFile) -> Result<DateTime<Utc>> {
-        let value = message_state_updated_rfc3339(&self.root, &message.message_id)?
+        let status = MessageStatus::parse(&message.workspace.status)?;
+        let value = self
+            .disposition_state_for_message(&message.message_id)?
+            .and_then(|(disposition_status, added_rfc3339)| {
+                if disposition_status == status {
+                    Some(added_rfc3339)
+                } else {
+                    None
+                }
+            })
             .or_else(|| message.received_rfc3339.clone())
             .or_else(|| message.sent_rfc3339.clone())
             .unwrap_or_else(now_rfc3339);

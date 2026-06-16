@@ -1,0 +1,9 @@
+Message-ID: <login_code@fixtures.afmail.local>
+From: Accounts <no-reply@accounts.example>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 10:56:00 +0000
+Subject: Your login code is 384219
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Use login code 384219. It expires in 10 minutes. If this was not you, reset your password.

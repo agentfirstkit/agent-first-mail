@@ -225,42 +225,39 @@ pub(super) fn thread_item_common(
         ThreadAction::Forward => "forward",
     };
     Ok(json!({
-        "message_id": message.message_id.as_str(),
-        "time": time,
-        "time_rfc3339": message_time(message).unwrap_or_default(),
-        "display_time": display_time,
-        "direction": match direction {
-            ThreadDirection::Received => "inbound",
-            ThreadDirection::Sent => "outbound",
-        },
-        "direction_kind": direction_kind,
-        "direction_symbol": match direction {
-            ThreadDirection::Received => "\u{2190}",
-            ThreadDirection::Sent => "\u{2192}",
-        },
-        "action": action_kind,
-        "action_kind": thread_action_kind(direction, action),
-        "action_label": thread_label(direction, action, language),
-        "is_reply": action == ThreadAction::Reply,
-        "is_forward": action == ThreadAction::Forward,
-        "contact_kind": contact_kind,
-        "contact_label": contact_label,
-        "contact": contact.as_str(),
-        "display_contact": markdown_inline(&contact),
-        "from": message.from.as_deref().unwrap_or(""),
-        "to": message.to.join(", "),
-        "subject": message.subject.as_deref().unwrap_or(""),
-        "display_subject": message
-            .subject
-            .as_deref()
-            .map(markdown_inline)
-            .unwrap_or_default(),
-        "title": title.as_str(),
-        "display_title": markdown_inline(&title),
-        "status": message.workspace.status.as_str(),
-        "display_status": markdown_inline(&message.workspace.status),
-        "link": link,
         "message": message_template_value(message)?,
+        "view": {
+            "time": time,
+            "time_rfc3339": message_time(message).unwrap_or_default(),
+            "display_time": display_time,
+            "direction": match direction {
+                ThreadDirection::Received => "inbound",
+                ThreadDirection::Sent => "outbound",
+            },
+            "direction_kind": direction_kind,
+            "direction_symbol": match direction {
+                ThreadDirection::Received => "\u{2190}",
+                ThreadDirection::Sent => "\u{2192}",
+            },
+            "action": action_kind,
+            "action_kind": thread_action_kind(direction, action),
+            "action_label": thread_label(direction, action, language),
+            "is_reply": action == ThreadAction::Reply,
+            "is_forward": action == ThreadAction::Forward,
+            "contact_kind": contact_kind,
+            "contact_label": contact_label,
+            "contact": contact.as_str(),
+            "display_contact": markdown_inline(&contact),
+            "display_subject": message
+                .subject
+                .as_deref()
+                .map(markdown_inline)
+                .unwrap_or_default(),
+            "title": title.as_str(),
+            "display_title": markdown_inline(&title),
+            "display_status": markdown_inline(&message.workspace.status),
+            "link": link,
+        },
     }))
 }
 
@@ -498,30 +495,26 @@ pub(super) fn message_section_context(
         })
         .collect::<Vec<_>>();
     Ok(json!({
-        "language": language.as_str(),
-        "message_id": message.message_id.as_str(),
-        "timestamp_rfc3339": timestamp_rfc3339,
-        "display_heading": display_heading,
-        "message_action": message_action,
-        "display_counterparty": display_counterparty,
-        "from": from,
-        "subject": message.subject.as_deref().unwrap_or(""),
-        "to": &message.to,
-        "cc": &message.cc,
-        "bcc": &message.bcc,
-        "body_text": body_text,
-        "body_text_block": body_text_block,
-        "body_text_visible": visible_body.visible,
-        "body_text_visible_block": body_text_visible_block,
-        "body_text_fence": body_text_fence,
-        "has_quoted_reply": visible_body.has_quoted_reply,
-        "quoted_message_id": quoted_message_id,
-        "quoted_from": visible_body.quoted_from.unwrap_or_default(),
-        "quoted_at": visible_body.quoted_at.unwrap_or_default(),
-        "security": security,
-        "hints": hints,
-        "attachments": attachments,
         "message": message_template_value(message)?,
+        "view": {
+            "language": language.as_str(),
+            "timestamp_rfc3339": timestamp_rfc3339,
+            "display_heading": display_heading,
+            "message_action": message_action,
+            "display_counterparty": display_counterparty,
+            "body_text": body_text,
+            "body_text_block": body_text_block,
+            "body_text_visible": visible_body.visible,
+            "body_text_visible_block": body_text_visible_block,
+            "body_text_fence": body_text_fence,
+            "has_quoted_reply": visible_body.has_quoted_reply,
+            "quoted_message_id": quoted_message_id,
+            "quoted_from": visible_body.quoted_from.unwrap_or_default(),
+            "quoted_at": visible_body.quoted_at.unwrap_or_default(),
+            "security": security,
+            "hints": hints,
+            "attachments": attachments,
+        },
     }))
 }
 

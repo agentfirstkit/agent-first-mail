@@ -46,7 +46,6 @@ pub fn prepare_outbound(
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    persist_outbound(root, &message_id, &raw, case_uid, "push_queued", None)?;
     Ok(PreparedOutbound {
         message_id,
         raw,
@@ -55,8 +54,20 @@ pub fn prepare_outbound(
     })
 }
 
-pub fn mark_staged(root: &Path, message_id: &str, raw: &[u8], case_uid: &str) -> Result<()> {
-    persist_outbound(root, message_id, raw, case_uid, "staged_draft", None)
+pub fn message_id_for_push(push_id: &str) -> String {
+    let suffix = push_id
+        .strip_prefix("push_")
+        .unwrap_or(push_id)
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("message_sent_{suffix}")
 }
 
 pub fn mark_sent_and_append_case(
@@ -83,11 +94,18 @@ pub fn mark_sent_and_append_case(
         "write sent eml",
     )?;
     crate::store::Workspace::at(root).write_message_artifacts(&parsed.message)?;
-    let messages_path = case_path.join("data").join("messages.json");
-    let mut case_messages = read_case_messages(&messages_path, case_uid)?;
-    case_messages.merge_ids(&[message_id.to_string()]);
-    write_json_pretty(&messages_path, &case_messages)?;
-    update_case_metadata_after_append(case_path, case_messages.message_ids.len())?;
+    let mut case_data = read_case_messages(case_path, case_uid)?;
+    let added_rfc3339 = parsed
+        .message
+        .sent_rfc3339
+        .clone()
+        .unwrap_or_else(crate::store::now_rfc3339);
+    case_data.upsert_item(
+        message_id,
+        parsed.message.subject.as_deref(),
+        &added_rfc3339,
+    );
+    update_case_metadata_after_append(case_path, &case_data)?;
     crate::store::Workspace::at(root).render_refresh()?;
     Ok(())
 }
@@ -143,31 +161,6 @@ fn build_draft_message(
         &from,
         &rfc822_message_id,
     )
-}
-
-fn persist_outbound(
-    root: &Path,
-    message_id: &str,
-    raw: &[u8],
-    case_uid: &str,
-    workspace_status: &str,
-    sent_rfc3339: Option<String>,
-) -> Result<()> {
-    let parsed = parse_outbound_message_with_status(
-        message_id.to_string(),
-        raw,
-        case_uid.to_string(),
-        workspace_status.to_string(),
-        sent_rfc3339,
-    )?;
-    let messages_dir = root.join(".afmail/messages");
-    fs::create_dir_all(&messages_dir).map_err(|e| AppError::io("create messages dir", &e))?;
-    write_bytes_atomic(
-        &messages_dir.join(format!("{message_id}.eml")),
-        raw,
-        "write outbound eml",
-    )?;
-    crate::store::Workspace::at(root).write_message_artifacts(&parsed.message)
 }
 
 fn build_message(
@@ -362,31 +355,33 @@ fn unique_outbound_id(root: &Path) -> String {
     base
 }
 
-fn read_case_messages(path: &Path, case_uid: &str) -> Result<CaseMessages> {
-    if !path.exists() {
-        return Ok(CaseMessages::new(case_uid));
-    }
-    let data = fs::read_to_string(path).map_err(|e| AppError::io("read case messages", &e))?;
-    let mut messages: CaseMessages =
-        serde_json::from_str(&data).map_err(|e| AppError::json("parse case messages", &e))?;
-    if messages.schema_name != "case_messages" || messages.schema_version != 1 {
+fn read_case_messages(case_path: &Path, case_uid: &str) -> Result<CaseMessages> {
+    let path = case_path.join("data").join("case.json");
+    let data = fs::read_to_string(&path).map_err(|e| AppError::io("read case metadata", &e))?;
+    let messages: CaseMessages =
+        serde_json::from_str(&data).map_err(|e| AppError::json("parse case metadata", &e))?;
+    if messages.schema_name != crate::types::CASE_SCHEMA_NAME
+        || messages.schema_version != crate::types::MESSAGE_COLLECTION_SCHEMA_VERSION
+        || messages.collection_uid != case_uid
+    {
         return Err(AppError::new(
-            "case_messages_invalid",
-            "invalid case messages schema",
+            "case_metadata_invalid",
+            "invalid case metadata schema",
         ));
     }
-    messages.case_uid = case_uid.to_string();
     Ok(messages)
 }
 
-fn update_case_metadata_after_append(case_path: &Path, message_count: usize) -> Result<()> {
+fn update_case_metadata_after_append(case_path: &Path, case: &CaseMessages) -> Result<()> {
     let path = case_path.join("data").join("case.json");
-    let data = fs::read_to_string(&path).map_err(|e| AppError::io("read case metadata", &e))?;
-    let mut case: CaseFrontmatter =
-        serde_json::from_str(&data).map_err(|e| AppError::json("parse case metadata", &e))?;
-    case.message_count = message_count;
-    case.updated_rfc3339 = Some(crate::store::now_rfc3339());
-    write_json_pretty(&path, &case)
+    let mut updated: CaseFrontmatter = case.clone();
+    updated.updated_rfc3339 = Some(crate::store::now_rfc3339());
+    updated.normalize(
+        crate::types::CASE_SCHEMA_NAME,
+        &case.collection_uid,
+        &case.collection_name,
+    );
+    write_json_pretty(&path, &updated)
 }
 
 #[cfg(test)]
@@ -431,33 +426,6 @@ mod tests {
         assert!(raw.contains("Subject: Hello"));
         assert!(raw.contains("Hi"));
         assert!(raw.contains("Message-ID: <msg@example.com>"));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn staged_outbound_writes_sidecar_layout() {
-        let root = temp_root("staged-layout");
-        let _ = fs::create_dir_all(&root);
-        let raw = concat!(
-            "Message-ID: <message_out@afmail.local>\r\n",
-            "From: Me <me@example.com>\r\n",
-            "To: Alice <alice@example.com>\r\n",
-            "Date: Thu, 21 May 2026 10:00:00 +0000\r\n",
-            "Subject: Hi\r\n",
-            "Content-Type: text/plain; charset=utf-8\r\n\r\n",
-            "Hello\r\n"
-        );
-        let result = mark_staged(&root, "message_out", raw.as_bytes(), "c20260521001");
-        assert!(result.is_ok(), "{result:?}");
-        assert!(root.join(".afmail/messages/message_out.eml").is_file());
-        assert!(root
-            .join(".afmail/messages/message_out.state.json")
-            .is_file());
-        assert!(!root
-            .join(".afmail/messages/message_out.remote.json")
-            .exists());
-        assert!(!root.join(".afmail/messages/message_out.json").exists());
-        assert!(root.join("messages/message_out.json").is_file());
         let _ = fs::remove_dir_all(root);
     }
 

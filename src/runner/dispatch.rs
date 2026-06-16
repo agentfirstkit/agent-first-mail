@@ -9,7 +9,7 @@ use crate::cli::{
 };
 use crate::error::{AppError, Result};
 use crate::progress::{ProgressCallback, WorkspaceProgressSink};
-use crate::store::Workspace;
+use crate::store::{DraftChange, Workspace};
 use crate::workspace_lock::{LockMode, WorkspaceLock};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -28,6 +28,10 @@ pub(super) fn execute_command_with_progress(
             let cwd = std::env::current_dir().map_err(|e| AppError::io("current dir", &e))?;
             execute_status(&cwd)
         }
+        Command::Init { .. } => {
+            let cwd = std::env::current_dir().map_err(|e| AppError::io("current dir", &e))?;
+            execute_command_unlocked(command, &cwd, progress)
+        }
         command => {
             let cwd = std::env::current_dir().map_err(|e| AppError::io("current dir", &e))?;
             let lock = command_lock(&command, &cwd)?;
@@ -35,7 +39,7 @@ pub(super) fn execute_command_with_progress(
             let mut workspace_progress = workspace_progress_command(&command)
                 .map(|name| WorkspaceProgressSink::start(&lock.root, name));
             if lock.mode == LockMode::Exclusive
-                && !matches!(command, Command::Init | Command::Doctor { .. })
+                && !matches!(command, Command::Init { .. } | Command::Doctor { .. })
             {
                 if let Err(err) = Workspace::at(&lock.root).ensure_no_incomplete_transactions() {
                     if let Some(sink) = &mut workspace_progress {
@@ -79,7 +83,7 @@ fn execute_command_unlocked(
     progress: Option<&mut ProgressCallback<'_>>,
 ) -> Result<Value> {
     match command {
-        Command::Init => Workspace::at(cwd).init(),
+        Command::Init { path } => Workspace::init_command(cwd, path.as_deref()),
         Command::Pull { ids } => Workspace::discover(cwd)?.pull_with_progress(&ids, progress),
         Command::Config { action } => {
             let ws = Workspace::discover(cwd)?;
@@ -102,56 +106,11 @@ fn execute_command_unlocked(
             action,
         } => {
             let ws = Workspace::discover(cwd)?;
-            if dry_run && confirm {
-                return Err(AppError::new(
-                    "invalid_request",
-                    "--dry-run cannot be used with --confirm",
-                ));
-            }
             match action {
                 Some(PushAction::List) => ws.push_list(),
-                Some(PushAction::Drafts {
-                    dry_run: child_dry_run,
-                    confirm: child_confirm,
-                }) => {
-                    let confirmed = push_confirmed(dry_run, confirm, child_dry_run, child_confirm)?;
-                    ws.push_with_progress(crate::push_queue::PushMode::Drafts, confirmed, progress)
-                }
-                Some(PushAction::DraftsSend {
-                    dry_run: child_dry_run,
-                    confirm: child_confirm,
-                }) => {
-                    let confirmed = push_confirmed(dry_run, confirm, child_dry_run, child_confirm)?;
-                    ws.push_with_progress(
-                        crate::push_queue::PushMode::DraftsSend,
-                        confirmed,
-                        progress,
-                    )
-                }
-                Some(PushAction::Archive {
-                    dry_run: child_dry_run,
-                    confirm: child_confirm,
-                }) => {
-                    let confirmed = push_confirmed(dry_run, confirm, child_dry_run, child_confirm)?;
-                    ws.push_with_progress(crate::push_queue::PushMode::Archive, confirmed, progress)
-                }
-                Some(PushAction::Spam {
-                    dry_run: child_dry_run,
-                    confirm: child_confirm,
-                }) => {
-                    let confirmed = push_confirmed(dry_run, confirm, child_dry_run, child_confirm)?;
-                    ws.push_with_progress(crate::push_queue::PushMode::Spam, confirmed, progress)
-                }
-                Some(PushAction::Trash {
-                    dry_run: child_dry_run,
-                    confirm: child_confirm,
-                }) => {
-                    let confirmed = push_confirmed(dry_run, confirm, child_dry_run, child_confirm)?;
-                    ws.push_with_progress(crate::push_queue::PushMode::Trash, confirmed, progress)
-                }
                 None => {
-                    let confirmed = push_confirmed(dry_run, confirm, false, false)?;
-                    ws.push_with_progress(crate::push_queue::PushMode::All, confirmed, progress)
+                    let confirmed = push_confirmed(dry_run, confirm)?;
+                    ws.push_with_progress(confirmed, progress)
                 }
             }
         }
@@ -190,31 +149,14 @@ fn execute_command_unlocked(
             let ws = Workspace::discover(cwd)?;
             match action {
                 MessageAction::Show { message_id } => ws.message_show(&message_id),
-                MessageAction::Archive {
-                    message_id,
-                    archive_ref,
-                    summary,
-                    reason,
-                } => ws.archive_message(
-                    &message_id,
-                    &archive_ref,
-                    Some(summary.as_str()),
-                    reason.as_deref(),
-                ),
                 MessageAction::Spam { message_id, reason } => {
                     ws.spam_message(&message_id, reason.as_deref())
-                }
-                MessageAction::Unspam { message_id, reason } => {
-                    ws.unspam_message(&message_id, reason.as_deref())
                 }
                 MessageAction::Trash { message_id, reason } => {
                     ws.trash_message(&message_id, reason.as_deref())
                 }
-                MessageAction::Untrash { message_id, reason } => {
-                    ws.untrash_message(&message_id, reason.as_deref())
-                }
-                MessageAction::Unarchive { message_id, reason } => {
-                    ws.unarchive_message(&message_id, reason.as_deref())
+                MessageAction::Restore { message_id, reason } => {
+                    ws.restore_message(&message_id, reason.as_deref())
                 }
                 MessageAction::Attachment { action } => match action {
                     MessageAttachmentAction::Fetch {
@@ -231,6 +173,7 @@ fn execute_command_unlocked(
                     &args.name,
                     args.group.as_deref(),
                     args.message.as_deref(),
+                    args.summary.as_deref(),
                     args.reason.as_deref(),
                 ),
                 CaseCommand::List => ws.case_list(),
@@ -238,8 +181,14 @@ fn execute_command_unlocked(
                 CaseCommand::Add {
                     case_ref,
                     message_id,
+                    summary,
                     reason,
-                } => ws.add_message_to_case(&case_ref, &message_id, reason.as_deref()),
+                } => ws.add_message_to_case(
+                    &case_ref,
+                    &message_id,
+                    summary.as_deref(),
+                    reason.as_deref(),
+                ),
                 CaseCommand::Move { case_ref, group } => ws.move_case(&case_ref, &group),
                 CaseCommand::Rename {
                     case_ref,
@@ -277,11 +226,66 @@ fn execute_command_unlocked(
                         to,
                         cc,
                         subject,
-                    } => ws.create_draft(&case_ref, &to, &cc, subject.as_deref()),
+                        body,
+                        body_file,
+                    } => ws.create_draft(
+                        &case_ref,
+                        &to,
+                        &cc,
+                        &subject,
+                        body.as_deref(),
+                        body_file.as_deref(),
+                    ),
+                    CaseDraftAction::Reply {
+                        case_ref,
+                        message_id,
+                        body,
+                        body_file,
+                        all,
+                    } => ws.reply_to_message(
+                        &case_ref,
+                        &message_id,
+                        all,
+                        body.as_deref(),
+                        body_file.as_deref(),
+                    ),
+                    CaseDraftAction::Change {
+                        case_ref,
+                        draft_name,
+                        subject,
+                        to,
+                        cc,
+                        clear_cc,
+                        body,
+                        body_file,
+                    } => ws.change_draft(
+                        &case_ref,
+                        &draft_name,
+                        DraftChange {
+                            subject: subject.as_deref(),
+                            to: &to,
+                            cc: &cc,
+                            clear_cc,
+                            body: body.as_deref(),
+                            body_file: body_file.as_deref(),
+                        },
+                    ),
+                    CaseDraftAction::Show {
+                        case_ref,
+                        draft_name,
+                    } => ws.show_draft(&case_ref, &draft_name),
                     CaseDraftAction::Validate {
                         case_ref,
                         draft_name,
                     } => ws.validate_draft(&case_ref, &draft_name),
+                    CaseDraftAction::Save {
+                        case_ref,
+                        draft_name,
+                    } => ws.save_draft(&case_ref, &draft_name),
+                    CaseDraftAction::Send {
+                        case_ref,
+                        draft_name,
+                    } => ws.send_draft(&case_ref, &draft_name),
                     CaseDraftAction::Attach {
                         case_ref,
                         draft_name,
@@ -293,15 +297,6 @@ fn execute_command_unlocked(
                         reason,
                     } => ws.remove_draft(&case_ref, &draft_name, reason.as_deref()),
                 },
-                CaseCommand::Compose {
-                    case_ref,
-                    draft_name,
-                } => ws.compose_draft(&case_ref, &draft_name),
-                CaseCommand::Reply {
-                    case_ref,
-                    message_id,
-                    all,
-                } => ws.reply_to_message(&case_ref, &message_id, all),
                 CaseCommand::Merge {
                     case_ref,
                     other_case_ref,
@@ -325,6 +320,17 @@ fn execute_command_unlocked(
                         args.message.as_deref(),
                         args.summary.as_deref(),
                         args.reason.as_deref(),
+                    ),
+                    ArchiveMessageCommand::Add {
+                        archive_ref,
+                        message_id,
+                        summary,
+                        reason,
+                    } => ws.archive_message(
+                        &message_id,
+                        &archive_ref,
+                        Some(summary.as_str()),
+                        reason.as_deref(),
                     ),
                     ArchiveMessageCommand::Show { archive_ref } => {
                         ws.archive_message_show(&archive_ref)
@@ -415,6 +421,12 @@ fn execute_command_unlocked(
                 LogAction::Case { case_uid } => ws.log_case(&case_uid),
                 LogAction::Archive { archive_uid } => ws.log_archive(&archive_uid),
             }
+        }
+        #[cfg(feature = "ui")]
+        Command::Ui(_) => {
+            let ws = Workspace::discover(cwd)?;
+            let message = crate::ui::workspace_snapshot(&ws)?;
+            serde_json::to_value(message).map_err(|e| AppError::json("serialize AFUI snapshot", &e))
         }
     }
 }

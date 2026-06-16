@@ -1,0 +1,9 @@
+Message-ID: <inbox_calendar_canceled@fixtures.afmail.local>
+From: Calendar Bot <calendar@example.net>
+To: Me <me@localhost>
+Date: Thu, 21 May 2026 13:48:00 +0000
+Subject: Canceled: old vendor sync
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+This vendor sync was canceled two weeks ago and has no replacement meeting.

@@ -35,11 +35,6 @@ pub(crate) fn sha256_fingerprint(bytes: &[u8]) -> String {
     out
 }
 
-pub(crate) fn file_sha256_fingerprint(path: &Path, context: &str) -> Result<String> {
-    let bytes = std::fs::read(path).map_err(|e| AppError::io(context, &e))?;
-    Ok(sha256_fingerprint(&bytes))
-}
-
 /// Normalize an IMAP flag set: drop the volatile `\Recent` flag, then sort and
 /// de-duplicate so stored flags compare equal regardless of server order.
 pub(crate) fn canonical_flags(flags: impl IntoIterator<Item = String>) -> Vec<String> {
