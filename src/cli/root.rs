@@ -48,7 +48,7 @@ archive/notifications/<archive_uid>-<name>/views/ generated archive detail views
 afmail init
 afmail init email-a
 afmail skill status
-afmail skill install --agent codex --scope project
+afmail skill install --agent codex --scope workspace
 afmail status
 afmail doctor
 afmail pull
@@ -160,7 +160,7 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<PurgeAction>,
     },
-    /// Manage the Agent-First Mail skill for Codex, Claude Code, and opencode.
+    /// Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes.
     Skill {
         #[command(subcommand)]
         action: SkillAction,

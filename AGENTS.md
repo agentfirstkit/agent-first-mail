@@ -6,7 +6,7 @@ This repository contains the afmail spore. Follow the installed
 For repo-local Codex use, install the skill with:
 
 ```bash
-afmail skill install --agent codex --scope project
+afmail skill install --agent codex --scope workspace
 ```
 
 Do not manually edit `.afmail/`; it is machine-managed state. Generated

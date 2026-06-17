@@ -1709,10 +1709,10 @@ fn init_status_and_afdata_output_formats_work() {
     assert_eq!(value["agent_skill_updated"], false);
     assert_eq!(value["agent_skill_path"], "AGENTS.md");
     assert_eq!(
-        value["project_skill_path"],
-        ".agents/skills/agent-first-mail/SKILL.md"
+        value["workspace_skill_path"],
+        ".codex/skills/agent-first-mail/SKILL.md"
     );
-    assert_eq!(value["project_skill_installed"], true);
+    assert_eq!(value["workspace_skill_installed"], true);
     assert_eq!(value["gitignore_created"], true);
     assert_eq!(value["gitignore_updated"], false);
     assert_eq!(value["gitignore_path"], ".gitignore");
@@ -1728,14 +1728,14 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(!root.join("buckets").exists());
     assert!(root.join("templates").is_dir());
     assert!(root
-        .join(".agents/skills/agent-first-mail/SKILL.md")
+        .join(".codex/skills/agent-first-mail/SKILL.md")
         .is_file());
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
     assert!(gitignore.contains("# BEGIN afmail managed"));
     assert!(!gitignore.contains(".afmail/messages/"));
     assert!(gitignore.contains(".afmail/push/"));
-    assert!(gitignore.contains(".agents/skills/agent-first-mail/"));
-    assert!(!gitignore.contains(".codex/skills/agent-first-mail/"));
+    assert!(gitignore.contains(".codex/skills/agent-first-mail/"));
+    assert!(!gitignore.contains(".agents/skills/agent-first-mail/"));
     assert!(!gitignore.contains(".claude/skills/agent-first-mail/"));
     assert!(gitignore.contains(".afmail/workspace.progress.json"));
     assert!(gitignore.contains("messages/*.json"));
@@ -1751,7 +1751,7 @@ fn init_status_and_afdata_output_formats_work() {
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
     assert!(agents.contains("Agent-First Mail Notes"));
     assert!(agents.contains("<!-- BEGIN afmail managed -->"));
-    assert!(agents.contains("afmail skill install --agent codex --scope project"));
+    assert!(agents.contains("afmail skill install --agent codex --scope workspace"));
     assert!(agents.contains("- `.`"));
     let do_not_edit = root.join(".afmail/DO_NOT_EDIT.txt");
     assert!(do_not_edit.is_file());
@@ -1769,7 +1769,7 @@ fn init_status_and_afdata_output_formats_work() {
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
     assert!(agents.contains("custom agents file"));
     assert!(agents.contains("<!-- BEGIN afmail managed -->"));
-    assert!(agents.contains("afmail skill install --agent codex --scope project"));
+    assert!(agents.contains("afmail skill install --agent codex --scope workspace"));
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
     assert!(gitignore.contains("*.tmp"));
     assert!(gitignore.contains("# BEGIN afmail managed"));
@@ -1975,24 +1975,24 @@ fn init_subdirectory_registers_agent_root_and_rejects_reserved_paths() {
     assert_eq!(value["agent_skill_path"], "AGENTS.md");
     assert_eq!(value["agent_gitignore_path"], ".gitignore");
     assert_eq!(
-        value["project_skill_path"],
-        ".agents/skills/agent-first-mail/SKILL.md"
+        value["workspace_skill_path"],
+        ".codex/skills/agent-first-mail/SKILL.md"
     );
     assert!(root.join("email-a/.afmail/config.json").is_file());
     assert!(root.join("email-a/templates").is_dir());
     assert!(root.join("email-a/.gitignore").is_file());
     assert!(root
-        .join(".agents/skills/agent-first-mail/SKILL.md")
+        .join(".codex/skills/agent-first-mail/SKILL.md")
         .is_file());
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
     assert!(agents.contains("- `email-a/`"));
     let root_gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
-    assert!(root_gitignore.contains(".agents/skills/agent-first-mail/"));
+    assert!(root_gitignore.contains(".codex/skills/agent-first-mail/"));
     assert!(!root_gitignore.contains("messages/*.json"));
     let workspace_gitignore =
         fs::read_to_string(root.join("email-a/.gitignore")).unwrap_or_default();
     assert!(workspace_gitignore.contains("messages/*.json"));
-    assert!(!workspace_gitignore.contains(".agents/skills/agent-first-mail/"));
+    assert!(!workspace_gitignore.contains(".codex/skills/agent-first-mail/"));
 
     let (status, stdout) = run(&root, &["init", "email-b"]);
     assert_eq!(status, 0, "{stdout}");

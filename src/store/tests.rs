@@ -646,7 +646,7 @@ fn init_and_status_work() {
     );
     assert!(root.join("AGENTS.md").is_file());
     assert!(root
-        .join(".agents/skills/agent-first-mail/SKILL.md")
+        .join(".codex/skills/agent-first-mail/SKILL.md")
         .is_file());
     assert!(root.join(".gitignore").is_file());
     assert!(root.join(".afmail/DO_NOT_EDIT.txt").is_file());
@@ -665,8 +665,8 @@ fn init_and_status_work() {
     assert!(gitignore.contains(AFMAIL_GITIGNORE_BEGIN));
     assert!(!gitignore.contains(".afmail/messages/"));
     assert!(gitignore.contains(".afmail/push/"));
-    assert!(gitignore.contains(".agents/skills/agent-first-mail/"));
-    assert!(!gitignore.contains(".codex/skills/agent-first-mail/"));
+    assert!(gitignore.contains(".codex/skills/agent-first-mail/"));
+    assert!(!gitignore.contains(".agents/skills/agent-first-mail/"));
     assert!(!gitignore.contains(".claude/skills/agent-first-mail/"));
     assert!(gitignore.contains(".afmail/transactions/"));
     assert!(gitignore.contains(".afmail/workspace.progress.json"));
@@ -676,7 +676,7 @@ fn init_and_status_work() {
     assert!(gitignore.contains("deleted/*.md"));
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
     assert!(agents.contains(AFMAIL_AGENTS_BEGIN));
-    assert!(agents.contains("afmail skill install --agent codex --scope project"));
+    assert!(agents.contains("afmail skill install --agent codex --scope workspace"));
     assert!(agents.contains("- `.`"));
     assert!(message_json_paths(&root)
         .map(|paths| paths.is_empty())
@@ -725,8 +725,8 @@ fn init_updates_managed_blocks_and_preserves_user_content() {
     assert!(!gitignore.contains("old generated rule"));
     assert!(!gitignore.contains(".afmail/messages/"));
     assert!(gitignore.contains(".afmail/push/"));
-    assert!(gitignore.contains(".agents/skills/agent-first-mail/"));
-    assert!(!gitignore.contains(".codex/skills/agent-first-mail/"));
+    assert!(gitignore.contains(".codex/skills/agent-first-mail/"));
+    assert!(!gitignore.contains(".agents/skills/agent-first-mail/"));
     assert!(!gitignore.contains(".claude/skills/agent-first-mail/"));
     assert!(gitignore.contains(".afmail/workspace.progress.json"));
     assert!(gitignore.contains("messages/*.json"));
@@ -738,7 +738,7 @@ fn init_updates_managed_blocks_and_preserves_user_content() {
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
     assert!(agents.contains("custom mailbox instructions"));
     assert!(!agents.contains("old afmail rule"));
-    assert!(agents.contains("afmail skill install --agent codex --scope project"));
+    assert!(agents.contains("afmail skill install --agent codex --scope workspace"));
     assert!(agents.contains("- `.`"));
     assert_eq!(agents.matches(AFMAIL_AGENTS_BEGIN).count(), 1);
 

@@ -111,7 +111,7 @@ in git means the repository contains private mail bodies and attachment bytes.
 The managed ignore block covers local runtime or generated files such as
 `.afmail/push/`, `.afmail/logs/`,
 `.afmail/transactions/`, `.afmail/workspace.lock`,
-`.afmail/workspace.progress.json`, `.agents/skills/agent-first-mail/`,
+`.afmail/workspace.progress.json`, `.codex/skills/agent-first-mail/`,
 `messages/*.json`, `triage/*.md`,
 `spam/*.md`, `trash/*.md`, `deleted/*.md`, and generated object Markdown views.
 

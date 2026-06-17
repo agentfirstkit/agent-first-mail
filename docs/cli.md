@@ -46,7 +46,7 @@ archive/notifications/<archive_uid>-<name>/views/ generated archive detail views
 afmail init
 afmail init email-a
 afmail skill status
-afmail skill install --agent codex --scope project
+afmail skill install --agent codex --scope workspace
 afmail status
 afmail doctor
 afmail pull
@@ -130,7 +130,7 @@ archive/notifications/<archive_uid>-<name>/views/ generated archive detail views
 afmail init
 afmail init email-a
 afmail skill status
-afmail skill install --agent codex --scope project
+afmail skill install --agent codex --scope workspace
 afmail status
 afmail doctor
 afmail pull
@@ -184,7 +184,7 @@ Commands:
   status   Report workspace health, counts, and latest pull/push progress
   doctor   Check afmail workspace consistency without inspecting Git
   purge    Permanently delete old local spam, trash, and remote-deleted records
-  skill    Manage the Agent-First Mail skill for Codex, Claude Code, and opencode
+  skill    Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
   triage   Inspect the triage queue
   message  Operate on any local message id
   case     Create a case or operate on an existing case ref
@@ -493,10 +493,10 @@ Options:
           Print help
 ```
 
-## afmail skill - Manage the Agent-First Mail skill for Codex, Claude Code, and opencode
+## afmail skill - Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
 
 ```text
-Manage the Agent-First Mail skill for Codex, Claude Code, and opencode
+Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
 
 Usage: skill <COMMAND>
 
@@ -524,18 +524,19 @@ Options:
 
           Possible values:
           - all:         Manage every agent that supports the requested scope
-          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .agents/skills
+          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .codex/skills
           - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
           - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
+          - hermes:      Manage the Hermes skill under $HERMES_HOME/skills or ~/.hermes/skills
 
           [default: all]
 
       --scope <SCOPE>
-          Skill scope. Project scope installs under the current project's skill directory
+          Skill scope. Workspace scope installs under the current workspace's skill directory
 
           Possible values:
-          - personal: Install under the user-level skills directory
-          - project:  Install under the current project's skills directory
+          - personal:  Install under the user-level skills directory
+          - workspace: Install under the current workspace's skills directory
 
           [default: personal]
 
@@ -559,18 +560,19 @@ Options:
 
           Possible values:
           - all:         Manage every agent that supports the requested scope
-          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .agents/skills
+          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .codex/skills
           - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
           - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
+          - hermes:      Manage the Hermes skill under $HERMES_HOME/skills or ~/.hermes/skills
 
           [default: all]
 
       --scope <SCOPE>
-          Skill scope. Project scope installs under the current project's skill directory
+          Skill scope. Workspace scope installs under the current workspace's skill directory
 
           Possible values:
-          - personal: Install under the user-level skills directory
-          - project:  Install under the current project's skills directory
+          - personal:  Install under the user-level skills directory
+          - workspace: Install under the current workspace's skills directory
 
           [default: personal]
 
@@ -597,18 +599,19 @@ Options:
 
           Possible values:
           - all:         Manage every agent that supports the requested scope
-          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .agents/skills
+          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .codex/skills
           - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
           - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
+          - hermes:      Manage the Hermes skill under $HERMES_HOME/skills or ~/.hermes/skills
 
           [default: all]
 
       --scope <SCOPE>
-          Skill scope. Project scope installs under the current project's skill directory
+          Skill scope. Workspace scope installs under the current workspace's skill directory
 
           Possible values:
-          - personal: Install under the user-level skills directory
-          - project:  Install under the current project's skills directory
+          - personal:  Install under the user-level skills directory
+          - workspace: Install under the current workspace's skills directory
 
           [default: personal]
 

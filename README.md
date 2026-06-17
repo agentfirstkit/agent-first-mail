@@ -13,7 +13,7 @@ Supported platforms: macOS, Linux, Windows.
 
 ## How it works: one email, start to finish
 
-<video src="https://github.com/agentfirstkit/agent-first-mail/releases/download/demo-media/afmail-demo.mp4" controls muted playsinline></video>
+<video src="https://github.com/user-attachments/assets/a7f9ee4d-3729-41e7-811c-74590d963782" controls muted playsinline></video>
 
 You don't run afmail — your agent does. You ask for what you want in plain
 language, and afmail is the tool it reaches for. The commands below are the
@@ -199,8 +199,8 @@ follows afmail's behavior rules, and restart the agent afterward so it reloads
 them:
 
 ```bash
-afmail skill install --agent codex --scope project
-afmail skill status --agent codex --scope project
+afmail skill install --agent codex --scope workspace
+afmail skill status --agent codex --scope workspace
 ```
 
 Then it's **one workspace directory per mailbox**: run `afmail init` in a fresh

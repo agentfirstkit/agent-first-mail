@@ -1,5 +1,5 @@
 //! `afmail skill` subcommand. Installs/uninstalls/reports status of the embedded
-//! Agent Skill across Codex, Claude Code, and opencode via the shared
+//! Agent Skill across Codex, Claude Code, opencode, and Hermes via the shared
 //! `agent_first_data::skill` admin — the same implementation every spore uses.
 
 use crate::cli::{SkillAction, SkillAgentSelection, SkillScope, SkillTargetArgs};
@@ -30,10 +30,10 @@ pub fn handle_action(action: SkillAction) -> Result<Value> {
     })
 }
 
-pub(crate) fn install_codex_project_skill(skills_dir: &Path) -> Result<Value> {
+pub(crate) fn install_codex_workspace_skill(skills_dir: &Path) -> Result<Value> {
     let options = SkillOptions {
         agent: AfSelection::Codex,
-        scope: AfScope::Project,
+        scope: AfScope::Workspace,
         skills_dir: Some(skills_dir.to_string_lossy().to_string()),
         force: false,
     };
@@ -70,13 +70,14 @@ fn convert_agent(agent: SkillAgentSelection) -> AfSelection {
         SkillAgentSelection::Codex => AfSelection::Codex,
         SkillAgentSelection::ClaudeCode => AfSelection::ClaudeCode,
         SkillAgentSelection::Opencode => AfSelection::Opencode,
+        SkillAgentSelection::Hermes => AfSelection::Hermes,
     }
 }
 
 fn convert_scope(scope: SkillScope) -> AfScope {
     match scope {
         SkillScope::Personal => AfScope::Personal,
-        SkillScope::Project => AfScope::Project,
+        SkillScope::Workspace => AfScope::Workspace,
     }
 }
 

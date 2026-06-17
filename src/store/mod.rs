@@ -61,8 +61,8 @@ use std::time::Instant;
 
 const AFMAIL_GITIGNORE_BEGIN: &str = "# BEGIN afmail managed";
 const AFMAIL_GITIGNORE_END: &str = "# END afmail managed";
-const AFMAIL_AGENT_GITIGNORE_BODY: &str = r#"# Agent-First Mail project skill installed by afmail init.
-.agents/skills/agent-first-mail/
+const AFMAIL_AGENT_GITIGNORE_BODY: &str = r#"# Agent-First Mail workspace skill installed by afmail init.
+.codex/skills/agent-first-mail/
 "#;
 const AFMAIL_WORKSPACE_GITIGNORE_BODY: &str = r#"# Local mail evidence and runtime state.
 .afmail/push/
@@ -405,9 +405,12 @@ impl Workspace {
             &agent_skill_body,
         )?;
 
-        let project_skills_dir = agent_root.join(".agents/skills");
-        let _project_skill = crate::skill_admin::install_codex_project_skill(&project_skills_dir)?;
-        let project_skill_path = project_skills_dir.join("agent-first-mail").join("SKILL.md");
+        let workspace_skills_dir = agent_root.join(".codex/skills");
+        let _workspace_skill =
+            crate::skill_admin::install_codex_workspace_skill(&workspace_skills_dir)?;
+        let workspace_skill_path = workspace_skills_dir
+            .join("agent-first-mail")
+            .join("SKILL.md");
 
         let do_not_edit_path = self.root.join(".afmail/DO_NOT_EDIT.txt");
         let do_not_edit_created = !do_not_edit_path.exists();
@@ -438,8 +441,8 @@ impl Workspace {
             "agent_skill_path": rel_path(agent_root, &agent_skill_path),
             "agent_skill_created": agent_skill_change.created,
             "agent_skill_updated": agent_skill_change.updated,
-            "project_skill_path": rel_path(agent_root, &project_skill_path),
-            "project_skill_installed": true,
+            "workspace_skill_path": rel_path(agent_root, &workspace_skill_path),
+            "workspace_skill_installed": true,
             "do_not_edit_path": ".afmail/DO_NOT_EDIT.txt",
             "do_not_edit_created": do_not_edit_created,
             "do_not_edit_updated": do_not_edit_updated,

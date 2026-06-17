@@ -142,7 +142,7 @@ copied into case files by assignment or case creation:
 The managed `.gitignore` ignores rebuildable `messages/*.json`, generated
 Markdown read views, `.afmail/push/`, `.afmail/logs/`, `.afmail/transactions/`,
 `.afmail/workspace.lock`, `.afmail/workspace.progress.json`, and
-`.agents/skills/agent-first-mail/`. It
+`.codex/skills/agent-first-mail/`. It
 intentionally does not ignore `.afmail/messages/`. If you track
 `.afmail/messages/` in git, the repository will contain private mail bodies,
 sidecar metadata, and raw attachment bytes.
