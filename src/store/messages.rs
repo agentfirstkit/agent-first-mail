@@ -319,6 +319,10 @@ impl Workspace {
         )?;
         self.apply_fetched_attachment_files(message_id, &mut parsed.message.attachments);
         self.apply_materialized_workspace_overlays(&mut parsed.message)?;
+        let config = MailConfig::load(&self.root)?;
+        self.apply_identity_match(&mut parsed.message, &config)?;
+        let contact_map = self.contact_email_map()?;
+        self.apply_contact_link(&mut parsed.message, &contact_map);
         self.write_message_materialized_cache(&parsed.message)?;
         Ok(parsed.message)
     }
@@ -479,6 +483,47 @@ impl Workspace {
         Ok(())
     }
 
+    /// Set `message.contact` from the sender address using a prebuilt
+    /// email→contact map. Called only from materialize/render paths so plain
+    /// `message show` reads the stored field without scanning contacts.
+    pub(super) fn apply_contact_link(
+        &self,
+        message: &mut MessageFile,
+        contact_map: &BTreeMap<String, MessageContact>,
+    ) {
+        message.contact = message
+            .from
+            .as_deref()
+            .and_then(|from| super::contacts::contact_for_from(contact_map, from));
+    }
+
+    pub(crate) fn apply_identity_match(
+        &self,
+        message: &mut MessageFile,
+        config: &MailConfig,
+    ) -> Result<()> {
+        if message
+            .direction
+            .as_deref()
+            .and_then(|direction| MailDirection::parse(direction).ok())
+            == Some(MailDirection::Outbound)
+        {
+            message.identity = None;
+            message.identity_email = None;
+            message.identity_match = None;
+            message.identity_candidates.clear();
+            message.observed_recipient_emails.clear();
+            return Ok(());
+        }
+        let matched = config.match_message_identity(&self.root, message)?;
+        message.identity = matched.identity;
+        message.identity_email = matched.identity_email;
+        message.identity_match = Some(matched.identity_match);
+        message.identity_candidates = matched.identity_candidates;
+        message.observed_recipient_emails = matched.observed_recipient_emails;
+        Ok(())
+    }
+
     fn pending_push_state_for_message(
         &self,
         message_id: &str,
@@ -559,6 +604,7 @@ impl Workspace {
             .iter()
             .any(|flag| flag.eq_ignore_ascii_case("\\Flagged"));
         let push = message.workspace.push.clone();
+        let contact = message.contact.clone();
         Ok(json!({
             "code": "message_show",
             "message_id": message.message_id.as_str(),
@@ -583,9 +629,15 @@ impl Workspace {
             "remote_missing_since_rfc3339": message_remote_missing_since_rfc3339(&message),
             "remote_effect_pending": message_remote_effect_pending(&message),
             "push": push,
+            "identity": message.identity.as_deref().unwrap_or(""),
+            "identity_email": message.identity_email.as_deref().unwrap_or(""),
+            "identity_match": message.identity_match.as_deref().unwrap_or(""),
+            "identity_candidates": &message.identity_candidates,
+            "observed_recipient_emails": &message.observed_recipient_emails,
             "view_path": self.message_existing_view_path(&message)?,
             "json_path": format!("messages/{message_id}.json"),
             "message": message_template_value(&message)?,
+            "contact": contact,
         }))
     }
 
@@ -861,10 +913,9 @@ impl Workspace {
                 &body_text,
                 config.template_language(),
                 config
-                    .smtp
-                    .from
-                    .as_deref()
-                    .or(config.imap.username.as_deref()),
+                    .default_identity()
+                    .ok()
+                    .map(|identity| identity.email.as_str()),
                 output_dir,
             )?,
         )

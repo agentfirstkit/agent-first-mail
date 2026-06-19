@@ -149,7 +149,30 @@ pub struct MessageFile {
     pub eml_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentRef>,
+    /// Contact association materialized from the sender address at
+    /// render/materialize time. Read-only on `message show`; refreshed when a
+    /// contact's emails or name change, or by `afmail render refresh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<MessageContact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_match: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identity_candidates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_recipient_emails: Vec<String>,
     pub workspace: WorkspaceState,
+}
+
+/// Snapshot of the contact whose email set includes this message's sender.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MessageContact {
+    pub contact_uid: String,
+    pub display_name: String,
 }
 
 /// Result of a single email authentication mechanism (SPF / DKIM / DMARC).

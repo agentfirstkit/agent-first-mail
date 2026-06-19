@@ -170,6 +170,7 @@ impl Workspace {
         create_dir_all(&case_views_messages_dir(&case_path))?;
         create_dir_all(&case_path.join("drafts"))?;
         create_dir_all(&case_path.join("files"))?;
+        let mut guard = DirGuard::new(case_path.clone());
         let added_rfc3339 = now_rfc3339();
         let items = message_id
             .map(|message_id| {
@@ -235,6 +236,7 @@ impl Workspace {
                 "case_path": rel_path(&self.root, &case_path),
             }),
         )?;
+        guard.commit();
         Ok(result)
     }
 

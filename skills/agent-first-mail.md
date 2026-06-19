@@ -63,6 +63,9 @@ decisions, and recovery only.
 - Match agent-authored user-facing text, summaries, reasons, case/archive names,
   notes, and draft bodies to `.afmail/config.json` `workspace.language_bcp47`
   unless the user asks for another language.
+- Treat configured `identities` as our send personas, separate from contacts.
+  Contacts are other people; identities are us. Same email address may have
+  multiple identity slugs/personas.
 - Case UIDs (`cYYYYMMDDNNN`) and archive UIDs (`aYYYYMMDDNNN`) are stable
   identities. Names are human-readable labels provided only on create/rename and
   may use the workspace/user language (for example `应用反馈-肥料登记` or `服务通知`).
@@ -71,11 +74,17 @@ decisions, and recovery only.
 
 ## Triage Decisions
 
+- Before choosing between case and direct archive, check
+  `afmail message show MESSAGE_ID` for `related_message_ids`; if any are present
+  the messages share a conversation thread and must be grouped into a case — a
+  direct archive will be rejected by afmail. Add each related message to the case
+  with `afmail case add REF MESSAGE_ID --reason TEXT`.
 - Needs reply, tracking, or conversation continuity: create a case with
   `afmail case create --name NAME --message MESSAGE_ID [--group GROUP] --reason TEXT`,
   copy the returned `case_uid`, then use `afmail case add REF MESSAGE_ID --reason TEXT`
   for later messages.
-- Standalone notification/reference mail: create a direct archive with
+- Standalone notification/reference mail with no related messages: create a direct
+  archive with
   `afmail archive message create --name NAME --message MESSAGE_ID --summary TEXT --reason TEXT`,
   copy the returned `archive_uid`, then use
   `afmail archive message add REF MESSAGE_ID --summary TEXT --reason TEXT` only for
@@ -173,6 +182,10 @@ decisions, and recovery only.
 - Create new outbound mail with `afmail case draft new REF --to ... --subject
   ... [--body TEXT | --body-file PATH]`; the draft Markdown remains the source
   of truth until push consumes it.
+- Use `--identity SLUG` on `case draft new`, `case draft reply`, or
+  `case draft change` when the sender persona matters. If omitted, afmail uses
+  the configured default identity. Identity footers are inserted into the draft
+  body for review; they are not hidden send-time additions.
 - Add an outbound attachment with `afmail case draft attach REF DRAFT_NAME PATH`;
   it copies external files into case `files/` and updates draft frontmatter.
 - Queued save/send items reference the current draft file, so draft edits after
@@ -192,6 +205,27 @@ decisions, and recovery only.
   `afmail case draft attach REF DRAFT_NAME PATH` so afmail copies it into case
   `files/`.
 - Archive completed active cases with `afmail case archive REF --reason TEXT`.
+
+## Contacts
+
+- Contacts are local cards under `contacts/<group>/<contact_uid>-<name>.md`;
+  archived contacts move to `archive/contacts/`. Contact UIDs (`pYYYYMMDDNNN`)
+  are stable identities; names are human labels and may use the workspace
+  language. Use the returned UID or `UID-any-readable-suffix` as the ref.
+- Manage contacts with `afmail contact create|list|show|move|rename`,
+  `afmail contact email|phone add|remove`, `afmail contact tag|untag`, and
+  `afmail contact extract` to stub contacts from message senders. Email
+  addresses are globally unique across contacts.
+- `afmail message show` and the generated message views show a `contact` link
+  resolved from the sender address. afmail materializes that link onto messages
+  and refreshes it automatically when a contact's emails or name change; if a
+  link ever looks stale, run `afmail render refresh` to rebuild views.
+- `afmail contact archive|reopen REF --reason TEXT` require `--reason` like case
+  transitions. Treat each contact's `notes.md`-style body as user-authored: only
+  run `afmail contact notes append|replace` when the user asks.
+- Contact card `.md` files are canonical state; edit them with `afmail contact`
+  commands, not by hand, and never hand-edit the generated `messages/*.json`
+  contact link.
 
 ## Archive Boundaries
 

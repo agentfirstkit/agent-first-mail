@@ -64,6 +64,9 @@ impl Workspace {
         } else {
             workspace_local_date(&self.workspace_date_offset()?)
         };
+        if let Some(message_id) = message_id {
+            self.ensure_no_related_conversation(message_id)?;
+        }
         let archive_uid = self.next_archive_uid(&date)?;
         let archive_dir = self.archive_message_dir_for_name(&archive_uid, name);
         if archive_dir.exists() {
@@ -77,6 +80,7 @@ impl Workspace {
         }
         create_dir_all(&archive_dir.join("data"))?;
         create_dir_all(&archive_dir.join("views/messages"))?;
+        let mut guard = DirGuard::new(archive_dir.clone());
         write_string_new(
             &archive_dir.join("notes.md"),
             &new_notes_md(&self.root, self.template_language()?)?,
@@ -95,7 +99,6 @@ impl Workspace {
             "path": rel_path(&self.root, &archive_dir),
         });
         if let Some(message_id) = message_id {
-            self.ensure_no_related_conversation(message_id)?;
             let archived_rfc3339 = self.set_direct_message_archive(message_id, &archive_uid)?;
             self.upsert_archive_message_item(&archive_uid, message_id, summary, &archived_rfc3339)?;
             self.refresh_archive_message_category(&archive_uid)?;
@@ -131,6 +134,7 @@ impl Workspace {
                 "path": rel_path(&self.root, &archive_dir),
             }),
         )?;
+        guard.commit();
         Ok(result)
     }
 

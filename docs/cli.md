@@ -6,8 +6,6 @@
 
 # afmail - Agent-First Mail: local-first email case workspace for agents.
 
-Agent-First Mail: local-first email case workspace for agents.
-
 ### Interface Policy
 
 - Files are the read interface; CLI is for effects.
@@ -34,6 +32,8 @@ deleted/*.md             generated remote-deleted review views
 cases/<group>/<case_uid>-<name>/case.md generated case entry view
 cases/<group>/<case_uid>-<name>/data/ canonical case state
 cases/<group>/<case_uid>-<name>/views/ generated case detail views
+contacts/<group>/<contact_uid>-<name>.md canonical contact cards
+archive/contacts/<contact_uid>-<name>.md archived contact cards
 archive/cases/<case_uid>-<name>/ archived case workspaces
 archive/notifications/<archive_uid>-<name>/archive.md generated archive entry view
 archive/notifications/<archive_uid>-<name>/data/ canonical archive state
@@ -66,6 +66,12 @@ afmail case move c20260603001 waiting
 afmail case archive c20260603001 --reason "feedback handled"
 afmail archive case restore c20260603001 --group open --reason "customer replied"
 afmail case tag c20260603001 legal --reason "legal review needed"
+afmail contact create --name "Zhang San" --email zhang@example.com --org Acme --role Buyer
+afmail contact list --group people
+afmail contact email add p20260603001 zhang-alt@example.com
+afmail contact rename p20260603001 --name "Zhang Sanfeng"
+afmail contact extract --from-triage
+afmail contact archive p20260603001 --reason "left the company"
 afmail case draft reply c20260603001 message_inbox_607146690_22
 afmail case draft attach c20260603001 reply-message_inbox_607146690_22.md ./screenshot.png
 afmail case draft change c20260603001 reply-message_inbox_607146690_22.md --body "Thanks, I will check this."
@@ -90,89 +96,6 @@ afmail message attachment fetch message_inbox_607146690_21 2
 - `2`: invalid CLI arguments
 
 ```text
-Agent-First Mail: local-first email case workspace for agents.
-
-### Interface Policy
-
-- Files are the read interface; CLI is for effects.
-- One workspace represents one mailbox account.
-- Message commands use `afmail message ACTION MESSAGE_ID ...`.
-- Case commands use `afmail case ACTION CASE_REF ...`.
-- Active and archived cases are readable with `afmail case show REF` and
- `afmail archive case show REF`.
-- stdout carries structured Agent-First Data events; stderr is not a protocol channel.
-
-### Workspace Shape
-
-```text
-.afmail/messages/        raw .eml plus durable remote sidecars
-messages/               rebuildable parsed message cache
-.afmail/logs/events.jsonl append-only audit log
-.afmail/transactions/    transient local write transaction sentinels
-.afmail/workspace.progress.json latest push/pull runtime snapshot
-templates/               user-editable generated Markdown templates
-triage/message_*.md      active unprocessed message views
-spam/*.md                generated spam review views
-trash/*.md               generated trash review views
-deleted/*.md             generated remote-deleted review views
-cases/<group>/<case_uid>-<name>/case.md generated case entry view
-cases/<group>/<case_uid>-<name>/data/ canonical case state
-cases/<group>/<case_uid>-<name>/views/ generated case detail views
-archive/cases/<case_uid>-<name>/ archived case workspaces
-archive/notifications/<archive_uid>-<name>/archive.md generated archive entry view
-archive/notifications/<archive_uid>-<name>/data/ canonical archive state
-archive/notifications/<archive_uid>-<name>/views/ generated archive detail views
-```
-
-### Examples
-
-```text
-afmail init
-afmail init email-a
-afmail skill status
-afmail skill install --agent codex --scope workspace
-afmail status
-afmail doctor
-afmail pull
-afmail pull sent archive
-afmail remote folders
-afmail case create --name 应用反馈-肥料登记 --message message_inbox_607146690_21 --group open --reason "new feedback thread"
-afmail case show c20260603001
-afmail case add c20260603001 message_inbox_607146690_22 --reason "follow-up belongs to same feedback case"
-afmail archive message create --name 服务通知 --message message_inbox_607146690_23 --summary "billing notification" --reason "billing notification"
-afmail archive message show a20260603001
-afmail archive message restore a20260603001 message_inbox_607146690_23 --reason "needs triage again"
-afmail message spam message_inbox_607146690_23 --reason "phishing attempt"
-afmail message trash message_inbox_607146690_24 --reason "duplicate no longer needed"
-afmail render refresh
-afmail doctor repair --confirm
-afmail case move c20260603001 waiting
-afmail case archive c20260603001 --reason "feedback handled"
-afmail archive case restore c20260603001 --group open --reason "customer replied"
-afmail case tag c20260603001 legal --reason "legal review needed"
-afmail case draft reply c20260603001 message_inbox_607146690_22
-afmail case draft attach c20260603001 reply-message_inbox_607146690_22.md ./screenshot.png
-afmail case draft change c20260603001 reply-message_inbox_607146690_22.md --body "Thanks, I will check this."
-afmail case draft validate c20260603001 reply-message_inbox_607146690_22.md
-afmail case draft send c20260603001 reply-message_inbox_607146690_22.md
-afmail case draft remove c20260603001 reply-message_inbox_607146690_22.md --reason "mistaken draft"
-afmail push list
-afmail push
-afmail push --confirm
-afmail purge
-afmail purge spam --older-than-days 30
-afmail purge deleted
-afmail log list --limit 20
-afmail message show message_inbox_607146690_21
-afmail message attachment fetch message_inbox_607146690_21 2
-```
-
-### Exit Codes
-
-- `0`: command completed successfully
-- `1`: runtime/store/protocol error
-- `2`: invalid CLI arguments
-
 Usage: afmail [OPTIONS] [COMMAND]
 
 Commands:
@@ -188,6 +111,7 @@ Commands:
   triage   Inspect the triage queue
   message  Operate on any local message id
   case     Create a case or operate on an existing case ref
+  contact  Create a contact or operate on an existing contact ref
   archive  Inspect and manage archived cases and direct-message archive categories
   render   Rebuild generated read views from local workspace state
   log      Inspect the workspace audit log
@@ -215,8 +139,6 @@ Options:
 ## afmail init - Initialize the current directory or a child path as an afmail workspace
 
 ```text
-Initialize the current directory or a child path as an afmail workspace
-
 Usage: init [PATH]
 
 Arguments:
@@ -231,8 +153,6 @@ Options:
 ## afmail pull - Read configured IMAP mailbox ids into local message files without changing remote mail
 
 ```text
-Read configured IMAP mailbox ids into local message files without changing remote mail
-
 Usage: pull [IDS]...
 
 Arguments:
@@ -247,8 +167,6 @@ Options:
 ## afmail config - Read or update local afmail configuration
 
 ```text
-Read or update local afmail configuration
-
 Usage: config <COMMAND>
 
 Commands:
@@ -265,8 +183,6 @@ Options:
 ### afmail config show - Show local .afmail/config.json
 
 ```text
-Show local .afmail/config.json
-
 Usage: show
 
 Options:
@@ -277,8 +193,6 @@ Options:
 ### afmail config get - Get one config key
 
 ```text
-Get one config key
-
 Usage: get <KEY>
 
 Arguments:
@@ -293,8 +207,6 @@ Options:
 ### afmail config set - Set one config key. Multiple values become an array for array keys
 
 ```text
-Set one config key. Multiple values become an array for array keys
-
 Usage: set <KEY> [VALUES]...
 
 Arguments:
@@ -312,8 +224,6 @@ Options:
 ## afmail remote - Inspect remote IMAP state for configuring mailboxes
 
 ```text
-Inspect remote IMAP state for configuring mailboxes
-
 Usage: remote <COMMAND>
 
 Commands:
@@ -329,8 +239,6 @@ Options:
 ### afmail remote test - Test IMAP login using local config
 
 ```text
-Test IMAP login using local config
-
 Usage: test
 
 Options:
@@ -341,8 +249,6 @@ Options:
 ### afmail remote folders - List IMAP folders/mailboxes
 
 ```text
-List IMAP folders/mailboxes
-
 Usage: folders
 
 Options:
@@ -353,8 +259,6 @@ Options:
 ## afmail push - Push queued local work or manage the local push queue
 
 ```text
-Push queued local work or manage the local push queue
-
 Usage: push [OPTIONS] [COMMAND]
 
 Commands:
@@ -375,8 +279,6 @@ Options:
 ### afmail push list - List queued local push items
 
 ```text
-List queued local push items
-
 Usage: list
 
 Options:
@@ -387,8 +289,6 @@ Options:
 ## afmail status - Report workspace health, counts, and latest pull/push progress
 
 ```text
-Report workspace health, counts, and latest pull/push progress
-
 Usage: status
 
 Options:
@@ -399,8 +299,6 @@ Options:
 ## afmail doctor - Check afmail workspace consistency without inspecting Git
 
 ```text
-Check afmail workspace consistency without inspecting Git
-
 Usage: doctor [COMMAND]
 
 Commands:
@@ -415,8 +313,6 @@ Options:
 ### afmail doctor repair - Repair only unambiguous afmail-generated state
 
 ```text
-Repair only unambiguous afmail-generated state
-
 Usage: repair [OPTIONS]
 
 Options:
@@ -430,8 +326,6 @@ Options:
 ## afmail purge - Permanently delete old local spam, trash, and remote-deleted records
 
 ```text
-Permanently delete old local spam, trash, and remote-deleted records
-
 Usage: purge [OPTIONS] [COMMAND]
 
 Commands:
@@ -451,8 +345,6 @@ Options:
 ### afmail purge spam - Permanently delete old local spam records
 
 ```text
-Permanently delete old local spam records
-
 Usage: spam [OPTIONS]
 
 Options:
@@ -466,8 +358,6 @@ Options:
 ### afmail purge trash - Permanently delete old local trash records
 
 ```text
-Permanently delete old local trash records
-
 Usage: trash [OPTIONS]
 
 Options:
@@ -481,8 +371,6 @@ Options:
 ### afmail purge deleted - Permanently delete old local records whose remote message disappeared
 
 ```text
-Permanently delete old local records whose remote message disappeared
-
 Usage: deleted [OPTIONS]
 
 Options:
@@ -496,8 +384,6 @@ Options:
 ## afmail skill - Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
 
 ```text
-Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
-
 Usage: skill <COMMAND>
 
 Commands:
@@ -514,8 +400,6 @@ Options:
 ### afmail skill status - Show whether the Agent-First Mail skill is installed and valid
 
 ```text
-Show whether the Agent-First Mail skill is installed and valid
-
 Usage: status [OPTIONS]
 
 Options:
@@ -550,8 +434,6 @@ Options:
 ### afmail skill install - Install the Agent-First Mail skill
 
 ```text
-Install the Agent-First Mail skill
-
 Usage: install [OPTIONS]
 
 Options:
@@ -589,8 +471,6 @@ Options:
 ### afmail skill uninstall - Remove an afmail-managed Agent-First Mail skill
 
 ```text
-Remove an afmail-managed Agent-First Mail skill
-
 Usage: uninstall [OPTIONS]
 
 Options:
@@ -628,8 +508,6 @@ Options:
 ## afmail triage - Inspect the triage queue
 
 ```text
-Inspect the triage queue
-
 Usage: triage <COMMAND>
 
 Commands:
@@ -644,8 +522,6 @@ Options:
 ### afmail triage list - List compact untriaged message locators
 
 ```text
-List compact untriaged message locators
-
 Usage: list
 
 Options:
@@ -656,8 +532,6 @@ Options:
 ## afmail message - Operate on any local message id
 
 ```text
-Operate on any local message id
-
 Usage: message <COMMAND>
 
 Commands:
@@ -676,8 +550,6 @@ Options:
 ### afmail message show - Show the full local message metadata, body text, and attachment metadata
 
 ```text
-Show the full local message metadata, body text, and attachment metadata
-
 Usage: show <MESSAGE_ID>
 
 Arguments:
@@ -692,8 +564,6 @@ Options:
 ### afmail message spam - Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
 
 ```text
-Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
-
 Usage: spam [OPTIONS] <MESSAGE_ID>
 
 Arguments:
@@ -711,8 +581,6 @@ Options:
 ### afmail message trash - Explicitly discard this message locally, show it under trash/, and queue a Trash move
 
 ```text
-Explicitly discard this message locally, show it under trash/, and queue a Trash move
-
 Usage: trash [OPTIONS] <MESSAGE_ID>
 
 Arguments:
@@ -730,8 +598,6 @@ Options:
 ### afmail message restore - Restore a message from spam, trash, or direct archive back to triage
 
 ```text
-Restore a message from spam, trash, or direct archive back to triage
-
 Usage: restore [OPTIONS] <MESSAGE_ID>
 
 Arguments:
@@ -749,8 +615,6 @@ Options:
 ### afmail message attachment - Fetch an attachment for this message
 
 ```text
-Fetch an attachment for this message
-
 Usage: attachment <COMMAND>
 
 Commands:
@@ -765,8 +629,6 @@ Options:
 #### afmail message attachment fetch - Fetch one attachment by MIME part id, or all attachments when omitted
 
 ```text
-Fetch one attachment by MIME part id, or all attachments when omitted
-
 Usage: fetch <MESSAGE_ID> [PART_ID]
 
 Arguments:
@@ -784,8 +646,6 @@ Options:
 ## afmail case - Create a case or operate on an existing case ref
 
 ```text
-Create a case or operate on an existing case ref
-
 Usage: case <COMMAND>
 
 Commands:
@@ -812,8 +672,6 @@ Options:
 ### afmail case create - Create a new case and return its stable UID/ref
 
 ```text
-Create a new case and return its stable UID/ref
-
 Usage: create [OPTIONS] --name <NAME>
 
 Options:
@@ -839,8 +697,6 @@ Options:
 ### afmail case list - List compact active case locators
 
 ```text
-List compact active case locators
-
 Usage: list
 
 Options:
@@ -851,8 +707,6 @@ Options:
 ### afmail case show - Show a case's case.md (active or archived) without changing workspace state
 
 ```text
-Show a case's case.md (active or archived) without changing workspace state
-
 Usage: show <CASE_REF>
 
 Arguments:
@@ -867,8 +721,6 @@ Options:
 ### afmail case add - Add a message to this existing case
 
 ```text
-Add a message to this existing case
-
 Usage: add [OPTIONS] <CASE_REF> <MESSAGE_ID>
 
 Arguments:
@@ -892,8 +744,6 @@ Options:
 ### afmail case move - Move this case to another group
 
 ```text
-Move this case to another group
-
 Usage: move <CASE_REF> <GROUP>
 
 Arguments:
@@ -911,8 +761,6 @@ Options:
 ### afmail case rename - Rename this active case's human-readable name without changing its UID
 
 ```text
-Rename this active case's human-readable name without changing its UID
-
 Usage: rename [OPTIONS] --name <NAME> <CASE_REF>
 
 Arguments:
@@ -933,8 +781,6 @@ Options:
 ### afmail case notes - Show or edit active case notes
 
 ```text
-Show or edit active case notes
-
 Usage: notes <COMMAND>
 
 Commands:
@@ -951,8 +797,6 @@ Options:
 #### afmail case notes show - Show notes markdown
 
 ```text
-Show notes markdown
-
 Usage: show <CASE_REF>
 
 Arguments:
@@ -967,8 +811,6 @@ Options:
 #### afmail case notes append - Append text to notes markdown
 
 ```text
-Append text to notes markdown
-
 Usage: append --text <TEXT> <CASE_REF>
 
 Arguments:
@@ -986,8 +828,6 @@ Options:
 #### afmail case notes replace - Replace notes markdown with text
 
 ```text
-Replace notes markdown with text
-
 Usage: replace --text <TEXT> <CASE_REF>
 
 Arguments:
@@ -1005,8 +845,6 @@ Options:
 ### afmail case archive - Archive this active case
 
 ```text
-Archive this active case
-
 Usage: archive [OPTIONS] <CASE_REF>
 
 Arguments:
@@ -1024,8 +862,6 @@ Options:
 ### afmail case reopen - Reopen this case as active work without changing its tags
 
 ```text
-Reopen this case as active work without changing its tags
-
 Usage: reopen [OPTIONS] <CASE_REF>
 
 Arguments:
@@ -1043,8 +879,6 @@ Options:
 ### afmail case tag - Add a case organization tag
 
 ```text
-Add a case organization tag
-
 Usage: tag [OPTIONS] <CASE_REF> <TAG>
 
 Arguments:
@@ -1065,8 +899,6 @@ Options:
 ### afmail case untag - Remove a case organization tag
 
 ```text
-Remove a case organization tag
-
 Usage: untag [OPTIONS] <CASE_REF> <TAG>
 
 Arguments:
@@ -1087,8 +919,6 @@ Options:
 ### afmail case draft - Create, edit, validate, queue, or remove local case drafts
 
 ```text
-Create, edit, validate, queue, or remove local case drafts
-
 Usage: draft <COMMAND>
 
 Commands:
@@ -1111,8 +941,6 @@ Options:
 #### afmail case draft new - Scaffold a new outbound draft (not a reply) in this case
 
 ```text
-Scaffold a new outbound draft (not a reply) in this case
-
 Usage: new [OPTIONS] --to <TO> --subject <SUBJECT> <CASE_REF>
 
 Arguments:
@@ -1129,6 +957,9 @@ Options:
       --subject <SUBJECT>
           Draft subject
 
+      --identity <IDENTITY>
+          Workspace identity slug to send as. Defaults to the configured default identity
+
       --body <BODY>
           Draft body text
 
@@ -1142,8 +973,6 @@ Options:
 #### afmail case draft reply - Scaffold a reply draft to a message, prefilled and quoting the original
 
 ```text
-Scaffold a reply draft to a message, prefilled and quoting the original
-
 Usage: reply [OPTIONS] <CASE_REF> <MESSAGE_ID>
 
 Arguments:
@@ -1154,6 +983,9 @@ Arguments:
           Message id in this case to reply to
 
 Options:
+      --identity <IDENTITY>
+          Workspace identity slug to send as. Defaults to the configured default identity
+
       --body <BODY>
           Draft body text. Replaces the default reply template when provided
 
@@ -1170,8 +1002,6 @@ Options:
 #### afmail case draft change - Change an existing editable draft in place
 
 ```text
-Change an existing editable draft in place
-
 Usage: change [OPTIONS] <CASE_REF> <DRAFT_NAME>
 
 Arguments:
@@ -1194,6 +1024,9 @@ Options:
       --clear-cc
           Clear all Cc recipients
 
+      --identity <IDENTITY>
+          Change the workspace identity slug used by this draft
+
       --body <BODY>
           Replacement draft body text
 
@@ -1207,8 +1040,6 @@ Options:
 #### afmail case draft show - Show an existing draft in a review-friendly JSON shape
 
 ```text
-Show an existing draft in a review-friendly JSON shape
-
 Usage: show <CASE_REF> <DRAFT_NAME>
 
 Arguments:
@@ -1226,8 +1057,6 @@ Options:
 #### afmail case draft validate - Validate a draft under the case drafts directory
 
 ```text
-Validate a draft under the case drafts directory
-
 Usage: validate <CASE_REF> <DRAFT_NAME>
 
 Arguments:
@@ -1245,8 +1074,6 @@ Options:
 #### afmail case draft save - Queue this draft to be saved to the remote Drafts mailbox
 
 ```text
-Queue this draft to be saved to the remote Drafts mailbox
-
 Usage: save <CASE_REF> <DRAFT_NAME>
 
 Arguments:
@@ -1264,8 +1091,6 @@ Options:
 #### afmail case draft send - Queue this draft to be sent and recorded in the case after push succeeds
 
 ```text
-Queue this draft to be sent and recorded in the case after push succeeds
-
 Usage: send <CASE_REF> <DRAFT_NAME>
 
 Arguments:
@@ -1283,8 +1108,6 @@ Options:
 #### afmail case draft attach - Copy or reference a file and add it to a draft's attachments
 
 ```text
-Copy or reference a file and add it to a draft's attachments
-
 Usage: attach <CASE_REF> <DRAFT_NAME> <PATH>
 
 Arguments:
@@ -1305,8 +1128,6 @@ Options:
 #### afmail case draft remove - Remove a local draft and any queued outbound item for it
 
 ```text
-Remove a local draft and any queued outbound item for it
-
 Usage: remove [OPTIONS] <CASE_REF> <DRAFT_NAME>
 
 Arguments:
@@ -1327,8 +1148,6 @@ Options:
 ### afmail case merge - Merge another case into this case
 
 ```text
-Merge another case into this case
-
 Usage: merge [OPTIONS] <CASE_REF> <OTHER_CASE_REF>
 
 Arguments:
@@ -1346,11 +1165,391 @@ Options:
           Print help
 ```
 
+## afmail contact - Create a contact or operate on an existing contact ref
+
+```text
+Usage: contact <COMMAND>
+
+Commands:
+  create   Create a new contact record
+  list     List contacts, optionally filtered by group, tag, org, or role
+  show     Show a contact's full file content
+  move     Move a contact to a different group
+  rename   Rename a contact's display name
+  email    Add or remove email addresses for a contact
+  phone    Add or remove phone numbers for a contact
+  tag      Add a tag to a contact
+  untag    Remove a tag from a contact
+  notes    Show or edit contact notes
+  archive  Archive an active contact
+  reopen   Reopen an archived contact as active
+  extract  Extract stub contacts from message senders not yet in the contact list
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help
+```
+
+### afmail contact create - Create a new contact record
+
+```text
+Usage: create [OPTIONS] --name <NAME>
+
+Options:
+      --name <NAME>
+          Display name for the contact
+
+      --group <GROUP>
+          Group. Defaults to the configured default contact group
+
+      --email <EMAILS>
+          Email address. Repeatable
+
+      --phone <PHONES>
+          Phone number. Repeatable
+
+      --org <ORG>
+          Organization name
+
+      --role <ROLE>
+          Role or title
+
+      --tag <TAGS>
+          Tag. Repeatable
+
+  -h, --help
+          Print help
+```
+
+### afmail contact list - List contacts, optionally filtered by group, tag, org, or role
+
+```text
+Usage: list [OPTIONS]
+
+Options:
+      --group <GROUP>
+          Filter to a specific group
+
+      --tag <TAG>
+          Filter by tag
+
+      --org <ORG>
+          Filter by organization
+
+      --role <ROLE>
+          Filter by role
+
+  -h, --help
+          Print help
+```
+
+### afmail contact show - Show a contact's full file content
+
+```text
+Usage: show <CONTACT_REF>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+Options:
+  -h, --help
+          Print help
+```
+
+### afmail contact move - Move a contact to a different group
+
+```text
+Usage: move --group <GROUP> <CONTACT_REF>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+Options:
+      --group <GROUP>
+          Destination group
+
+  -h, --help
+          Print help
+```
+
+### afmail contact rename - Rename a contact's display name
+
+```text
+Usage: rename --name <NAME> <CONTACT_REF>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+Options:
+      --name <NAME>
+          New display name
+
+  -h, --help
+          Print help
+```
+
+### afmail contact email - Add or remove email addresses for a contact
+
+```text
+Usage: email <COMMAND>
+
+Commands:
+  add     Add an email address to the contact
+  remove  Remove an email address from the contact
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help
+```
+
+#### afmail contact email add - Add an email address to the contact
+
+```text
+Usage: add <CONTACT_REF> <EMAIL>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+  <EMAIL>
+          Email address to add
+
+Options:
+  -h, --help
+          Print help
+```
+
+#### afmail contact email remove - Remove an email address from the contact
+
+```text
+Usage: remove <CONTACT_REF> <EMAIL>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+  <EMAIL>
+          Email address to remove
+
+Options:
+  -h, --help
+          Print help
+```
+
+### afmail contact phone - Add or remove phone numbers for a contact
+
+```text
+Usage: phone <COMMAND>
+
+Commands:
+  add     Add a phone number to the contact
+  remove  Remove a phone number from the contact
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help
+```
+
+#### afmail contact phone add - Add a phone number to the contact
+
+```text
+Usage: add <CONTACT_REF> <PHONE>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+  <PHONE>
+          Phone number to add
+
+Options:
+  -h, --help
+          Print help
+```
+
+#### afmail contact phone remove - Remove a phone number from the contact
+
+```text
+Usage: remove <CONTACT_REF> <PHONE>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+  <PHONE>
+          Phone number to remove
+
+Options:
+  -h, --help
+          Print help
+```
+
+### afmail contact tag - Add a tag to a contact
+
+```text
+Usage: tag <CONTACT_REF> <TAG>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+  <TAG>
+          Tag to add
+
+Options:
+  -h, --help
+          Print help
+```
+
+### afmail contact untag - Remove a tag from a contact
+
+```text
+Usage: untag <CONTACT_REF> <TAG>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+  <TAG>
+          Tag to remove
+
+Options:
+  -h, --help
+          Print help
+```
+
+### afmail contact notes - Show or edit contact notes
+
+```text
+Usage: notes <COMMAND>
+
+Commands:
+  show     Show notes markdown
+  append   Append text to notes markdown
+  replace  Replace notes markdown with text
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help
+```
+
+#### afmail contact notes show - Show notes markdown
+
+```text
+Usage: show <CONTACT_REF>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+Options:
+  -h, --help
+          Print help
+```
+
+#### afmail contact notes append - Append text to notes markdown
+
+```text
+Usage: append --text <TEXT> <CONTACT_REF>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+Options:
+      --text <TEXT>
+          Markdown text to append
+
+  -h, --help
+          Print help
+```
+
+#### afmail contact notes replace - Replace notes markdown with text
+
+```text
+Usage: replace --text <TEXT> <CONTACT_REF>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+Options:
+      --text <TEXT>
+          Markdown text to write
+
+  -h, --help
+          Print help
+```
+
+### afmail contact archive - Archive an active contact
+
+```text
+Usage: archive [OPTIONS] <CONTACT_REF>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+Options:
+      --reason <REASON>
+          Why this contact is being archived; required by default
+
+  -h, --help
+          Print help
+```
+
+### afmail contact reopen - Reopen an archived contact as active
+
+```text
+Usage: reopen [OPTIONS] <CONTACT_REF>
+
+Arguments:
+  <CONTACT_REF>
+          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+
+Options:
+      --group <GROUP>
+          Destination group. Defaults to contact.default_group in config
+
+      --reason <REASON>
+          Why this contact should be reopened; required by default
+
+  -h, --help
+          Print help
+```
+
+### afmail contact extract - Extract stub contacts from message senders not yet in the contact list
+
+```text
+Usage: extract [OPTIONS]
+
+Options:
+      --from-triage
+          Extract from triage messages only
+
+      --from-case <CASE_REF>
+          Extract from a specific case's messages
+
+      --all
+          Extract from all triage and case messages
+
+      --group <GROUP>
+          Destination group for created contacts. Defaults to contact.default_group
+
+  -h, --help
+          Print help
+```
+
 ## afmail archive - Inspect and manage archived cases and direct-message archive categories
 
 ```text
-Inspect and manage archived cases and direct-message archive categories
-
 Usage: archive <COMMAND>
 
 Commands:
@@ -1367,8 +1566,6 @@ Options:
 ### afmail archive list - List compact archived cases and/or direct-message archive categories
 
 ```text
-List compact archived cases and/or direct-message archive categories
-
 Usage: list [COMMAND]
 
 Commands:
@@ -1384,8 +1581,6 @@ Options:
 #### afmail archive list cases - List compact archived cases
 
 ```text
-List compact archived cases
-
 Usage: cases
 
 Options:
@@ -1396,8 +1591,6 @@ Options:
 #### afmail archive list messages - List compact direct-message archive categories
 
 ```text
-List compact direct-message archive categories
-
 Usage: messages
 
 Options:
@@ -1408,8 +1601,6 @@ Options:
 ### afmail archive message - Operate on a direct-message archive category
 
 ```text
-Operate on a direct-message archive category
-
 Usage: message <COMMAND>
 
 Commands:
@@ -1431,8 +1622,6 @@ Options:
 #### afmail archive message create - Create a direct-message archive category and optionally file one message
 
 ```text
-Create a direct-message archive category and optionally file one message
-
 Usage: create [OPTIONS] --name <NAME>
 
 Options:
@@ -1455,8 +1644,6 @@ Options:
 #### afmail archive message add - File an existing message into this direct-message archive category
 
 ```text
-File an existing message into this direct-message archive category
-
 Usage: add [OPTIONS] --summary <SUMMARY> <ARCHIVE_REF> <MESSAGE_ID>
 
 Arguments:
@@ -1480,8 +1667,6 @@ Options:
 #### afmail archive message show - Show archive category index and entries
 
 ```text
-Show archive category index and entries
-
 Usage: show <ARCHIVE_REF>
 
 Arguments:
@@ -1496,8 +1681,6 @@ Options:
 #### afmail archive message restore - Restore a direct archived message to triage
 
 ```text
-Restore a direct archived message to triage
-
 Usage: restore [OPTIONS] <ARCHIVE_REF> <MESSAGE_ID>
 
 Arguments:
@@ -1518,8 +1701,6 @@ Options:
 #### afmail archive message move - Move a direct archived message to another archive category
 
 ```text
-Move a direct archived message to another archive category
-
 Usage: move [OPTIONS] <ARCHIVE_REF> <MESSAGE_ID> <NEW_ARCHIVE_REF>
 
 Arguments:
@@ -1543,8 +1724,6 @@ Options:
 #### afmail archive message rename - Rename this archive category's human-readable name without changing its UID
 
 ```text
-Rename this archive category's human-readable name without changing its UID
-
 Usage: rename [OPTIONS] --name <NAME> <ARCHIVE_REF>
 
 Arguments:
@@ -1565,8 +1744,6 @@ Options:
 #### afmail archive message set-summary - Set or replace one direct archive entry summary
 
 ```text
-Set or replace one direct archive entry summary
-
 Usage: set-summary [OPTIONS] --summary <SUMMARY> <ARCHIVE_REF> <MESSAGE_ID>
 
 Arguments:
@@ -1590,8 +1767,6 @@ Options:
 #### afmail archive message notes - Show or edit archive category notes
 
 ```text
-Show or edit archive category notes
-
 Usage: notes <COMMAND>
 
 Commands:
@@ -1608,8 +1783,6 @@ Options:
 ##### afmail archive message notes show - Show notes markdown
 
 ```text
-Show notes markdown
-
 Usage: show <ARCHIVE_REF>
 
 Arguments:
@@ -1624,8 +1797,6 @@ Options:
 ##### afmail archive message notes append - Append text to notes markdown
 
 ```text
-Append text to notes markdown
-
 Usage: append --text <TEXT> <ARCHIVE_REF>
 
 Arguments:
@@ -1643,8 +1814,6 @@ Options:
 ##### afmail archive message notes replace - Replace notes markdown with text
 
 ```text
-Replace notes markdown with text
-
 Usage: replace --text <TEXT> <ARCHIVE_REF>
 
 Arguments:
@@ -1662,8 +1831,6 @@ Options:
 ### afmail archive case - Operate on an archived case
 
 ```text
-Operate on an archived case
-
 Usage: case <COMMAND>
 
 Commands:
@@ -1681,8 +1848,6 @@ Options:
 #### afmail archive case show - Show the archived case
 
 ```text
-Show the archived case
-
 Usage: show <CASE_REF>
 
 Arguments:
@@ -1697,8 +1862,6 @@ Options:
 #### afmail archive case restore - Restore an archived case to an active case group
 
 ```text
-Restore an archived case to an active case group
-
 Usage: restore [OPTIONS] --group <GROUP> <CASE_REF>
 
 Arguments:
@@ -1719,8 +1882,6 @@ Options:
 #### afmail archive case rename - Rename this archived case's human-readable name without changing its UID
 
 ```text
-Rename this archived case's human-readable name without changing its UID
-
 Usage: rename [OPTIONS] --name <NAME> <CASE_REF>
 
 Arguments:
@@ -1741,8 +1902,6 @@ Options:
 #### afmail archive case notes - Show or edit archived case notes
 
 ```text
-Show or edit archived case notes
-
 Usage: notes <COMMAND>
 
 Commands:
@@ -1759,8 +1918,6 @@ Options:
 ##### afmail archive case notes show - Show notes markdown
 
 ```text
-Show notes markdown
-
 Usage: show <CASE_REF>
 
 Arguments:
@@ -1775,8 +1932,6 @@ Options:
 ##### afmail archive case notes append - Append text to notes markdown
 
 ```text
-Append text to notes markdown
-
 Usage: append --text <TEXT> <CASE_REF>
 
 Arguments:
@@ -1794,8 +1949,6 @@ Options:
 ##### afmail archive case notes replace - Replace notes markdown with text
 
 ```text
-Replace notes markdown with text
-
 Usage: replace --text <TEXT> <CASE_REF>
 
 Arguments:
@@ -1813,8 +1966,6 @@ Options:
 ## afmail render - Rebuild generated read views from local workspace state
 
 ```text
-Rebuild generated read views from local workspace state
-
 Usage: render <COMMAND>
 
 Commands:
@@ -1830,8 +1981,6 @@ Options:
 ### afmail render refresh - Rebuild generated case and direct-message archive read views
 
 ```text
-Rebuild generated case and direct-message archive read views
-
 Usage: refresh
 
 Options:
@@ -1842,8 +1991,6 @@ Options:
 ### afmail render templates - Export built-in language templates, keeping existing files unless forced
 
 ```text
-Export built-in language templates, keeping existing files unless forced
-
 Usage: templates [OPTIONS]
 
 Options:
@@ -1857,8 +2004,6 @@ Options:
 ## afmail log - Inspect the workspace audit log
 
 ```text
-Inspect the workspace audit log
-
 Usage: log <COMMAND>
 
 Commands:
@@ -1877,8 +2022,6 @@ Options:
 ### afmail log list - List recent audit events
 
 ```text
-List recent audit events
-
 Usage: list [OPTIONS]
 
 Options:
@@ -1894,8 +2037,6 @@ Options:
 ### afmail log tail - Tail recent audit events as JSON data
 
 ```text
-Tail recent audit events as JSON data
-
 Usage: tail
 
 Options:
@@ -1906,8 +2047,6 @@ Options:
 ### afmail log message - List events for one message id
 
 ```text
-List events for one message id
-
 Usage: message <MESSAGE_ID>
 
 Arguments:
@@ -1922,8 +2061,6 @@ Options:
 ### afmail log case - List events for one case id
 
 ```text
-List events for one case id
-
 Usage: case <CASE_UID>
 
 Arguments:
@@ -1938,8 +2075,6 @@ Options:
 ### afmail log archive - List events for one archive category
 
 ```text
-List events for one archive category
-
 Usage: archive <ARCHIVE_UID>
 
 Arguments:

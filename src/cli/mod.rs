@@ -1,6 +1,7 @@
 mod archive;
 mod cases;
 mod common;
+mod contacts;
 mod hints;
 mod message;
 mod parse;
@@ -17,6 +18,9 @@ pub use cases::{CaseCommand, CaseCreateArgs, CaseDraftAction, CaseNotesAction};
 pub use common::{
     ConfigAction, DoctorAction, LogAction, PurgeAction, PushAction, RemoteAction, RenderAction,
     TriageAction,
+};
+pub use contacts::{
+    ContactCommand, ContactCreateArgs, ContactEmailAction, ContactNotesAction, ContactPhoneAction,
 };
 #[doc(hidden)]
 pub use hints::error_hint;

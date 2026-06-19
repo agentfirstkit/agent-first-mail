@@ -4,12 +4,13 @@ use super::push::push_confirmed;
 use crate::cli::{
     ArchiveAction, ArchiveCaseAction, ArchiveCaseNotesAction, ArchiveListAction,
     ArchiveMessageCommand, ArchiveMessageNotesAction, CaseCommand, CaseDraftAction,
-    CaseNotesAction, Command, ConfigAction, DoctorAction, LogAction, MessageAction,
-    MessageAttachmentAction, PushAction, RemoteAction, RenderAction, TriageAction,
+    CaseNotesAction, Command, ConfigAction, ContactCommand, ContactEmailAction, ContactNotesAction,
+    ContactPhoneAction, DoctorAction, LogAction, MessageAction, MessageAttachmentAction,
+    PushAction, RemoteAction, RenderAction, TriageAction,
 };
 use crate::error::{AppError, Result};
 use crate::progress::{ProgressCallback, WorkspaceProgressSink};
-use crate::store::{DraftChange, Workspace};
+use crate::store::{DraftChange, NewDraft, Workspace};
 use crate::workspace_lock::{LockMode, WorkspaceLock};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -226,19 +227,24 @@ fn execute_command_unlocked(
                         to,
                         cc,
                         subject,
+                        identity,
                         body,
                         body_file,
                     } => ws.create_draft(
                         &case_ref,
-                        &to,
-                        &cc,
-                        &subject,
-                        body.as_deref(),
-                        body_file.as_deref(),
+                        NewDraft {
+                            to: &to,
+                            cc: &cc,
+                            subject: &subject,
+                            identity: identity.as_deref(),
+                            body: body.as_deref(),
+                            body_file: body_file.as_deref(),
+                        },
                     ),
                     CaseDraftAction::Reply {
                         case_ref,
                         message_id,
+                        identity,
                         body,
                         body_file,
                         all,
@@ -246,6 +252,7 @@ fn execute_command_unlocked(
                         &case_ref,
                         &message_id,
                         all,
+                        identity.as_deref(),
                         body.as_deref(),
                         body_file.as_deref(),
                     ),
@@ -256,6 +263,7 @@ fn execute_command_unlocked(
                         to,
                         cc,
                         clear_cc,
+                        identity,
                         body,
                         body_file,
                     } => ws.change_draft(
@@ -266,6 +274,7 @@ fn execute_command_unlocked(
                             to: &to,
                             cc: &cc,
                             clear_cc,
+                            identity: identity.as_deref(),
                             body: body.as_deref(),
                             body_file: body_file.as_deref(),
                         },
@@ -302,6 +311,92 @@ fn execute_command_unlocked(
                     other_case_ref,
                     reason,
                 } => ws.merge_case(&case_ref, &other_case_ref, reason.as_deref()),
+            }
+        }
+        Command::Contact { action } => {
+            use crate::store::contacts::{ContactExtractSource, NewContact};
+            let ws = Workspace::discover(cwd)?;
+            match action {
+                ContactCommand::Create(args) => ws.contact_create(NewContact {
+                    name: &args.name,
+                    group: args.group.as_deref(),
+                    emails: &args.emails,
+                    phones: &args.phones,
+                    org: args.org.as_deref(),
+                    role: args.role.as_deref(),
+                    tags: &args.tags,
+                }),
+                ContactCommand::List {
+                    group,
+                    tag,
+                    org,
+                    role,
+                } => ws.contact_list(
+                    group.as_deref(),
+                    tag.as_deref(),
+                    org.as_deref(),
+                    role.as_deref(),
+                ),
+                ContactCommand::Show { contact_ref } => ws.contact_show(&contact_ref),
+                ContactCommand::Move { contact_ref, group } => {
+                    ws.contact_move(&contact_ref, &group)
+                }
+                ContactCommand::Rename { contact_ref, name } => {
+                    ws.contact_rename(&contact_ref, &name)
+                }
+                ContactCommand::Email { action } => match action {
+                    ContactEmailAction::Add { contact_ref, email } => {
+                        ws.contact_email_add(&contact_ref, &email)
+                    }
+                    ContactEmailAction::Remove { contact_ref, email } => {
+                        ws.contact_email_remove(&contact_ref, &email)
+                    }
+                },
+                ContactCommand::Phone { action } => match action {
+                    ContactPhoneAction::Add { contact_ref, phone } => {
+                        ws.contact_phone_add(&contact_ref, &phone)
+                    }
+                    ContactPhoneAction::Remove { contact_ref, phone } => {
+                        ws.contact_phone_remove(&contact_ref, &phone)
+                    }
+                },
+                ContactCommand::Tag { contact_ref, tag } => ws.contact_tag(&contact_ref, &tag),
+                ContactCommand::Untag { contact_ref, tag } => ws.contact_untag(&contact_ref, &tag),
+                ContactCommand::Notes { action } => match action {
+                    ContactNotesAction::Show { contact_ref } => ws.contact_notes_show(&contact_ref),
+                    ContactNotesAction::Append { contact_ref, text } => {
+                        ws.contact_notes_append(&contact_ref, &text)
+                    }
+                    ContactNotesAction::Replace { contact_ref, text } => {
+                        ws.contact_notes_replace(&contact_ref, &text)
+                    }
+                },
+                ContactCommand::Archive {
+                    contact_ref,
+                    reason,
+                } => ws.contact_archive_contact(&contact_ref, reason.as_deref()),
+                ContactCommand::Reopen {
+                    contact_ref,
+                    group,
+                    reason,
+                } => ws.contact_reopen_contact(&contact_ref, group.as_deref(), reason.as_deref()),
+                ContactCommand::Extract {
+                    from_triage,
+                    from_case,
+                    all,
+                    group,
+                } => {
+                    let source = if from_triage {
+                        ContactExtractSource::FromTriage
+                    } else if let Some(case_ref) = from_case {
+                        ContactExtractSource::FromCase(case_ref)
+                    } else if all {
+                        ContactExtractSource::All
+                    } else {
+                        ContactExtractSource::FromTriage
+                    };
+                    ws.contact_extract(source, group.as_deref())
+                }
             }
         }
         Command::Archive { action } => {

@@ -242,6 +242,7 @@ impl Workspace {
                 message.workspace.archive_uid = None;
                 message.workspace.archived_rfc3339 = None;
                 message.workspace.origin = None;
+                self.apply_identity_match(&mut message, &config)?;
                 desired
                     .entry(spec.dir)
                     .or_default()

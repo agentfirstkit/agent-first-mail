@@ -1,5 +1,34 @@
 use super::*;
 
+/// Removes a directory on drop unless `commit()` was called first.
+/// Use this to ensure newly-created workspace directories are cleaned up
+/// if any subsequent operation in the same command fails.
+pub(super) struct DirGuard {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl DirGuard {
+    pub(super) fn new(path: PathBuf) -> Self {
+        DirGuard {
+            path,
+            committed: false,
+        }
+    }
+
+    pub(super) fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        if !self.committed && self.path.exists() {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ManagedBlockChange {
     pub(super) created: bool,
@@ -492,6 +521,7 @@ pub(super) fn next_uid_for_date(
         let valid = match prefix {
             'c' => validate_case_uid(&uid).is_ok(),
             'a' => validate_archive_uid(&uid).is_ok(),
+            'p' => validate_contact_uid(&uid).is_ok(),
             _ => false,
         };
         if !valid || uid.get(1..9) != Some(date) {
@@ -533,6 +563,39 @@ pub(super) fn human_slug(value: &str) -> String {
     } else {
         slug
     }
+}
+
+pub(super) fn validate_contact_uid(value: &str) -> Result<()> {
+    validate_uid("contact_uid", value, 'p')
+}
+
+pub(super) fn parse_contact_ref(value: &str) -> Result<String> {
+    parse_uid_ref(value, 'p', "contact_ref").and_then(|uid| {
+        validate_contact_uid(&uid)?;
+        Ok(uid)
+    })
+}
+
+pub(super) fn contact_uid_from_file_name(name: &str) -> Option<String> {
+    name.split('-')
+        .next()
+        .filter(|uid| validate_contact_uid(uid).is_ok())
+        .map(ToString::to_string)
+}
+
+pub(super) fn contact_file_name(uid: &str, display_name: &str) -> String {
+    format!("{uid}-{}", human_slug(display_name))
+}
+
+pub(super) fn extract_from_display_name(from_header: &str) -> String {
+    let trimmed = from_header.trim();
+    if let (Some(start), Some(_end)) = (trimmed.rfind('<'), trimmed.rfind('>')) {
+        let name = trimmed[..start].trim().trim_matches('"').trim().to_string();
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    trimmed.to_string()
 }
 
 pub(super) fn parse_case_ref(value: &str) -> Result<String> {

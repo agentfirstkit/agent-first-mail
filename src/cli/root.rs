@@ -1,8 +1,8 @@
 #[cfg(feature = "ui")]
 use super::UiCommand;
 use super::{
-    ArchiveAction, CaseCommand, ConfigAction, DoctorAction, LogAction, MessageAction, PurgeAction,
-    PushAction, RemoteAction, RenderAction, SkillAction, TriageAction,
+    ArchiveAction, CaseCommand, ConfigAction, ContactCommand, DoctorAction, LogAction,
+    MessageAction, PurgeAction, PushAction, RemoteAction, RenderAction, SkillAction, TriageAction,
 };
 use clap::{Parser, Subcommand};
 
@@ -36,6 +36,8 @@ deleted/*.md             generated remote-deleted review views
 cases/<group>/<case_uid>-<name>/case.md generated case entry view
 cases/<group>/<case_uid>-<name>/data/ canonical case state
 cases/<group>/<case_uid>-<name>/views/ generated case detail views
+contacts/<group>/<contact_uid>-<name>.md canonical contact cards
+archive/contacts/<contact_uid>-<name>.md archived contact cards
 archive/cases/<case_uid>-<name>/ archived case workspaces
 archive/notifications/<archive_uid>-<name>/archive.md generated archive entry view
 archive/notifications/<archive_uid>-<name>/data/ canonical archive state
@@ -68,6 +70,12 @@ afmail case move c20260603001 waiting
 afmail case archive c20260603001 --reason "feedback handled"
 afmail archive case restore c20260603001 --group open --reason "customer replied"
 afmail case tag c20260603001 legal --reason "legal review needed"
+afmail contact create --name "Zhang San" --email zhang@example.com --org Acme --role Buyer
+afmail contact list --group people
+afmail contact email add p20260603001 zhang-alt@example.com
+afmail contact rename p20260603001 --name "Zhang Sanfeng"
+afmail contact extract --from-triage
+afmail contact archive p20260603001 --reason "left the company"
 afmail case draft reply c20260603001 message_inbox_607146690_22
 afmail case draft attach c20260603001 reply-message_inbox_607146690_22.md ./screenshot.png
 afmail case draft change c20260603001 reply-message_inbox_607146690_22.md --body "Thanks, I will check this."
@@ -179,6 +187,11 @@ pub enum Command {
     Case {
         #[command(subcommand)]
         action: CaseCommand,
+    },
+    /// Create a contact or operate on an existing contact ref.
+    Contact {
+        #[command(subcommand)]
+        action: ContactCommand,
     },
     /// Inspect and manage archived cases and direct-message archive categories.
     Archive {

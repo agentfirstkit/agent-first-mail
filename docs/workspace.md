@@ -35,7 +35,13 @@ account-workspace/
             <message_id>.md
         drafts/
         files/
+  contacts/  # created when contacts first exist
+    <group>/
+      <contact_uid>-<name>.md
+  identities/  # optional persona overrides, one <identity>.md per config identity
   archive/
+    contacts/  # created when contacts are archived
+      <contact_uid>-<name>.md
     cases/
       <case_uid>-<name>/
         case.md
@@ -98,7 +104,9 @@ of generated views. Case and archive message links point to
 `.afmail/DO_NOT_EDIT.txt` is a warning sentinel. The rest of `.afmail/` is
 machine-managed evidence, remote state, push queue, and audit history; use the
 CLI for effects instead of editing it by hand. Generated Markdown template
-overrides live under user-editable `templates/`, outside `.afmail/`.
+overrides live under user-editable `templates/`, outside `.afmail/`. Optional
+identity persona files live under user-editable `identities/`, also outside
+`.afmail/`.
 
 Persisted JSON state documents identify their on-disk format with
 `schema_name` and `schema_version`. CLI stdout, diagnostics, errors, and
@@ -111,7 +119,8 @@ in git means the repository contains private mail bodies and attachment bytes.
 The managed ignore block covers local runtime or generated files such as
 `.afmail/push/`, `.afmail/logs/`,
 `.afmail/transactions/`, `.afmail/workspace.lock`,
-`.afmail/workspace.progress.json`, `.codex/skills/agent-first-mail/`,
+`.afmail/workspace.progress.json`, installed workspace skill directories such as
+`.codex/skills/agent-first-mail/` or `.claude/skills/agent-first-mail/`,
 `messages/*.json`, `triage/*.md`,
 `spam/*.md`, `trash/*.md`, `deleted/*.md`, and generated object Markdown views.
 
@@ -165,6 +174,29 @@ agents should edit draft Markdown, not `data/drafts.json`; queued save/send
 items reference the draft by case and filename and use the latest content at
 push time.
 
+## Contacts
+
+Identities are "us": configured send personas with an address, display name,
+and default flag in `.afmail/config.json`. Contacts are everyone else. Multiple
+identities may share one email address when the same mailbox needs separate
+personas, such as `support` and `sales`.
+
+Contact cards live at `contacts/<group>/<contact_uid>-<name>.md`; archived
+contacts move to `archive/contacts/<contact_uid>-<name>.md`. `contact_uid` is
+globally unique and stable across active and archived contacts and starts with
+`pYYYYMMDDNNN`; a ref may include a readable suffix after one dash. The card is a
+Markdown file with a `kind: contact` frontmatter (display name, `emails`,
+`phones`, organization, role, tags, timestamps) and a free-form notes body. Each
+card is canonical state — edit it with `afmail contact` commands, not by hand.
+
+Email addresses are globally unique across all contacts (active and archived);
+`contact create` and `contact email add` reject an address already held by
+another contact. The sender→contact association is materialized onto each
+message as a `contact` object (`messages/<message_id>.json`) at pull/render time
+and refreshed automatically when a contact's emails or display name change.
+`afmail render refresh` rebuilds it for every message. There is no separate
+contact index file.
+
 ## Drafts And Case Files
 
 Draft Markdown lives under a case `drafts/` directory. Outbound attachments
@@ -179,6 +211,13 @@ safe, and points to an existing file under the case workspace. Adding or editing
 attachments changes the draft; queued `draft save` / `draft send` items still
 use the latest Markdown content. Use `afmail case draft remove` to delete the
 draft and any queued save/send item.
+
+Draft frontmatter may include `identity: <slug>`. New/reply/change commands
+accept `--identity <slug>`; when omitted, afmail records or resolves the config
+default identity. An identity footer from `identities/<slug>.md` is inserted
+into the draft body immediately so reviewers see the exact body before queueing
+or sending. Send time uses the resolved identity for the RFC 5322 `From` header
+and SMTP envelope sender, but it does not secretly append or mutate footers.
 
 ## Direct Message Archive Categories
 

@@ -74,6 +74,11 @@ afmail case draft reply c20260606001 message_inbox_88213_4 --body-file refund-re
 afmail case draft send c20260606001 reply-message_inbox_88213_4.md # queue the reply
 ```
 
+Workspaces define explicit send identities in `.afmail/config.json`; optional
+`identities/<slug>.md` files add persona notes and footers. Draft commands accept
+`--identity <slug>`, and footers are written into the draft for review rather
+than appended secretly at send time.
+
 If the queued reply needs correction before sending, edit the draft Markdown or
 use `draft change`; the queued item still points at the latest draft content:
 

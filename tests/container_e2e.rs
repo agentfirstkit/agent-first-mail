@@ -646,6 +646,9 @@ fn test_config(imap_port: u16, smtp_port: u16) -> Value {
             }}
         },
         "case": {"default_group": "open"},
+        "identities": [
+            {"identity": "me", "name": "Me", "email": "me@localhost", "default": true}
+        ],
         "audit": {"reason_mode": "required"},
         "smtp": {
             "host": "127.0.0.1",
@@ -653,8 +656,7 @@ fn test_config(imap_port: u16, smtp_port: u16) -> Value {
             "starttls": false,
             "tls_wrapper": false,
             "username": null,
-            "password_secret": null,
-            "from": "Me <me@localhost>"
+            "password_secret": null
         },
         "workspace": {"language_bcp47": null, "timezone_utc_offset": "UTC"}
     })
@@ -1369,4 +1371,539 @@ fn unique_suffix() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{}-{stamp}", std::process::id())
+}
+
+fn minimal_config() -> Value {
+    json!({
+        "schema_name": "config",
+        "schema_version": 1,
+        "imap": {
+            "host": null,
+            "port": 993,
+            "tls": true,
+            "username": null,
+            "password_secret": null
+        },
+        "mailboxes": {
+            "inbox": {"mailbox_name": "INBOX", "special_use": null},
+            "sent": {"special_use": "\\Sent", "mailbox_name": null},
+            "archive": {"special_use": "\\Archive", "mailbox_name": null},
+            "junk": {"special_use": "\\Junk", "mailbox_name": null},
+            "trash": {"special_use": "\\Trash", "mailbox_name": null},
+            "drafts": {"special_use": "\\Drafts", "mailbox_name": null}
+        },
+        "actions": {
+            "pull": {
+                "default_mailbox_ids": ["inbox"],
+                "by_mailbox_id": {
+                    "inbox": {"import_as": "triage", "direction": "inbound"},
+                    "sent": {"import_as": "triage", "direction": "outbound"},
+                    "archive": {"import_as": "triage", "direction": "inbound"},
+                    "junk": {"import_as": "spam", "direction": "inbound"},
+                    "trash": {"import_as": "trashed", "direction": "inbound"},
+                    "drafts": {"import_as": "triage", "direction": "outbound"}
+                }
+            },
+            "case.add": {"steps": []},
+            "draft.save": {"steps": []},
+            "draft.send": {"steps": []},
+            "message.spam": {"steps": []},
+            "message.trash": {"steps": []},
+            "message.archive": {"by_source_mailbox_id": {
+                "inbox": {"steps": []},
+                "sent": {"steps": []},
+                "archive": {"steps": []},
+                "junk": {"steps": []},
+                "trash": {"steps": []},
+                "drafts": {"steps": []}
+            }}
+        },
+        "case": {"default_group": "open"},
+        "contact": {"default_group": "people"},
+        "identities": [
+            {"identity": "me", "name": "Me", "email": "me@example.com", "default": true}
+        ],
+        "audit": {"reason_mode": "optional"},
+        "smtp": {
+            "host": null,
+            "port": 587,
+            "starttls": true,
+            "tls_wrapper": false,
+            "username": null,
+            "password_secret": null
+        },
+        "workspace": {"language_bcp47": null, "timezone_utc_offset": "UTC"}
+    })
+}
+
+#[test]
+fn contact_crud_local_e2e() {
+    let root = TempRoot::new("contact-crud");
+    assert!(fs::create_dir_all(root.path()).is_ok());
+
+    // Step 1: init workspace
+    let (status, stdout) = run(root.path(), &["init"]);
+    assert_eq!(status, 0, "init failed: {stdout}");
+    write_json(&root.path().join(".afmail/config.json"), &minimal_config());
+
+    // Step 2: create first contact
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "contact",
+            "create",
+            "--name",
+            "Zhang San",
+            "--email",
+            "zhang@example.com",
+        ],
+    );
+    assert_eq!(status, 0, "contact create failed: {stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["code"], "contact_created");
+    let p001 = result["contact_uid"].as_str().unwrap_or("").to_string();
+    assert!(p001.starts_with('p'), "uid should start with p: {p001}");
+    assert_eq!(result["emails"], json!(["zhang@example.com"]));
+    // Contact file should exist
+    let contacts_dir = root.path().join("contacts").join("people");
+    assert!(contacts_dir.exists(), "contacts/people dir missing");
+    let contact_file_count = fs::read_dir(&contacts_dir)
+        .ok()
+        .map(|rd| rd.flatten().count())
+        .unwrap_or(0);
+    assert_eq!(contact_file_count, 1);
+
+    // Step 3: contact list
+    let (status, stdout) = run(root.path(), &["contact", "list"]);
+    assert_eq!(status, 0, "contact list failed: {stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["count"], 1);
+    assert_eq!(result["contacts"][0]["contact_uid"], p001);
+
+    // Step 4: contact show
+    let (status, stdout) = run(root.path(), &["contact", "show", &p001]);
+    assert_eq!(status, 0, "contact show failed: {stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["code"], "contact_show");
+    assert!(result["content"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Zhang San"));
+
+    // Step 5: tag
+    let (status, stdout) = run(root.path(), &["contact", "tag", &p001, "vip"]);
+    assert_eq!(status, 0, "contact tag failed: {stdout}");
+    let result = parse_one(&stdout);
+    assert!(result["tags"]
+        .as_array()
+        .is_some_and(|t| t.contains(&json!("vip"))));
+
+    // Step 6: untag
+    let (status, stdout) = run(root.path(), &["contact", "untag", &p001, "vip"]);
+    assert_eq!(status, 0, "contact untag failed: {stdout}");
+    let result = parse_one(&stdout);
+    assert!(!result["tags"]
+        .as_array()
+        .is_some_and(|t| t.contains(&json!("vip"))));
+
+    // Step 7: notes show
+    let (status, _) = run(root.path(), &["contact", "notes", "show", &p001]);
+    assert_eq!(status, 0, "contact notes show failed");
+
+    // Step 8: notes append
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "contact",
+            "notes",
+            "append",
+            &p001,
+            "--text",
+            "some notes here",
+        ],
+    );
+    assert_eq!(status, 0, "contact notes append failed: {stdout}");
+
+    // Step 9: notes replace
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "contact",
+            "notes",
+            "replace",
+            &p001,
+            "--text",
+            "replaced content",
+        ],
+    );
+    assert_eq!(status, 0, "contact notes replace failed: {stdout}");
+    // Verify replace took effect
+    let (_, show_stdout) = run(root.path(), &["contact", "notes", "show", &p001]);
+    let show_result = parse_one(&show_stdout);
+    assert!(
+        show_result["notes"]
+            .as_str()
+            .unwrap_or("")
+            .contains("replaced content"),
+        "notes should contain replaced content"
+    );
+
+    // Step 10: rename
+    let (status, stdout) = run(
+        root.path(),
+        &["contact", "rename", &p001, "--name", "Zhang Sanfeng"],
+    );
+    assert_eq!(status, 0, "contact rename failed: {stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["display_name"], "Zhang Sanfeng");
+    // Original ref still resolves
+    let (status, _) = run(root.path(), &["contact", "show", &p001]);
+    assert_eq!(status, 0, "ref after rename failed");
+
+    // Step 11: email add
+    let (status, stdout) = run(
+        root.path(),
+        &["contact", "email", "add", &p001, "zhang-extra@example.com"],
+    );
+    assert_eq!(status, 0, "contact email add failed: {stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["emails"].as_array().map(|a| a.len()), Some(2));
+
+    // Step 12: email remove
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "contact",
+            "email",
+            "remove",
+            &p001,
+            "zhang-extra@example.com",
+        ],
+    );
+    assert_eq!(status, 0, "contact email remove failed: {stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["emails"].as_array().map(|a| a.len()), Some(1));
+
+    // Step 13: phone add
+    let (status, stdout) = run(
+        root.path(),
+        &["contact", "phone", "add", &p001, "13800138000"],
+    );
+    assert_eq!(status, 0, "contact phone add failed: {stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["phones"].as_array().map(|a| a.len()), Some(1));
+
+    // Step 14: phone remove
+    let (status, stdout) = run(
+        root.path(),
+        &["contact", "phone", "remove", &p001, "13800138000"],
+    );
+    assert_eq!(status, 0, "contact phone remove failed: {stdout}");
+    let result = parse_one(&stdout);
+    assert!(result["phones"].as_array().is_some_and(|a| a.is_empty()));
+
+    // Step 15: email uniqueness is enforced
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "contact",
+            "create",
+            "--name",
+            "Li Si",
+            "--email",
+            "zhang@example.com",
+        ],
+    );
+    assert_ne!(status, 0, "duplicate email should fail");
+    assert!(
+        stdout.contains("email_conflict"),
+        "error should say email_conflict: {stdout}"
+    );
+
+    // Step 16: create second contact with different email
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "contact",
+            "create",
+            "--name",
+            "Li Si",
+            "--email",
+            "lisi@example.com",
+        ],
+    );
+    assert_eq!(status, 0, "second contact create failed: {stdout}");
+    let result = parse_one(&stdout);
+    let p002 = result["contact_uid"].as_str().unwrap_or("").to_string();
+    assert!(p002.starts_with('p') && p002 != p001);
+
+    // Step 17: move p001 to vip group
+    let (status, stdout) = run(root.path(), &["contact", "move", &p001, "--group", "vip"]);
+    assert_eq!(status, 0, "contact move failed: {stdout}");
+    assert!(root.path().join("contacts").join("vip").exists());
+    // ref still resolves
+    let (status, _) = run(root.path(), &["contact", "show", &p001]);
+    assert_eq!(status, 0, "show after move failed");
+
+    // Step 18: archive p001
+    let (status, stdout) = run(root.path(), &["contact", "archive", &p001]);
+    assert_eq!(status, 0, "contact archive failed: {stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "contact_archived");
+    assert!(root.path().join("archive").join("contacts").exists());
+    let (_, list_stdout) = run(root.path(), &["contact", "list"]);
+    let list = parse_one(&list_stdout);
+    assert_eq!(list["count"], 1, "only p002 should be active");
+
+    // Step 19: reopen p001
+    let (status, stdout) = run(root.path(), &["contact", "reopen", &p001]);
+    assert_eq!(status, 0, "contact reopen failed: {stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "contact_reopened");
+    let (_, list_stdout) = run(root.path(), &["contact", "list"]);
+    let list = parse_one(&list_stdout);
+    assert_eq!(list["count"], 2, "both contacts should be active again");
+}
+
+#[test]
+#[ignore]
+fn docker_greenmail_contact_cards_e2e() {
+    let suffix = unique_suffix();
+    let container_name = format!("afmail-e2e-contact-{suffix}");
+    let _docker_guard = DockerE2eGuard {
+        containers: vec![container_name.clone()],
+    };
+    let greenmail_opts = format!(
+        "GREENMAIL_OPTS=-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled -Dgreenmail.users={ME_LOGIN}:{PASSWORD}@{MAIL_DOMAIN},{ALICE_LOGIN}:{PASSWORD}@{MAIL_DOMAIN}"
+    );
+
+    docker_success(
+        &[
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            &container_name,
+            "-e",
+            &greenmail_opts,
+            "-p",
+            "127.0.0.1::3025",
+            "-p",
+            "127.0.0.1::3143",
+            GREENMAIL_IMAGE,
+        ],
+        "start GreenMail container for contact e2e",
+    );
+    let smtp_port = docker_mapped_port(&container_name, GREENMAIL_SMTP_PORT);
+    let imap_port = docker_mapped_port(&container_name, GREENMAIL_IMAP_PORT);
+    assert!(
+        wait_until(Duration::from_secs(45), || imap_login_works(
+            imap_port, ME_LOGIN, PASSWORD
+        )),
+        "GreenMail IMAP did not become ready"
+    );
+
+    let root = TempRoot::new("greenmail-contact");
+    assert!(fs::create_dir_all(root.path()).is_ok());
+    assert_eq!(run(root.path(), &["init"]).0, 0);
+    let mut config = test_config(imap_port, smtp_port);
+    config["contact"] = json!({"default_group": "people"});
+    config["audit"] = json!({"reason_mode": "optional"});
+    write_json(&root.path().join(".afmail/config.json"), &config);
+
+    for folder in ["Drafts", "Sent", "Archive", "Junk", "Trash"] {
+        create_remote_folder(imap_port, ME_LOGIN, PASSWORD, folder);
+    }
+
+    // Seed a message from alice@localhost
+    seed_inbound_message(smtp_port, &suffix);
+    assert!(
+        wait_until(Duration::from_secs(15), || mailbox_contains(
+            imap_port,
+            ME_LOGIN,
+            PASSWORD,
+            "INBOX",
+            "Hello from real GreenMail"
+        )),
+        "seeded message from alice not visible"
+    );
+
+    // Step 1: pull
+    let (status, stdout) = run(root.path(), &["pull"]);
+    assert_eq!(status, 0, "pull failed: {stdout}");
+    let alice_msg_id = single_message_id(root.path(), "inbound");
+
+    // Step 2: create contact for alice
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "contact",
+            "create",
+            "--name",
+            "Alice Customer",
+            "--email",
+            "alice@localhost",
+        ],
+    );
+    assert_eq!(status, 0, "contact create alice failed: {stdout}");
+    let result = parse_one(&stdout);
+    let p001 = result["contact_uid"].as_str().unwrap_or("").to_string();
+
+    // Step 3: message show carries contact enrichment with no rebuild —
+    //         `contact create` auto-updates matching messages.
+    let (status, stdout) = run(root.path(), &["message", "show", &alice_msg_id]);
+    assert_eq!(status, 0, "message show failed: {stdout}");
+    let msg = parse_one(&stdout);
+    assert_eq!(
+        msg["contact"]["contact_uid"], p001,
+        "message show should have contact.contact_uid"
+    );
+    assert_eq!(msg["contact"]["display_name"], "Alice Customer");
+
+    // Step 4: create a case from alice's message; the contact link stays
+    //         materialized on the message after it moves into the case.
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "case",
+            "create",
+            "--name",
+            "alice-inquiry",
+            "--message",
+            &alice_msg_id,
+            "--group",
+            "open",
+        ],
+    );
+    assert_eq!(status, 0, "case create failed: {stdout}");
+    let (status, stdout) = run(root.path(), &["message", "show", &alice_msg_id]);
+    assert_eq!(status, 0, "message show after case create failed: {stdout}");
+    assert_eq!(
+        parse_one(&stdout)["contact"]["contact_uid"],
+        p001,
+        "contact link should survive case creation"
+    );
+
+    // Step 5: seed a second message from bob@external.example
+    let bob_subject = format!("bob-subject-{suffix}");
+    let bob_raw = format!(
+        "Message-ID: <bob-{suffix}@external.example>\r\nFrom: Bob External <bob@external.example>\r\nTo: Me <me@localhost>\r\nDate: Thu, 21 May 2026 11:00:00 +0000\r\nSubject: {bob_subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello from bob\r\n"
+    );
+    smtp_send(
+        smtp_port,
+        "bob@external.example",
+        "me@localhost",
+        bob_raw.as_bytes(),
+    );
+    assert!(
+        wait_until(Duration::from_secs(15), || mailbox_contains(
+            imap_port,
+            ME_LOGIN,
+            PASSWORD,
+            "INBOX",
+            &bob_subject
+        )),
+        "bob's seeded message not visible"
+    );
+
+    let (status, stdout) = run(root.path(), &["pull"]);
+    assert_eq!(status, 0, "second pull failed: {stdout}");
+    let bob_msg_ids = message_ids_where(root.path(), "subject", &bob_subject);
+    assert_eq!(
+        bob_msg_ids.len(),
+        1,
+        "expected one bob message: {bob_msg_ids:?}"
+    );
+    let bob_msg_id = bob_msg_ids[0].clone();
+
+    // Step 6: extract a contact stub for bob from triage; extract auto-updates
+    //         bob's message link.
+    let (status, stdout) = run(root.path(), &["contact", "extract", "--from-triage"]);
+    assert_eq!(status, 0, "contact extract failed: {stdout}");
+    let extract = parse_one(&stdout);
+    assert_eq!(
+        extract["created_count"], 1,
+        "should have created 1 stub contact for bob"
+    );
+    let p002 = extract["created_uids"][0]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(p002.starts_with('p'));
+
+    // Step 7: bob's message now shows the extracted contact, no rebuild needed.
+    let (status, stdout) = run(root.path(), &["message", "show", &bob_msg_id]);
+    assert_eq!(status, 0, "bob message show failed: {stdout}");
+    assert_eq!(
+        parse_one(&stdout)["contact"]["contact_uid"],
+        p002,
+        "bob's message should link to the extracted contact"
+    );
+
+    // Step 8: create a case for bob; the link survives.
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "case",
+            "create",
+            "--name",
+            "bob-inquiry",
+            "--message",
+            &bob_msg_id,
+            "--group",
+            "open",
+        ],
+    );
+    assert_eq!(status, 0, "case create for bob failed: {stdout}");
+    let (status, stdout) = run(root.path(), &["message", "show", &bob_msg_id]);
+    assert_eq!(status, 0, "bob message show after case failed: {stdout}");
+    assert_eq!(
+        parse_one(&stdout)["contact"]["contact_uid"],
+        p002,
+        "bob's case message should keep contact = p002"
+    );
+
+    // Step 9: contact list shows both
+    let (status, stdout) = run(root.path(), &["contact", "list"]);
+    assert_eq!(status, 0, "contact list failed: {stdout}");
+    assert_eq!(parse_one(&stdout)["count"], 2);
+
+    // Step 10: rename alice; the message's contact name snapshot refreshes.
+    let (status, stdout) = run(
+        root.path(),
+        &["contact", "rename", &p001, "--name", "Alice VIP"],
+    );
+    assert_eq!(status, 0, "contact rename failed: {stdout}");
+    let (status, stdout) = run(root.path(), &["message", "show", &alice_msg_id]);
+    assert_eq!(status, 0, "message show after rename failed: {stdout}");
+    assert_eq!(
+        parse_one(&stdout)["contact"]["display_name"],
+        "Alice VIP",
+        "rename should refresh the message's contact name snapshot"
+    );
+
+    // Step 11: add second email to alice
+    let (status, stdout) = run(
+        root.path(),
+        &["contact", "email", "add", &p001, "alice-work@localhost"],
+    );
+    assert_eq!(status, 0, "email add failed: {stdout}");
+    assert_eq!(
+        parse_one(&stdout)["emails"].as_array().map(|a| a.len()),
+        Some(2)
+    );
+
+    // Step 12: move p001 to vip group
+    let (status, stdout) = run(root.path(), &["contact", "move", &p001, "--group", "vip"]);
+    assert_eq!(status, 0, "contact move failed: {stdout}");
+    let _ = parse_one(&stdout);
+    assert!(root.path().join("contacts").join("vip").exists());
+
+    // Step 13: archive p002 (bob stub)
+    let (status, stdout) = run(root.path(), &["contact", "archive", &p002]);
+    assert_eq!(status, 0, "contact archive p002 failed: {stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "contact_archived");
+
+    // Step 14: active contact list shows only p001
+    let (status, stdout) = run(root.path(), &["contact", "list"]);
+    assert_eq!(status, 0);
+    assert_eq!(parse_one(&stdout)["count"], 1, "only p001 should be active");
 }

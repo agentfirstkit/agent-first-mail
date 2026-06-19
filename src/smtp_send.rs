@@ -1,4 +1,4 @@
-use crate::config::{MailConfig, SmtpConfig};
+use crate::config::{MailConfig, ResolvedIdentity, SmtpConfig};
 use crate::error::{AppError, Result};
 use crate::frontmatter::{CaseFrontmatter, DraftFrontmatter};
 use crate::mail::parse_outbound_message_with_status;
@@ -150,7 +150,9 @@ fn build_draft_message(
     let draft_text = fs::read_to_string(&draft_path).map_err(|e| AppError::io("read draft", &e))?;
     let (fm, raw_body) = read_doc::<DraftFrontmatter>(&draft_text)?;
     let body = raw_body.trim_start().to_string();
-    let from = config.require_from()?;
+    let identity = config
+        .resolve_identity(root, fm.identity.as_deref())
+        .map_err(identity_draft_error)?;
     let rfc822_message_id = format!("<{message_id}@afmail.local>");
     build_message(
         root,
@@ -158,7 +160,7 @@ fn build_draft_message(
         case_uid,
         &fm,
         &body,
-        &from,
+        &identity,
         &rfc822_message_id,
     )
 }
@@ -169,7 +171,7 @@ fn build_message(
     case_uid: &str,
     fm: &DraftFrontmatter,
     body: &str,
-    from: &str,
+    identity: &ResolvedIdentity,
     rfc822_message_id: &str,
 ) -> Result<Message> {
     if fm.case_uid != case_uid {
@@ -179,7 +181,7 @@ fn build_message(
         ));
     }
     let mut builder = Message::builder()
-        .from(parse_mailbox(from, "from")?)
+        .from(identity_mailbox(identity)?)
         .message_id(Some(rfc822_message_id.to_string()))
         .subject(
             fm.subject
@@ -225,6 +227,21 @@ fn build_message(
     builder
         .multipart(multipart)
         .map_err(|e| AppError::new("draft_invalid", e.to_string()))
+}
+
+fn identity_mailbox(identity: &ResolvedIdentity) -> Result<Mailbox> {
+    let address = identity
+        .email
+        .parse::<Address>()
+        .map_err(|e| AppError::new("draft_invalid", format!("invalid identity email: {e}")))?;
+    Ok(Mailbox::new(Some(identity.name.clone()), address))
+}
+
+fn identity_draft_error(err: AppError) -> AppError {
+    match err.error_code {
+        "unknown_identity" | "config_invalid" => AppError::new("draft_invalid", err.message),
+        _ => err,
+    }
 }
 
 fn draft_attachment_path(case_path: &Path, attachment: &str) -> Result<PathBuf> {
@@ -402,6 +419,17 @@ mod tests {
         crate::markdown::parse_frontmatter(text).unwrap_or_default()
     }
 
+    fn test_identity() -> ResolvedIdentity {
+        ResolvedIdentity {
+            identity: "me".to_string(),
+            name: "Me".to_string(),
+            email: "me@example.com".to_string(),
+            default: true,
+            footer: None,
+            notes: None,
+        }
+    }
+
     #[test]
     fn builds_plain_draft_message() {
         let root = temp_root("build");
@@ -416,7 +444,7 @@ mod tests {
             "c20260521001",
             &fm,
             "Hi",
-            "Me <me@example.com>",
+            &test_identity(),
             "<msg@example.com>",
         );
         assert!(msg.is_ok());
@@ -457,6 +485,12 @@ mod tests {
             body_text: String::new(),
             eml_path: None,
             attachments: Vec::new(),
+            contact: None,
+            identity: None,
+            identity_email: None,
+            identity_match: None,
+            identity_candidates: Vec::new(),
+            observed_recipient_emails: Vec::new(),
             workspace: crate::types::WorkspaceState {
                 status: "triage".to_string(),
                 archive_uid: None,
@@ -481,6 +515,7 @@ mod tests {
             "parent@example.com",
             &["root@example.com"],
         );
+        let identity = test_identity();
         let fm = draft(
             "kind: draft\ncase_uid: c20260521001\nto:\n  - a@example.com\nsubject: \"Re: Hi\"\nreply_to_message_id: message_p",
         );
@@ -490,7 +525,7 @@ mod tests {
             "c20260521001",
             &fm,
             "reply body",
-            "Me <me@example.com>",
+            &identity,
             "<reply@afmail.local>",
         )
         .map(|m| String::from_utf8(m.formatted()).unwrap_or_default())
@@ -506,6 +541,7 @@ mod tests {
         let case_path = root.join("cases/open/c20260521001");
         let _ = fs::create_dir_all(case_path.join("drafts"));
         write_parent(&root, "message_p", "parent@example.com", &[]);
+        let identity = test_identity();
         let fm = draft(
             "kind: draft\ncase_uid: c20260521001\nto:\n  - a@example.com\nsubject: \"Re: Hi\"\nreply_to_message_id: message_p",
         );
@@ -515,7 +551,7 @@ mod tests {
             "c20260521001",
             &fm,
             "reply body",
-            "Me <me@example.com>",
+            &identity,
             "<reply@afmail.local>",
         )
         .map(|m| String::from_utf8(m.formatted()).unwrap_or_default())

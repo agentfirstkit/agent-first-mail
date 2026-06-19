@@ -144,6 +144,12 @@ pub fn parse_message_with_options(
         body_text: body_text.clone(),
         eml_path: Some(format!(".afmail/messages/{message_id}.eml")),
         attachments,
+        contact: None,
+        identity: None,
+        identity_email: None,
+        identity_match: None,
+        identity_candidates: Vec::new(),
+        observed_recipient_emails: Vec::new(),
         workspace: options.workspace,
     };
     let conversation = render_message_section(&message, &body_text)?;

@@ -286,10 +286,9 @@ pub fn render_message_section_with_config(
         body_text,
         config.template_language(),
         config
-            .smtp
-            .from
-            .as_deref()
-            .or(config.imap.username.as_deref()),
+            .default_identity()
+            .ok()
+            .map(|identity| identity.email.as_str()),
         None,
     )
 }

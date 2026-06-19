@@ -1,5 +1,6 @@
 mod archive;
 mod cases;
+pub mod contacts;
 mod disposition_views;
 mod doctor;
 mod drafts;
@@ -18,6 +19,7 @@ mod util;
 mod view_model;
 
 use cases::*;
+pub use contacts::ContactExtractSource;
 use disposition_views::*;
 use drafts::*;
 use messages::*;
@@ -42,9 +44,9 @@ use crate::templates::{language_template_path, MarkdownTemplateRenderer, Templat
 use crate::types::RemoteSyncState;
 use crate::types::{
     ArchiveMessageItem, ArchiveMessages, AttachmentRef, CaseMessages, MailDirection,
-    MessageCollection, MessageCollectionItem, MessageFile, MessageStatus, OutboundAction, PushItem,
-    PushLocation, RemoteLocation, RemoteState, WorkspacePendingPush, WorkspacePushState,
-    WorkspaceState, ARCHIVE_NOTIFICATION_SCHEMA_NAME, CASE_SCHEMA_NAME,
+    MessageCollection, MessageCollectionItem, MessageContact, MessageFile, MessageStatus,
+    OutboundAction, PushItem, PushLocation, RemoteLocation, RemoteState, WorkspacePendingPush,
+    WorkspacePushState, WorkspaceState, ARCHIVE_NOTIFICATION_SCHEMA_NAME, CASE_SCHEMA_NAME,
     MESSAGE_COLLECTION_SCHEMA_VERSION,
 };
 use crate::util::{canonical_flags, sha256_fingerprint, write_json_pretty, write_string_atomic};
@@ -61,9 +63,8 @@ use std::time::Instant;
 
 const AFMAIL_GITIGNORE_BEGIN: &str = "# BEGIN afmail managed";
 const AFMAIL_GITIGNORE_END: &str = "# END afmail managed";
-const AFMAIL_AGENT_GITIGNORE_BODY: &str = r#"# Agent-First Mail workspace skill installed by afmail init.
-.codex/skills/agent-first-mail/
-"#;
+const AFMAIL_AGENT_GITIGNORE_HEADER: &str =
+    "# Agent-First Mail workspace skill installed by afmail init.";
 const AFMAIL_WORKSPACE_GITIGNORE_BODY: &str = r#"# Local mail evidence and runtime state.
 .afmail/push/
 .afmail/logs/
@@ -102,6 +103,16 @@ pub(crate) struct DraftChange<'a> {
     pub(crate) to: &'a [String],
     pub(crate) cc: &'a [String],
     pub(crate) clear_cc: bool,
+    pub(crate) identity: Option<&'a str>,
+    pub(crate) body: Option<&'a str>,
+    pub(crate) body_file: Option<&'a str>,
+}
+
+pub(crate) struct NewDraft<'a> {
+    pub(crate) to: &'a [String],
+    pub(crate) cc: &'a [String],
+    pub(crate) subject: &'a str,
+    pub(crate) identity: Option<&'a str>,
     pub(crate) body: Option<&'a str>,
     pub(crate) body_file: Option<&'a str>,
 }
@@ -153,6 +164,158 @@ fn resolve_init_target(agent_root: &Path, path: Option<&str>) -> Result<(PathBuf
         agent_root.join(normalized)
     };
     Ok((target, workspace_ref))
+}
+
+pub(crate) fn ensure_agent_gitignore_ignores_skill_dirs(
+    agent_root: &Path,
+    skill_dirs: &[PathBuf],
+) -> Result<()> {
+    let include_workspace_body = agent_gitignore_should_include_workspace_body(agent_root)?;
+    let _ = ensure_agent_gitignore_ignores_skill_dirs_with_workspace_body(
+        agent_root,
+        skill_dirs,
+        include_workspace_body,
+    )?;
+    Ok(())
+}
+
+fn ensure_agent_gitignore_ignores_skill_dirs_with_workspace_body(
+    agent_root: &Path,
+    skill_dirs: &[PathBuf],
+    include_workspace_body: bool,
+) -> Result<ManagedBlockChange> {
+    let gitignore_path = agent_root.join(".gitignore");
+    let existing_body = existing_gitignore_managed_body(&gitignore_path)?;
+    let mut patterns = BTreeSet::new();
+    if let Some(body) = existing_body.as_deref() {
+        patterns.extend(existing_agent_skill_gitignore_patterns(body));
+    }
+    patterns.extend(
+        skill_dirs
+            .iter()
+            .filter_map(|dir| agent_skill_dir_gitignore_pattern(agent_root, dir)),
+    );
+
+    if patterns.is_empty() && !include_workspace_body {
+        return Ok(ManagedBlockChange {
+            created: false,
+            updated: false,
+        });
+    }
+
+    let mut block_body = if patterns.is_empty() {
+        String::new()
+    } else {
+        render_agent_gitignore_body(&patterns)
+    };
+    if include_workspace_body {
+        if !block_body.is_empty() {
+            block_body.push('\n');
+        }
+        block_body.push_str(trim_surrounding_line_endings(
+            AFMAIL_WORKSPACE_GITIGNORE_BODY,
+        ));
+    }
+
+    ensure_managed_block_file(
+        &gitignore_path,
+        AFMAIL_GITIGNORE_BEGIN,
+        AFMAIL_GITIGNORE_END,
+        "",
+        &block_body,
+    )
+}
+
+fn agent_gitignore_should_include_workspace_body(agent_root: &Path) -> Result<bool> {
+    if agent_root.join(".afmail").is_dir() {
+        return Ok(true);
+    }
+    Ok(
+        existing_gitignore_managed_body(&agent_root.join(".gitignore"))?
+            .is_some_and(|body| body.contains(".afmail/push/") || body.contains("messages/*.json")),
+    )
+}
+
+fn existing_gitignore_managed_body(path: &Path) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let existing = read_to_string(path, "read managed block file")?;
+    let Some(begin_pos) = existing.find(AFMAIL_GITIGNORE_BEGIN) else {
+        return Ok(None);
+    };
+    let after_begin = begin_pos + AFMAIL_GITIGNORE_BEGIN.len();
+    let end_rel = existing[after_begin..]
+        .find(AFMAIL_GITIGNORE_END)
+        .ok_or_else(|| {
+            AppError::new(
+                "managed_block_invalid",
+                format!(
+                    "{} has an afmail managed BEGIN marker without a matching END marker",
+                    path_to_string(path)
+                ),
+            )
+        })?;
+    let end_pos = after_begin + end_rel;
+    Ok(Some(
+        trim_surrounding_line_endings(&existing[after_begin..end_pos]).to_string(),
+    ))
+}
+
+fn existing_agent_skill_gitignore_patterns(block_body: &str) -> BTreeSet<String> {
+    block_body
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty()
+                || line.starts_with('#')
+                || line.starts_with(".agents/")
+                || !line.ends_with("/agent-first-mail/")
+                || !line.contains("/skills/agent-first-mail/")
+            {
+                return None;
+            }
+            Some(line.to_string())
+        })
+        .collect()
+}
+
+fn agent_skill_dir_gitignore_pattern(agent_root: &Path, skill_dir: &Path) -> Option<String> {
+    let absolute = if skill_dir.is_absolute() {
+        skill_dir.to_path_buf()
+    } else {
+        agent_root.join(skill_dir)
+    };
+    let rel = absolute.strip_prefix(agent_root).ok()?;
+    if rel.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return None;
+    }
+    let mut pattern = path_to_string(rel);
+    if pattern.is_empty() {
+        return None;
+    }
+    if !pattern.ends_with('/') {
+        pattern.push('/');
+    }
+    Some(pattern)
+}
+
+fn render_agent_gitignore_body(patterns: &BTreeSet<String>) -> String {
+    let mut out = String::new();
+    out.push_str(AFMAIL_AGENT_GITIGNORE_HEADER);
+    out.push('\n');
+    for pattern in patterns {
+        out.push_str(pattern);
+        out.push('\n');
+    }
+    out
 }
 
 fn prepare_init_target(root: &Path) -> Result<()> {
@@ -351,22 +514,19 @@ impl Workspace {
             "workspaces": workspace_paths.clone(),
         });
 
+        let workspace_skills_dir = agent_root.join(".codex/skills");
+        let workspace_skill =
+            crate::skill_admin::install_codex_workspace_skill(&workspace_skills_dir)?;
+        let workspace_skill_path = workspace_skill.skill_path.clone();
+
         let workspace_gitignore_path = self.root.join(".gitignore");
         let agent_gitignore_path = agent_root.join(".gitignore");
         let same_root = self.root == agent_root;
-        let combined_gitignore_body;
         let workspace_gitignore_change = if same_root {
-            combined_gitignore_body = format!(
-                "{}\n{}",
-                trim_surrounding_line_endings(AFMAIL_AGENT_GITIGNORE_BODY),
-                trim_surrounding_line_endings(AFMAIL_WORKSPACE_GITIGNORE_BODY)
-            );
-            ensure_managed_block_file(
-                &workspace_gitignore_path,
-                AFMAIL_GITIGNORE_BEGIN,
-                AFMAIL_GITIGNORE_END,
-                "",
-                &combined_gitignore_body,
+            ensure_agent_gitignore_ignores_skill_dirs_with_workspace_body(
+                agent_root,
+                std::slice::from_ref(&workspace_skill.skill_dir),
+                true,
             )?
         } else {
             ensure_managed_block_file(
@@ -380,12 +540,10 @@ impl Workspace {
         let agent_gitignore_change = if same_root {
             workspace_gitignore_change
         } else {
-            ensure_managed_block_file(
-                &agent_gitignore_path,
-                AFMAIL_GITIGNORE_BEGIN,
-                AFMAIL_GITIGNORE_END,
-                "",
-                AFMAIL_AGENT_GITIGNORE_BODY,
+            ensure_agent_gitignore_ignores_skill_dirs_with_workspace_body(
+                agent_root,
+                std::slice::from_ref(&workspace_skill.skill_dir),
+                false,
             )?
         };
 
@@ -404,13 +562,6 @@ impl Workspace {
             &agent_skill_prefix,
             &agent_skill_body,
         )?;
-
-        let workspace_skills_dir = agent_root.join(".codex/skills");
-        let _workspace_skill =
-            crate::skill_admin::install_codex_workspace_skill(&workspace_skills_dir)?;
-        let workspace_skill_path = workspace_skills_dir
-            .join("agent-first-mail")
-            .join("SKILL.md");
 
         let do_not_edit_path = self.root.join(".afmail/DO_NOT_EDIT.txt");
         let do_not_edit_created = !do_not_edit_path.exists();

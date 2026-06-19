@@ -11,6 +11,11 @@ fn config_defaults_pull_and_tls() {
     assert!(cfg.smtp.starttls);
     assert_eq!(cfg.case.default_group, "open");
     assert_eq!(cfg.audit.reason_mode, ReasonMode::Required);
+    assert_eq!(cfg.identities.len(), 1);
+    assert_eq!(
+        cfg.default_identity().ok().map(|i| i.identity.as_str()),
+        Some("me")
+    );
     assert_eq!(cfg.workspace.language_bcp47, None);
     assert_eq!(cfg.template_language(), TemplateLanguage::EnUs);
     assert!(cfg.workspace.timezone_utc_offset.is_some());
@@ -67,6 +72,10 @@ fn default_config_serializes_explicit_mailboxes_and_actions() {
     assert!(value.get("push").is_none());
     assert!(value.get("ui").is_none());
     assert!(value.get("timezone").is_none());
+    assert_eq!(
+        value["identities"],
+        json!([{"identity": "me", "name": "Me", "email": "me@example.com", "default": true}])
+    );
     assert_eq!(value["workspace"]["language_bcp47"], Value::Null);
     assert!(value["workspace"].get("timezone_utc_offset").is_some());
 }
@@ -187,6 +196,10 @@ fn config_set_and_get_key() {
         Ok(json!("AFMAIL_IMAP_PASSWORD_SECRET"))
     );
     assert_eq!(cfg.get_key("imap.password_secret"), Ok(Value::Null));
+    assert_eq!(
+        cfg.get_key("identities"),
+        Ok(json!([{"identity": "me", "name": "Me", "email": "me@example.com", "default": true}]))
+    );
 }
 
 #[test]
@@ -309,4 +322,46 @@ fn password_secret_sources_are_explicit_by_field() {
         Some("IMAP_PASSWORD")
     )
     .is_err());
+}
+
+#[test]
+fn identity_config_validation() {
+    let mut cfg = MailConfig::default();
+    cfg.identities.clear();
+    assert!(cfg.validate().is_err());
+
+    let mut cfg = MailConfig::default();
+    cfg.identities[0].default = false;
+    assert!(cfg.validate().is_err());
+
+    let mut cfg = MailConfig::default();
+    cfg.identities.push(IdentityConfig {
+        identity: "other".to_string(),
+        name: "Other".to_string(),
+        email: "other@example.com".to_string(),
+        default: true,
+    });
+    assert!(cfg.validate().is_err());
+
+    let mut cfg = MailConfig::default();
+    cfg.identities.push(IdentityConfig {
+        identity: "me".to_string(),
+        name: "Other".to_string(),
+        email: "other@example.com".to_string(),
+        default: false,
+    });
+    assert!(cfg.validate().is_err());
+
+    let mut cfg = MailConfig::default();
+    cfg.identities.push(IdentityConfig {
+        identity: "alias".to_string(),
+        name: "Alias".to_string(),
+        email: "me@example.com".to_string(),
+        default: false,
+    });
+    assert!(cfg.validate().is_ok());
+
+    let mut cfg = MailConfig::default();
+    cfg.identities[0].email = "not an email".to_string();
+    assert!(cfg.validate().is_err());
 }

@@ -1,6 +1,6 @@
 use super::defaults::{
-    default_case_group, default_reason_mode, default_smtp_port, default_timezone_utc_offset,
-    default_timezone_utc_offset_option, default_true,
+    default_case_group, default_contact_group, default_reason_mode, default_smtp_port,
+    default_timezone_utc_offset, default_timezone_utc_offset_option, default_true,
 };
 use super::validation::validate_language_bcp47;
 use crate::error::{AppError, Result};
@@ -18,6 +18,21 @@ impl Default for CaseSection {
     fn default() -> Self {
         Self {
             default_group: default_case_group(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContactSection {
+    #[serde(default = "default_contact_group")]
+    pub default_group: String,
+}
+
+impl Default for ContactSection {
+    fn default() -> Self {
+        Self {
+            default_group: default_contact_group(),
         }
     }
 }
@@ -77,7 +92,6 @@ pub struct SmtpSection {
     pub username: Option<String>,
     pub password_secret: Option<String>,
     pub password_secret_env: Option<String>,
-    pub from: Option<String>,
 }
 
 impl Default for SmtpSection {
@@ -90,7 +104,6 @@ impl Default for SmtpSection {
             username: None,
             password_secret: None,
             password_secret_env: None,
-            from: None,
         }
     }
 }
@@ -171,5 +184,4 @@ pub struct SmtpConfig {
     pub tls_wrapper: bool,
     pub username: Option<String>,
     pub password_secret: Option<String>,
-    pub from: String,
 }

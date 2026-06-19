@@ -743,6 +743,9 @@ fn test_config(imap_port: Option<u16>, smtp_port: Option<u16>) -> Value {
                 "drafts": {"steps": []}
             }}
         },
+        "identities": [
+            {"identity": "me", "name": "Me", "email": "me@example.com", "default": true}
+        ],
         "case": {"default_group": "open"},
         "audit": {"reason_mode": "required"},
         "smtp": {
@@ -751,8 +754,7 @@ fn test_config(imap_port: Option<u16>, smtp_port: Option<u16>) -> Value {
             "starttls": false,
             "tls_wrapper": false,
             "username": null,
-            "password_secret": null,
-            "from": "Me <me@example.com>"
+            "password_secret": null
         },
         "workspace": {"language_bcp47": null, "timezone_utc_offset": "UTC"}
     })
@@ -1743,6 +1745,29 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(gitignore.contains("spam/*.md"));
     assert!(gitignore.contains("trash/*.md"));
     assert!(gitignore.contains("deleted/*.md"));
+    let (status, stdout) = run(
+        &root,
+        &[
+            "skill",
+            "install",
+            "--agent",
+            "claude-code",
+            "--scope",
+            "workspace",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "skill_install");
+    assert!(value["targets"][0]["skill_path"]
+        .as_str()
+        .unwrap_or_default()
+        .ends_with(".claude/skills/agent-first-mail/SKILL.md"));
+    let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
+    assert!(gitignore.contains(".codex/skills/agent-first-mail/"));
+    assert!(gitignore.contains(".claude/skills/agent-first-mail/"));
+    assert!(gitignore.contains("messages/*.json"));
+    assert_eq!(gitignore.matches("# BEGIN afmail managed").count(), 1);
     let (status, stdout) = run(&root, &["status"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
@@ -2175,6 +2200,10 @@ fn skill_install_status_and_uninstall_work() {
     let value = parse_one(&stdout);
     assert_eq!(value["code"], "skill_install");
     let skill_path = skills_dir.join("agent-first-mail/SKILL.md");
+    assert!(value["targets"][0]["skill_path"]
+        .as_str()
+        .unwrap_or_default()
+        .ends_with("agent-first-mail/SKILL.md"));
     assert!(skill_path.is_file());
     let text = fs::read_to_string(&skill_path).unwrap_or_default();
     assert!(text.contains("afmail-managed-skill: true"));
@@ -4383,10 +4412,6 @@ fn case_reply_all_includes_original_recipients_minus_self() {
     let root = temp_root("case-reply-all");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
-    assert_eq!(
-        run(&root, &["config", "set", "smtp.from", "me@example.com"]).0,
-        0
-    );
     write_message(&root, "message_ra", 70, None);
     // Give the message multiple recipients, including this account itself.
     let message_path = root.join("messages/message_ra.json");

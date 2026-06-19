@@ -28,6 +28,8 @@ impl MailConfig {
             "actions.message.spam.steps" => Ok(json!(self.actions.message_spam.steps)),
             "actions.message.trash.steps" => Ok(json!(self.actions.message_trash.steps)),
             "case.default_group" => Ok(json!(self.case.default_group)),
+            "contact.default_group" => Ok(json!(self.contact.default_group)),
+            "identities" => Ok(json!(self.identities)),
             "archive" => Ok(json!(self.archive)),
             "archive.message_index.item_fields" => {
                 Ok(json!(self.archive.message_index.item_fields))
@@ -41,7 +43,6 @@ impl MailConfig {
             "smtp.username" => Ok(json!(self.smtp.username)),
             "smtp.password_secret" => Ok(json!(self.smtp.password_secret)),
             "smtp.password_secret_env" => Ok(json!(self.smtp.password_secret_env)),
-            "smtp.from" => Ok(json!(self.smtp.from)),
             "workspace.language_bcp47" => Ok(json!(self.workspace.language_bcp47)),
             "workspace.timezone_utc_offset" => Ok(json!(self.workspace.timezone_utc_offset)),
             _ => Err(AppError::new(
@@ -101,6 +102,7 @@ impl MailConfig {
                 self.actions.pull.default_mailbox_ids = ids;
             }
             "case.default_group" => self.case.default_group = single(values, key)?,
+            "contact.default_group" => self.contact.default_group = single(values, key)?,
             "audit.reason_mode" => {
                 self.audit.reason_mode = ReasonMode::parse(&single(values, key)?)?;
             }
@@ -117,7 +119,6 @@ impl MailConfig {
                 self.smtp.password_secret_env = Some(single(values, key)?);
                 self.smtp.password_secret = None;
             }
-            "smtp.from" => self.smtp.from = Some(single(values, key)?),
             "workspace.language_bcp47" => {
                 let value = single(values, key)?;
                 self.workspace.language_bcp47 = parse_optional_language_bcp47(&value)?;

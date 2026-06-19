@@ -76,6 +76,7 @@ pub(super) fn save_remote_message(
         }
     }
     apply_pull_target(&mut parsed.message, target);
+    crate::store::Workspace::at(root).apply_identity_match(&mut parsed.message, mail_config)?;
     parsed.conversation = crate::store::render_message_section_with_config(
         root,
         &parsed.message,

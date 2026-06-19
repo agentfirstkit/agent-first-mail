@@ -15,7 +15,6 @@ pub(super) struct TransactionFile {
 #[derive(Debug)]
 pub(crate) struct LocalTransaction {
     path: PathBuf,
-    finished: bool,
 }
 
 impl Workspace {
@@ -38,10 +37,7 @@ impl Workspace {
             paths: paths.into_iter().collect(),
         };
         write_json_pretty(&path, &transaction)?;
-        Ok(LocalTransaction {
-            path,
-            finished: false,
-        })
+        Ok(LocalTransaction { path })
     }
 
     pub fn ensure_no_incomplete_transactions(&self) -> Result<()> {
@@ -97,20 +93,11 @@ impl Workspace {
 }
 
 impl LocalTransaction {
-    pub(crate) fn commit(mut self) -> Result<()> {
+    pub(crate) fn commit(self) -> Result<()> {
         if self.path.exists() {
             remove_file(&self.path)?;
         }
-        self.finished = true;
         Ok(())
-    }
-}
-
-impl Drop for LocalTransaction {
-    fn drop(&mut self) {
-        if !self.finished && !std::thread::panicking() {
-            let _ = fs::remove_file(&self.path);
-        }
     }
 }
 

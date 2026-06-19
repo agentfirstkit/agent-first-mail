@@ -52,8 +52,12 @@ high-level wiring. Sibling modules add focused `impl Workspace` blocks:
 
 - `archive.rs` handles direct-message archive categories and archived case IO.
 - `cases.rs` handles active case CRUD, membership, notes, tags, and moves.
+- `contacts.rs` handles contact-card CRUD, emails/phones/tags/notes, archive and
+  reopen, sender extraction, the ephemeral email→contact map, and the view
+  refresh that materializes the contact link onto messages.
 - `messages.rs` handles message cache materialization, reads, local status
-  transitions, attachments, related-message discovery, and relocation.
+  transitions, attachments, related-message discovery, relocation, and stamping
+  each message's materialized `contact` link.
 - `refs.rs` builds the case->message reference index (`CaseIndex`) used to decide
   whether a message is still referenced by any active or archived case.
 - `disposition_views.rs` handles canonical local spam/trash/deleted collections

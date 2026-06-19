@@ -6,10 +6,10 @@ use crate::cli::{SkillAction, SkillAgentSelection, SkillScope, SkillTargetArgs};
 use crate::error::{AppError, Result};
 use agent_first_data::skill::{
     self, SkillAction as AfAction, SkillAgentSelection as AfSelection, SkillError, SkillOptions,
-    SkillScope as AfScope, SkillSpec,
+    SkillReport, SkillScope as AfScope, SkillSpec,
 };
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The embedded skill this binary installs.
 const SPEC: SkillSpec = SkillSpec {
@@ -20,8 +20,15 @@ const SPEC: SkillSpec = SkillSpec {
 };
 
 pub fn handle_action(action: SkillAction) -> Result<Value> {
+    let update_workspace_gitignore = matches!(
+        &action,
+        SkillAction::Install(write) if write.target.scope == SkillScope::Workspace
+    );
     let (af_action, options) = split_action(action);
     let report = skill::run_skill_admin(&SPEC, af_action, &options).map_err(to_app_error)?;
+    if update_workspace_gitignore {
+        update_gitignore_for_workspace_install(&report)?;
+    }
     serde_json::to_value(&report).map_err(|e| {
         AppError::new(
             "internal_error",
@@ -30,7 +37,13 @@ pub fn handle_action(action: SkillAction) -> Result<Value> {
     })
 }
 
-pub(crate) fn install_codex_workspace_skill(skills_dir: &Path) -> Result<Value> {
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceSkillInstall {
+    pub(crate) skill_dir: PathBuf,
+    pub(crate) skill_path: PathBuf,
+}
+
+pub(crate) fn install_codex_workspace_skill(skills_dir: &Path) -> Result<WorkspaceSkillInstall> {
     let options = SkillOptions {
         agent: AfSelection::Codex,
         scope: AfScope::Workspace,
@@ -39,11 +52,47 @@ pub(crate) fn install_codex_workspace_skill(skills_dir: &Path) -> Result<Value> 
     };
     let report =
         skill::run_skill_admin(&SPEC, AfAction::Install, &options).map_err(to_app_error)?;
-    serde_json::to_value(&report).map_err(|e| {
-        AppError::new(
+    workspace_skill_install_from_report(&report)
+}
+
+fn update_gitignore_for_workspace_install(report: &SkillReport) -> Result<()> {
+    let SkillReport::Install { targets, .. } = report else {
+        return Ok(());
+    };
+    let skill_dirs = targets
+        .iter()
+        .filter_map(|target| target.skill_path.parent().map(Path::to_path_buf))
+        .collect::<Vec<_>>();
+    let agent_root =
+        std::env::current_dir().map_err(|e| AppError::io("resolve current directory", &e))?;
+    crate::store::ensure_agent_gitignore_ignores_skill_dirs(&agent_root, &skill_dirs)
+}
+
+fn workspace_skill_install_from_report(report: &SkillReport) -> Result<WorkspaceSkillInstall> {
+    let SkillReport::Install { targets, .. } = report else {
+        return Err(AppError::new(
             "internal_error",
-            format!("failed to serialize skill report: {e}"),
-        )
+            "unexpected skill report kind after install",
+        ));
+    };
+    let Some(target) = targets.first() else {
+        return Err(AppError::new(
+            "internal_error",
+            "skill install returned no targets",
+        ));
+    };
+    Ok(WorkspaceSkillInstall {
+        skill_dir: target
+            .skill_path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                AppError::new(
+                    "internal_error",
+                    "skill install returned a path without a parent",
+                )
+            })?,
+        skill_path: target.skill_path.clone(),
     })
 }
 

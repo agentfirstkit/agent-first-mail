@@ -40,11 +40,15 @@ impl Workspace {
         self.require_workspace()?;
         create_dir_all(&self.root.join("triage"))?;
         let cases = CaseIndex::build(self)?;
+        let contact_map = self.contact_email_map()?;
+        let config = MailConfig::load(&self.root)?;
         let mut desired = BTreeSet::new();
         let mut written_count = 0usize;
         for path in message_json_paths(&self.root)? {
             let mut message = read_message(&path)?;
             self.apply_materialized_workspace_overlays(&mut message)?;
+            self.apply_identity_match(&mut message, &config)?;
+            self.apply_contact_link(&mut message, &contact_map);
             message.workspace.remote_sync = None;
             self.write_message_materialized_cache(&message)?;
             if self.triage_candidate(&message, &cases)? {

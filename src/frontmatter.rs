@@ -31,6 +31,8 @@ pub struct DraftFrontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
     #[serde(
         default,
@@ -50,6 +52,18 @@ pub struct DraftFrontmatter {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub attachments: Vec<String>,
+}
+
+/// Optional `identities/<identity>.md` persona override.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityFileFrontmatter {
+    pub kind: String,
+    pub identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer: Option<String>,
 }
 
 /// Frontmatter of a generated `triage/message_*.md` view.

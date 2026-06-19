@@ -33,6 +33,7 @@ impl Workspace {
             "draft_name": draft_name,
             "draft_path": rel_path(&self.root, &draft_path),
             "subject": fm.subject,
+            "identity": fm.identity,
             "to": fm.to,
             "cc": fm.cc,
             "attachments": attachments,
@@ -259,9 +260,43 @@ impl Workspace {
             changed_fields.push("cc".to_string());
         }
         if let Some(new_body) = body_override {
+            let config = MailConfig::load(&self.root)?;
+            let identity = if let Some(identity) = change.identity {
+                config.resolve_identity(&self.root, Some(identity))
+            } else {
+                config.resolve_identity(&self.root, fm.identity.as_deref())
+            }
+            .map_err(identity_draft_error)?;
+            let new_body = ensure_identity_footer(&new_body, identity.footer.as_deref());
             if current_body != new_body {
                 current_body = new_body;
                 changed_fields.push("body".to_string());
+            }
+        }
+        if let Some(identity_slug) = change.identity {
+            let config = MailConfig::load(&self.root)?;
+            let old_identity = config
+                .resolve_identity(&self.root, fm.identity.as_deref())
+                .map_err(identity_draft_error)?;
+            let new_identity = config
+                .resolve_identity(&self.root, Some(identity_slug))
+                .map_err(identity_draft_error)?;
+            if fm.identity.as_deref() != Some(new_identity.identity.as_str()) {
+                if !changed_fields.iter().any(|field| field == "identity") {
+                    changed_fields.push("identity".to_string());
+                }
+                fm.identity = Some(new_identity.identity.clone());
+            }
+            let updated_body = replace_identity_footer(
+                &current_body,
+                old_identity.footer.as_deref(),
+                new_identity.footer.as_deref(),
+            );
+            if updated_body != current_body {
+                current_body = updated_body;
+                if !changed_fields.iter().any(|field| field == "body") {
+                    changed_fields.push("body".to_string());
+                }
             }
         }
         let rendered = render_frontmatter(&fm, &current_body)?;
@@ -428,6 +463,7 @@ impl Workspace {
         case_ref: &str,
         message_id: &str,
         reply_all: bool,
+        identity: Option<&str>,
         body: Option<&str>,
         body_file: Option<&str>,
     ) -> Result<Value> {
@@ -456,14 +492,12 @@ impl Workspace {
         // Prefer Reply-To over From. With `reply_all`, also carry the original To
         // recipients into `to` and the original Cc into `cc`, excluding self.
         let config = MailConfig::load(&self.root)?;
-        let own_email = config
-            .smtp
-            .from
-            .as_deref()
-            .or(config.imap.username.as_deref())
-            .map(email_address);
+        let resolved_identity = config
+            .resolve_identity(&self.root, identity)
+            .map_err(identity_draft_error)?;
+        let own_emails = config.identity_emails();
         let mut seen: BTreeSet<String> = BTreeSet::new();
-        if let Some(own) = &own_email {
+        for own in &own_emails {
             seen.insert(own.clone());
         }
         let mut to: Vec<String> = Vec::new();
@@ -495,6 +529,7 @@ impl Workspace {
             case_uid: case_uid.to_string(),
             send_intent: Some("reply".to_string()),
             reply_to_message_id: Some(message_id.to_string()),
+            identity: Some(resolved_identity.identity.clone()),
             subject: Some(subject),
             to,
             cc,
@@ -511,6 +546,7 @@ impl Workspace {
                 &quoted,
             )?
         };
+        let body = ensure_identity_footer(&body, resolved_identity.footer.as_deref());
         let draft_name = format!("reply-{message_id}.md");
         let draft_path = case_path.join("drafts").join(&draft_name);
         if draft_path.exists() {
@@ -526,40 +562,38 @@ impl Workspace {
             "case_uid": case_uid,
             "message_id": message_id,
             "draft_name": draft_name,
-            "draft_path": rel_path(&self.root, &draft_path)
+            "draft_path": rel_path(&self.root, &draft_path),
+            "identity": resolved_identity.identity
         }))
     }
 
-    pub fn create_draft(
-        &self,
-        case_ref: &str,
-        to: &[String],
-        cc: &[String],
-        subject: &str,
-        body: Option<&str>,
-        body_file: Option<&str>,
-    ) -> Result<Value> {
+    pub(crate) fn create_draft(&self, case_ref: &str, draft: NewDraft<'_>) -> Result<Value> {
         self.require_workspace()?;
-        let body_override = draft_body_override(body, body_file)?;
+        let body_override = draft_body_override(draft.body, draft.body_file)?;
         let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
-        if to.is_empty() {
+        if draft.to.is_empty() {
             return Err(AppError::new(
                 "invalid_request",
                 "draft requires at least one --to recipient",
             ));
         }
+        let config = MailConfig::load(&self.root)?;
+        let resolved_identity = config
+            .resolve_identity(&self.root, draft.identity)
+            .map_err(identity_draft_error)?;
         let fm = DraftFrontmatter {
             kind: Some("draft".to_string()),
             case_uid: case_uid.to_string(),
             send_intent: Some("new".to_string()),
             reply_to_message_id: None,
-            subject: Some(subject.to_string()),
-            to: to.to_vec(),
-            cc: cc.to_vec(),
+            identity: Some(resolved_identity.identity.clone()),
+            subject: Some(draft.subject.to_string()),
+            to: draft.to.to_vec(),
+            cc: draft.cc.to_vec(),
             attachments: Vec::new(),
         };
         let slug = {
-            let slug = crate::mail::slugify(subject);
+            let slug = crate::mail::slugify(draft.subject);
             if slug.is_empty() {
                 "message".to_string()
             } else {
@@ -580,12 +614,14 @@ impl Workspace {
             Some(body) => body,
             None => render_draft_new_body(&self.root, language)?,
         };
+        let body = ensure_identity_footer(&body, resolved_identity.footer.as_deref());
         write_string_new(&draft_path, &render_frontmatter(&fm, &body)?)?;
         Ok(json!({
             "code": "draft_created",
             "case_uid": case_uid,
             "draft_name": draft_name,
-            "draft_path": rel_path(&self.root, &draft_path)
+            "draft_path": rel_path(&self.root, &draft_path),
+            "identity": resolved_identity.identity
         }))
     }
 
@@ -695,6 +731,10 @@ impl Workspace {
         if fm.to.is_empty() {
             return Err(AppError::new("draft_invalid", "draft to is required"));
         }
+        let config = MailConfig::load(&self.root)?;
+        config
+            .resolve_identity(&self.root, fm.identity.as_deref())
+            .map_err(identity_draft_error)?;
         if let Some(reply_id) = fm.reply_to_message_id.as_ref() {
             let messages = read_case_messages(case_path, case_uid)?;
             if !messages.contains_message(reply_id) {
@@ -798,6 +838,62 @@ fn draft_body_override(body: Option<&str>, body_file: Option<&str>) -> Result<Op
             read_to_string(&path, "read draft body file").map(Some)
         }
         (None, None) => Ok(None),
+    }
+}
+
+fn ensure_identity_footer(body: &str, footer: Option<&str>) -> String {
+    let Some(footer) = normalize_identity_footer(footer) else {
+        return body.to_string();
+    };
+    let body_end = body.trim_end();
+    if body_end == footer || body_end.ends_with(&format!("\n\n{footer}")) {
+        return body.to_string();
+    }
+    append_identity_footer(body, &footer)
+}
+
+fn replace_identity_footer(
+    body: &str,
+    old_footer: Option<&str>,
+    new_footer: Option<&str>,
+) -> String {
+    let stripped = remove_identity_footer(body, old_footer);
+    ensure_identity_footer(&stripped, new_footer)
+}
+
+fn append_identity_footer(body: &str, footer: &str) -> String {
+    if body.trim().is_empty() {
+        footer.to_string()
+    } else {
+        format!("{}\n\n{footer}", body.trim_end())
+    }
+}
+
+fn remove_identity_footer(body: &str, footer: Option<&str>) -> String {
+    let Some(footer) = normalize_identity_footer(footer) else {
+        return body.to_string();
+    };
+    let body_end = body.trim_end();
+    if body_end == footer {
+        return String::new();
+    }
+    let suffix = format!("\n\n{footer}");
+    if let Some(prefix) = body_end.strip_suffix(&suffix) {
+        return prefix.trim_end().to_string();
+    }
+    body.to_string()
+}
+
+fn normalize_identity_footer(footer: Option<&str>) -> Option<String> {
+    footer
+        .map(|footer| footer.trim_matches('\n').trim_end().to_string())
+        .filter(|footer| !footer.trim().is_empty())
+}
+
+fn identity_draft_error(err: AppError) -> AppError {
+    match err.error_code {
+        "unknown_identity" | "config_invalid" => AppError::new("draft_invalid", err.message),
+        _ => err,
     }
 }
 

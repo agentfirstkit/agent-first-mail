@@ -1,7 +1,8 @@
 use crate::cli::{
     ArchiveAction, ArchiveCaseAction, ArchiveCaseNotesAction, ArchiveMessageCommand,
-    ArchiveMessageNotesAction, CaseCommand, CaseNotesAction, Command, ConfigAction, DoctorAction,
-    MessageAction, PushAction, RemoteAction, RenderAction, TriageAction,
+    ArchiveMessageNotesAction, CaseCommand, CaseNotesAction, Command, ConfigAction, ContactCommand,
+    ContactNotesAction, DoctorAction, MessageAction, PushAction, RemoteAction, RenderAction,
+    TriageAction,
 };
 use crate::error::Result;
 use crate::store::Workspace;
@@ -85,6 +86,14 @@ fn lock_mode(command: &Command) -> LockMode {
         Command::Render { action } => match action {
             RenderAction::Refresh => LockMode::Exclusive,
             RenderAction::Templates { .. } => LockMode::Exclusive,
+        },
+        Command::Contact { action } => match action {
+            ContactCommand::List { .. }
+            | ContactCommand::Show { .. }
+            | ContactCommand::Notes {
+                action: ContactNotesAction::Show { .. },
+            } => LockMode::Shared,
+            _ => LockMode::Exclusive,
         },
         Command::Log { .. } => LockMode::Shared,
         #[cfg(feature = "ui")]

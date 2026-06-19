@@ -2,6 +2,7 @@ mod access;
 mod actions;
 mod archive;
 mod defaults;
+mod identity;
 mod mailbox;
 mod validation;
 mod workspace;
@@ -13,13 +14,14 @@ pub use actions::{
 pub use archive::{
     ArchiveMessageIndexField, ArchiveMessageIndexSection, ArchiveMessageIndexSort, ArchiveSection,
 };
+pub use identity::{IdentityConfig, MessageIdentityMatch, ResolvedIdentity};
 pub use mailbox::{
     special_use_kinds, ImapConfig, ImapMailboxConfig, ImapSection, SpecialUseKind,
     SpecialUseSource, SpecialUseTarget,
 };
 pub use workspace::{
-    AuditSection, CaseSection, ReasonMode, SmtpConfig, SmtpSection, TemplateLanguage,
-    WorkspaceSection,
+    AuditSection, CaseSection, ContactSection, ReasonMode, SmtpConfig, SmtpSection,
+    TemplateLanguage, WorkspaceSection,
 };
 
 use crate::error::{AppError, Result};
@@ -43,12 +45,15 @@ pub struct MailConfig {
     pub imap: ImapSection,
     pub mailboxes: BTreeMap<String, ImapMailboxConfig>,
     pub actions: ActionsSection,
+    pub identities: Vec<IdentityConfig>,
     #[serde(default)]
     pub case: CaseSection,
     #[serde(default)]
     pub archive: ArchiveSection,
     pub audit: AuditSection,
     pub smtp: SmtpSection,
+    #[serde(default)]
+    pub contact: ContactSection,
 }
 
 impl Default for MailConfig {
@@ -60,10 +65,12 @@ impl Default for MailConfig {
             imap: ImapSection::default(),
             mailboxes: default_mailbox_configs(),
             actions: ActionsSection::default(),
+            identities: default_identities(),
             case: CaseSection::default(),
             archive: ArchiveSection::default(),
             audit: AuditSection::default(),
             smtp: SmtpSection::default(),
+            contact: ContactSection::default(),
         }
     }
 }
@@ -78,6 +85,7 @@ impl MailConfig {
         let config: Self = serde_json::from_value(raw)
             .map_err(|e| AppError::new("config_invalid", format!("invalid config schema: {e}")))?;
         config.validate()?;
+        config.validate_identity_files(workspace_root)?;
         Ok(config)
     }
 
@@ -105,6 +113,7 @@ impl MailConfig {
         }
         self.workspace.validate()?;
         self.actions.validate(self)?;
+        self.validate_identities()?;
         self.archive.validate()?;
         validate_password_secret_source(
             "imap.password_secret",
@@ -166,19 +175,7 @@ impl MailConfig {
                 "smtp.password_secret_env",
                 self.smtp.password_secret_env.as_deref(),
             )?,
-            from: self
-                .smtp
-                .from
-                .clone()
-                .ok_or_else(|| AppError::new("config_missing", "smtp.from is required"))?,
         })
-    }
-
-    pub fn require_from(&self) -> Result<String> {
-        self.smtp
-            .from
-            .clone()
-            .ok_or_else(|| AppError::new("config_missing", "smtp.from is required"))
     }
 
     pub fn mailbox_ids(&self) -> Vec<String> {

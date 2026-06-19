@@ -600,6 +600,12 @@ mod tests {
             body_text: String::new(),
             eml_path: None,
             attachments: Vec::new(),
+            contact: None,
+            identity: None,
+            identity_email: None,
+            identity_match: None,
+            identity_candidates: Vec::new(),
+            observed_recipient_emails: Vec::new(),
             workspace: crate::types::WorkspaceState {
                 status: "case".to_string(),
                 archive_uid: None,

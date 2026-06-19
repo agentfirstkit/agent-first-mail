@@ -12,8 +12,36 @@ Raw message evidence lives at `.afmail/messages/<message_id>.eml`. Remote IMAP
 locations live at `.afmail/messages/<message_id>.remote.json` when remote
 metadata exists. Parsed `messages/<message_id>.json` files are rebuildable cache
 with `schema_name: "message"` and `schema_version: 1`; they include headers,
-attachment metadata, `body_text`, remote overlay, and workspace overlay
-materialized from durable object collections plus remote metadata.
+attachment metadata, `body_text`, remote overlay, workspace overlay materialized
+from durable object collections plus remote metadata, an optional `contact` link
+materialized from the sender address, and inbound identity-match fields
+materialized from configured workspace identities.
+
+The `contact` field is present only when the `From` address matches a contact
+card. It is a snapshot refreshed at pull/render time and on contact changes:
+
+```json
+{
+  "contact": {
+    "contact_uid": "p20260521001",
+    "display_name": "Zhang San"
+  }
+}
+```
+
+Inbound mail records which configured identity appears to have received the
+message. Unique matches set `identity`, `identity_email`, and `identity_match`
+(`email` or `name`). Ambiguous same-address personas set `identity_match:
+"multiple"` plus `identity_candidates`. Unknown recipient addresses set
+`identity_match: "unmatched"` plus `observed_recipient_emails`.
+
+```json
+{
+  "identity": "support",
+  "identity_email": "hello@example.com",
+  "identity_match": "name"
+}
+```
 
 Remote sidecar:
 
@@ -141,9 +169,10 @@ copied into case files by assignment or case creation:
 
 The managed `.gitignore` ignores rebuildable `messages/*.json`, generated
 Markdown read views, `.afmail/push/`, `.afmail/logs/`, `.afmail/transactions/`,
-`.afmail/workspace.lock`, `.afmail/workspace.progress.json`, and
-`.codex/skills/agent-first-mail/`. It
-intentionally does not ignore `.afmail/messages/`. If you track
+`.afmail/workspace.lock`, `.afmail/workspace.progress.json`, and installed
+workspace skill directories such as `.codex/skills/agent-first-mail/` or
+`.claude/skills/agent-first-mail/`. It intentionally does not ignore
+`.afmail/messages/`. If you track
 `.afmail/messages/` in git, the repository will contain private mail bodies,
 sidecar metadata, and raw attachment bytes.
 
@@ -206,13 +235,14 @@ frontmatter), and links to messages from the case root as
 `data/case.json` and message evidence/cache.
 
 Draft markdown files use frontmatter fields `kind`, `case_uid`, `send_intent`,
-`reply_to_message_id`, `subject`, `to`, `cc`, and `attachments`:
+`reply_to_message_id`, `identity`, `subject`, `to`, `cc`, and `attachments`:
 
 ```yaml
 kind: draft
 case_uid: c20260521001
 send_intent: reply
 reply_to_message_id: message_20260521_3af9c1b2e8d04f6a
+identity: support
 subject: "Re: Contract renewal"
 to:
   - alice@example.com
@@ -228,11 +258,72 @@ recorded as safe relative paths. Inbound message-cache paths under
 `.afmail/messages/<message_id>.files/` are message evidence and should not be
 used as draft attachment paths.
 
+`identity:` is a config identity slug. If absent, afmail resolves the configured
+default identity. Optional footers are inserted into the draft body when the
+draft is created or its identity changes; send time does not append hidden text.
+
 `data/drafts.json` is afmail-managed case-local state. It records each draft's
 `last_validated_hash` and `last_validated_rfc3339`. Agents and humans edit
 draft Markdown directly (or use `draft change`); queued `draft save` and
 `draft send` items reference the draft by case and filename and use the latest
 valid Markdown at push time. They should not edit `data/drafts.json` directly.
+
+## Identity Persona Override
+
+`.afmail/config.json` is the canonical identity registry. Each configured
+identity has a slug, display name, email address, and exactly one default.
+Optional `identities/<identity>.md` files may override the display name and add a
+footer plus agent-facing notes. They do not override `email` or `default`.
+
+```markdown
+---
+kind: identity
+identity: support
+name: "Support Team"
+footer: |
+  --
+  Support Team
+  Agent-First Kit
+---
+Use this identity for customer support replies.
+```
+
+The frontmatter `identity` must exist in config and must match the file stem.
+Contacts are other people; identities are our send personas.
+
+## Contact Card
+
+Contact cards live at `contacts/<group>/<contact_uid>-<name>.md` (archived:
+`archive/contacts/<contact_uid>-<name>.md`). Each card is canonical Markdown with
+a `kind: contact` frontmatter and a free-form notes body:
+
+```markdown
+---
+kind: contact
+contact_uid: p20260521001
+display_name: Zhang San
+emails:
+- zhang@example.com
+phones:
+- "13800138000"
+organization: Acme
+role: Buyer
+tags:
+- vip
+created_rfc3339: 2026-06-01T17:30:00Z
+updated_rfc3339: 2026-06-01T17:30:00Z
+---
+
+## Zhang San
+
+Free-form notes.
+```
+
+`contact_uid` starts with `pYYYYMMDDNNN` and is stable across active/archived.
+Email addresses are globally unique across all contacts. There is no separate
+email→contact index file; the sender→contact link is materialized onto each
+message's `contact` field (see Message JSON) at pull/render time and on contact
+changes.
 
 ## Direct Message Archive Category
 

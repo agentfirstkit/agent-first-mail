@@ -159,6 +159,9 @@ pub enum CaseDraftAction {
         /// Draft subject.
         #[arg(long)]
         subject: String,
+        /// Workspace identity slug to send as. Defaults to the configured default identity.
+        #[arg(long)]
+        identity: Option<String>,
         /// Draft body text.
         #[arg(long, conflicts_with = "body_file")]
         body: Option<String>,
@@ -172,6 +175,9 @@ pub enum CaseDraftAction {
         case_ref: String,
         /// Message id in this case to reply to.
         message_id: String,
+        /// Workspace identity slug to send as. Defaults to the configured default identity.
+        #[arg(long)]
+        identity: Option<String>,
         /// Draft body text. Replaces the default reply template when provided.
         #[arg(long, conflicts_with = "body_file")]
         body: Option<String>,
@@ -200,6 +206,9 @@ pub enum CaseDraftAction {
         /// Clear all Cc recipients.
         #[arg(long)]
         clear_cc: bool,
+        /// Change the workspace identity slug used by this draft.
+        #[arg(long)]
+        identity: Option<String>,
         /// Replacement draft body text.
         #[arg(long, conflicts_with = "body_file")]
         body: Option<String>,

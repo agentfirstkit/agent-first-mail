@@ -64,6 +64,15 @@ pub(super) fn default_mailbox_configs() -> BTreeMap<String, ImapMailboxConfig> {
     mailboxes
 }
 
+pub(super) fn default_identities() -> Vec<IdentityConfig> {
+    vec![IdentityConfig {
+        identity: "me".to_string(),
+        name: "Me".to_string(),
+        email: "me@example.com".to_string(),
+        default: true,
+    }]
+}
+
 pub(super) fn default_timezone_utc_offset_option() -> Option<String> {
     Some(default_timezone_utc_offset())
 }
@@ -85,6 +94,10 @@ pub(super) fn default_case_group() -> String {
 
 pub(super) fn default_reason_mode() -> ReasonMode {
     ReasonMode::Required
+}
+
+pub(super) fn default_contact_group() -> String {
+    "people".to_string()
 }
 
 pub(super) fn default_archive_message_index_fields() -> Vec<ArchiveMessageIndexField> {
