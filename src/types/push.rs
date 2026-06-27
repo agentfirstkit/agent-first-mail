@@ -163,9 +163,11 @@ impl PushItem {
     }
 
     pub fn has_started_steps(&self) -> bool {
-        self.step_states
-            .iter()
-            .any(|state| state.status != PushStepStatus::Pending)
+        self.step_states.iter().any(|state| {
+            state.status != PushStepStatus::Pending
+                || state.started_rfc3339.is_some()
+                || state.completed_rfc3339.is_some()
+        })
     }
 }
 

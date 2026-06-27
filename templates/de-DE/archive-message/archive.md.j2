@@ -1,0 +1,11 @@
+# Archivierte Nachrichten: {{ archive.archive_name }} (`{{ archive.archive_uid }}`)
+
+{% if items | length == 0 %}_Keine Nachrichten._
+{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.action_kind == 'received' %}Empfangen{% elif item.view.action_kind == 'received_reply' %}Empfangene Antwort{% elif item.view.action_kind == 'received_forward' %}Empfangene Weiterleitung{% elif item.view.action_kind == 'sent' %}Gesendet{% elif item.view.action_kind == 'sent_reply' %}Gesendete Antwort{% else %}Gesendete Weiterleitung{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
+
+{% if item.view.display_contact %}- {% if item.view.contact_kind == 'from' %}Von{% else %}An{% endif %}: {{ item.view.display_contact }}
+{% endif %}- Nachricht: [{{ item.message.message_id }}]({{ item.view.link }})
+{% if item.view.time.datetime %}- Zeit: {{ item.view.time.datetime }}
+{% endif %}
+
+{% endfor %}{% endif %}

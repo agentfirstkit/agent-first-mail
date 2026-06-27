@@ -1,0 +1,22 @@
+# {{ case.collection_name }}
+
+事項: {{ case.collection_uid }} · 狀態: {{ view.status }} · 訊息: {{ view.message_count }}
+
+{% if items | length == 0 %}_沒有訊息。_
+{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.direction_kind == 'received' %}收到{% else %}發送{% endif %}{% if item.view.action == 'reply' %}回覆{% elif item.view.action == 'forward' %}轉寄{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
+
+{% if item.view.display_contact %}- {% if item.view.contact_kind == 'from' %}寄件人{% else %}收件人{% endif %}: {{ item.view.display_contact }}
+{% endif %}- 訊息: [{{ item.message.message_id }}]({{ item.view.link }})
+{% if item.view.time.datetime %}- 時間: {{ item.view.time.datetime }}
+{% endif %}
+
+{% endfor %}{% endif %}
+{% if view.conversation %}
+## 正文
+
+<!-- afmail:conversation:start -->
+
+{{ view.conversation }}
+
+<!-- afmail:conversation:end -->
+{% endif %}

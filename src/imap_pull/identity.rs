@@ -1,4 +1,5 @@
 use super::*;
+use agent_first_slug::{AllowedCharacterSet, SlugConfig};
 
 #[derive(Clone, Debug)]
 pub(super) struct SavedMessage {
@@ -469,13 +470,9 @@ pub(super) fn stable_message_id(
     offset: FixedOffset,
 ) -> String {
     let parsed = MessageParser::default().parse(&remote.raw_eml);
-    // Date prefix from the message's own (immutable) Date header, rendered in the
-    // workspace's configured offset. Absent Date -> no prefix.
-    let date_prefix = parsed
-        .as_ref()
-        .and_then(|message| message.date())
-        .map(|date| date.to_rfc3339())
-        .and_then(|rfc3339| DateTime::parse_from_rfc3339(&rfc3339).ok())
+    // Prefer parser-normalized Date, accept common sender Date variants, then
+    // fall back to the sender-side Received timestamp when Date is absent.
+    let date_prefix = stable_message_datetime(parsed.as_ref(), &remote.raw_eml)
         .map(|date| date.with_timezone(&offset).format("%Y%m%d").to_string());
     let hash = parsed
         .as_ref()
@@ -503,6 +500,116 @@ pub(super) fn stable_message_id(
     unique_message_id(root, &base)
 }
 
+fn stable_message_datetime(
+    parsed: Option<&mail_parser::Message<'_>>,
+    raw_eml: &[u8],
+) -> Option<DateTime<FixedOffset>> {
+    parsed
+        .and_then(|message| message.date())
+        .map(|date| date.to_rfc3339())
+        .and_then(|rfc3339| DateTime::parse_from_rfc3339(&rfc3339).ok())
+        .or_else(|| {
+            raw_header_values(raw_eml, "Date")
+                .into_iter()
+                .find_map(|value| parse_message_datetime(&value))
+        })
+        .or_else(|| sender_received_datetime(raw_eml))
+}
+
+fn sender_received_datetime(raw_eml: &[u8]) -> Option<DateTime<FixedOffset>> {
+    raw_header_values(raw_eml, "Received")
+        .into_iter()
+        .rev()
+        .filter_map(|value| {
+            value
+                .rsplit_once(';')
+                .and_then(|(_, date)| parse_message_datetime(date))
+        })
+        .next()
+}
+
+fn parse_message_datetime(value: &str) -> Option<DateTime<FixedOffset>> {
+    let trimmed = value.trim();
+    let without_comment = trim_trailing_parenthetical(trimmed);
+    for candidate in [trimmed, without_comment] {
+        if let Ok(parsed) = DateTime::parse_from_rfc2822(candidate) {
+            return Some(parsed);
+        }
+        for format in [
+            "%a %b %d %Y %H:%M:%S GMT%z",
+            "%a %b %e %Y %H:%M:%S GMT%z",
+            "%a %b %d %Y %H:%M:%S %z",
+            "%a %b %e %Y %H:%M:%S %z",
+        ] {
+            if let Ok(parsed) = DateTime::parse_from_str(candidate, format) {
+                return Some(parsed);
+            }
+        }
+    }
+    None
+}
+
+fn trim_trailing_parenthetical(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.ends_with(')') {
+        if let Some(start) = trimmed.rfind(" (") {
+            return trimmed[..start].trim_end();
+        }
+    }
+    trimmed
+}
+
+fn raw_header_values(raw_eml: &[u8], name: &str) -> Vec<String> {
+    let header = raw_header_section(raw_eml);
+    let text = String::from_utf8_lossy(header);
+    let mut values = Vec::new();
+    let mut current_matches = false;
+    let mut current_value = String::new();
+    let mut has_current = false;
+
+    for line in text.lines().map(|line| line.trim_end_matches('\r')) {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if has_current && current_matches {
+                if !current_value.is_empty() {
+                    current_value.push(' ');
+                }
+                current_value.push_str(line.trim());
+            }
+            continue;
+        }
+
+        if has_current && current_matches {
+            values.push(current_value.trim().to_string());
+        }
+        has_current = false;
+        current_matches = false;
+        current_value.clear();
+
+        if let Some((header_name, value)) = line.split_once(':') {
+            has_current = true;
+            current_matches = header_name.eq_ignore_ascii_case(name);
+            if current_matches {
+                current_value.push_str(value.trim());
+            }
+        }
+    }
+
+    if has_current && current_matches {
+        values.push(current_value.trim().to_string());
+    }
+    values
+}
+
+fn raw_header_section(raw_eml: &[u8]) -> &[u8] {
+    if let Some(pos) = raw_eml.windows(4).position(|window| window == b"\r\n\r\n") {
+        return &raw_eml[..pos];
+    }
+    if let Some(pos) = raw_eml.windows(2).position(|window| window == b"\n\n") {
+        return &raw_eml[..pos];
+    }
+    raw_eml
+}
+
 pub(super) fn fnv1a_hex(value: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in value.as_bytes() {
@@ -513,13 +620,12 @@ pub(super) fn fnv1a_hex(value: &str) -> String {
 }
 
 pub(super) fn slug_segment(value: &str) -> String {
-    let mut out = String::new();
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-        } else if !out.ends_with('_') {
-            out.push('_');
-        }
-    }
-    out.trim_matches('_').to_string()
+    let config = SlugConfig {
+        replacement_delimiter: '_',
+        allowed_character_set: AllowedCharacterSet::AsciiAlphanumericCharacters,
+        ..SlugConfig::default()
+    };
+    agent_first_slug::slugify(value, &config)
+        .map(|result| result.slug)
+        .unwrap_or_default()
 }

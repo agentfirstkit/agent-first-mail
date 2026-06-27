@@ -10,6 +10,7 @@ mod push_state;
 mod refs;
 mod remote_sync;
 mod render;
+mod render_cache;
 #[cfg(test)]
 mod tests;
 mod transactions;
@@ -26,6 +27,7 @@ use messages::*;
 use refs::CaseIndex;
 use remote_sync::*;
 use render::*;
+use render_cache::*;
 use util::*;
 
 pub use render::{
@@ -39,7 +41,7 @@ use crate::config::{
 };
 use crate::error::{AppError, Result};
 use crate::frontmatter::{CaseFrontmatter, DraftFrontmatter, TriageFrontmatter};
-use crate::markdown::{read_doc, render_frontmatter};
+use crate::markdown::{parse_frontmatter, read_doc, render_frontmatter};
 use crate::templates::{language_template_path, MarkdownTemplateRenderer, TemplateKey};
 use crate::types::RemoteSyncState;
 use crate::types::{
@@ -49,7 +51,10 @@ use crate::types::{
     WorkspacePushState, WorkspaceState, ARCHIVE_NOTIFICATION_SCHEMA_NAME, CASE_SCHEMA_NAME,
     MESSAGE_COLLECTION_SCHEMA_VERSION,
 };
-use crate::util::{canonical_flags, sha256_fingerprint, write_json_pretty, write_string_atomic};
+use crate::util::{
+    blake3_fingerprint, blake3_fingerprint_str, canonical_flags, write_json_pretty,
+    write_string_atomic,
+};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, SecondsFormat, Timelike, Utc};
 use sanitize_filename::{sanitize_with_options, Options as SanitizeFilenameOptions};
 use serde::{Deserialize, Serialize};
@@ -59,18 +64,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, UNIX_EPOCH};
 
 const AFMAIL_GITIGNORE_BEGIN: &str = "# BEGIN afmail managed";
 const AFMAIL_GITIGNORE_END: &str = "# END afmail managed";
 const AFMAIL_AGENT_GITIGNORE_HEADER: &str =
     "# Agent-First Mail workspace skill installed by afmail init.";
-const AFMAIL_WORKSPACE_GITIGNORE_BODY: &str = r#"# Local mail evidence and runtime state.
+const AFMAIL_WORKSPACE_GITIGNORE_BODY: &str = r#"# This workspace is meant to live in a PRIVATE repository: pulled mail bodies,
+# attachments, and .afmail/config.json (which may hold an inline imap/smtp
+# password_secret) are intentionally NOT ignored, so they are committed as part
+# of your private mailbox state. If this repo could ever be public or shared, set
+# credentials via password_secret_env instead of storing them inline in config.
+
+# Local mail evidence and runtime state.
 .afmail/push/
 .afmail/logs/
 .afmail/transactions/
 .afmail/workspace.lock
 .afmail/workspace.progress.json
+.afmail/render-cache.json
+.afmail/config.example.json
 
 # Generated caches and read views; rebuild with afmail render refresh.
 messages/*.json
@@ -421,12 +434,16 @@ pub struct Workspace {
 struct CaseViewRefresh {
     case_index_count: usize,
     case_message_count: usize,
+    case_index_unchanged_count: usize,
+    case_message_unchanged_count: usize,
 }
 
 #[derive(Clone, Debug, Default)]
 struct ArchiveMessageViewRefresh {
     archive_message_index_count: usize,
     archive_message_count: usize,
+    archive_message_index_unchanged_count: usize,
+    archive_message_unchanged_count: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -436,20 +453,69 @@ struct RenderRefreshTotals {
     archive_message_category_count: usize,
     case_index_count: usize,
     case_message_count: usize,
+    case_index_unchanged_count: usize,
+    case_message_unchanged_count: usize,
     archive_message_index_count: usize,
     archive_message_count: usize,
+    archive_message_index_unchanged_count: usize,
+    archive_message_unchanged_count: usize,
 }
 
 impl RenderRefreshTotals {
     fn add_case(&mut self, refresh: CaseViewRefresh) {
         self.case_index_count += refresh.case_index_count;
         self.case_message_count += refresh.case_message_count;
+        self.case_index_unchanged_count += refresh.case_index_unchanged_count;
+        self.case_message_unchanged_count += refresh.case_message_unchanged_count;
     }
 
     fn add_archive_message(&mut self, refresh: ArchiveMessageViewRefresh) {
         self.archive_message_index_count += refresh.archive_message_index_count;
         self.archive_message_count += refresh.archive_message_count;
+        self.archive_message_index_unchanged_count += refresh.archive_message_index_unchanged_count;
+        self.archive_message_unchanged_count += refresh.archive_message_unchanged_count;
     }
+}
+
+fn render_done_fields(stage: &str, started: Instant, mut fields: Value) -> Value {
+    if let Value::Object(map) = &mut fields {
+        map.insert("render_stage".to_string(), json!(stage));
+        map.insert(
+            "elapsed_ms".to_string(),
+            json!(started.elapsed().as_millis() as u64),
+        );
+        return fields;
+    }
+    json!({
+        "render_stage": stage,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+    })
+}
+
+fn render_case_done_fields(totals: &RenderRefreshTotals) -> Value {
+    json!({
+        "active_case_count": totals.active_case_count,
+        "archived_case_count": totals.archived_case_count,
+        "case_view_count": totals.case_index_count + totals.case_index_unchanged_count,
+        "case_view_written_count": totals.case_index_count + totals.case_message_count,
+        "case_view_unchanged_count": totals.case_index_unchanged_count + totals.case_message_unchanged_count,
+        "case_index_written_count": totals.case_index_count,
+        "case_index_unchanged_count": totals.case_index_unchanged_count,
+        "case_message_written_count": totals.case_message_count,
+        "case_message_unchanged_count": totals.case_message_unchanged_count,
+    })
+}
+
+fn render_archive_done_fields(totals: &RenderRefreshTotals) -> Value {
+    json!({
+        "archive_message_category_count": totals.archive_message_category_count,
+        "archive_message_view_written_count": totals.archive_message_index_count + totals.archive_message_count,
+        "archive_message_view_unchanged_count": totals.archive_message_index_unchanged_count + totals.archive_message_unchanged_count,
+        "archive_message_index_written_count": totals.archive_message_index_count,
+        "archive_message_index_unchanged_count": totals.archive_message_index_unchanged_count,
+        "archive_message_written_count": totals.archive_message_count,
+        "archive_message_unchanged_count": totals.archive_message_unchanged_count,
+    })
 }
 
 impl Workspace {
@@ -499,8 +565,11 @@ impl Workspace {
         create_dir_all(&self.root.join("archive/notifications"))?;
         write_json_if_missing(
             &self.root.join(".afmail/config.json"),
-            &serde_json::to_value(crate::config::MailConfig::default())
-                .map_err(|e| AppError::json("serialize config", &e))?,
+            &crate::config::MailConfig::default().sparse_value()?,
+        )?;
+        write_json_pretty(
+            &self.root.join(".afmail/config.example.json"),
+            &crate::config::MailConfig::default_template_value()?,
         )?;
         write_string_if_missing(&self.root.join(".afmail/logs/events.jsonl"), "")?;
         let config = MailConfig::load(&self.root)?;
@@ -663,7 +732,7 @@ impl Workspace {
             serde_json::to_value(config).map_err(|e| AppError::json("serialize config", &e))?;
         Ok(json!({
             "code": "config",
-            "config": value
+            "config": redact_config_secrets(value)
         }))
     }
 
@@ -687,6 +756,35 @@ impl Workspace {
         Ok(json!({
             "code": "config_updated",
             "key": key,
+            "value": value
+        }))
+    }
+
+    pub fn config_add(&self, key: &str, slug: &str, fields: &[String]) -> Result<Value> {
+        self.require_workspace()?;
+        let mut config = crate::config::MailConfig::load(&self.root)?;
+        let parsed = parse_field_assignments(fields)?;
+        config.add_key(key, slug, &parsed)?;
+        config.write(&self.root)?;
+        let value = config_value_for_output(key, config.get_key(key)?);
+        Ok(json!({
+            "code": "config_updated",
+            "key": key,
+            "slug": slug,
+            "value": value
+        }))
+    }
+
+    pub fn config_remove(&self, key: &str, slug: &str) -> Result<Value> {
+        self.require_workspace()?;
+        let mut config = crate::config::MailConfig::load(&self.root)?;
+        config.remove_key(key, slug)?;
+        config.write(&self.root)?;
+        let value = config_value_for_output(key, config.get_key(key)?);
+        Ok(json!({
+            "code": "config_updated",
+            "key": key,
+            "slug": slug,
             "value": value
         }))
     }
@@ -719,39 +817,144 @@ impl Workspace {
     }
 
     pub fn render_refresh(&self) -> Result<Value> {
+        self.render_refresh_with_progress(None)
+    }
+
+    pub fn render_refresh_with_progress(
+        &self,
+        progress: Option<&mut crate::progress::ProgressCallback<'_>>,
+    ) -> Result<Value> {
         self.require_workspace()?;
+        let mut progress = progress;
+        crate::progress::emit(&mut progress, "render_start", json!({}));
         create_dir_all(&self.root.join("archive/cases"))?;
         create_dir_all(&self.root.join("archive/notifications"))?;
+
+        crate::progress::emit(
+            &mut progress,
+            "render_materialize_start",
+            json!({"render_stage": "materialize"}),
+        );
+        let step_started = Instant::now();
         let cache = self.rebuild_message_cache_from_eml()?;
-        let triage = self.refresh_triage_views()?;
-        let dispositions = self.refresh_disposition_views()?;
+        crate::progress::emit(
+            &mut progress,
+            "render_materialize_done",
+            render_done_fields(
+                "materialize",
+                step_started,
+                json!({
+                    "message_cache_rebuilt_count": cache.rebuilt_count,
+                    "text_cache_removed_count": cache.removed_text_cache_count,
+                }),
+            ),
+        );
+
+        let mut render_cache = self.read_render_cache()?;
+        crate::progress::emit(
+            &mut progress,
+            "render_triage_start",
+            json!({"render_stage": "triage"}),
+        );
+        let step_started = Instant::now();
+        let triage = self.refresh_triage_views_cached_with_progress(
+            &mut render_cache,
+            progress.as_deref_mut(),
+            "render_triage_progress",
+        )?;
+        crate::progress::emit(
+            &mut progress,
+            "render_triage_done",
+            render_done_fields("triage", step_started, triage.clone()),
+        );
+
+        crate::progress::emit(
+            &mut progress,
+            "render_dispositions_start",
+            json!({"render_stage": "dispositions"}),
+        );
+        let step_started = Instant::now();
+        let dispositions = self.refresh_disposition_views_cached(&mut render_cache)?;
+        crate::progress::emit(
+            &mut progress,
+            "render_dispositions_done",
+            render_done_fields("dispositions", step_started, dispositions.clone()),
+        );
+
         let config = MailConfig::load(&self.root)?;
         let mut renderer = MarkdownTemplateRenderer::new(&self.root, config.template_language());
         let mut totals = RenderRefreshTotals::default();
 
+        crate::progress::emit(
+            &mut progress,
+            "render_cases_start",
+            json!({"render_stage": "cases"}),
+        );
+        let step_started = Instant::now();
         for (_, case_path) in self.case_entries()? {
-            let refresh =
-                self.refresh_case_message_views_with_renderer(&case_path, &mut renderer)?;
+            let refresh = self.refresh_case_message_views_with_cache(
+                &case_path,
+                &mut renderer,
+                &mut render_cache,
+            )?;
             totals.active_case_count += 1;
             totals.add_case(refresh);
         }
         for entry in self.archived_case_entries()? {
-            let refresh =
-                self.refresh_case_message_views_with_renderer(&entry.path, &mut renderer)?;
+            let refresh = self.refresh_case_message_views_with_cache(
+                &entry.path,
+                &mut renderer,
+                &mut render_cache,
+            )?;
             totals.archived_case_count += 1;
             totals.add_case(refresh);
         }
+        crate::progress::emit(
+            &mut progress,
+            "render_cases_done",
+            render_done_fields("cases", step_started, render_case_done_fields(&totals)),
+        );
+
+        crate::progress::emit(
+            &mut progress,
+            "render_archives_start",
+            json!({"render_stage": "archives"}),
+        );
+        let step_started = Instant::now();
         for archive_uid in self.archive_message_category_ids()? {
-            let refresh = self.refresh_archive_message_category_with_renderer(
+            let refresh = self.refresh_archive_message_category_with_cache(
                 &archive_uid,
                 &mut renderer,
                 false,
+                &mut render_cache,
             )?;
             totals.archive_message_category_count += 1;
             totals.add_archive_message(refresh);
         }
+        crate::progress::emit(
+            &mut progress,
+            "render_archives_done",
+            render_done_fields(
+                "archives",
+                step_started,
+                render_archive_done_fields(&totals),
+            ),
+        );
 
-        Ok(json!({
+        crate::progress::emit(
+            &mut progress,
+            "render_cache_write_start",
+            json!({"render_stage": "cache_write"}),
+        );
+        let step_started = Instant::now();
+        self.write_render_cache_if_changed(&mut render_cache)?;
+        crate::progress::emit(
+            &mut progress,
+            "render_cache_write_done",
+            render_done_fields("cache_write", step_started, json!({})),
+        );
+
+        let result = json!({
             "code": "render_refreshed",
             "active_case_count": totals.active_case_count,
             "archived_case_count": totals.archived_case_count,
@@ -780,7 +983,9 @@ impl Workspace {
                 "archive-message/message.md.j2": totals.archive_message_count,
             },
             "template_sources": renderer.stats().to_value(),
-        }))
+        });
+        crate::progress::emit(&mut progress, "render_done", result.clone());
+        Ok(result)
     }
 
     pub fn render_templates(&self, force: bool) -> Result<Value> {
@@ -930,16 +1135,24 @@ fn merge_triage_refresh_into_pull(pull: &mut Value, triage: &Value) {
     for key in [
         "triage_count",
         "triage_written_count",
+        "triage_unchanged_count",
         "stale_triage_removed_count",
         "spam_count",
         "spam_written_count",
+        "spam_unchanged_count",
         "stale_spam_removed_count",
         "trash_count",
         "trash_written_count",
+        "trash_unchanged_count",
         "stale_trash_removed_count",
         "deleted_count",
         "deleted_written_count",
+        "deleted_unchanged_count",
         "stale_deleted_removed_count",
+        "index_written_count",
+        "index_unchanged_count",
+        "message_written_count",
+        "message_unchanged_count",
     ] {
         if let Some(value) = triage_obj.get(key) {
             pull_obj.insert(key.to_string(), value.clone());

@@ -48,11 +48,13 @@ pub fn resolve_pull_targets(
 ) -> Result<Vec<PullTarget>> {
     let ids = mail_config.selected_pull_ids(ids)?;
     let needs_list = ids.iter().any(|id| {
-        mail_config
-            .mailbox(id)
-            .ok()
-            .and_then(|mailbox| mailbox.special_use.as_ref())
-            .is_some()
+        mail_config.mailbox(id).ok().is_some_and(|mailbox| {
+            mailbox.resolve.len() != 1
+                || mailbox
+                    .resolve
+                    .iter()
+                    .any(|rule| rule.special_use.as_ref().is_some())
+        })
     });
     let mailboxes = if needs_list {
         Some(fetch_mailboxes(imap)?)
@@ -64,49 +66,10 @@ pub fn resolve_pull_targets(
     for id in ids {
         let configured = mail_config.mailbox(&id)?;
         let pull_action = mail_config.pull_action(&id)?;
-        let mailbox = match configured.mailbox_name.as_deref() {
-            Some(mailbox) => mailbox.to_string(),
-            None => {
-                let special_use = configured.special_use.as_deref().ok_or_else(|| {
-                    AppError::new(
-                        "config_invalid",
-                        format!("mailboxes.{id} is missing mailbox selector"),
-                    )
-                })?;
-                let matches = mailboxes
-                    .as_ref()
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter(|mailbox| {
-                                mailbox
-                                    .attributes
-                                    .iter()
-                                    .any(|attribute| attribute.eq_ignore_ascii_case(special_use))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                match matches.as_slice() {
-                    [mailbox] => mailbox.name.clone(),
-                    [] => {
-                        return Err(AppError::new(
-                            "imap_mailbox_unresolved",
-                            format!(
-                                "mailboxes.{id}.special_use {special_use} matched no remote mailbox"
-                            ),
-                        ));
-                    }
-                    _ => {
-                        return Err(AppError::new(
-                            "imap_mailbox_ambiguous",
-                            format!(
-                                "mailboxes.{id}.special_use {special_use} matched multiple remote mailboxes"
-                            ),
-                        ));
-                    }
-                }
-            }
+        let mailbox = if let Some(mailboxes) = &mailboxes {
+            resolve_configured_mailbox(&id, configured, mailboxes)?
+        } else {
+            mail_config.offline_mailbox_name(&id)?
         };
         if !resolved_names.insert(mailbox.clone()) {
             return Err(AppError::new(
@@ -122,6 +85,56 @@ pub fn resolve_pull_targets(
         });
     }
     Ok(targets)
+}
+
+pub(crate) fn resolve_configured_mailbox(
+    id: &str,
+    configured: &crate::config::ImapMailboxConfig,
+    mailboxes: &[MailboxInfo],
+) -> Result<String> {
+    for (index, rule) in configured.resolve.iter().enumerate() {
+        if let Some(name) = rule.mailbox_name.as_deref() {
+            let matches = mailboxes
+                .iter()
+                .filter(|mailbox| mailbox.name.eq_ignore_ascii_case(name))
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [mailbox] => return Ok(mailbox.name.clone()),
+                [] => {}
+                _ => {
+                    return Err(AppError::new(
+                        "imap_mailbox_ambiguous",
+                        format!("mailboxes.{id}.resolve[{index}].mailbox_name {name} matched multiple remote mailboxes"),
+                    ));
+                }
+            }
+        }
+        if let Some(special_use) = rule.special_use.as_deref() {
+            let matches = mailboxes
+                .iter()
+                .filter(|mailbox| {
+                    mailbox
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute.eq_ignore_ascii_case(special_use))
+                })
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [mailbox] => return Ok(mailbox.name.clone()),
+                [] => {}
+                _ => {
+                    return Err(AppError::new(
+                        "imap_mailbox_ambiguous",
+                        format!("mailboxes.{id}.resolve[{index}].special_use {special_use} matched multiple remote mailboxes"),
+                    ));
+                }
+            }
+        }
+    }
+    Err(AppError::new(
+        "imap_mailbox_unresolved",
+        format!("mailboxes.{id}.resolve matched no remote mailbox"),
+    ))
 }
 
 pub fn pull_workspace(
@@ -478,8 +491,9 @@ mod tests {
     fn resolve_special_use_prefers_config_attribute_then_fallback_name() {
         let mut cfg = MailConfig::default();
         if let Some(archive) = cfg.mailboxes.get_mut("archive") {
-            archive.mailbox_name = Some("Configured Archive".to_string());
-            archive.special_use = None;
+            archive.resolve = vec![crate::config::MailboxResolveRule::mailbox_name(
+                "Configured Archive",
+            )];
         }
         let mailboxes = vec![
             mailbox("RFC Archive", &["\\Archive"]),
@@ -494,12 +508,51 @@ mod tests {
 
         let junk = resolve_special_use_from_mailboxes(&cfg, SpecialUseKind::Junk, &mailboxes);
         assert_eq!(junk.mailbox_name, "Spam");
-        assert_eq!(junk.source, SpecialUseSource::FallbackName);
+        assert_eq!(junk.source, SpecialUseSource::Mailboxes);
         assert_eq!(junk.flag, Some("$Junk".to_string()));
 
         let trash = resolve_special_use_from_mailboxes(&cfg, SpecialUseKind::Trash, &mailboxes);
         assert_eq!(trash.mailbox_name, "Trash");
-        assert_eq!(trash.source, SpecialUseSource::FallbackName);
+        assert_eq!(trash.source, SpecialUseSource::Mailboxes);
+    }
+
+    #[test]
+    fn resolve_configured_mailbox_uses_ordered_rules() -> Result<()> {
+        let cfg = MailConfig::default();
+        let archive = cfg.mailbox("archive")?;
+        let mailboxes = vec![mailbox("Archive", &[])];
+        assert_eq!(
+            resolve_configured_mailbox("archive", archive, &mailboxes).as_deref(),
+            Ok("Archive")
+        );
+
+        let sent = cfg.mailbox("sent")?;
+        let mailboxes = vec![mailbox("Sent", &[]), mailbox("Sent Messages", &["\\Sent"])];
+        assert_eq!(
+            resolve_configured_mailbox("sent", sent, &mailboxes).as_deref(),
+            Ok("Sent Messages")
+        );
+
+        let junk = cfg.mailbox("junk")?;
+        let mailboxes = vec![mailbox("Spam", &[])];
+        assert_eq!(
+            resolve_configured_mailbox("junk", junk, &mailboxes).as_deref(),
+            Ok("Spam")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_configured_mailbox_errors_when_no_rule_matches() -> Result<()> {
+        let cfg = MailConfig::default();
+        let archive = cfg.mailbox("archive")?;
+        let err = resolve_configured_mailbox("archive", archive, &[mailbox("INBOX", &[])]);
+        assert!(err.is_err());
+        assert_eq!(
+            err.err().map(|err| err.error_code),
+            Some("imap_mailbox_unresolved")
+        );
+        Ok(())
     }
 
     #[test]
@@ -566,6 +619,54 @@ mod tests {
         // Same offset is deterministic; the hash suffix is offset-independent.
         assert_eq!(id_plus8, stable_message_id(&root, &remote, plus8));
         assert_eq!(id_utc.rsplit('_').next(), id_plus8.rsplit('_').next());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn message_id_accepts_qq_style_date_header() {
+        let root = temp_root("id-qq-date");
+        let _ = fs::create_dir_all(root.join(".afmail/messages"));
+        let raw = b"Message-ID: <qq-date@example.com>\r\nDate: Wed Apr 15 2026 11:39:16 GMT+0800\r\nFrom: a@example.com\r\nSubject: x\r\n\r\nhi".to_vec();
+        let remote = RemoteMessage {
+            mailbox: "INBOX".to_string(),
+            uid_validity: 1,
+            uid: 1,
+            flags: Vec::new(),
+            raw_eml: raw,
+        };
+        let plus8 =
+            FixedOffset::east_opt(8 * 3600).unwrap_or_else(|| chrono::Offset::fix(&chrono::Utc));
+        let id = stable_message_id(&root, &remote, plus8);
+        assert!(id.starts_with("message_20260415_"), "{id}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn message_id_falls_back_to_sender_received_date_without_date_header() {
+        let root = temp_root("id-received-date");
+        let _ = fs::create_dir_all(root.join(".afmail/messages"));
+        let raw = concat!(
+            "Received: from mx.example by inbound.example; Thu, 16 Apr 2026 00:01:00 +0000 (UTC)\r\n",
+            "Received: from smtp.qq.com by sender.example; Wed, 15 Apr 2026 23:59:00 +0800\r\n",
+            "Message-ID: <received-fallback@example.com>\r\n",
+            "From: a@example.com\r\n",
+            "Subject: x\r\n",
+            "\r\n",
+            "hi"
+        )
+        .as_bytes()
+        .to_vec();
+        let remote = RemoteMessage {
+            mailbox: "INBOX".to_string(),
+            uid_validity: 1,
+            uid: 1,
+            flags: Vec::new(),
+            raw_eml: raw,
+        };
+        let plus8 =
+            FixedOffset::east_opt(8 * 3600).unwrap_or_else(|| chrono::Offset::fix(&chrono::Utc));
+        let id = stable_message_id(&root, &remote, plus8);
+        assert!(id.starts_with("message_20260415_"), "{id}");
         let _ = fs::remove_dir_all(root);
     }
 

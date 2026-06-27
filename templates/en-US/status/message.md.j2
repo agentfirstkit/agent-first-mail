@@ -2,11 +2,10 @@
 kind: {{ frontmatter.kind }}
 message_id: {{ frontmatter.message_id }}
 status: {{ frontmatter.status }}
-generated_rfc3339: "{{ frontmatter.generated_rfc3339 }}"
 ---
 
-# {% if view.title %}{{ view.title }}{% else %}{{ view.status_label }} message{% endif %}
+# {% if view.title %}{{ view.title }}{% else %}{% if view.status == 'spam' %}Spam{% elif view.status == 'trashed' %}Trash{% else %}Remote deleted{% endif %} message{% endif %}
 
-Workspace status: {{ view.status_label }} (`{{ view.status }}`)
+Workspace status: {% if view.status == 'spam' %}Spam{% elif view.status == 'trashed' %}Trash{% else %}Remote deleted{% endif %} (`{{ view.status }}`)
 
 {{ view.conversation }}

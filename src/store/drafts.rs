@@ -705,7 +705,7 @@ impl Workspace {
         draft_bytes: &[u8],
     ) -> Result<DraftValidation> {
         validate_file_name("draft_name", draft_name)?;
-        let draft_hash = sha256_fingerprint(draft_bytes);
+        let draft_hash = blake3_fingerprint(draft_bytes);
         let draft = std::str::from_utf8(draft_bytes)
             .map_err(|e| AppError::new("draft_invalid", format!("draft is not UTF-8: {e}")))?;
         let (fm, _) = read_doc::<DraftFrontmatter>(draft).map_err(|e| {

@@ -1,6 +1,7 @@
 #[cfg(feature = "ui")]
 use agent_first_ui::{
-    prepare_user_action, validate_document, AfuiMessage, PrepareUserActionOptions, PreparedStatus,
+    find_capability, find_unit, prepare_request, validate_space, validate_space_bindings,
+    AgentFirstUiMessage, Layout, MessagePayload, PrepareRequestSpec, PreparedStatus,
 };
 use fs4::FileExt;
 use serde_json::{json, Value};
@@ -196,7 +197,7 @@ fn version_uses_afdata_output_formats() {
 
 #[test]
 #[cfg(feature = "ui")]
-fn ui_snapshot_emits_valid_afui_surface() {
+fn ui_snapshot_emits_valid_afui_space() {
     let batch = test_fixtures::load_mail_batch();
     assert!(batch.is_ok(), "{batch:?}");
     let Ok(batch) = batch else {
@@ -324,21 +325,32 @@ fn ui_snapshot_emits_valid_afui_surface() {
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
     assert!(value.get("trace").is_none(), "{stdout}");
-    assert_eq!(value["type"], "ui_snapshot");
+    assert_eq!(value["agent_first_ui"], "0.2");
+    assert_eq!(value["type"], "snapshot");
 
-    let message = serde_json::from_value::<AfuiMessage>(value);
+    let message = serde_json::from_value::<AgentFirstUiMessage>(value);
     assert!(message.is_ok(), "{message:?}");
     let Ok(message) = message else {
         return;
     };
-    let snapshot = message.as_snapshot();
-    assert!(snapshot.is_ok(), "{snapshot:?}");
-    let Ok(snapshot) = snapshot else {
+    assert!(
+        matches!(&message.payload, MessagePayload::Snapshot { .. }),
+        "ui snapshot should be a space snapshot"
+    );
+    let MessagePayload::Snapshot { space, .. } = message.payload else {
         return;
     };
-    let validation = validate_document(&snapshot.document);
+    let validation = validate_space(&space);
     assert!(validation.is_ok(), "{validation:?}");
-    for view_id in [
+    let binding_validation = validate_space_bindings(&space);
+    assert!(binding_validation.is_ok(), "{binding_validation:?}");
+    let afmail = &space.as_value()["afmail"];
+    assert!(space.as_value().get("host_web").is_some());
+    assert!(space.as_value().get("session_operator").is_some());
+    assert!(space.as_value().get("host/web").is_none());
+    assert!(space.as_value().get("session/operator").is_none());
+
+    for unit_id in [
         "mailbox_status",
         "inbox_triage",
         "active_cases",
@@ -349,11 +361,11 @@ fn ui_snapshot_emits_valid_afui_surface() {
         "mail_terminal",
     ] {
         assert!(
-            snapshot.document.find_view(view_id).is_some(),
-            "{view_id} missing"
+            find_unit(&space, "afmail", unit_id).is_some(),
+            "{unit_id} missing"
         );
     }
-    for legacy_view_id in [
+    for legacy_unit_id in [
         "overview_panel",
         "triage_panel",
         "workspace_tabs",
@@ -364,61 +376,94 @@ fn ui_snapshot_emits_valid_afui_surface() {
         "termail_terminal",
     ] {
         assert!(
-            snapshot.document.find_view(legacy_view_id).is_none(),
-            "{legacy_view_id} should not remain in the Dockview surface"
+            find_unit(&space, "afmail", legacy_unit_id).is_none(),
+            "{legacy_unit_id} should not remain in the space"
         );
     }
-    let pulse = snapshot.document.find_view("mailbox_status");
+
+    assert_eq!(afmail.get("layout"), None);
+    assert_eq!(afmail["root_layout"], "root");
+    let layouts = serde_json::from_value::<Vec<Layout>>(afmail["layouts"].clone());
+    assert!(layouts.is_ok(), "{layouts:?}");
+    let Ok(layouts) = layouts else {
+        return;
+    };
+    let layout_ids: Vec<&str> = layouts.iter().map(|layout| layout.id.as_str()).collect();
+    assert_eq!(
+        layout_ids,
+        ["primary", "glance", "archives", "tools", "root"]
+    );
+    let primary = &layouts[0];
+    assert_eq!(primary.members, ["inbox_triage", "active_cases"]);
+    assert!(!primary.overlay);
+    assert_eq!(primary.extra.get("relation"), Some(&json!("workspace")));
+    assert_eq!(primary.extra.get("role"), Some(&json!("primary")));
+    assert_eq!(
+        serde_json::to_value(&primary.salience).unwrap_or_default(),
+        json!({ "prominence": "primary" })
+    );
+    let glance = &layouts[1];
+    assert_eq!(glance.extra.get("role"), Some(&json!("summary")));
+    let archives = &layouts[2];
+    assert_eq!(archives.members, ["message_archives", "case_archives"]);
+    assert!(archives.overlay);
+    assert_eq!(archives.extra.get("relation"), Some(&json!("supporting")));
+    assert_eq!(archives.extra.get("role"), Some(&json!("history")));
+
+    let pulse = find_unit(&space, "afmail", "mailbox_status");
     assert!(pulse.is_some());
     let Some(pulse) = pulse else {
         return;
     };
-    assert_eq!(pulse.kind, "stats");
+    assert_eq!(pulse.kind, "facts");
     assert_eq!(pulse.field("title"), Some(&json!("Mailbox Status")));
     assert_eq!(
-        pulse.field("actions"),
-        Some(&json!(["afmail.status", "afmail.pull"]))
+        pulse.field("capabilities"),
+        Some(&json!(["status", "pull"]))
     );
+    assert_eq!(pulse.primary_capability.as_deref(), Some("pull"));
     assert_eq!(
-        pulse.field("dockview"),
-        Some(&json!({
-            "role": "utility",
-            "priority": 30,
-            "preferred_height": 170
-        }))
+        serde_json::to_value(&pulse.salience).unwrap_or_default(),
+        json!({ "prominence": "subtle", "state": "info" })
     );
-    let triage = snapshot.document.find_view("inbox_triage");
+    assert_eq!(pulse.field("dockview"), None);
+
+    let triage = find_unit(&space, "afmail", "inbox_triage");
     assert!(triage.is_some());
     let Some(triage) = triage else {
         return;
     };
-    assert_eq!(triage.kind, "record_list");
+    assert_eq!(triage.kind, "list");
+    assert_eq!(triage.field("dockview"), None);
     assert_eq!(
-        triage.field("dockview"),
+        triage.field("summary"),
         Some(&json!({
-            "role": "main",
-            "priority": 10,
-            "preferred_width": 920
+            "count_binding": "space:afmail.status.triage_count",
+            "attention_binding": "space:afmail.status.triage_count"
         }))
     );
     assert_eq!(triage.field("body_key"), Some(&json!("view.body_text")));
     assert_eq!(
-        triage.field("count_bind"),
-        Some(&json!("state:status.triage_count"))
+        triage.field("count_binding"),
+        Some(&json!("space:afmail.status.triage_count"))
     );
     assert_eq!(
-        triage.field("ref_bind"),
+        triage.field("reference_binding"),
         Some(&json!("record:message.message_id"))
     );
-    // Triage shows raw email text, not markdown — it must stay unmarked so a host
-    // does not misrender quoted lines or leading `#`/`-`.
-    assert_eq!(triage.field("body_format"), None);
-    let triage_items = snapshot.state.as_value()["ui"]["triage_items"].as_array();
-    assert!(
-        triage_items.is_some(),
-        "{:?}",
-        snapshot.state.as_value()["ui"]
+    assert_eq!(
+        triage.field("input_bindings"),
+        Some(&json!({ "message_id": "record:message.message_id" }))
     );
+    assert_eq!(triage.field("message_id_binding"), None);
+    assert_eq!(triage.activate_capability.as_deref(), Some("message_show"));
+    assert_eq!(triage.primary_capability.as_deref(), Some("case_create"));
+    assert!(triage.field("interactions").is_some());
+    assert_eq!(triage.field("preview_length"), Some(&json!(180)));
+    assert_eq!(triage.field("body_format"), None);
+
+    let triage_items = afmail["ui"]["triage_items"].as_array();
+    assert!(triage_items.is_some(), "{:?}", afmail["ui"]);
     let Some(triage_items) = triage_items else {
         return;
     };
@@ -426,11 +471,15 @@ fn ui_snapshot_emits_valid_afui_surface() {
         triage_items.len() >= 20,
         "fixture-backed UI should expose the 30-message e2e corpus: {triage_items:?}"
     );
-    let triage_item = triage_items
+    let triage_match = triage_items
         .iter()
-        .find(|item| item["message"]["message_id"] == contract_attachment);
-    assert!(triage_item.is_some(), "{triage_items:?}");
-    let Some(triage_item) = triage_item else {
+        .enumerate()
+        .find(|(_, item)| item["message"]["message_id"] == contract_attachment);
+    assert!(
+        triage_match.is_some(),
+        "triage item missing: {triage_items:?}"
+    );
+    let Some((triage_index, triage_item)) = triage_match else {
         return;
     };
     let triage_message_json = read_json(&root.join(format!("messages/{contract_attachment}.json")));
@@ -442,12 +491,11 @@ fn ui_snapshot_emits_valid_afui_surface() {
         triage_item["view"]["body_text"].is_string(),
         "{triage_item}"
     );
-    let prepared = prepare_user_action(
-        &snapshot,
-        Some(triage),
-        "afmail.message.trash",
-        Some(triage_item),
-        &PrepareUserActionOptions::default(),
+    let prepared = prepare_request(
+        &space,
+        PrepareRequestSpec::new("session_operator", "afmail", "message_trash")
+            .with_source_unit_id("inbox_triage")
+            .with_record_path(format!("/afmail/ui/triage_items/{triage_index}")),
     );
     assert!(prepared.is_ok(), "{prepared:?}");
     let Ok(prepared) = prepared else {
@@ -455,32 +503,36 @@ fn ui_snapshot_emits_valid_afui_surface() {
     };
     assert_eq!(prepared.status, PreparedStatus::Ready);
     assert_eq!(prepared.input["message_id"], contract_attachment);
-    let cases = snapshot.document.find_view("active_cases");
+
+    let cases = find_unit(&space, "afmail", "active_cases");
     assert!(cases.is_some());
     let Some(cases) = cases else {
         return;
     };
-    assert_eq!(cases.kind, "record_list");
+    assert_eq!(cases.kind, "list");
     assert_eq!(cases.field("body_key"), Some(&json!("view.notes_text")));
     assert_eq!(
-        cases.field("ref_bind"),
+        cases.field("reference_binding"),
         Some(&json!("record:case.collection_uid"))
     );
-    assert_eq!(cases.field("body_format"), Some(&json!("markdown")));
-    let case_items = snapshot.state.as_value()["ui"]["case_items"].as_array();
-    assert!(
-        case_items.is_some(),
-        "{:?}",
-        snapshot.state.as_value()["ui"]
+    assert_eq!(
+        cases.field("input_bindings"),
+        Some(&json!({ "case_ref": "record:case.collection_uid" }))
     );
+    assert_eq!(cases.field("case_ref_binding"), None);
+    assert_eq!(cases.activate_capability.as_deref(), Some("case_show"));
+    assert_eq!(cases.field("body_format"), Some(&json!("markdown")));
+    let case_items = afmail["ui"]["case_items"].as_array();
+    assert!(case_items.is_some(), "{:?}", afmail["ui"]);
     let Some(case_items) = case_items else {
         return;
     };
-    let case_item = case_items
+    let case_match = case_items
         .iter()
-        .find(|item| item["case"]["collection_uid"].as_str() == Some(case_uid));
-    assert!(case_item.is_some(), "{case_items:?}");
-    let Some(case_item) = case_item else {
+        .enumerate()
+        .find(|(_, item)| item["case"]["collection_uid"].as_str() == Some(case_uid));
+    assert!(case_match.is_some(), "case item missing: {case_items:?}");
+    let Some((case_index, case_item)) = case_match else {
         return;
     };
     let case_json = read_json(&root.join(format!(
@@ -488,17 +540,14 @@ fn ui_snapshot_emits_valid_afui_surface() {
     )));
     assert_eq!(case_item["case"], case_json);
     assert_eq!(case_item["case"]["collection_name"], "refund-order-4471");
-    // The case body is the human notes (a fact); status/uid are facts, not a
-    // detail string stitched from the generated case.md.
     assert_eq!(case_item["case"]["collection_uid"], case_uid);
     assert!(case_item["case"]["status"].is_string(), "{case_item}");
     assert!(case_item["view"]["notes_text"].is_string(), "{case_item}");
-    let prepared = prepare_user_action(
-        &snapshot,
-        Some(cases),
-        "afmail.case.show",
-        Some(case_item),
-        &PrepareUserActionOptions::default(),
+    let prepared = prepare_request(
+        &space,
+        PrepareRequestSpec::new("session_operator", "afmail", "case_show")
+            .with_source_unit_id("active_cases")
+            .with_record_path(format!("/afmail/ui/case_items/{case_index}")),
     );
     assert!(prepared.is_ok(), "{prepared:?}");
     let Ok(prepared) = prepared else {
@@ -506,38 +555,44 @@ fn ui_snapshot_emits_valid_afui_surface() {
     };
     assert_eq!(prepared.status, PreparedStatus::Ready);
     assert_eq!(prepared.input["case_ref"], case_uid);
-    let archive_messages = snapshot.document.find_view("message_archives");
+
+    let archive_messages = find_unit(&space, "afmail", "message_archives");
     assert!(archive_messages.is_some());
     let Some(archive_messages) = archive_messages else {
         return;
     };
-    assert_eq!(archive_messages.kind, "record_list");
+    assert_eq!(archive_messages.kind, "list");
     assert_eq!(
         archive_messages.field("body_key"),
         Some(&json!("view.notes_text"))
     );
     assert_eq!(
-        archive_messages.field("ref_bind"),
+        archive_messages.field("reference_binding"),
         Some(&json!("record:archive.collection_uid"))
     );
+    assert_eq!(
+        archive_messages.field("input_bindings"),
+        Some(&json!({ "archive_ref": "record:archive.collection_uid" }))
+    );
+    assert_eq!(archive_messages.field("archive_ref_binding"), None);
     assert_eq!(
         archive_messages.field("body_format"),
         Some(&json!("markdown"))
     );
-    let archive_items = snapshot.state.as_value()["ui"]["archive_message_items"].as_array();
-    assert!(
-        archive_items.is_some(),
-        "{:?}",
-        snapshot.state.as_value()["ui"]
-    );
+    let archive_items = afmail["ui"]["archive_message_items"].as_array();
+    assert!(archive_items.is_some(), "{:?}", afmail["ui"]);
     let Some(archive_items) = archive_items else {
         return;
     };
-    let archive_item = archive_items
+    let archive_match = archive_items
         .iter()
-        .find(|item| item["archive"]["collection_uid"].as_str() == Some(archive_uid));
-    assert!(archive_item.is_some(), "{archive_items:?}");
-    let Some(archive_item) = archive_item else {
+        .enumerate()
+        .find(|(_, item)| item["archive"]["collection_uid"].as_str() == Some(archive_uid));
+    assert!(
+        archive_match.is_some(),
+        "archive item missing: {archive_items:?}"
+    );
+    let Some((archive_index, archive_item)) = archive_match else {
         return;
     };
     let archive_json = read_json(&root.join(format!(
@@ -545,20 +600,17 @@ fn ui_snapshot_emits_valid_afui_surface() {
     )));
     assert_eq!(archive_item["archive"], archive_json);
     assert_eq!(archive_item["archive"]["collection_name"], "receipts");
-    // The per-message summary is a stored fact, surfaced through the `item`
-    // namespace; `message` stays byte-for-byte equivalent as JSON data.
     let archived_message_json = read_json(&root.join(format!("messages/{receipt_cloud}.json")));
     assert_eq!(archive_item["items"][0]["message"], archived_message_json);
     assert_eq!(
         archive_item["items"][0]["item"]["summary"],
         "cloud service receipt"
     );
-    let prepared = prepare_user_action(
-        &snapshot,
-        Some(archive_messages),
-        "afmail.archive.message.show",
-        Some(archive_item),
-        &PrepareUserActionOptions::default(),
+    let prepared = prepare_request(
+        &space,
+        PrepareRequestSpec::new("session_operator", "afmail", "archive_message_show")
+            .with_source_unit_id("message_archives")
+            .with_record_path(format!("/afmail/ui/archive_message_items/{archive_index}")),
     );
     assert!(prepared.is_ok(), "{prepared:?}");
     let Ok(prepared) = prepared else {
@@ -566,33 +618,39 @@ fn ui_snapshot_emits_valid_afui_surface() {
     };
     assert_eq!(prepared.status, PreparedStatus::Ready);
     assert_eq!(prepared.input["archive_ref"], archive_uid);
-    let archive_cases = snapshot.document.find_view("case_archives");
+
+    let archive_cases = find_unit(&space, "afmail", "case_archives");
     assert!(archive_cases.is_some());
     let Some(archive_cases) = archive_cases else {
         return;
     };
-    assert_eq!(archive_cases.kind, "record_list");
+    assert_eq!(archive_cases.kind, "list");
     assert_eq!(archive_cases.field("body_format"), Some(&json!("markdown")));
-    let push = snapshot.document.find_view("push_queue");
+
+    let push = find_unit(&space, "afmail", "push_queue");
     assert!(push.is_some());
     let Some(push) = push else {
         return;
     };
-    assert_eq!(push.kind, "record_list");
-    assert_eq!(push.field("ref_bind"), Some(&json!("record:push.push_id")));
+    assert_eq!(push.kind, "list");
     assert_eq!(
-        push.field("push_id_bind"),
+        push.field("reference_binding"),
         Some(&json!("record:push.push_id"))
     );
-    let push_item = &snapshot.state.as_value()["ui"]["push_items"][0];
+    assert_eq!(
+        push.field("input_bindings"),
+        Some(&json!({ "push_id": "record:push.push_id" }))
+    );
+    assert_eq!(push.field("push_id_binding"), None);
+    assert_eq!(push.activate_capability.as_deref(), Some("push_dry_run"));
+    let push_item = &afmail["ui"]["push_items"][0];
     let push_id = push_item["push"]["push_id"].as_str().unwrap_or_default();
     assert!(!push_id.is_empty(), "{push_item}");
-    let prepared = prepare_user_action(
-        &snapshot,
-        Some(push),
-        "afmail.push.dry_run",
-        Some(push_item),
-        &PrepareUserActionOptions::default(),
+    let prepared = prepare_request(
+        &space,
+        PrepareRequestSpec::new("session_operator", "afmail", "push_dry_run")
+            .with_source_unit_id("push_queue")
+            .with_record_path("/afmail/ui/push_items/0"),
     );
     assert!(prepared.is_ok(), "{prepared:?}");
     let Ok(prepared) = prepared else {
@@ -600,59 +658,50 @@ fn ui_snapshot_emits_valid_afui_surface() {
     };
     assert_eq!(prepared.status, PreparedStatus::Ready);
     assert_eq!(prepared.input["push_id"], push_id);
-    let activity = snapshot.document.find_view("activity_log");
+
+    let activity = find_unit(&space, "afmail", "activity_log");
     assert!(activity.is_some());
     let Some(activity) = activity else {
         return;
     };
     assert_eq!(activity.kind, "log");
     assert_eq!(
-        activity.field("source_bind"),
-        Some(&json!("state:ui.log_items"))
+        activity.field("source_binding"),
+        Some(&json!("space:afmail.ui.log_items"))
     );
     assert_eq!(activity.field("message_key"), Some(&json!("message")));
-    assert_eq!(
-        activity.field("dockview"),
-        Some(&json!({
-            "role": "utility",
-            "priority": 10,
-            "preferred_height": 260
-        }))
-    );
-    let log_item = &snapshot.state.as_value()["ui"]["log_items"][0];
+    assert_eq!(activity.field("dockview"), None);
+    let log_item = &afmail["ui"]["log_items"][0];
     assert!(log_item["created_rfc3339"].is_string(), "{log_item}");
     assert!(log_item["kind"].is_string(), "{log_item}");
     assert!(log_item["message"].is_string(), "{log_item}");
     assert!(log_item["summary"].is_string(), "{log_item}");
-    let terminal = snapshot.document.find_view("mail_terminal");
+
+    let terminal = find_unit(&space, "afmail", "mail_terminal");
     assert!(terminal.is_some());
     let Some(terminal) = terminal else {
         return;
     };
     assert_eq!(terminal.kind, "terminal");
-    assert!(terminal.field("session_bind").is_some());
+    assert!(terminal.field("session_id_binding").is_some());
     for forbidden in ["command", "cmd", "exec", "shell_command"] {
         assert!(terminal.field(forbidden).is_none(), "{forbidden}");
     }
-    let send = snapshot
-        .document
-        .find_action("afmail.push.drafts_send.confirm");
+    let send = find_capability(&space, "afmail", "push_drafts_send_confirm");
     assert!(send.is_some());
     let Some(send) = send else {
         return;
     };
     assert_eq!(send.risk.as_str(), "destructive");
     assert_eq!(
-        snapshot.state.as_value()["terminals"]["mail_terminal"]["title"],
+        space.as_value()["host_web"]["terminals"]["mail_terminal"]["title"],
         "Mail Terminal"
     );
-    assert!(snapshot.state.as_value()["terminals"]
+    assert!(space.as_value()["host_web"]["terminals"]
         .get("termail_terminal")
         .is_none());
 
-    // Notes are markdown: the text input carries the advisory `format` hint so a
-    // host can collect it with a markdown editor.
-    let notes = snapshot.document.find_action("afmail.case.notes.replace");
+    let notes = find_capability(&space, "afmail", "case_notes_replace");
     assert!(notes.is_some());
     let Some(notes) = notes else {
         return;
@@ -686,7 +735,7 @@ fn ui_open_reports_afui_fallback_when_host_binary_is_missing() {
     assert!(value["hint"]
         .as_str()
         .unwrap_or_default()
-        .contains("--appearance dockview"));
+        .contains("afui web serve mail.afui.json"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -703,12 +752,12 @@ fn test_config(imap_port: Option<u16>, smtp_port: Option<u16>) -> Value {
             "password_secret": imap_port.map(|_| "pass")
         },
         "mailboxes": {
-            "inbox": {"mailbox_name": "INBOX", "special_use": null},
-            "sent": {"mailbox_name": null, "special_use": "\\Sent"},
-            "archive": {"mailbox_name": null, "special_use": "\\Archive"},
-            "junk": {"mailbox_name": null, "special_use": "\\Junk"},
-            "trash": {"mailbox_name": null, "special_use": "\\Trash"},
-            "drafts": {"mailbox_name": null, "special_use": "\\Drafts"}
+            "inbox": {"resolve": [{"mailbox_name": "INBOX"}]},
+            "sent": {"resolve": [{"special_use": "\\Sent"}, {"mailbox_name": "Sent"}, {"mailbox_name": "Sent Mail"}, {"mailbox_name": "Sent Messages"}]},
+            "archive": {"resolve": [{"special_use": "\\Archive"}, {"mailbox_name": "Archive"}, {"mailbox_name": "Archives"}]},
+            "junk": {"resolve": [{"special_use": "\\Junk"}, {"mailbox_name": "Junk"}, {"mailbox_name": "Spam"}, {"mailbox_name": "Junk Email"}, {"mailbox_name": "Junk E-mail"}]},
+            "trash": {"resolve": [{"special_use": "\\Trash"}, {"mailbox_name": "Trash"}, {"mailbox_name": "Deleted Items"}, {"mailbox_name": "Deleted Messages"}, {"mailbox_name": "Bin"}]},
+            "drafts": {"resolve": [{"special_use": "\\Drafts"}, {"mailbox_name": "Drafts"}, {"mailbox_name": "Draft"}]}
         },
         "actions": {
             "pull": {
@@ -725,6 +774,7 @@ fn test_config(imap_port: Option<u16>, smtp_port: Option<u16>) -> Value {
             "case.add": {"steps": []},
             "draft.save": {"steps": [{"append_to_mailbox_id": "drafts"}]},
             "draft.send": {"steps": [
+                {"append_to_mailbox_id": "drafts"},
                 {"smtp_send": {}},
                 {"append_to_mailbox_id": "sent"},
                 {"add_flags": ["\\Seen", "\\Answered"], "on": "reply_to_message"}
@@ -940,7 +990,7 @@ fn message_id_for_rfc822(root: &Path, rfc822: &str) -> String {
 
 fn write_triage(root: &Path, message_id: &str, notes: &str) {
     let text = format!(
-        "---\nkind: triage_view\nmessage_id: {message_id}\nmessage_ids:\n  - {message_id}\ngenerated_rfc3339: \"2026-05-21T10:00:02Z\"\nmessage_count: 1\nattachment_count: 1\n---\n\n# Contract renewal\n\n<!-- afmail:conversation:start -->\n\n### {message_id} - 2026-05-21T10:00:00Z - Alice <alice@example.com>\n\n```text\nBody for {message_id}\n```\n\n<!-- afmail:conversation:end -->\n"
+        "---\nkind: triage_view\nmessage_id: {message_id}\nmessage_ids:\n  - {message_id}\nmessage_count: 1\nattachment_count: 1\n---\n\n# Contract renewal\n\n<!-- afmail:conversation:start -->\n\n### {message_id} - 2026-05-21T10:00:00Z - Alice <alice@example.com>\n\n```text\nBody for {message_id}\n```\n\n<!-- afmail:conversation:end -->\n"
     );
     let _ = notes;
     assert!(fs::write(root.join(format!("triage/{message_id}.md")), text).is_ok());
@@ -1652,6 +1702,7 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(stdout.contains("show"));
     assert!(stdout.contains("add"));
     assert!(stdout.contains("archive"));
+    assert!(stdout.contains("trash"));
     assert!(stdout.contains("draft"));
     assert!(stdout.contains("notes"));
     assert!(stdout.contains("merge"));
@@ -1679,6 +1730,7 @@ fn init_status_and_afdata_output_formats_work() {
     assert_eq!(status, 0);
     assert!(stdout.contains("show"));
     assert!(stdout.contains("restore"));
+    assert!(stdout.contains("trash"));
     assert!(stdout.contains("rename"));
     assert!(stdout.contains("notes"));
     let (status, stdout) = run(&root, &["message", "ignore", "message_001"]);
@@ -1692,7 +1744,7 @@ fn init_status_and_afdata_output_formats_work() {
     assert_eq!(parse_one(&stdout)["code"], "error");
     let (status, stdout) = run(&root, &["--help", "--output", "markdown"]);
     assert_eq!(status, 0);
-    assert!(stdout.contains("# afmail"));
+    assert!(stdout.contains("# Agent-First Mail"));
     assert!(stdout.contains("afmail case show c20260603001"));
     assert!(stdout.contains("afmail archive case show REF"));
     assert!(stdout.contains("afmail archive message show a20260603001"));
@@ -1740,6 +1792,7 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(!gitignore.contains(".agents/skills/agent-first-mail/"));
     assert!(!gitignore.contains(".claude/skills/agent-first-mail/"));
     assert!(gitignore.contains(".afmail/workspace.progress.json"));
+    assert!(gitignore.contains(".afmail/config.example.json"));
     assert!(gitignore.contains("messages/*.json"));
     assert!(gitignore.contains("triage/*.md"));
     assert!(gitignore.contains("spam/*.md"));
@@ -1818,25 +1871,29 @@ fn init_status_and_afdata_output_formats_work() {
     assert_eq!(status, 2);
     assert_eq!(parse_one(&stdout)["code"], "error");
     let config = fs::read_to_string(root.join(".afmail/config.json")).unwrap_or_default();
-    assert!(config.contains("\"imap\""));
-    assert!(config.contains("\"case\""));
-    assert!(config.contains("\"audit\""));
-    assert!(config.contains("\"reason_mode\": \"required\""));
-    assert!(config.contains("\"mailboxes\""));
-    assert!(config.contains("\"actions\""));
-    assert!(config.contains("\"move_to_mailbox_id\": \"archive\""));
     let config_json: Value = serde_json::from_str(&config).unwrap_or(Value::Null);
-    assert_eq!(config_json["schema_name"], "config");
-    assert_eq!(config_json["schema_version"], 1);
+    assert_eq!(config_json, json!({}));
     assert!(config_json.get("code").is_none());
     assert!(config_json.get("special_use").is_none());
     assert!(config_json.get("imap_mailboxes").is_none());
     assert!(config_json.get("pull").is_none());
     assert!(config_json.get("push").is_none());
-    assert!(config_json["mailboxes"].get("all").is_none());
-    assert!(config_json["mailboxes"].get("flagged").is_none());
     assert!(!config.contains("\"folders\": {"));
     assert!(!config.contains("imap_host"));
+    let config_example =
+        fs::read_to_string(root.join(".afmail/config.example.json")).unwrap_or_default();
+    assert!(config_example.contains("\"schema_name\": \"config\""));
+    assert!(config_example.contains("\"schema_version\": 1"));
+    assert!(config_example.contains("\"imap\""));
+    assert!(config_example.contains("\"case\""));
+    assert!(config_example.contains("\"audit\""));
+    assert!(config_example.contains("\"reason_mode\": \"required\""));
+    assert!(config_example.contains("\"mailboxes\""));
+    assert!(config_example.contains("\"actions\""));
+    assert!(config_example.contains("\"move_to_mailbox_id\": \"archive\""));
+    let example_json: Value = serde_json::from_str(&config_example).unwrap_or(Value::Null);
+    assert!(example_json["mailboxes"].get("all").is_none());
+    assert!(example_json["mailboxes"].get("flagged").is_none());
 
     let (status, stdout) = run(&root, &["config", "pull", "add", "Sent"]);
     assert_eq!(status, 2);
@@ -1864,6 +1921,19 @@ fn init_status_and_afdata_output_formats_work() {
     assert_eq!(parse_one(&stdout)["value"], "***");
     let config = fs::read_to_string(root.join(".afmail/config.json")).unwrap_or_default();
     assert!(config.contains("super-secret"));
+    assert!(!config.contains("\"actions\""));
+    // `config show` dumps the whole config; it must redact inline secrets the
+    // same way `config get`/`set` do, or an agent surfaces the live password.
+    let (status, stdout) = run(&root, &["config", "show"]);
+    assert_eq!(status, 0, "{stdout}");
+    assert!(
+        !stdout.contains("super-secret"),
+        "config show leaked the inline secret: {stdout}"
+    );
+    assert_eq!(
+        parse_one(&stdout)["config"]["imap"]["password_secret"],
+        "***"
+    );
     let (status, stdout) = run(
         &root,
         &[
@@ -1880,10 +1950,18 @@ fn init_status_and_afdata_output_formats_work() {
     assert_eq!(parse_one(&stdout)["value"], Value::Null);
     let (status, stdout) = run(
         &root,
-        &["config", "set", "mailboxes.archive.mailbox_name", "Archive"],
+        &[
+            "config",
+            "set",
+            "mailboxes.archive.resolve",
+            r#"[{"mailbox_name":"Archive"}]"#,
+        ],
     );
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["value"], "Archive");
+    assert_eq!(
+        parse_one(&stdout)["value"],
+        json!([{"mailbox_name": "Archive"}])
+    );
     let (status, stdout) = run(&root, &["config", "get", "case.default_group"]);
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["value"], "open");
@@ -1899,6 +1977,11 @@ fn init_status_and_afdata_output_formats_work() {
     let (status, stdout) = run(&root, &["config", "set", "audit.reason_mode", "required"]);
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["value"], "required");
+    let config = fs::read_to_string(root.join(".afmail/config.json")).unwrap_or_default();
+    assert!(
+        !config.contains("\"reason_mode\""),
+        "default audit mode should not be persisted: {config}"
+    );
 
     let (status, stdout) = run(&root, &["--output", "plain", "status"]);
     assert_eq!(status, 0);
@@ -2083,6 +2166,43 @@ fn status_progress_uses_progress_percent_field() {
     let (status, stdout) = run(&root, &["--output", "plain", "status"]);
     assert_eq!(status, 0, "{stdout}");
     assert!(stdout.contains("progress.progress=25%"), "{stdout}");
+
+    write_json(
+        &root.join(".afmail/workspace.progress.json"),
+        &json!({
+            "schema_name": "workspace_progress",
+            "schema_version": 1,
+            "command": "pull",
+            "status": "running",
+            "phase": "pull_render_triage_done",
+            "started_rfc3339": "2026-06-11T00:00:00Z",
+            "updated_rfc3339": "2026-06-11T00:00:02Z",
+            "elapsed_ms": 2000,
+            "fields": {
+                "render_stage": "triage",
+                "elapsed_ms": 1500,
+                "triage_count": 3,
+                "triage_written_count": 2,
+                "triage_unchanged_count": 1
+            },
+            "result": null,
+            "error": null
+        }),
+    );
+    let (status, stdout) = run(&root, &["status"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["progress"]["render_stage"], "triage");
+    assert_eq!(value["progress"]["elapsed_ms"], 1500);
+    assert_eq!(value["progress"]["triage_count"], 3);
+    assert_eq!(value["progress"]["triage_written_count"], 2);
+    assert_eq!(value["progress"]["triage_unchanged_count"], 1);
+    assert!(
+        value["progress"]["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("rendered triage views")),
+        "{stdout}"
+    );
 
     let _ = fs::remove_dir_all(root);
 }
@@ -2376,12 +2496,21 @@ fn pull_imports_imap_mail_with_codec_backed_test_server() {
     assert!(message_value["body_text"]
         .as_str()
         .is_some_and(|text| text.contains("Hello from IMAP.")));
+    let render_cache = read_json(&root.join(".afmail/render-cache.json"));
+    assert_eq!(render_cache["schema_name"], "render_cache");
+    assert!(
+        render_cache["entries"][format!("triage/{id}.md")]["input_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("blake3:"))
+    );
 
     let (status, stdout) = run(&root, &["pull", "inbox"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
     assert_eq!(value["new_message_count"], 0);
     assert_eq!(value["triage_created_count"], 0);
+    assert_eq!(value["triage_written_count"], 0);
+    assert_eq!(value["triage_unchanged_count"], 1);
     assert!(server.handle.join().is_ok());
     let commands = server.commands.lock();
     assert!(commands.is_ok());
@@ -2461,6 +2590,17 @@ fn pull_progress_logs_real_phases_when_requested() {
         "pull_reconcile_start",
         "pull_reconcile_done",
         "pull_render_start",
+        "pull_render_triage_start",
+        "pull_render_triage_progress",
+        "pull_render_triage_done",
+        "pull_render_dispositions_start",
+        "pull_render_dispositions_done",
+        "pull_render_cases_start",
+        "pull_render_cases_done",
+        "pull_render_archives_start",
+        "pull_render_archives_done",
+        "pull_render_cache_write_start",
+        "pull_render_cache_write_done",
         "pull_render_done",
         "finish",
     ] {
@@ -2502,6 +2642,14 @@ fn pull_progress_logs_real_phases_when_requested() {
         .cloned()
         .unwrap_or(Value::Null);
     assert_eq!(body_done["new_message_count"], 1);
+    let render_triage_done = lines
+        .iter()
+        .find(|line| line["phase"] == "pull_render_triage_done")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(render_triage_done["render_stage"], "triage");
+    assert_eq!(render_triage_done["triage_count"], 1);
+    assert!(render_triage_done["elapsed_ms"].as_u64().is_some());
     assert!(server.handle.join().is_ok());
     let _ = fs::remove_dir_all(root);
 }
@@ -4809,7 +4957,7 @@ fn draft_change_updates_requested_fields_and_validates() {
     );
     assert!(changed["draft_hash"]
         .as_str()
-        .is_some_and(|hash| hash.starts_with("sha256:")));
+        .is_some_and(|hash| hash.starts_with("blake3:")));
     let draft =
         fs::read_to_string(case_path.join(format!("drafts/{draft_name}"))).unwrap_or_default();
     assert!(draft.contains("subject: New subject"));
@@ -4917,7 +5065,7 @@ fn draft_save_send_queue_is_idempotent_and_switches_action() {
 }
 
 #[test]
-fn draft_remove_clears_started_outbound_push() {
+fn draft_remove_rejects_started_outbound_push() {
     let root = temp_root("draft-remove-started");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
@@ -4940,13 +5088,79 @@ fn draft_remove_clears_started_outbound_push() {
     let push_id = push["items"][0]["push_id"].as_str().unwrap_or_default();
     let push_path = root.join(".afmail/push").join(format!("{push_id}.json"));
     let mut push_item = read_json(&push_path);
+    push_item["step_states"] = json!([
+        {
+            "index": 0,
+            "label": "append_to_mailbox_id_drafts",
+            "status": "succeeded",
+            "started_rfc3339": "2026-06-09T00:00:00Z",
+            "completed_rfc3339": "2026-06-09T00:00:01Z",
+            "result_summary": "append succeeded"
+        },
+        {
+            "index": 1,
+            "label": "smtp_send",
+            "status": "succeeded",
+            "started_rfc3339": "2026-06-09T00:00:01Z",
+            "completed_rfc3339": "2026-06-09T00:00:02Z",
+            "result_summary": "smtp_send succeeded"
+        }
+    ]);
+    write_json(&push_path, &push_item);
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "draft",
+            "remove",
+            &case_uid,
+            "new.md",
+            "--reason",
+            "mistaken draft",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["error_code"], "push_already_started");
+    assert_eq!(value["details"]["push_id"], push_id);
+    assert!(value["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("afmail push --confirm")));
+    assert!(draft_path.exists());
+    assert!(push_path.exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn draft_remove_rejects_in_progress_outbound_push() {
+    let root = temp_root("draft-remove-in-progress");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    let (case_uid, case_path, _) = create_case(
+        &root,
+        "in-progress-thread",
+        Some("open"),
+        None,
+        Some("in progress draft case"),
+    );
+    let draft_path = case_path.join("drafts/new.md");
+    let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"In progress\"\nattachments:\n---\n\nHi Bob\n");
+    assert!(fs::write(&draft_path, draft).is_ok());
+    assert_eq!(
+        run(&root, &["case", "draft", "send", &case_uid, "new.md"]).0,
+        0
+    );
+    let push = parse_one(&run(&root, &["push", "list"]).1);
+    let push_id = push["items"][0]["push_id"].as_str().unwrap_or_default();
+    let push_path = root.join(".afmail/push").join(format!("{push_id}.json"));
+    let mut push_item = read_json(&push_path);
     push_item["step_states"] = json!([{
         "index": 0,
-        "label": "smtp_send",
-        "status": "succeeded",
-        "started_rfc3339": "2026-06-09T00:00:00Z",
-        "completed_rfc3339": "2026-06-09T00:00:01Z",
-        "result_summary": "smtp_send succeeded"
+        "label": "append_to_mailbox_id_drafts",
+        "status": "pending",
+        "started_rfc3339": "2026-06-09T00:00:00Z"
     }]);
     write_json(&push_path, &push_item);
 
@@ -4962,10 +5176,12 @@ fn draft_remove_clears_started_outbound_push() {
             "mistaken draft",
         ],
     );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "draft_removed");
-    assert!(!draft_path.exists());
-    assert!(!push_path.exists());
+    assert_eq!(status, 1, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["error_code"], "push_already_started");
+    assert_eq!(value["details"]["push_id"], push_id);
+    assert!(draft_path.exists());
+    assert!(push_path.exists());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -5268,6 +5484,61 @@ fn render_refresh_rebuilds_generated_views_and_removes_obsolete_case_indexes() {
 }
 
 #[test]
+fn render_refresh_progress_logs_render_substages() {
+    let root = temp_root("render-refresh-progress");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    write_message(&root, "message_render_progress", 86, None);
+
+    let (status, stdout) = run(&root, &["--log", "progress", "render", "refresh"]);
+    assert_eq!(status, 0, "{stdout}");
+    let lines = parse_lines(&stdout);
+    assert_eq!(
+        lines.last().unwrap_or(&Value::Null)["code"],
+        "render_refreshed"
+    );
+    let phases = lines
+        .iter()
+        .filter(|line| line["code"] == "log" && line["event"] == "progress")
+        .filter_map(|line| line["phase"].as_str())
+        .collect::<Vec<_>>();
+    for phase in [
+        "render_start",
+        "render_materialize_start",
+        "render_materialize_done",
+        "render_triage_start",
+        "render_triage_progress",
+        "render_triage_done",
+        "render_dispositions_start",
+        "render_dispositions_done",
+        "render_cases_start",
+        "render_cases_done",
+        "render_archives_start",
+        "render_archives_done",
+        "render_cache_write_start",
+        "render_cache_write_done",
+        "render_done",
+        "finish",
+    ] {
+        assert!(phases.contains(&phase), "{stdout}");
+    }
+    let triage_done = lines
+        .iter()
+        .find(|line| line["phase"] == "render_triage_done")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(triage_done["render_stage"], "triage");
+    assert_eq!(triage_done["triage_count"], 1);
+    assert!(triage_done["elapsed_ms"].as_u64().is_some());
+
+    let progress = read_json(&root.join(".afmail/workspace.progress.json"));
+    assert_eq!(progress["command"], "render");
+    assert_eq!(progress["status"], "succeeded");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn render_refresh_uses_user_templates_per_generated_file_type() {
     let root = temp_root("render-template");
     assert!(fs::create_dir_all(&root).is_ok());
@@ -5354,8 +5625,8 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
     assert_eq!(value["code"], "render_templates");
     assert_eq!(value["template_dir"], "templates");
     assert_eq!(value["template_dir_created"], false);
-    assert_eq!(value["exported_count"], 28);
-    assert_eq!(value["workspace_count"], 28);
+    assert_eq!(value["exported_count"], 126);
+    assert_eq!(value["workspace_count"], 126);
     assert!(root.join("templates/en-US/case/case.md.j2").is_file());
     assert!(root
         .join("templates/zh-CN/archive-message/message.md.j2")
@@ -5369,7 +5640,7 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
     let (status, stdout) = run(&root, &["render", "templates"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["kept_count"], 28);
+    assert_eq!(value["kept_count"], 126);
     assert_eq!(
         fs::read_to_string(root.join("templates/en-US/case/case.md.j2")).unwrap_or_default(),
         "CUSTOM {{ case.collection_uid }}\n"
@@ -5383,8 +5654,8 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
     let (status, stdout) = run(&other, &["render", "templates"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["exported_count"], 28);
-    assert_eq!(value["workspace_count"], 28);
+    assert_eq!(value["exported_count"], 126);
+    assert_eq!(value["workspace_count"], 126);
     assert_eq!(value["builtin_count"], 0);
     assert_eq!(value["items"][0]["source"], "workspace");
     assert_eq!(value["items"][0]["language"], "en-US");
@@ -5392,7 +5663,7 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
     let (status, stdout) = run(&root, &["render", "templates", "--force"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["overwritten_count"], 28);
+    assert_eq!(value["overwritten_count"], 126);
     assert!(
         fs::read_to_string(root.join("templates/en-US/case/case.md.j2"))
             .unwrap_or_default()
@@ -5481,7 +5752,7 @@ fn draft_save_send_validate_current_content_without_freshness_gate() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(first_hash.starts_with("sha256:"));
+    assert!(first_hash.starts_with("blake3:"));
     let push = parse_one(&run(&root, &["push", "list"]).1);
     assert_eq!(push["items"][0]["push_id"], push_id);
     assert!(push["items"][0].get("draft_hash").is_none());
@@ -5776,6 +6047,12 @@ fn header_related_messages_require_case_for_direct_disposition() {
             .as_str()
             .unwrap_or_default()
             .contains("afmail case add CASE_REF message_health_reply"))));
+    assert!(value["details"]["suggested_commands"]
+        .as_array()
+        .is_some_and(|commands| commands.iter().any(|command| command
+            .as_str()
+            .unwrap_or_default()
+            .contains("afmail case trash CASE_REF"))));
 
     let (done_archive_uid, _done_archive_path, _) =
         create_archive_message(&root, "done", None, None, Some("done archive"));
@@ -5809,6 +6086,12 @@ fn header_related_messages_require_case_for_direct_disposition() {
             .as_str()
             .unwrap_or_default()
             .contains("afmail case add CASE_REF message_health_parent"))));
+    assert!(value["details"]["suggested_commands"]
+        .as_array()
+        .is_some_and(|commands| commands.iter().any(|command| command
+            .as_str()
+            .unwrap_or_default()
+            .contains("afmail case trash CASE_REF"))));
 
     let (case_uid, _case_path, _value) = create_case(
         &root,
@@ -5857,6 +6140,217 @@ fn header_related_messages_require_case_for_direct_disposition() {
             "archive/cases/{case_uid}-health-conversation/case.md"
         ))
         .exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn case_trash_discards_entire_related_conversation() {
+    let root = temp_root("case-trash-related");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    write_message(&root, "message_trash_parent", 71, None);
+    write_message(&root, "message_trash_reply", 72, None);
+    update_message_json(&root, "message_trash_reply", |value| {
+        value["direction"] = json!("outbound");
+        value["subject"] = json!("Re: Contract renewal");
+        value["from"] = json!("me@example.com");
+        value["received_rfc3339"] = Value::Null;
+        value["sent_rfc3339"] = json!("2026-05-21T10:05:00Z");
+        value["in_reply_to"] = json!("<message_trash_parent@example.com>");
+        value["references"] = json!(["<message_trash_parent@example.com>"]);
+    });
+    write_triage(&root, "message_trash_parent", "parent");
+    write_triage(&root, "message_trash_reply", "reply");
+
+    let (case_uid, case_path, _value) = create_case(
+        &root,
+        "trash-conversation",
+        None,
+        Some("message_trash_parent"),
+        Some("conversation needs case"),
+    );
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "add",
+            &case_uid,
+            "message_trash_reply",
+            "--reason",
+            "reply belongs to same case",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "trash",
+            &case_uid,
+            "--reason",
+            "test conversation can be discarded",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "case_trashed");
+    assert_eq!(value["source_status"], "active");
+    assert_eq!(value["trashed_message_count"], 2);
+    assert_eq!(
+        value["message_ids"],
+        json!(["message_trash_parent", "message_trash_reply"])
+    );
+    assert_eq!(
+        value["eligible_message_ids"],
+        json!(["message_trash_parent"])
+    );
+    assert_eq!(value["location_count"], 1);
+    assert_eq!(value["queued_location_count"], 1);
+    assert_eq!(value["queued"], true);
+    assert!(!case_path.exists());
+
+    for message_id in ["message_trash_parent", "message_trash_reply"] {
+        let message = read_json(&root.join(format!("messages/{message_id}.json")));
+        assert_eq!(message["workspace"]["status"], "trashed");
+        assert!(root.join(format!("trash/{message_id}.md")).exists());
+        assert!(!root.join(format!("triage/{message_id}.md")).exists());
+    }
+    let trash = read_json(&root.join("trash/data/trash.json"));
+    let trash_items = trash["items"].as_array().cloned().unwrap_or_default();
+    for message_id in ["message_trash_parent", "message_trash_reply"] {
+        assert!(trash_items
+            .iter()
+            .any(|item| item["message_id"] == message_id));
+    }
+    let push = parse_one(&run(&root, &["push", "list"]).1);
+    assert_eq!(push["count"], 1);
+    assert_eq!(push["items"][0]["action"], "trash");
+    assert_eq!(
+        push["items"][0]["message_ids"],
+        json!(["message_trash_parent"])
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn archive_case_trash_discards_archived_case_without_restore() {
+    let root = temp_root("archive-case-trash");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let mut config = test_config(None, None);
+    config["actions"]["message.archive"]["by_source_mailbox_id"]["inbox"]["steps"] = json!([]);
+    write_json(&root.join(".afmail/config.json"), &config);
+    write_message(&root, "message_archive_case_trash", 81, None);
+    write_triage(&root, "message_archive_case_trash", "done");
+
+    let (case_uid, _case_path, _value) = create_case(
+        &root,
+        "archived-trash",
+        None,
+        Some("message_archive_case_trash"),
+        Some("conversation done"),
+    );
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "archive",
+            &case_uid,
+            "--reason",
+            "conversation complete",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let archived = parse_one(&stdout);
+    assert_eq!(archived["queued"], false);
+    let archived_path = root.join(archived["case_path"].as_str().unwrap_or_default());
+    assert!(archived_path.exists());
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "archive",
+            "case",
+            "trash",
+            &case_uid,
+            "--reason",
+            "archived test case can be discarded",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "case_trashed");
+    assert_eq!(value["source_status"], "archived");
+    assert_eq!(value["message_ids"], json!(["message_archive_case_trash"]));
+    assert_eq!(
+        value["eligible_message_ids"],
+        json!(["message_archive_case_trash"])
+    );
+    assert!(!archived_path.exists());
+    let message = read_json(&root.join("messages/message_archive_case_trash.json"));
+    assert_eq!(message["workspace"]["status"], "trashed");
+    assert!(root.join("trash/message_archive_case_trash.md").exists());
+    let push = parse_one(&run(&root, &["push", "list"]).1);
+    assert_eq!(push["count"], 1);
+    assert_eq!(push["items"][0]["action"], "trash");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn case_trash_rejects_cases_with_local_drafts() {
+    let root = temp_root("case-trash-draft");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    write_message(&root, "message_case_with_draft", 91, None);
+    write_triage(&root, "message_case_with_draft", "needs reply");
+    let (case_uid, case_path, _value) = create_case(
+        &root,
+        "case-with-draft",
+        None,
+        Some("message_case_with_draft"),
+        Some("needs a draft"),
+    );
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "draft",
+            "new",
+            &case_uid,
+            "--to",
+            "friend@example.com",
+            "--subject",
+            "Test",
+            "--body",
+            "Draft body",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+
+    let (status, stdout) = run(
+        &root,
+        &["case", "trash", &case_uid, "--reason", "discard test case"],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["error_code"], "case_has_local_drafts");
+    assert!(value["hint"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("archive/merge/trash"));
+    assert!(value["details"]["suggested_commands"]
+        .as_array()
+        .is_some_and(|commands| commands.iter().any(|command| command
+            .as_str()
+            .unwrap_or_default()
+            .contains("afmail case draft remove"))));
+    assert!(case_path.exists());
+    let message = read_json(&root.join("messages/message_case_with_draft.json"));
+    assert_ne!(message["workspace"]["status"], "trashed");
+    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -6520,7 +7014,11 @@ fn push_drafts_send_new_message_skips_reply_to_step() {
     let dry_run = parse_one(&stdout);
     assert_eq!(
         dry_run["items"][0]["actions"],
-        json!(["smtp_send", "append_to_mailbox_id_sent"])
+        json!([
+            "append_to_mailbox_id_drafts",
+            "smtp_send",
+            "append_to_mailbox_id_sent"
+        ])
     );
 
     let (status, stdout) = run(&root, &["push", "--confirm"]);
@@ -6581,14 +7079,24 @@ fn push_drafts_send_resumes_after_completed_smtp_step() {
     let mut push_item: Value =
         serde_json::from_str(&fs::read_to_string(&push_path).unwrap_or_default())
             .unwrap_or(Value::Null);
-    push_item["step_states"] = json!([{
-        "index": 0,
-        "label": "smtp_send",
-        "status": "succeeded",
-        "started_rfc3339": "2026-06-09T00:00:00Z",
-        "completed_rfc3339": "2026-06-09T00:00:01Z",
-        "result_summary": "smtp_send succeeded"
-    }]);
+    push_item["step_states"] = json!([
+        {
+            "index": 0,
+            "label": "append_to_mailbox_id_drafts",
+            "status": "succeeded",
+            "started_rfc3339": "2026-06-09T00:00:00Z",
+            "completed_rfc3339": "2026-06-09T00:00:01Z",
+            "result_summary": "append succeeded"
+        },
+        {
+            "index": 1,
+            "label": "smtp_send",
+            "status": "succeeded",
+            "started_rfc3339": "2026-06-09T00:00:01Z",
+            "completed_rfc3339": "2026-06-09T00:00:02Z",
+            "result_summary": "smtp_send succeeded"
+        }
+    ]);
     write_json(&push_path, &push_item);
 
     let imap = start_imap_server(Vec::new(), 3);
@@ -6713,9 +7221,90 @@ fn push_failure_records_step_level_state() {
     let push = parse_one(&run(&root, &["push", "list"]).1);
     let item = &push["items"][0];
     assert_eq!(item["attempt_count"], 1);
-    assert_eq!(item["step_states"][0]["label"], "smtp_send");
+    assert_eq!(
+        item["step_states"][0]["label"],
+        "append_to_mailbox_id_drafts"
+    );
     assert_eq!(item["step_states"][0]["status"], "failed");
     assert!(item["step_states"][0]["error_code"].as_str().is_some());
+}
+
+#[test]
+fn push_confirm_stops_after_first_failure() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("push-fail-fast");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let smtp = start_smtp_server();
+    assert!(smtp.is_some());
+    let smtp = match smtp {
+        Some(server) => server,
+        None => return,
+    };
+    let mut config = test_config(None, Some(smtp.addr.port()));
+    config["actions"]["draft.send"]["steps"] = json!([
+        {"smtp_send": {}},
+        {"append_to_mailbox_id": "sent"}
+    ]);
+    write_json(&root.join(".afmail/config.json"), &config);
+
+    let (case_one_uid, case_one_path, _) =
+        create_case(&root, "fail-one", Some("open"), None, Some("first send"));
+    let draft_one = format!("---\nkind: draft\ncase_uid: {case_one_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"One\"\nattachments:\n---\n\nFirst body\n");
+    assert!(fs::write(case_one_path.join("drafts/one.md"), draft_one).is_ok());
+    let (case_two_uid, case_two_path, _) =
+        create_case(&root, "fail-two", Some("open"), None, Some("second send"));
+    let draft_two = format!("---\nkind: draft\ncase_uid: {case_two_uid}\nsend_intent: new\nto:\n  - sue@example.com\ncc: []\nsubject: \"Two\"\nattachments:\n---\n\nSecond body\n");
+    assert!(fs::write(case_two_path.join("drafts/two.md"), draft_two).is_ok());
+    assert_eq!(
+        run(&root, &["case", "draft", "send", &case_one_uid, "one.md"]).0,
+        0
+    );
+    assert_eq!(
+        run(&root, &["case", "draft", "send", &case_two_uid, "two.md"]).0,
+        0
+    );
+
+    let (status, stdout) = run(&root, &["push", "--confirm"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["pushed_count"], 0, "{value}");
+    assert_eq!(value["failed_count"], 1, "{value}");
+    assert_eq!(value["stopped_after_failure"], true);
+    assert_eq!(value["remaining_count"], 1);
+    let sent_body = smtp
+        .data_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_default();
+    assert!(
+        sent_body.contains("First body") || sent_body.contains("Second body"),
+        "{sent_body}"
+    );
+    assert!(smtp.handle.join().is_ok());
+
+    let push = parse_one(&run(&root, &["push", "list"]).1);
+    assert_eq!(push["count"], 2);
+    let items = push["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item["attempt_count"] == 1)
+            .count(),
+        1
+    );
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item["attempt_count"] == 0
+                && item["step_states"]
+                    .as_array()
+                    .is_some_and(|states| states.is_empty()))
+            .count(),
+        1
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -7100,7 +7689,11 @@ fn triage_assign_move_draft_and_send_contract_work() {
     let (status, stdout) = run(&root, &["push", "--dry-run"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["items"][0]["actions"][0], "smtp_send");
+    assert_eq!(
+        value["items"][0]["actions"][0],
+        "append_to_mailbox_id_drafts"
+    );
+    assert_eq!(value["items"][0]["actions"][1], "smtp_send");
 
     let (status, stdout) = run(&root, &["push", "--confirm"]);
     assert_eq!(status, 0, "{stdout}");
@@ -7131,7 +7724,7 @@ fn triage_assign_move_draft_and_send_contract_work() {
     let appended = imap.appended.lock();
     assert!(appended.is_ok());
     let appended = appended.map(|items| items.clone()).unwrap_or_default();
-    assert_eq!(appended.len(), 2);
+    assert_eq!(appended.len(), 3);
     assert!(appended
         .iter()
         .any(|(folder, draft, body)| folder == "Drafts" && *draft && body.contains("Hi Alice")));

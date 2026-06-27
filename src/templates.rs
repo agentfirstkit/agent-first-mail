@@ -1,5 +1,6 @@
 use crate::config::TemplateLanguage;
 use crate::error::{AppError, Result};
+use include_dir::{include_dir, Dir};
 use minijinja::Environment;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -63,93 +64,30 @@ impl TemplateKey {
     }
 
     pub fn builtin_text(self, language: TemplateLanguage) -> &'static str {
-        match (language, self) {
-            (TemplateLanguage::EnUs, Self::WorkspaceAgents) => {
-                include_str!("../templates/en-US/workspace/AGENTS.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::WorkspaceDoNotEdit) => {
-                include_str!("../templates/en-US/workspace/DO_NOT_EDIT.txt.j2")
-            }
-            (TemplateLanguage::EnUs, Self::NotesDefault) => {
-                include_str!("../templates/en-US/notes/default.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::NotesMergeSection) => {
-                include_str!("../templates/en-US/notes/merge-section.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::DraftNew) => {
-                include_str!("../templates/en-US/draft/new.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::DraftReply) => {
-                include_str!("../templates/en-US/draft/reply.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::MessageSection) => {
-                include_str!("../templates/en-US/message/section.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::TriageView) => {
-                include_str!("../templates/en-US/triage/view.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::CaseDocument) => {
-                include_str!("../templates/en-US/case/case.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::CaseMessage) => {
-                include_str!("../templates/en-US/case/message.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::ArchiveMessageIndex) => {
-                include_str!("../templates/en-US/archive-message/archive.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::ArchiveMessage) => {
-                include_str!("../templates/en-US/archive-message/message.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::StatusIndex) => {
-                include_str!("../templates/en-US/status/index.md.j2")
-            }
-            (TemplateLanguage::EnUs, Self::StatusMessage) => {
-                include_str!("../templates/en-US/status/message.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::WorkspaceAgents) => {
-                include_str!("../templates/zh-CN/workspace/AGENTS.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::WorkspaceDoNotEdit) => {
-                include_str!("../templates/zh-CN/workspace/DO_NOT_EDIT.txt.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::NotesDefault) => {
-                include_str!("../templates/zh-CN/notes/default.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::NotesMergeSection) => {
-                include_str!("../templates/zh-CN/notes/merge-section.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::DraftNew) => {
-                include_str!("../templates/zh-CN/draft/new.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::DraftReply) => {
-                include_str!("../templates/zh-CN/draft/reply.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::MessageSection) => {
-                include_str!("../templates/zh-CN/message/section.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::TriageView) => {
-                include_str!("../templates/zh-CN/triage/view.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::CaseDocument) => {
-                include_str!("../templates/zh-CN/case/case.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::CaseMessage) => {
-                include_str!("../templates/zh-CN/case/message.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::ArchiveMessageIndex) => {
-                include_str!("../templates/zh-CN/archive-message/archive.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::ArchiveMessage) => {
-                include_str!("../templates/zh-CN/archive-message/message.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::StatusIndex) => {
-                include_str!("../templates/zh-CN/status/index.md.j2")
-            }
-            (TemplateLanguage::ZhCn, Self::StatusMessage) => {
-                include_str!("../templates/zh-CN/status/message.md.j2")
-            }
-        }
+        builtin_template_text(language, self)
     }
+}
+
+/// The whole `templates/` tree, embedded at compile time. Language selection is
+/// data-driven: each `templates/<bcp47>/` directory is a language pack, looked up
+/// by `TemplateLanguage::as_str()`. Adding a language is dropping a directory and
+/// a `TemplateLanguage` variant — no per-language code lives here.
+static BUILTIN_TEMPLATES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates");
+
+fn lookup_builtin(language: &str, key: TemplateKey) -> Option<&'static str> {
+    BUILTIN_TEMPLATES
+        .get_file(format!("{language}/{}", key.as_str()))
+        .and_then(|file| file.contents_utf8())
+}
+
+fn builtin_template_text(language: TemplateLanguage, key: TemplateKey) -> &'static str {
+    // Fall back to en-US so a partial language pack (a key not yet translated)
+    // degrades to English instead of an empty render. en-US is complete, so the
+    // final `unwrap_or` is unreachable in practice; a test asserts every pack is
+    // complete. Empty string keeps this panic-free for the clippy lint gate.
+    lookup_builtin(language.as_str(), key)
+        .or_else(|| lookup_builtin(TemplateLanguage::EnUs.as_str(), key))
+        .unwrap_or("")
 }
 
 pub fn language_template_path(language: TemplateLanguage, key: TemplateKey) -> PathBuf {
@@ -230,6 +168,12 @@ impl<'a> MarkdownTemplateRenderer<'a> {
     pub fn render<T: Serialize>(&mut self, key: TemplateKey, context: &T) -> Result<String> {
         let source = self.template_source(key)?;
         let mut env = Environment::new();
+        // Untrusted email-derived fields (subject, from/to/cc, sender, mailing
+        // list, domains) are interpolated into generated views the agent reads.
+        // `inline` collapses CR/LF to spaces so a crafted header cannot inject
+        // new Markdown lines that impersonate afmail's own block-level labels
+        // (Warnings:/Notes:/headings) outside the body fence.
+        env.add_filter("inline", template_inline_filter);
         env.add_template(key.as_str(), &source.text)
             .map_err(|e| template_error(key, self.language, &source.label, e))?;
         let template = env
@@ -288,4 +232,33 @@ fn template_error(
 
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+/// minijinja `inline` filter: collapse CR/LF to single spaces and trim, so an
+/// untrusted header value stays on its own labeled line and cannot introduce
+/// new Markdown block structure. Mirrors `store::render::markdown_inline`.
+fn template_inline_filter(value: String) -> String {
+    value.replace(['\r', '\n'], " ").trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_language_pack_ships_every_template_key() {
+        // Each language pack must carry its OWN file for every key — the en-US
+        // fallback in `builtin_template_text` is a safety net, not a license for
+        // an incomplete pack. A missing file would silently render in English.
+        for language in TemplateLanguage::ALL {
+            for key in TemplateKey::ALL {
+                assert!(
+                    lookup_builtin(language.as_str(), key).is_some(),
+                    "missing builtin template {}/{}",
+                    language.as_str(),
+                    key.as_str()
+                );
+            }
+        }
+    }
 }

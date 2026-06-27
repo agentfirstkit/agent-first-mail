@@ -1,10 +1,8 @@
-<!-- Generated. Do not edit by hand. -->
+<!-- Generated. Do not edit by hand. Regenerate: afmail --help --recursive --output markdown -->
 
 # afmail CLI Reference
 
-> Regenerate with `scripts/projects/agent-first-mail/generate-cli-doc.sh` (runs `afmail --help --recursive --output markdown`).
-
-# afmail - Agent-First Mail: local-first email case workspace for agents.
+# Agent-First Mail - Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.
 
 ### Interface Policy
 
@@ -136,7 +134,7 @@ Options:
           Print help. Add --recursive to expand every nested subcommand; add --output json|yaml|markdown to render this help in another format.
 ```
 
-## afmail init - Initialize the current directory or a child path as an afmail workspace
+## Agent-First Mail init - Initialize the current directory or a child path as an afmail workspace
 
 ```text
 Usage: init [PATH]
@@ -150,7 +148,7 @@ Options:
           Print help
 ```
 
-## afmail pull - Read configured IMAP mailbox ids into local message files without changing remote mail
+## Agent-First Mail pull - Read configured IMAP mailbox ids into local message files without changing remote mail
 
 ```text
 Usage: pull [IDS]...
@@ -164,23 +162,25 @@ Options:
           Print help
 ```
 
-## afmail config - Read or update local afmail configuration
+## Agent-First Mail config - Read or update local afmail configuration
 
 ```text
 Usage: config <COMMAND>
 
 Commands:
-  show  Show local .afmail/config.json
-  get   Get one config key
-  set   Set one config key. Multiple values become an array for array keys
-  help  Print this message or the help of the given subcommand(s)
+  show    Show effective config after applying built-in defaults
+  get     Get one config key
+  set     Set one config key. Multiple values become an array for array keys
+  add     Add an element to a keyed list (e.g. `identities`). FIELDS are key=value
+  remove  Remove a keyed-list element by its slug
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help
           Print help
 ```
 
-### afmail config show - Show local .afmail/config.json
+### Agent-First Mail config show - Show effective config after applying built-in defaults
 
 ```text
 Usage: show
@@ -190,7 +190,7 @@ Options:
           Print help
 ```
 
-### afmail config get - Get one config key
+### Agent-First Mail config get - Get one config key
 
 ```text
 Usage: get <KEY>
@@ -204,7 +204,7 @@ Options:
           Print help
 ```
 
-### afmail config set - Set one config key. Multiple values become an array for array keys
+### Agent-First Mail config set - Set one config key. Multiple values become an array for array keys
 
 ```text
 Usage: set <KEY> [VALUES]...
@@ -221,7 +221,44 @@ Options:
           Print help
 ```
 
-## afmail remote - Inspect remote IMAP state for configuring mailboxes
+### Agent-First Mail config add - Add an element to a keyed list (e.g. `identities`). FIELDS are key=value
+
+```text
+Usage: add <KEY> <SLUG> [FIELDS]...
+
+Arguments:
+  <KEY>
+
+
+  <SLUG>
+
+
+  [FIELDS]...
+
+
+Options:
+  -h, --help
+          Print help
+```
+
+### Agent-First Mail config remove - Remove a keyed-list element by its slug
+
+```text
+Usage: remove <KEY> <SLUG>
+
+Arguments:
+  <KEY>
+
+
+  <SLUG>
+
+
+Options:
+  -h, --help
+          Print help
+```
+
+## Agent-First Mail remote - Inspect remote IMAP state for configuring mailboxes
 
 ```text
 Usage: remote <COMMAND>
@@ -236,7 +273,7 @@ Options:
           Print help
 ```
 
-### afmail remote test - Test IMAP login using local config
+### Agent-First Mail remote test - Test IMAP login using local config
 
 ```text
 Usage: test
@@ -246,7 +283,7 @@ Options:
           Print help
 ```
 
-### afmail remote folders - List IMAP folders/mailboxes
+### Agent-First Mail remote folders - List IMAP folders/mailboxes
 
 ```text
 Usage: folders
@@ -256,7 +293,7 @@ Options:
           Print help
 ```
 
-## afmail push - Push queued local work or manage the local push queue
+## Agent-First Mail push - Push queued local work or manage the local push queue
 
 ```text
 Usage: push [OPTIONS] [COMMAND]
@@ -276,7 +313,7 @@ Options:
           Print help
 ```
 
-### afmail push list - List queued local push items
+### Agent-First Mail push list - List queued local push items
 
 ```text
 Usage: list
@@ -286,7 +323,7 @@ Options:
           Print help
 ```
 
-## afmail status - Report workspace health, counts, and latest pull/push progress
+## Agent-First Mail status - Report workspace health, counts, and latest pull/push progress
 
 ```text
 Usage: status
@@ -296,7 +333,7 @@ Options:
           Print help
 ```
 
-## afmail doctor - Check afmail workspace consistency without inspecting Git
+## Agent-First Mail doctor - Check afmail workspace consistency without inspecting Git
 
 ```text
 Usage: doctor [COMMAND]
@@ -310,7 +347,7 @@ Options:
           Print help
 ```
 
-### afmail doctor repair - Repair only unambiguous afmail-generated state
+### Agent-First Mail doctor repair - Repair only unambiguous afmail-generated state
 
 ```text
 Usage: repair [OPTIONS]
@@ -323,7 +360,7 @@ Options:
           Print help
 ```
 
-## afmail purge - Permanently delete old local spam, trash, and remote-deleted records
+## Agent-First Mail purge - Permanently delete old local spam, trash, and remote-deleted records
 
 ```text
 Usage: purge [OPTIONS] [COMMAND]
@@ -342,7 +379,7 @@ Options:
           Print help
 ```
 
-### afmail purge spam - Permanently delete old local spam records
+### Agent-First Mail purge spam - Permanently delete old local spam records
 
 ```text
 Usage: spam [OPTIONS]
@@ -355,7 +392,7 @@ Options:
           Print help
 ```
 
-### afmail purge trash - Permanently delete old local trash records
+### Agent-First Mail purge trash - Permanently delete old local trash records
 
 ```text
 Usage: trash [OPTIONS]
@@ -368,7 +405,7 @@ Options:
           Print help
 ```
 
-### afmail purge deleted - Permanently delete old local records whose remote message disappeared
+### Agent-First Mail purge deleted - Permanently delete old local records whose remote message disappeared
 
 ```text
 Usage: deleted [OPTIONS]
@@ -381,7 +418,7 @@ Options:
           Print help
 ```
 
-## afmail skill - Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
+## Agent-First Mail skill - Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
 
 ```text
 Usage: skill <COMMAND>
@@ -397,7 +434,7 @@ Options:
           Print help
 ```
 
-### afmail skill status - Show whether the Agent-First Mail skill is installed and valid
+### Agent-First Mail skill status - Show whether the Agent-First Mail skill is installed and valid
 
 ```text
 Usage: status [OPTIONS]
@@ -431,7 +468,7 @@ Options:
           Print help (see a summary with '-h')
 ```
 
-### afmail skill install - Install the Agent-First Mail skill
+### Agent-First Mail skill install - Install the Agent-First Mail skill
 
 ```text
 Usage: install [OPTIONS]
@@ -468,7 +505,7 @@ Options:
           Print help (see a summary with '-h')
 ```
 
-### afmail skill uninstall - Remove an afmail-managed Agent-First Mail skill
+### Agent-First Mail skill uninstall - Remove an afmail-managed Agent-First Mail skill
 
 ```text
 Usage: uninstall [OPTIONS]
@@ -505,7 +542,7 @@ Options:
           Print help (see a summary with '-h')
 ```
 
-## afmail triage - Inspect the triage queue
+## Agent-First Mail triage - Inspect the triage queue
 
 ```text
 Usage: triage <COMMAND>
@@ -519,7 +556,7 @@ Options:
           Print help
 ```
 
-### afmail triage list - List compact untriaged message locators
+### Agent-First Mail triage list - List compact untriaged message locators
 
 ```text
 Usage: list
@@ -529,7 +566,7 @@ Options:
           Print help
 ```
 
-## afmail message - Operate on any local message id
+## Agent-First Mail message - Operate on any local message id
 
 ```text
 Usage: message <COMMAND>
@@ -547,7 +584,7 @@ Options:
           Print help
 ```
 
-### afmail message show - Show the full local message metadata, body text, and attachment metadata
+### Agent-First Mail message show - Show the full local message metadata, body text, and attachment metadata
 
 ```text
 Usage: show <MESSAGE_ID>
@@ -561,7 +598,7 @@ Options:
           Print help
 ```
 
-### afmail message spam - Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
+### Agent-First Mail message spam - Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
 
 ```text
 Usage: spam [OPTIONS] <MESSAGE_ID>
@@ -578,7 +615,7 @@ Options:
           Print help
 ```
 
-### afmail message trash - Explicitly discard this message locally, show it under trash/, and queue a Trash move
+### Agent-First Mail message trash - Explicitly discard this message locally, show it under trash/, and queue a Trash move
 
 ```text
 Usage: trash [OPTIONS] <MESSAGE_ID>
@@ -595,7 +632,7 @@ Options:
           Print help
 ```
 
-### afmail message restore - Restore a message from spam, trash, or direct archive back to triage
+### Agent-First Mail message restore - Restore a message from spam, trash, or direct archive back to triage
 
 ```text
 Usage: restore [OPTIONS] <MESSAGE_ID>
@@ -612,7 +649,7 @@ Options:
           Print help
 ```
 
-### afmail message attachment - Fetch an attachment for this message
+### Agent-First Mail message attachment - Fetch an attachment for this message
 
 ```text
 Usage: attachment <COMMAND>
@@ -626,7 +663,7 @@ Options:
           Print help
 ```
 
-#### afmail message attachment fetch - Fetch one attachment by MIME part id, or all attachments when omitted
+#### Agent-First Mail message attachment fetch - Fetch one attachment by MIME part id, or all attachments when omitted
 
 ```text
 Usage: fetch <MESSAGE_ID> [PART_ID]
@@ -643,7 +680,7 @@ Options:
           Print help
 ```
 
-## afmail case - Create a case or operate on an existing case ref
+## Agent-First Mail case - Create a case or operate on an existing case ref
 
 ```text
 Usage: case <COMMAND>
@@ -657,6 +694,7 @@ Commands:
   rename   Rename this active case's human-readable name without changing its UID
   notes    Show or edit active case notes
   archive  Archive this active case
+  trash    Move every message in this active case to local trash and queue Trash moves
   reopen   Reopen this case as active work without changing its tags
   tag      Add a case organization tag
   untag    Remove a case organization tag
@@ -669,7 +707,7 @@ Options:
           Print help
 ```
 
-### afmail case create - Create a new case and return its stable UID/ref
+### Agent-First Mail case create - Create a new case and return its stable UID/ref
 
 ```text
 Usage: create [OPTIONS] --name <NAME>
@@ -694,7 +732,7 @@ Options:
           Print help
 ```
 
-### afmail case list - List compact active case locators
+### Agent-First Mail case list - List compact active case locators
 
 ```text
 Usage: list
@@ -704,7 +742,7 @@ Options:
           Print help
 ```
 
-### afmail case show - Show a case's case.md (active or archived) without changing workspace state
+### Agent-First Mail case show - Show a case's case.md (active or archived) without changing workspace state
 
 ```text
 Usage: show <CASE_REF>
@@ -718,7 +756,7 @@ Options:
           Print help
 ```
 
-### afmail case add - Add a message to this existing case
+### Agent-First Mail case add - Add a message to this existing case
 
 ```text
 Usage: add [OPTIONS] <CASE_REF> <MESSAGE_ID>
@@ -741,7 +779,7 @@ Options:
           Print help
 ```
 
-### afmail case move - Move this case to another group
+### Agent-First Mail case move - Move this case to another group
 
 ```text
 Usage: move <CASE_REF> <GROUP>
@@ -758,7 +796,7 @@ Options:
           Print help
 ```
 
-### afmail case rename - Rename this active case's human-readable name without changing its UID
+### Agent-First Mail case rename - Rename this active case's human-readable name without changing its UID
 
 ```text
 Usage: rename [OPTIONS] --name <NAME> <CASE_REF>
@@ -778,7 +816,7 @@ Options:
           Print help
 ```
 
-### afmail case notes - Show or edit active case notes
+### Agent-First Mail case notes - Show or edit active case notes
 
 ```text
 Usage: notes <COMMAND>
@@ -794,7 +832,7 @@ Options:
           Print help
 ```
 
-#### afmail case notes show - Show notes markdown
+#### Agent-First Mail case notes show - Show notes markdown
 
 ```text
 Usage: show <CASE_REF>
@@ -808,7 +846,7 @@ Options:
           Print help
 ```
 
-#### afmail case notes append - Append text to notes markdown
+#### Agent-First Mail case notes append - Append text to notes markdown
 
 ```text
 Usage: append --text <TEXT> <CASE_REF>
@@ -825,7 +863,7 @@ Options:
           Print help
 ```
 
-#### afmail case notes replace - Replace notes markdown with text
+#### Agent-First Mail case notes replace - Replace notes markdown with text
 
 ```text
 Usage: replace --text <TEXT> <CASE_REF>
@@ -842,7 +880,7 @@ Options:
           Print help
 ```
 
-### afmail case archive - Archive this active case
+### Agent-First Mail case archive - Archive this active case
 
 ```text
 Usage: archive [OPTIONS] <CASE_REF>
@@ -859,7 +897,24 @@ Options:
           Print help
 ```
 
-### afmail case reopen - Reopen this case as active work without changing its tags
+### Agent-First Mail case trash - Move every message in this active case to local trash and queue Trash moves
+
+```text
+Usage: trash [OPTIONS] <CASE_REF>
+
+Arguments:
+  <CASE_REF>
+          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+
+Options:
+      --reason <REASON>
+          Why this whole case should be discarded; required by default
+
+  -h, --help
+          Print help
+```
+
+### Agent-First Mail case reopen - Reopen this case as active work without changing its tags
 
 ```text
 Usage: reopen [OPTIONS] <CASE_REF>
@@ -876,7 +931,7 @@ Options:
           Print help
 ```
 
-### afmail case tag - Add a case organization tag
+### Agent-First Mail case tag - Add a case organization tag
 
 ```text
 Usage: tag [OPTIONS] <CASE_REF> <TAG>
@@ -896,7 +951,7 @@ Options:
           Print help
 ```
 
-### afmail case untag - Remove a case organization tag
+### Agent-First Mail case untag - Remove a case organization tag
 
 ```text
 Usage: untag [OPTIONS] <CASE_REF> <TAG>
@@ -916,7 +971,7 @@ Options:
           Print help
 ```
 
-### afmail case draft - Create, edit, validate, queue, or remove local case drafts
+### Agent-First Mail case draft - Create, edit, validate, queue, or remove local case drafts
 
 ```text
 Usage: draft <COMMAND>
@@ -938,7 +993,7 @@ Options:
           Print help
 ```
 
-#### afmail case draft new - Scaffold a new outbound draft (not a reply) in this case
+#### Agent-First Mail case draft new - Scaffold a new outbound draft (not a reply) in this case
 
 ```text
 Usage: new [OPTIONS] --to <TO> --subject <SUBJECT> <CASE_REF>
@@ -970,7 +1025,7 @@ Options:
           Print help
 ```
 
-#### afmail case draft reply - Scaffold a reply draft to a message, prefilled and quoting the original
+#### Agent-First Mail case draft reply - Scaffold a reply draft to a message, prefilled and quoting the original
 
 ```text
 Usage: reply [OPTIONS] <CASE_REF> <MESSAGE_ID>
@@ -999,7 +1054,7 @@ Options:
           Print help
 ```
 
-#### afmail case draft change - Change an existing editable draft in place
+#### Agent-First Mail case draft change - Change an existing editable draft in place
 
 ```text
 Usage: change [OPTIONS] <CASE_REF> <DRAFT_NAME>
@@ -1037,7 +1092,7 @@ Options:
           Print help
 ```
 
-#### afmail case draft show - Show an existing draft in a review-friendly JSON shape
+#### Agent-First Mail case draft show - Show an existing draft in a review-friendly JSON shape
 
 ```text
 Usage: show <CASE_REF> <DRAFT_NAME>
@@ -1054,7 +1109,7 @@ Options:
           Print help
 ```
 
-#### afmail case draft validate - Validate a draft under the case drafts directory
+#### Agent-First Mail case draft validate - Validate a draft under the case drafts directory
 
 ```text
 Usage: validate <CASE_REF> <DRAFT_NAME>
@@ -1071,7 +1126,7 @@ Options:
           Print help
 ```
 
-#### afmail case draft save - Queue this draft to be saved to the remote Drafts mailbox
+#### Agent-First Mail case draft save - Queue this draft to be saved to the remote Drafts mailbox
 
 ```text
 Usage: save <CASE_REF> <DRAFT_NAME>
@@ -1088,7 +1143,7 @@ Options:
           Print help
 ```
 
-#### afmail case draft send - Queue this draft to be sent and recorded in the case after push succeeds
+#### Agent-First Mail case draft send - Queue this draft to be sent and recorded in the case after push succeeds
 
 ```text
 Usage: send <CASE_REF> <DRAFT_NAME>
@@ -1105,7 +1160,7 @@ Options:
           Print help
 ```
 
-#### afmail case draft attach - Copy or reference a file and add it to a draft's attachments
+#### Agent-First Mail case draft attach - Copy or reference a file and add it to a draft's attachments
 
 ```text
 Usage: attach <CASE_REF> <DRAFT_NAME> <PATH>
@@ -1125,7 +1180,7 @@ Options:
           Print help
 ```
 
-#### afmail case draft remove - Remove a local draft and any queued outbound item for it
+#### Agent-First Mail case draft remove - Remove a local draft and any queued outbound item for it
 
 ```text
 Usage: remove [OPTIONS] <CASE_REF> <DRAFT_NAME>
@@ -1145,7 +1200,7 @@ Options:
           Print help
 ```
 
-### afmail case merge - Merge another case into this case
+### Agent-First Mail case merge - Merge another case into this case
 
 ```text
 Usage: merge [OPTIONS] <CASE_REF> <OTHER_CASE_REF>
@@ -1165,7 +1220,7 @@ Options:
           Print help
 ```
 
-## afmail contact - Create a contact or operate on an existing contact ref
+## Agent-First Mail contact - Create a contact or operate on an existing contact ref
 
 ```text
 Usage: contact <COMMAND>
@@ -1191,7 +1246,7 @@ Options:
           Print help
 ```
 
-### afmail contact create - Create a new contact record
+### Agent-First Mail contact create - Create a new contact record
 
 ```text
 Usage: create [OPTIONS] --name <NAME>
@@ -1222,7 +1277,7 @@ Options:
           Print help
 ```
 
-### afmail contact list - List contacts, optionally filtered by group, tag, org, or role
+### Agent-First Mail contact list - List contacts, optionally filtered by group, tag, org, or role
 
 ```text
 Usage: list [OPTIONS]
@@ -1244,7 +1299,7 @@ Options:
           Print help
 ```
 
-### afmail contact show - Show a contact's full file content
+### Agent-First Mail contact show - Show a contact's full file content
 
 ```text
 Usage: show <CONTACT_REF>
@@ -1258,7 +1313,7 @@ Options:
           Print help
 ```
 
-### afmail contact move - Move a contact to a different group
+### Agent-First Mail contact move - Move a contact to a different group
 
 ```text
 Usage: move --group <GROUP> <CONTACT_REF>
@@ -1275,7 +1330,7 @@ Options:
           Print help
 ```
 
-### afmail contact rename - Rename a contact's display name
+### Agent-First Mail contact rename - Rename a contact's display name
 
 ```text
 Usage: rename --name <NAME> <CONTACT_REF>
@@ -1292,7 +1347,7 @@ Options:
           Print help
 ```
 
-### afmail contact email - Add or remove email addresses for a contact
+### Agent-First Mail contact email - Add or remove email addresses for a contact
 
 ```text
 Usage: email <COMMAND>
@@ -1307,7 +1362,7 @@ Options:
           Print help
 ```
 
-#### afmail contact email add - Add an email address to the contact
+#### Agent-First Mail contact email add - Add an email address to the contact
 
 ```text
 Usage: add <CONTACT_REF> <EMAIL>
@@ -1324,7 +1379,7 @@ Options:
           Print help
 ```
 
-#### afmail contact email remove - Remove an email address from the contact
+#### Agent-First Mail contact email remove - Remove an email address from the contact
 
 ```text
 Usage: remove <CONTACT_REF> <EMAIL>
@@ -1341,7 +1396,7 @@ Options:
           Print help
 ```
 
-### afmail contact phone - Add or remove phone numbers for a contact
+### Agent-First Mail contact phone - Add or remove phone numbers for a contact
 
 ```text
 Usage: phone <COMMAND>
@@ -1356,7 +1411,7 @@ Options:
           Print help
 ```
 
-#### afmail contact phone add - Add a phone number to the contact
+#### Agent-First Mail contact phone add - Add a phone number to the contact
 
 ```text
 Usage: add <CONTACT_REF> <PHONE>
@@ -1373,7 +1428,7 @@ Options:
           Print help
 ```
 
-#### afmail contact phone remove - Remove a phone number from the contact
+#### Agent-First Mail contact phone remove - Remove a phone number from the contact
 
 ```text
 Usage: remove <CONTACT_REF> <PHONE>
@@ -1390,7 +1445,7 @@ Options:
           Print help
 ```
 
-### afmail contact tag - Add a tag to a contact
+### Agent-First Mail contact tag - Add a tag to a contact
 
 ```text
 Usage: tag <CONTACT_REF> <TAG>
@@ -1407,7 +1462,7 @@ Options:
           Print help
 ```
 
-### afmail contact untag - Remove a tag from a contact
+### Agent-First Mail contact untag - Remove a tag from a contact
 
 ```text
 Usage: untag <CONTACT_REF> <TAG>
@@ -1424,7 +1479,7 @@ Options:
           Print help
 ```
 
-### afmail contact notes - Show or edit contact notes
+### Agent-First Mail contact notes - Show or edit contact notes
 
 ```text
 Usage: notes <COMMAND>
@@ -1440,7 +1495,7 @@ Options:
           Print help
 ```
 
-#### afmail contact notes show - Show notes markdown
+#### Agent-First Mail contact notes show - Show notes markdown
 
 ```text
 Usage: show <CONTACT_REF>
@@ -1454,7 +1509,7 @@ Options:
           Print help
 ```
 
-#### afmail contact notes append - Append text to notes markdown
+#### Agent-First Mail contact notes append - Append text to notes markdown
 
 ```text
 Usage: append --text <TEXT> <CONTACT_REF>
@@ -1471,7 +1526,7 @@ Options:
           Print help
 ```
 
-#### afmail contact notes replace - Replace notes markdown with text
+#### Agent-First Mail contact notes replace - Replace notes markdown with text
 
 ```text
 Usage: replace --text <TEXT> <CONTACT_REF>
@@ -1488,7 +1543,7 @@ Options:
           Print help
 ```
 
-### afmail contact archive - Archive an active contact
+### Agent-First Mail contact archive - Archive an active contact
 
 ```text
 Usage: archive [OPTIONS] <CONTACT_REF>
@@ -1505,7 +1560,7 @@ Options:
           Print help
 ```
 
-### afmail contact reopen - Reopen an archived contact as active
+### Agent-First Mail contact reopen - Reopen an archived contact as active
 
 ```text
 Usage: reopen [OPTIONS] <CONTACT_REF>
@@ -1525,7 +1580,7 @@ Options:
           Print help
 ```
 
-### afmail contact extract - Extract stub contacts from message senders not yet in the contact list
+### Agent-First Mail contact extract - Extract stub contacts from message senders not yet in the contact list
 
 ```text
 Usage: extract [OPTIONS]
@@ -1547,7 +1602,7 @@ Options:
           Print help
 ```
 
-## afmail archive - Inspect and manage archived cases and direct-message archive categories
+## Agent-First Mail archive - Inspect and manage archived cases and direct-message archive categories
 
 ```text
 Usage: archive <COMMAND>
@@ -1563,7 +1618,7 @@ Options:
           Print help
 ```
 
-### afmail archive list - List compact archived cases and/or direct-message archive categories
+### Agent-First Mail archive list - List compact archived cases and/or direct-message archive categories
 
 ```text
 Usage: list [COMMAND]
@@ -1578,7 +1633,7 @@ Options:
           Print help
 ```
 
-#### afmail archive list cases - List compact archived cases
+#### Agent-First Mail archive list cases - List compact archived cases
 
 ```text
 Usage: cases
@@ -1588,7 +1643,7 @@ Options:
           Print help
 ```
 
-#### afmail archive list messages - List compact direct-message archive categories
+#### Agent-First Mail archive list messages - List compact direct-message archive categories
 
 ```text
 Usage: messages
@@ -1598,7 +1653,7 @@ Options:
           Print help
 ```
 
-### afmail archive message - Operate on a direct-message archive category
+### Agent-First Mail archive message - Operate on a direct-message archive category
 
 ```text
 Usage: message <COMMAND>
@@ -1619,7 +1674,7 @@ Options:
           Print help
 ```
 
-#### afmail archive message create - Create a direct-message archive category and optionally file one message
+#### Agent-First Mail archive message create - Create a direct-message archive category and optionally file one message
 
 ```text
 Usage: create [OPTIONS] --name <NAME>
@@ -1641,7 +1696,7 @@ Options:
           Print help
 ```
 
-#### afmail archive message add - File an existing message into this direct-message archive category
+#### Agent-First Mail archive message add - File an existing message into this direct-message archive category
 
 ```text
 Usage: add [OPTIONS] --summary <SUMMARY> <ARCHIVE_REF> <MESSAGE_ID>
@@ -1664,7 +1719,7 @@ Options:
           Print help
 ```
 
-#### afmail archive message show - Show archive category index and entries
+#### Agent-First Mail archive message show - Show archive category index and entries
 
 ```text
 Usage: show <ARCHIVE_REF>
@@ -1678,7 +1733,7 @@ Options:
           Print help
 ```
 
-#### afmail archive message restore - Restore a direct archived message to triage
+#### Agent-First Mail archive message restore - Restore a direct archived message to triage
 
 ```text
 Usage: restore [OPTIONS] <ARCHIVE_REF> <MESSAGE_ID>
@@ -1698,7 +1753,7 @@ Options:
           Print help
 ```
 
-#### afmail archive message move - Move a direct archived message to another archive category
+#### Agent-First Mail archive message move - Move a direct archived message to another archive category
 
 ```text
 Usage: move [OPTIONS] <ARCHIVE_REF> <MESSAGE_ID> <NEW_ARCHIVE_REF>
@@ -1721,7 +1776,7 @@ Options:
           Print help
 ```
 
-#### afmail archive message rename - Rename this archive category's human-readable name without changing its UID
+#### Agent-First Mail archive message rename - Rename this archive category's human-readable name without changing its UID
 
 ```text
 Usage: rename [OPTIONS] --name <NAME> <ARCHIVE_REF>
@@ -1741,7 +1796,7 @@ Options:
           Print help
 ```
 
-#### afmail archive message set-summary - Set or replace one direct archive entry summary
+#### Agent-First Mail archive message set-summary - Set or replace one direct archive entry summary
 
 ```text
 Usage: set-summary [OPTIONS] --summary <SUMMARY> <ARCHIVE_REF> <MESSAGE_ID>
@@ -1764,7 +1819,7 @@ Options:
           Print help
 ```
 
-#### afmail archive message notes - Show or edit archive category notes
+#### Agent-First Mail archive message notes - Show or edit archive category notes
 
 ```text
 Usage: notes <COMMAND>
@@ -1780,7 +1835,7 @@ Options:
           Print help
 ```
 
-##### afmail archive message notes show - Show notes markdown
+##### Agent-First Mail archive message notes show - Show notes markdown
 
 ```text
 Usage: show <ARCHIVE_REF>
@@ -1794,7 +1849,7 @@ Options:
           Print help
 ```
 
-##### afmail archive message notes append - Append text to notes markdown
+##### Agent-First Mail archive message notes append - Append text to notes markdown
 
 ```text
 Usage: append --text <TEXT> <ARCHIVE_REF>
@@ -1811,7 +1866,7 @@ Options:
           Print help
 ```
 
-##### afmail archive message notes replace - Replace notes markdown with text
+##### Agent-First Mail archive message notes replace - Replace notes markdown with text
 
 ```text
 Usage: replace --text <TEXT> <ARCHIVE_REF>
@@ -1828,7 +1883,7 @@ Options:
           Print help
 ```
 
-### afmail archive case - Operate on an archived case
+### Agent-First Mail archive case - Operate on an archived case
 
 ```text
 Usage: case <COMMAND>
@@ -1836,6 +1891,7 @@ Usage: case <COMMAND>
 Commands:
   show     Show the archived case
   restore  Restore an archived case to an active case group
+  trash    Move every message in this archived case to local trash and queue Trash moves
   rename   Rename this archived case's human-readable name without changing its UID
   notes    Show or edit archived case notes
   help     Print this message or the help of the given subcommand(s)
@@ -1845,7 +1901,7 @@ Options:
           Print help
 ```
 
-#### afmail archive case show - Show the archived case
+#### Agent-First Mail archive case show - Show the archived case
 
 ```text
 Usage: show <CASE_REF>
@@ -1859,7 +1915,7 @@ Options:
           Print help
 ```
 
-#### afmail archive case restore - Restore an archived case to an active case group
+#### Agent-First Mail archive case restore - Restore an archived case to an active case group
 
 ```text
 Usage: restore [OPTIONS] --group <GROUP> <CASE_REF>
@@ -1879,7 +1935,24 @@ Options:
           Print help
 ```
 
-#### afmail archive case rename - Rename this archived case's human-readable name without changing its UID
+#### Agent-First Mail archive case trash - Move every message in this archived case to local trash and queue Trash moves
+
+```text
+Usage: trash [OPTIONS] <CASE_REF>
+
+Arguments:
+  <CASE_REF>
+          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+
+Options:
+      --reason <REASON>
+          Why this whole archived case should be discarded; required by default
+
+  -h, --help
+          Print help
+```
+
+#### Agent-First Mail archive case rename - Rename this archived case's human-readable name without changing its UID
 
 ```text
 Usage: rename [OPTIONS] --name <NAME> <CASE_REF>
@@ -1899,7 +1972,7 @@ Options:
           Print help
 ```
 
-#### afmail archive case notes - Show or edit archived case notes
+#### Agent-First Mail archive case notes - Show or edit archived case notes
 
 ```text
 Usage: notes <COMMAND>
@@ -1915,7 +1988,7 @@ Options:
           Print help
 ```
 
-##### afmail archive case notes show - Show notes markdown
+##### Agent-First Mail archive case notes show - Show notes markdown
 
 ```text
 Usage: show <CASE_REF>
@@ -1929,7 +2002,7 @@ Options:
           Print help
 ```
 
-##### afmail archive case notes append - Append text to notes markdown
+##### Agent-First Mail archive case notes append - Append text to notes markdown
 
 ```text
 Usage: append --text <TEXT> <CASE_REF>
@@ -1946,7 +2019,7 @@ Options:
           Print help
 ```
 
-##### afmail archive case notes replace - Replace notes markdown with text
+##### Agent-First Mail archive case notes replace - Replace notes markdown with text
 
 ```text
 Usage: replace --text <TEXT> <CASE_REF>
@@ -1963,7 +2036,7 @@ Options:
           Print help
 ```
 
-## afmail render - Rebuild generated read views from local workspace state
+## Agent-First Mail render - Rebuild generated read views from local workspace state
 
 ```text
 Usage: render <COMMAND>
@@ -1978,7 +2051,7 @@ Options:
           Print help
 ```
 
-### afmail render refresh - Rebuild generated case and direct-message archive read views
+### Agent-First Mail render refresh - Rebuild generated case and direct-message archive read views
 
 ```text
 Usage: refresh
@@ -1988,7 +2061,7 @@ Options:
           Print help
 ```
 
-### afmail render templates - Export built-in language templates, keeping existing files unless forced
+### Agent-First Mail render templates - Export built-in language templates, keeping existing files unless forced
 
 ```text
 Usage: templates [OPTIONS]
@@ -2001,7 +2074,7 @@ Options:
           Print help
 ```
 
-## afmail log - Inspect the workspace audit log
+## Agent-First Mail log - Inspect the workspace audit log
 
 ```text
 Usage: log <COMMAND>
@@ -2019,7 +2092,7 @@ Options:
           Print help
 ```
 
-### afmail log list - List recent audit events
+### Agent-First Mail log list - List recent audit events
 
 ```text
 Usage: list [OPTIONS]
@@ -2034,7 +2107,7 @@ Options:
           Print help
 ```
 
-### afmail log tail - Tail recent audit events as JSON data
+### Agent-First Mail log tail - Tail recent audit events as JSON data
 
 ```text
 Usage: tail
@@ -2044,7 +2117,7 @@ Options:
           Print help
 ```
 
-### afmail log message - List events for one message id
+### Agent-First Mail log message - List events for one message id
 
 ```text
 Usage: message <MESSAGE_ID>
@@ -2058,7 +2131,7 @@ Options:
           Print help
 ```
 
-### afmail log case - List events for one case id
+### Agent-First Mail log case - List events for one case id
 
 ```text
 Usage: case <CASE_UID>
@@ -2072,7 +2145,7 @@ Options:
           Print help
 ```
 
-### afmail log archive - List events for one archive category
+### Agent-First Mail log archive - List events for one archive category
 
 ```text
 Usage: archive <ARCHIVE_UID>

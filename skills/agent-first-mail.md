@@ -101,6 +101,10 @@ decisions, and recovery only.
 - Unneeded mail that should be discarded: use
   `afmail message trash MESSAGE_ID --reason TEXT`; afmail removes it from
   `triage/` and exposes it under generated `trash/` views for review.
+- Unneeded conversation mail with `related_message_ids`: create/add the full
+  thread as a case, then use `afmail case trash REF --reason TEXT` (or
+  `afmail archive case trash REF --reason TEXT` for an already archived case) so
+  the whole thread moves to local trash together.
 - If a local disposition (spam/trash/direct archive) was wrong before remote
   push, undo it with `afmail message restore MESSAGE_ID --reason TEXT`; afmail
   detects the current disposition and returns the message to triage.
@@ -205,6 +209,9 @@ decisions, and recovery only.
   `afmail case draft attach REF DRAFT_NAME PATH` so afmail copies it into case
   `files/`.
 - Archive completed active cases with `afmail case archive REF --reason TEXT`.
+- Discard test/no-longer-needed cases with `afmail case trash REF --reason TEXT`
+  or `afmail archive case trash REF --reason TEXT`; afmail queues Trash moves
+  for eligible remote messages but does not push them until `afmail push --confirm`.
 
 ## Contacts
 

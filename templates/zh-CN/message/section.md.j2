@@ -1,30 +1,30 @@
-### {{ view.display_heading }}
+### {% if view.message_action == 'received' %}收到自{% else %}发送给{% endif %} {% if view.display_counterparty %}{{ view.display_counterparty }}{% else %}未知{% endif %} - {{ view.display_time }}
 
 消息: `{{ message.message_id }}`
-发件人: {% if message.from %}{{ message.from }}{% else %}未知{% endif %}
-{% if message.contact %}联系人: {{ message.contact.display_name }} (`{{ message.contact.contact_uid }}`)
-{% endif %}{% if message.subject %}主题: {{ message.subject }}
-{% endif %}{% if message.to %}收件人: {{ message.to | join(", ") }}
-{% endif %}{% if message.cc %}抄送: {{ message.cc | join(", ") }}
-{% endif %}{% if message.bcc %}密送: {{ message.bcc | join(", ") }}
-{% endif %}{% if message.identity_match %}身份: {% if message.identity %}{{ message.identity }}{% else %}{{ message.identity_match }}{% endif %}{% if message.identity_email %} <{{ message.identity_email }}>{% endif %}{% if message.identity_candidates %}（候选: {{ message.identity_candidates | join(", ") }}）{% endif %}{% if message.observed_recipient_emails %}（观察到: {{ message.observed_recipient_emails | join(", ") }}）{% endif %}
+发件人: {% if message.from %}{{ message.from | inline }}{% else %}未知{% endif %}
+{% if message.contact %}联系人: {{ message.contact.display_name | inline }} (`{{ message.contact.contact_uid }}`)
+{% endif %}{% if message.subject %}主题: {{ message.subject | inline }}
+{% endif %}{% if message.to %}收件人: {{ message.to | map("inline") | join(", ") }}
+{% endif %}{% if message.cc %}抄送: {{ message.cc | map("inline") | join(", ") }}
+{% endif %}{% if message.bcc %}密送: {{ message.bcc | map("inline") | join(", ") }}
+{% endif %}{% if message.identity_match %}身份: {% if message.identity %}{{ message.identity }}{% else %}{{ message.identity_match }}{% endif %}{% if message.identity_email %} <{{ message.identity_email }}>{% endif %}{% if message.identity_candidates %}（候选: {{ message.identity_candidates | join(", ") }}）{% endif %}{% if message.observed_recipient_emails %}（观察到: {{ message.observed_recipient_emails | map("inline") | join(", ") }}）{% endif %}
 {% endif %}{% set security = view.security %}{% set auth = security.authentication %}{% set has_auth_warnings = auth.check and (auth.spf != "pass" or auth.dkim != "pass" or auth.dmarc != "pass" or auth.alignment == "mismatch") %}{% if has_auth_warnings %}警告:
 {% if auth.spf != "pass" %}- 认证：SPF {% if auth.spf == "missing" %}缺失{% else %}未通过（{{ auth.spf }}）{% endif %}
 {% endif %}{% if auth.dkim != "pass" %}- 认证：DKIM {% if auth.dkim == "missing" %}缺失{% else %}未通过（{{ auth.dkim }}）{% endif %}
 {% endif %}{% if auth.dmarc != "pass" %}- 认证：DMARC {% if auth.dmarc == "missing" %}缺失{% else %}未通过（{{ auth.dmarc }}）{% endif %}
-{% endif %}{% if auth.alignment == "mismatch" %}- 认证：已认证域 {% if auth.authenticated_domain %}{{ auth.authenticated_domain }}{% else %}未知{% endif %} 与发件域 {% if auth.from_domain %}{{ auth.from_domain }}{% else %}未知{% endif %} 不一致
+{% endif %}{% if auth.alignment == "mismatch" %}- 认证：已认证域 {% if auth.authenticated_domain %}{{ auth.authenticated_domain | inline }}{% else %}未知{% endif %} 与发件域 {% if auth.from_domain %}{{ auth.from_domain | inline }}{% else %}未知{% endif %} 不一致
 {% endif %}{% endif %}{% set has_notes = security.possible_bcc or security.reply_to_differs or security.sender_differs or security.mailing_list or security.mailing_list_headers %}{% if has_notes %}提示:
 {% if security.possible_bcc %}- 可能是密送给我：To/Cc 未包含本账号，但投递头匹配
-{% endif %}{% if security.reply_to_differs %}- Reply-To 与 From 不同：{{ security.reply_to_recipients }}
-{% endif %}{% if security.sender_differs %}- Sender 与 From 不同：{{ security.sender }}
-{% endif %}{% if security.mailing_list %}- 邮件列表：{{ security.mailing_list }}
-{% elif security.mailing_list_headers %}- 邮件列表头：{{ security.mailing_list_headers }}
+{% endif %}{% if security.reply_to_differs %}- Reply-To 与 From 不同：{{ security.reply_to_recipients | inline }}
+{% endif %}{% if security.sender_differs %}- Sender 与 From 不同：{{ security.sender | inline }}
+{% endif %}{% if security.mailing_list %}- 邮件列表：{{ security.mailing_list | inline }}
+{% elif security.mailing_list_headers %}- 邮件列表头：{{ security.mailing_list_headers | inline }}
 {% endif %}{% endif %}
 {{ view.body_text_fence }}text
 {{ view.body_text_visible_block }}{{ view.body_text_fence }}
 {% if view.attachments | length > 0 %}
 附件:
-{% for attachment in view.attachments %}- {{ attachment.display_filename }} (`{{ attachment.content_type }}`, {{ attachment.size_bytes }} bytes; `{{ message.message_id }}`, part `{{ attachment.part_id }}`, {% if attachment.file_path %}已获取: `{{ attachment.file_path }}`{% else %}未获取{% endif %})
+{% for attachment in view.attachments %}- `{{ attachment.display_filename }}` (`{{ attachment.content_type }}`, {{ attachment.size_bytes }} bytes; `{{ message.message_id }}`, part `{{ attachment.part_id }}`, {% if attachment.file_path %}已获取: `{{ attachment.file_path }}`{% else %}未获取{% endif %})
 {% if attachment.preview_path %}
 ![{{ attachment.image_alt }}](<{{ attachment.preview_path }}>)
 {% endif %}

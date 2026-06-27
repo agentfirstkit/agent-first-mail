@@ -132,6 +132,14 @@ pub enum ArchiveCaseAction {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Move every message in this archived case to local trash and queue Trash moves.
+    Trash {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Why this whole archived case should be discarded; required by default.
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Rename this archived case's human-readable name without changing its UID.
     Rename {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.

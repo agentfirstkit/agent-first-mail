@@ -7,10 +7,10 @@ pub(super) struct DispositionViewSpec {
     data_file: &'static str,
     schema_name: &'static str,
     collection_uid: &'static str,
+    // English title only — used for the collection's stored (data) title. The
+    // human-facing localized title/label shown in the Markdown view is rendered
+    // by the per-language template from `view.status`, not from here.
     title_en: &'static str,
-    title_zh: &'static str,
-    label_en: &'static str,
-    label_zh: &'static str,
     frontmatter_kind: &'static str,
 }
 
@@ -22,9 +22,6 @@ const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
         schema_name: "spam",
         collection_uid: "spam",
         title_en: "Spam",
-        title_zh: "垃圾邮件",
-        label_en: "Spam",
-        label_zh: "垃圾邮件",
         frontmatter_kind: "spam_message",
     },
     DispositionViewSpec {
@@ -34,9 +31,6 @@ const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
         schema_name: "trash",
         collection_uid: "trash",
         title_en: "Trash",
-        title_zh: "废弃邮件",
-        label_en: "Trash",
-        label_zh: "废弃邮件",
         frontmatter_kind: "trash_message",
     },
     DispositionViewSpec {
@@ -46,35 +40,15 @@ const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
         schema_name: "deleted_remote",
         collection_uid: "deleted",
         title_en: "Remote Deleted",
-        title_zh: "远端已删除",
-        label_en: "Remote deleted",
-        label_zh: "远端已删除",
         frontmatter_kind: "deleted_message",
     },
 ];
 
 impl DispositionViewSpec {
-    fn title(self, language: TemplateLanguage) -> &'static str {
-        match language {
-            TemplateLanguage::EnUs => self.title_en,
-            TemplateLanguage::ZhCn => self.title_zh,
-        }
-    }
-
-    fn label(self, language: TemplateLanguage) -> &'static str {
-        match language {
-            TemplateLanguage::EnUs => self.label_en,
-            TemplateLanguage::ZhCn => self.label_zh,
-        }
-    }
-
     fn empty_collection(self) -> MessageCollection {
         let now = now_rfc3339();
-        let mut collection = MessageCollection::new(
-            self.schema_name,
-            self.collection_uid,
-            self.title(TemplateLanguage::EnUs),
-        );
+        let mut collection =
+            MessageCollection::new(self.schema_name, self.collection_uid, self.title_en);
         collection.status = self.status.as_str().to_string();
         collection.created_rfc3339 = Some(now.clone());
         collection.updated_rfc3339 = Some(now);
@@ -115,11 +89,7 @@ impl Workspace {
         data: &MessageCollection,
     ) -> Result<()> {
         let mut normalized = data.clone();
-        normalized.normalize(
-            spec.schema_name,
-            spec.collection_uid,
-            spec.title(TemplateLanguage::EnUs),
-        );
+        normalized.normalize(spec.schema_name, spec.collection_uid, spec.title_en);
         normalized.status = spec.status.as_str().to_string();
         if normalized.created_rfc3339.is_none() {
             normalized.created_rfc3339 = Some(now_rfc3339());
@@ -219,7 +189,32 @@ impl Workspace {
         Ok(None)
     }
 
+    pub(super) fn disposition_state_by_message(&self) -> Result<BTreeMap<String, MessageStatus>> {
+        let mut out = BTreeMap::new();
+        for spec in DISPOSITION_VIEW_SPECS {
+            let data = self.read_disposition_messages(spec)?;
+            for item in data.items {
+                out.insert(item.message_id, spec.status);
+            }
+        }
+        Ok(out)
+    }
+
     pub(super) fn refresh_disposition_views(&self) -> Result<Value> {
+        self.refresh_disposition_views_inner(None)
+    }
+
+    pub(super) fn refresh_disposition_views_cached(
+        &self,
+        cache: &mut RenderCache,
+    ) -> Result<Value> {
+        self.refresh_disposition_views_inner(Some(cache))
+    }
+
+    fn refresh_disposition_views_inner(
+        &self,
+        mut cache: Option<&mut RenderCache>,
+    ) -> Result<Value> {
         self.require_workspace()?;
         let config = MailConfig::load(&self.root)?;
         let language = config.template_language();
@@ -227,11 +222,13 @@ impl Workspace {
         let mut groups: BTreeMap<&'static str, Vec<MessageFile>> = BTreeMap::new();
         let mut desired: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
         let mut written: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut unchanged: BTreeMap<&'static str, usize> = BTreeMap::new();
 
         for spec in DISPOSITION_VIEW_SPECS {
             groups.insert(spec.dir, Vec::new());
             desired.insert(spec.dir, BTreeSet::new());
             written.insert(spec.dir, 0);
+            unchanged.insert(spec.dir, 0);
         }
 
         for spec in DISPOSITION_VIEW_SPECS {
@@ -247,13 +244,17 @@ impl Workspace {
                     .entry(spec.dir)
                     .or_default()
                     .insert(message.message_id.clone());
-                self.write_disposition_message_view_with_renderer(
+                let outcome = self.write_disposition_message_view_inner(
                     spec,
                     &message,
                     &config,
                     &mut renderer,
+                    cache.as_deref_mut(),
                 )?;
-                *written.entry(spec.dir).or_default() += 1;
+                match outcome {
+                    FileWriteOutcome::Written => *written.entry(spec.dir).or_default() += 1,
+                    FileWriteOutcome::Unchanged => *unchanged.entry(spec.dir).or_default() += 1,
+                }
                 groups.entry(spec.dir).or_default().push(message);
             }
         }
@@ -262,6 +263,7 @@ impl Workspace {
         let mut stale_trash_removed_count = 0usize;
         let mut stale_deleted_removed_count = 0usize;
         let mut index_written_count = 0usize;
+        let mut index_unchanged_count = 0usize;
         for spec in DISPOSITION_VIEW_SPECS {
             let desired = desired.get(spec.dir).cloned().unwrap_or_default();
             let stale_count = self.remove_stale_disposition_message_views(spec, &desired)?;
@@ -275,76 +277,124 @@ impl Workspace {
             if messages.is_empty() {
                 continue;
             }
-            self.write_disposition_index_with_renderer(
+            let outcome = self.write_disposition_index_inner(
                 spec,
                 &mut messages,
                 &config,
                 &mut renderer,
+                cache.as_deref_mut(),
             )?;
-            index_written_count += 1;
+            match outcome {
+                FileWriteOutcome::Written => index_written_count += 1,
+                FileWriteOutcome::Unchanged => index_unchanged_count += 1,
+            }
         }
 
         let spam_written_count = written.get("spam").copied().unwrap_or_default();
         let trash_written_count = written.get("trash").copied().unwrap_or_default();
         let deleted_written_count = written.get("deleted").copied().unwrap_or_default();
+        let spam_unchanged_count = unchanged.get("spam").copied().unwrap_or_default();
+        let trash_unchanged_count = unchanged.get("trash").copied().unwrap_or_default();
+        let deleted_unchanged_count = unchanged.get("deleted").copied().unwrap_or_default();
         Ok(json!({
             "code": "disposition_views_refreshed",
-            "spam_count": spam_written_count,
+            "spam_count": spam_written_count + spam_unchanged_count,
             "spam_written_count": spam_written_count,
+            "spam_unchanged_count": spam_unchanged_count,
             "stale_spam_removed_count": stale_spam_removed_count,
-            "trash_count": trash_written_count,
+            "trash_count": trash_written_count + trash_unchanged_count,
             "trash_written_count": trash_written_count,
+            "trash_unchanged_count": trash_unchanged_count,
             "stale_trash_removed_count": stale_trash_removed_count,
-            "deleted_count": deleted_written_count,
+            "deleted_count": deleted_written_count + deleted_unchanged_count,
             "deleted_written_count": deleted_written_count,
+            "deleted_unchanged_count": deleted_unchanged_count,
             "stale_deleted_removed_count": stale_deleted_removed_count,
             "index_written_count": index_written_count,
+            "index_unchanged_count": index_unchanged_count,
             "message_written_count": spam_written_count + trash_written_count + deleted_written_count,
+            "message_unchanged_count": spam_unchanged_count + trash_unchanged_count + deleted_unchanged_count,
         }))
     }
 
-    pub(super) fn write_disposition_message_view_with_renderer(
+    fn write_disposition_message_view_inner(
         &self,
         spec: DispositionViewSpec,
         message: &MessageFile,
         config: &MailConfig,
         renderer: &mut MarkdownTemplateRenderer<'_>,
-    ) -> Result<()> {
+        cache: Option<&mut RenderCache>,
+    ) -> Result<FileWriteOutcome> {
         let path = self.disposition_message_view_path(spec, &message.message_id);
-        let generated_rfc3339 = now_rfc3339();
-        let conversation =
-            self.message_conversation_with_renderer(message, config, renderer, path.parent())?;
         let context = json!({
             "frontmatter": {
                 "kind": spec.frontmatter_kind,
                 "message_id": message.message_id.as_str(),
                 "status": message.workspace.status.as_str(),
-                "generated_rfc3339": generated_rfc3339.as_str(),
             },
             "message": message_template_value(message)?,
             "view": {
                 "language": config.resolved_language_bcp47(),
                 "status": message.workspace.status.as_str(),
-                "status_label": spec.label(config.template_language()),
                 "title": message.subject.as_deref().unwrap_or(""),
-                "generated_rfc3339": generated_rfc3339.as_str(),
-                "conversation": conversation.trim(),
             },
         });
+        if let Some(cache) = cache {
+            let input_hash = self.render_input_hash_cached(
+                cache,
+                spec.frontmatter_kind,
+                &path,
+                &[TemplateKey::StatusMessage, TemplateKey::MessageSection],
+                json!({
+                    "message_hash": blake3_json_fingerprint(message)?,
+                    "context": context.clone(),
+                }),
+            )?;
+            return self.render_cached_string(
+                cache,
+                &path,
+                spec.frontmatter_kind,
+                input_hash,
+                || {
+                    let conversation = self.message_conversation_with_renderer(
+                        message,
+                        config,
+                        renderer,
+                        path.parent(),
+                    )?;
+                    let mut context = context.clone();
+                    if let Value::Object(root) = &mut context {
+                        if let Some(Value::Object(view)) = root.get_mut("view") {
+                            view.insert("conversation".to_string(), json!(conversation.trim()));
+                        }
+                    }
+                    renderer.render(TemplateKey::StatusMessage, &context)
+                },
+            );
+        }
+        let conversation =
+            self.message_conversation_with_renderer(message, config, renderer, path.parent())?;
+        let mut context = context;
+        if let Value::Object(root) = &mut context {
+            if let Some(Value::Object(view)) = root.get_mut("view") {
+                view.insert("conversation".to_string(), json!(conversation.trim()));
+            }
+        }
         let rendered = renderer.render(TemplateKey::StatusMessage, &context)?;
-        write_string(&path, &rendered)
+        write_string(&path, &rendered)?;
+        Ok(FileWriteOutcome::Written)
     }
 
-    pub(super) fn write_disposition_index_with_renderer(
+    fn write_disposition_index_inner(
         &self,
         spec: DispositionViewSpec,
         messages: &mut [MessageFile],
         config: &MailConfig,
         renderer: &mut MarkdownTemplateRenderer<'_>,
-    ) -> Result<()> {
+        cache: Option<&mut RenderCache>,
+    ) -> Result<FileWriteOutcome> {
         messages.sort_by(|a, b| compare_message_time_asc(b, a));
         let offset = config.resolved_timezone_offset();
-        let language = config.template_language();
         let items = messages
             .iter()
             .map(|message| {
@@ -357,34 +407,52 @@ impl Workspace {
                 let item = thread_item_common(
                     message,
                     &offset,
-                    language,
                     format!("{}.md", message.message_id),
                     title,
                 )?;
                 Ok(item)
             })
             .collect::<Result<Vec<_>>>()?;
-        let generated_rfc3339 = now_rfc3339();
         let context = json!({
             "frontmatter": {
                 "kind": format!("{}_index", spec.frontmatter_kind),
                 "status": spec.status.as_str(),
-                "generated_rfc3339": generated_rfc3339.as_str(),
                 "message_count": items.len(),
             },
             "items": items,
             "view": {
                 "language": config.resolved_language_bcp47(),
                 "status": spec.status.as_str(),
-                "status_label": spec.label(language),
                 "status_dir": spec.dir,
-                "title": spec.title(language),
-                "generated_rfc3339": generated_rfc3339.as_str(),
                 "message_count": items.len(),
             },
         });
+        let path = self.root.join(spec.dir).join("index.md");
+        if let Some(cache) = cache {
+            let input_hash = self.render_input_hash_cached(
+                cache,
+                &format!("{}_index", spec.frontmatter_kind),
+                &path,
+                &[TemplateKey::StatusIndex],
+                json!({
+                    "message_hashes": messages
+                        .iter()
+                        .map(blake3_json_fingerprint)
+                        .collect::<Result<Vec<_>>>()?,
+                    "context": context.clone(),
+                }),
+            )?;
+            return self.render_cached_string(
+                cache,
+                &path,
+                &format!("{}_index", spec.frontmatter_kind),
+                input_hash,
+                || renderer.render(TemplateKey::StatusIndex, &context),
+            );
+        }
         let rendered = renderer.render(TemplateKey::StatusIndex, &context)?;
-        write_string(&self.root.join(spec.dir).join("index.md"), &rendered)
+        write_string(&path, &rendered)?;
+        Ok(FileWriteOutcome::Written)
     }
 
     pub(super) fn remove_stale_disposition_message_views(

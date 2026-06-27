@@ -2,11 +2,10 @@
 kind: {{ frontmatter.kind }}
 message_id: {{ frontmatter.message_id }}
 status: {{ frontmatter.status }}
-generated_rfc3339: "{{ frontmatter.generated_rfc3339 }}"
 ---
 
-# {% if view.title %}{{ view.title }}{% else %}{{ view.status_label }}邮件{% endif %}
+# {% if view.title %}{{ view.title }}{% else %}{% if view.status == 'spam' %}垃圾邮件{% elif view.status == 'trashed' %}废弃邮件{% else %}远端已删除邮件{% endif %}{% endif %}
 
-工作区状态: {{ view.status_label }} (`{{ view.status }}`)
+工作区状态: {% if view.status == 'spam' %}垃圾邮件{% elif view.status == 'trashed' %}废弃邮件{% else %}远端已删除{% endif %} (`{{ view.status }}`)
 
 {{ view.conversation }}

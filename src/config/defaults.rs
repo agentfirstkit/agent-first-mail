@@ -21,45 +21,27 @@ pub(super) fn default_mailbox_configs() -> BTreeMap<String, ImapMailboxConfig> {
     let mut mailboxes = BTreeMap::new();
     mailboxes.insert(
         "inbox".to_string(),
-        ImapMailboxConfig {
-            mailbox_name: Some("INBOX".to_string()),
-            special_use: None,
-        },
+        ImapMailboxConfig::mailbox_name("INBOX"),
     );
     mailboxes.insert(
         "sent".to_string(),
-        ImapMailboxConfig {
-            mailbox_name: None,
-            special_use: Some("\\Sent".to_string()),
-        },
+        ImapMailboxConfig::special_use(SpecialUseKind::Sent),
     );
     mailboxes.insert(
         "archive".to_string(),
-        ImapMailboxConfig {
-            mailbox_name: None,
-            special_use: Some("\\Archive".to_string()),
-        },
+        ImapMailboxConfig::special_use(SpecialUseKind::Archive),
     );
     mailboxes.insert(
         "junk".to_string(),
-        ImapMailboxConfig {
-            mailbox_name: None,
-            special_use: Some("\\Junk".to_string()),
-        },
+        ImapMailboxConfig::special_use(SpecialUseKind::Junk),
     );
     mailboxes.insert(
         "trash".to_string(),
-        ImapMailboxConfig {
-            mailbox_name: None,
-            special_use: Some("\\Trash".to_string()),
-        },
+        ImapMailboxConfig::special_use(SpecialUseKind::Trash),
     );
     mailboxes.insert(
         "drafts".to_string(),
-        ImapMailboxConfig {
-            mailbox_name: None,
-            special_use: Some("\\Drafts".to_string()),
-        },
+        ImapMailboxConfig::special_use(SpecialUseKind::Drafts),
     );
     mailboxes
 }

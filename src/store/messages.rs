@@ -243,6 +243,74 @@ pub(super) fn message_reply_header_ids(message: &MessageFile) -> Vec<String> {
     ids
 }
 
+#[derive(Clone, Debug, Default)]
+pub(super) struct MessageRelationIndex {
+    rfc822_ids: BTreeMap<String, String>,
+    replies_by_parent: BTreeMap<String, BTreeSet<String>>,
+}
+
+pub(super) struct MaterializedOverlayIndex {
+    cases: CaseIndex,
+    dispositions: BTreeMap<String, MessageStatus>,
+    direct_archives: BTreeMap<String, (String, String)>,
+    pending_push: BTreeMap<String, Vec<WorkspacePendingPush>>,
+}
+
+impl MessageRelationIndex {
+    pub(super) fn build(workspace: &Workspace) -> Result<Self> {
+        let mut index = Self::default();
+        for path in message_json_paths(&workspace.root)? {
+            let message = read_message(&path)?;
+            if let Some(normalized) = message
+                .rfc822_message_id
+                .as_deref()
+                .and_then(normalize_rfc822_message_id)
+            {
+                index
+                    .rfc822_ids
+                    .entry(normalized)
+                    .or_insert_with(|| message.message_id.clone());
+            }
+            for header_id in message_reply_header_ids(&message) {
+                index
+                    .replies_by_parent
+                    .entry(header_id)
+                    .or_default()
+                    .insert(message.message_id.clone());
+            }
+        }
+        Ok(index)
+    }
+
+    pub(super) fn related_message_ids(&self, message: &MessageFile) -> Vec<String> {
+        let mut related = BTreeSet::new();
+        for header_id in message_reply_header_ids(message) {
+            if let Some(local_message_id) = self.rfc822_ids.get(&header_id) {
+                if local_message_id != &message.message_id {
+                    related.insert(local_message_id.clone());
+                }
+            }
+        }
+
+        let Some(current_rfc822_id) = message
+            .rfc822_message_id
+            .as_deref()
+            .and_then(normalize_rfc822_message_id)
+        else {
+            return related.into_iter().collect();
+        };
+
+        if let Some(reply_ids) = self.replies_by_parent.get(&current_rfc822_id) {
+            for reply_id in reply_ids {
+                if reply_id != &message.message_id {
+                    related.insert(reply_id.clone());
+                }
+            }
+        }
+        related.into_iter().collect()
+    }
+}
+
 impl Workspace {
     pub(crate) fn persist_message_remote(&self, message: &MessageFile) -> Result<()> {
         let path = message_remote_path(&self.root, &message.message_id);
@@ -270,7 +338,8 @@ impl Workspace {
         if let Some(parent) = path.parent() {
             create_dir_all(parent)?;
         }
-        write_json_pretty(&path, &message)
+        write_json_pretty_if_changed(&path, &message)?;
+        Ok(())
     }
 
     pub(super) fn write_message_cache(&self, message: &MessageFile) -> Result<()> {
@@ -433,23 +502,54 @@ impl Workspace {
         &self,
         message: &mut MessageFile,
     ) -> Result<()> {
+        let index = self.materialized_overlay_index()?;
+        self.apply_materialized_workspace_overlays_with_index(message, &index)
+    }
+
+    pub(super) fn materialized_overlay_index(&self) -> Result<MaterializedOverlayIndex> {
+        let mut pending_push: BTreeMap<String, Vec<WorkspacePendingPush>> = BTreeMap::new();
+        for item in crate::push_queue::pending_items(&self.root)? {
+            for message_id in item.message_ids() {
+                pending_push
+                    .entry(message_id.clone())
+                    .or_default()
+                    .push(WorkspacePendingPush {
+                        push_id: item.push_id.clone(),
+                        kind: item.display_kind(),
+                        queued_rfc3339: item.created_rfc3339.clone(),
+                        last_error: item.last_error.clone(),
+                    });
+            }
+        }
+        for pending in pending_push.values_mut() {
+            pending.sort_by(|a, b| a.push_id.cmp(&b.push_id));
+        }
+        Ok(MaterializedOverlayIndex {
+            cases: CaseIndex::build(self)?,
+            dispositions: self.disposition_state_by_message()?,
+            direct_archives: self.direct_archive_state_by_message()?,
+            pending_push,
+        })
+    }
+
+    pub(super) fn apply_materialized_workspace_overlays_with_index(
+        &self,
+        message: &mut MessageFile,
+        index: &MaterializedOverlayIndex,
+    ) -> Result<()> {
         message.workspace.archive_uid = None;
         message.workspace.archived_rfc3339 = None;
-        let cases = CaseIndex::build(self)?;
-        if let Some((status, _added_rfc3339)) =
-            self.disposition_state_for_message(&message.message_id)?
-        {
+        if let Some(status) = index.dispositions.get(&message.message_id) {
             message.workspace.status = status.as_str().to_string();
             message.workspace.origin = None;
-        } else if let Some((archive_uid, archived_rfc3339)) = self
-            .direct_archive_state_by_message()?
-            .get(&message.message_id)
+        } else if let Some((archive_uid, archived_rfc3339)) =
+            index.direct_archives.get(&message.message_id)
         {
             message.workspace.status = "archived".to_string();
             message.workspace.archive_uid = Some(archive_uid.clone());
             message.workspace.archived_rfc3339 = Some(archived_rfc3339.clone());
             message.workspace.origin = None;
-        } else if cases.has_any_reference(&message.message_id) {
+        } else if index.cases.has_any_reference(&message.message_id) {
             message.workspace.status = MessageStatus::Case.as_str().to_string();
         } else if message.workspace.origin.is_some() {
             message.workspace.status = MessageStatus::Archived.as_str().to_string();
@@ -461,7 +561,14 @@ impl Workspace {
             .push
             .as_ref()
             .and_then(|push| push.last_completed_rfc3339.clone());
-        message.workspace.push = self.pending_push_state_for_message(&message.message_id)?;
+        message.workspace.push = index
+            .pending_push
+            .get(&message.message_id)
+            .filter(|pending| !pending.is_empty())
+            .map(|pending| WorkspacePushState {
+                pending: pending.clone(),
+                last_completed_rfc3339: None,
+            });
         if let Some(last_completed_rfc3339) = last_completed_rfc3339 {
             let push = message
                 .workspace
@@ -522,30 +629,6 @@ impl Workspace {
         message.identity_candidates = matched.identity_candidates;
         message.observed_recipient_emails = matched.observed_recipient_emails;
         Ok(())
-    }
-
-    fn pending_push_state_for_message(
-        &self,
-        message_id: &str,
-    ) -> Result<Option<WorkspacePushState>> {
-        let mut state = WorkspacePushState::default();
-        for item in crate::push_queue::pending_items(&self.root)? {
-            if !item.message_ids().iter().any(|id| id == message_id) {
-                continue;
-            }
-            state.pending.push(WorkspacePendingPush {
-                push_id: item.push_id.clone(),
-                kind: item.display_kind(),
-                queued_rfc3339: item.created_rfc3339.clone(),
-                last_error: item.last_error.clone(),
-            });
-        }
-        state.pending.sort_by(|a, b| a.push_id.cmp(&b.push_id));
-        if state.pending.is_empty() && state.last_completed_rfc3339.is_none() {
-            Ok(None)
-        } else {
-            Ok(Some(state))
-        }
     }
 
     pub(super) fn rebuild_message_cache_from_eml(&self) -> Result<MessageCacheRebuildTotals> {
@@ -887,16 +970,6 @@ impl Workspace {
         Ok(message.body_text.clone())
     }
 
-    pub(super) fn message_conversation_for_dir(
-        &self,
-        message: &MessageFile,
-        output_dir: Option<&Path>,
-    ) -> Result<String> {
-        let config = MailConfig::load(&self.root)?;
-        let mut renderer = MarkdownTemplateRenderer::new(&self.root, config.template_language());
-        self.message_conversation_with_renderer(message, &config, &mut renderer, output_dir)
-    }
-
     pub(super) fn message_conversation_with_renderer(
         &self,
         message: &MessageFile,
@@ -942,39 +1015,8 @@ impl Workspace {
     pub(super) fn related_message_ids(&self, message_id: &str) -> Result<Vec<String>> {
         validate_id("message_id", message_id)?;
         let current = self.read_message_by_id(message_id)?;
-        let rfc822_index = self.rfc822_message_id_index()?;
-        let mut related = BTreeSet::new();
-
-        for header_id in message_reply_header_ids(&current) {
-            if let Some(local_message_id) = rfc822_index.get(&header_id) {
-                if local_message_id != message_id {
-                    related.insert(local_message_id.clone());
-                }
-            }
-        }
-
-        let Some(current_rfc822_id) = current
-            .rfc822_message_id
-            .as_deref()
-            .and_then(normalize_rfc822_message_id)
-        else {
-            return Ok(related.into_iter().collect());
-        };
-
-        for path in message_json_paths(&self.root)? {
-            let other = read_message(&path)?;
-            if other.message_id == message_id {
-                continue;
-            }
-            if message_reply_header_ids(&other)
-                .iter()
-                .any(|header_id| header_id == &current_rfc822_id)
-            {
-                related.insert(other.message_id);
-            }
-        }
-
-        Ok(related.into_iter().collect())
+        let index = MessageRelationIndex::build(self)?;
+        Ok(index.related_message_ids(&current))
     }
 
     pub(super) fn ensure_no_related_conversation(&self, message_id: &str) -> Result<()> {
@@ -991,12 +1033,13 @@ impl Workspace {
             ));
         }
         suggested_commands.push("afmail case archive CASE_REF --reason TEXT".to_string());
+        suggested_commands.push("afmail case trash CASE_REF --reason TEXT".to_string());
         Err(AppError::new(
             "message_has_related_conversation_use_case",
             "message has RFC-header-confirmed related conversation",
         )
         .with_hint(
-            "Create a case for the conversation, add the related messages, then archive the case.",
+            "Create a case for the conversation, add the related messages, then archive or trash the case.",
         )
         .with_details(json!({
             "message_id": message_id,

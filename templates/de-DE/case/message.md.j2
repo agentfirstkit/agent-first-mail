@@ -1,0 +1,17 @@
+---
+kind: {{ frontmatter.kind }}
+case_uid: {{ frontmatter.case_uid }}
+case_name: {{ frontmatter.case_name }}
+message_id: {{ frontmatter.message_id }}
+---
+
+# {% if view.title %}{{ view.title }}{% else %}Fall-Nachricht{% endif %}
+
+Fall: {{ case.case_name }} (`{{ case.case_uid }}`)
+Nachricht: `{{ message.message_id }}`
+
+<!-- afmail:conversation:start -->
+
+{{ view.conversation }}
+
+<!-- afmail:conversation:end -->

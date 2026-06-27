@@ -1,0 +1,11 @@
+---
+kind: {{ frontmatter.kind }}
+message_id: {{ frontmatter.message_id }}
+status: {{ frontmatter.status }}
+---
+
+# {% if view.title %}{{ view.title }}{% else %}{% if view.status == 'spam' %}스팸{% elif view.status == 'trashed' %}휴지통{% else %}원격에서 삭제됨{% endif %} 메시지{% endif %}
+
+워크스페이스 상태: {% if view.status == 'spam' %}스팸{% elif view.status == 'trashed' %}휴지통{% else %}원격에서 삭제됨{% endif %} (`{{ view.status }}`)
+
+{{ view.conversation }}

@@ -7,10 +7,14 @@ use super::{
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "afmail", disable_version_flag = true, verbatim_doc_comment)]
-#[doc = r#"Agent-First Mail: local-first email case workspace for agents.
-
-### Interface Policy
+#[command(
+    name = env!("DISPLAY_NAME"),
+    bin_name = "afmail",
+    disable_version_flag = true,
+    verbatim_doc_comment,
+    about = env!("CARGO_PKG_DESCRIPTION"),
+)]
+#[doc = r#"### Interface Policy
 
 - Files are the read interface; CLI is for effects.
 - One workspace represents one mailbox account.

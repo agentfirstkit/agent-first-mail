@@ -56,13 +56,86 @@ impl Workspace {
         crate::progress::emit(&mut progress, "pull_reconcile_done", reconcile_progress);
         merge_reconciliation_into_pull(&mut result, &reconciliation);
         crate::progress::emit(&mut progress, "pull_render_start", json!({}));
-        let triage = self.refresh_triage_views()?;
-        let dispositions = self.refresh_disposition_views()?;
+        let mut render_cache = self.read_render_cache()?;
+
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_triage_start",
+            json!({"render_stage": "triage"}),
+        );
+        let render_step_started = Instant::now();
+        let triage = self.refresh_triage_views_cached_with_progress(
+            &mut render_cache,
+            progress.as_deref_mut(),
+            "pull_render_triage_progress",
+        )?;
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_triage_done",
+            render_step_done_fields("triage", render_step_started, triage.clone()),
+        );
+
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_dispositions_start",
+            json!({"render_stage": "dispositions"}),
+        );
+        let render_step_started = Instant::now();
+        let dispositions = self.refresh_disposition_views_cached(&mut render_cache)?;
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_dispositions_done",
+            render_step_done_fields("dispositions", render_step_started, dispositions.clone()),
+        );
         merge_triage_refresh_into_pull(&mut result, &triage);
         merge_triage_refresh_into_pull(&mut result, &dispositions);
-        let case_view_count = self.refresh_all_case_message_views()?;
-        let archive_index_count = self.archive_message_category_ids()?.len();
-        self.refresh_archive_indexes()?;
+
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_cases_start",
+            json!({"render_stage": "cases"}),
+        );
+        let render_step_started = Instant::now();
+        let case_refresh = self.refresh_all_case_message_views_cached(&mut render_cache)?;
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_cases_done",
+            render_step_done_fields(
+                "cases",
+                render_step_started,
+                case_refresh_progress_fields(&case_refresh),
+            ),
+        );
+
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_archives_start",
+            json!({"render_stage": "archives"}),
+        );
+        let render_step_started = Instant::now();
+        let archive_refresh = self.refresh_archive_indexes_cached(&mut render_cache)?;
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_archives_done",
+            render_step_done_fields(
+                "archives",
+                render_step_started,
+                archive_refresh_progress_fields(&archive_refresh),
+            ),
+        );
+
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_cache_write_start",
+            json!({"render_stage": "cache_write"}),
+        );
+        let render_step_started = Instant::now();
+        self.write_render_cache_if_changed(&mut render_cache)?;
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_cache_write_done",
+            render_step_done_fields("cache_write", render_step_started, json!({})),
+        );
         let mut render_done = triage.clone();
         if let (Some(render_map), Some(disposition_map)) =
             (render_done.as_object_mut(), dispositions.as_object())
@@ -84,10 +157,79 @@ impl Workspace {
             }
         }
         if let Some(map) = render_done.as_object_mut() {
-            map.insert("case_view_count".to_string(), json!(case_view_count));
+            map.insert(
+                "case_view_count".to_string(),
+                json!(case_refresh.case_index_count + case_refresh.case_index_unchanged_count),
+            );
+            map.insert(
+                "case_view_written_count".to_string(),
+                json!(case_refresh.case_index_count + case_refresh.case_message_count),
+            );
+            map.insert(
+                "case_view_unchanged_count".to_string(),
+                json!(
+                    case_refresh.case_index_unchanged_count
+                        + case_refresh.case_message_unchanged_count
+                ),
+            );
             map.insert(
                 "archive_message_category_count".to_string(),
-                json!(archive_index_count),
+                json!(
+                    archive_refresh.archive_message_index_count
+                        + archive_refresh.archive_message_index_unchanged_count
+                ),
+            );
+            map.insert(
+                "archive_message_view_written_count".to_string(),
+                json!(
+                    archive_refresh.archive_message_index_count
+                        + archive_refresh.archive_message_count
+                ),
+            );
+            map.insert(
+                "archive_message_view_unchanged_count".to_string(),
+                json!(
+                    archive_refresh.archive_message_index_unchanged_count
+                        + archive_refresh.archive_message_unchanged_count
+                ),
+            );
+        }
+        if let Some(map) = result.as_object_mut() {
+            map.insert(
+                "case_view_count".to_string(),
+                json!(case_refresh.case_index_count + case_refresh.case_index_unchanged_count),
+            );
+            map.insert(
+                "case_view_written_count".to_string(),
+                json!(case_refresh.case_index_count + case_refresh.case_message_count),
+            );
+            map.insert(
+                "case_view_unchanged_count".to_string(),
+                json!(
+                    case_refresh.case_index_unchanged_count
+                        + case_refresh.case_message_unchanged_count
+                ),
+            );
+            map.insert(
+                "archive_message_category_count".to_string(),
+                json!(
+                    archive_refresh.archive_message_index_count
+                        + archive_refresh.archive_message_index_unchanged_count
+                ),
+            );
+            map.insert(
+                "archive_message_view_written_count".to_string(),
+                json!(
+                    archive_refresh.archive_message_index_count
+                        + archive_refresh.archive_message_count
+                ),
+            );
+            map.insert(
+                "archive_message_view_unchanged_count".to_string(),
+                json!(
+                    archive_refresh.archive_message_index_unchanged_count
+                        + archive_refresh.archive_message_unchanged_count
+                ),
             );
         }
         crate::progress::emit(&mut progress, "pull_render_done", render_done);
@@ -167,6 +309,45 @@ impl Workspace {
             "duration_ms": started.elapsed().as_millis() as u64
         }))
     }
+}
+
+fn render_step_done_fields(stage: &str, started: Instant, mut fields: Value) -> Value {
+    if let Value::Object(map) = &mut fields {
+        map.insert("render_stage".to_string(), json!(stage));
+        map.insert(
+            "elapsed_ms".to_string(),
+            json!(started.elapsed().as_millis() as u64),
+        );
+        return fields;
+    }
+    json!({
+        "render_stage": stage,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+    })
+}
+
+fn case_refresh_progress_fields(refresh: &CaseViewRefresh) -> Value {
+    json!({
+        "case_view_count": refresh.case_index_count + refresh.case_index_unchanged_count,
+        "case_view_written_count": refresh.case_index_count + refresh.case_message_count,
+        "case_view_unchanged_count": refresh.case_index_unchanged_count + refresh.case_message_unchanged_count,
+        "case_index_written_count": refresh.case_index_count,
+        "case_index_unchanged_count": refresh.case_index_unchanged_count,
+        "case_message_written_count": refresh.case_message_count,
+        "case_message_unchanged_count": refresh.case_message_unchanged_count,
+    })
+}
+
+fn archive_refresh_progress_fields(refresh: &ArchiveMessageViewRefresh) -> Value {
+    json!({
+        "archive_message_category_count": refresh.archive_message_index_count + refresh.archive_message_index_unchanged_count,
+        "archive_message_view_written_count": refresh.archive_message_index_count + refresh.archive_message_count,
+        "archive_message_view_unchanged_count": refresh.archive_message_index_unchanged_count + refresh.archive_message_unchanged_count,
+        "archive_message_index_written_count": refresh.archive_message_index_count,
+        "archive_message_index_unchanged_count": refresh.archive_message_index_unchanged_count,
+        "archive_message_written_count": refresh.archive_message_count,
+        "archive_message_unchanged_count": refresh.archive_message_unchanged_count,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -167,11 +167,13 @@ fn insert_progress_counts(out: &mut Map<String, Value>, command: Option<&str>, f
     }
     if let Some(value) = fields.get("uid_count").cloned() {
         out.insert("total_count".to_string(), value);
+    } else if let Some(value) = fields.get("total_count").cloned() {
+        out.insert("total_count".to_string(), value);
     }
-    if let (Some(processed), Some(total)) = (
-        value_u64(fields.get("processed_count")),
-        value_u64(fields.get("uid_count")),
-    ) {
+    let total_count =
+        value_u64(fields.get("uid_count")).or_else(|| value_u64(fields.get("total_count")));
+    if let (Some(processed), Some(total)) = (value_u64(fields.get("processed_count")), total_count)
+    {
         if total > 0 {
             let percent = ((processed as f64 / total as f64) * 10000.0).round() / 100.0;
             out.insert("progress_percent".to_string(), json!(percent));
@@ -184,13 +186,77 @@ fn insert_progress_counts(out: &mut Map<String, Value>, command: Option<&str>, f
     }
     match command {
         Some("pull") => insert_pull_progress_fields(out, fields),
+        Some("render") => insert_render_progress_fields(out, fields),
         Some("push") => insert_push_progress_fields(out, fields),
         _ => {}
     }
 }
 
+fn insert_render_progress_fields(out: &mut Map<String, Value>, fields: &Map<String, Value>) {
+    for key in [
+        "render_stage",
+        "elapsed_ms",
+        "total_count",
+        "message_cache_rebuilt_count",
+        "text_cache_removed_count",
+        "triage_count",
+        "triage_written_count",
+        "triage_unchanged_count",
+        "spam_count",
+        "spam_written_count",
+        "spam_unchanged_count",
+        "trash_count",
+        "trash_written_count",
+        "trash_unchanged_count",
+        "deleted_count",
+        "deleted_written_count",
+        "deleted_unchanged_count",
+        "message_written_count",
+        "message_unchanged_count",
+        "active_case_count",
+        "archived_case_count",
+        "case_view_count",
+        "case_view_written_count",
+        "case_view_unchanged_count",
+        "archive_message_category_count",
+        "archive_message_view_written_count",
+        "archive_message_view_unchanged_count",
+    ] {
+        if let Some(value) = fields.get(key).cloned() {
+            out.insert(key.to_string(), value);
+        }
+    }
+}
+
 fn insert_pull_progress_fields(out: &mut Map<String, Value>, fields: &Map<String, Value>) {
-    for key in ["mailbox_id", "mailbox_name", "mailbox_count"] {
+    for key in [
+        "mailbox_id",
+        "mailbox_name",
+        "mailbox_count",
+        "render_stage",
+        "elapsed_ms",
+        "total_count",
+        "triage_count",
+        "triage_written_count",
+        "triage_unchanged_count",
+        "spam_count",
+        "spam_written_count",
+        "spam_unchanged_count",
+        "trash_count",
+        "trash_written_count",
+        "trash_unchanged_count",
+        "deleted_count",
+        "deleted_written_count",
+        "deleted_unchanged_count",
+        "message_written_count",
+        "message_unchanged_count",
+        "case_view_count",
+        "case_view_written_count",
+        "case_view_unchanged_count",
+        "archive_message_category_count",
+        "archive_message_view_written_count",
+        "archive_message_view_unchanged_count",
+    ] {
         if let Some(value) = fields.get(key).cloned() {
             out.insert(key.to_string(), value);
         }
@@ -291,6 +357,10 @@ fn success_summary(command: &str, result: &Value) -> String {
             let mailbox_count = value_u64(result.get("mailbox_count")).unwrap_or(0);
             format!("pull succeeded: {new_count} new messages across {mailbox_count} mailboxes")
         }
+        "render" => {
+            let triage_count = value_u64(result.get("triage_count")).unwrap_or(0);
+            format!("render succeeded: refreshed {triage_count} triage views")
+        }
         "push" => {
             let pushed = value_u64(result.get("pushed_count")).unwrap_or(0);
             let failed = value_u64(result.get("failed_count")).unwrap_or(0);
@@ -303,10 +373,42 @@ fn success_summary(command: &str, result: &Value) -> String {
 fn phase_summary(command: &str, phase: Option<&str>, fields: &Value) -> String {
     match command {
         "pull" => pull_phase_summary(phase, fields),
+        "render" => render_phase_summary(phase, fields),
         "push" => push_phase_summary(phase, fields),
         _ => phase
             .map(|phase| format!("{command}: {phase}"))
             .unwrap_or_else(|| command.to_string()),
+    }
+}
+
+fn render_phase_summary(phase: Option<&str>, fields: &Value) -> String {
+    let Some(fields) = fields.as_object() else {
+        return phase
+            .map(|phase| format!("render: {phase}"))
+            .unwrap_or_else(|| "render".to_string());
+    };
+    match phase {
+        Some("render_start") => "render: refreshing generated views".to_string(),
+        Some("render_materialize_start") => "render: rebuilding message cache".to_string(),
+        Some("render_materialize_done") => render_done_summary("message cache", fields),
+        Some("render_triage_start") => "render: refreshing triage views".to_string(),
+        Some("render_triage_progress") => render_progress_summary("triage views", fields),
+        Some("render_triage_done") => render_done_summary("triage views", fields),
+        Some("render_dispositions_start") => {
+            "render: refreshing spam, trash, and deleted views".to_string()
+        }
+        Some("render_dispositions_done") => {
+            render_done_summary("spam, trash, and deleted views", fields)
+        }
+        Some("render_cases_start") => "render: refreshing case views".to_string(),
+        Some("render_cases_done") => render_done_summary("case views", fields),
+        Some("render_archives_start") => "render: refreshing archive views".to_string(),
+        Some("render_archives_done") => render_done_summary("archive views", fields),
+        Some("render_cache_write_start") => "render: writing render cache".to_string(),
+        Some("render_cache_write_done") => render_done_summary("render cache", fields),
+        Some("render_done") => "render: refreshed generated views".to_string(),
+        Some(phase) => format!("render: {phase}"),
+        None => "render".to_string(),
     }
 }
 
@@ -333,10 +435,59 @@ fn pull_phase_summary(phase: Option<&str>, fields: &Value) -> String {
         Some("pull_reconcile_start") => "pull: reconciling local remote state".to_string(),
         Some("pull_reconcile_done") => "pull: reconciled local remote state".to_string(),
         Some("pull_render_start") => "pull: refreshing generated views".to_string(),
+        Some("pull_render_triage_start") => "pull: rendering triage views".to_string(),
+        Some("pull_render_triage_progress") => render_progress_summary("triage views", fields),
+        Some("pull_render_triage_done") => render_done_summary("triage views", fields),
+        Some("pull_render_dispositions_start") => {
+            "pull: rendering spam, trash, and deleted views".to_string()
+        }
+        Some("pull_render_dispositions_done") => {
+            render_done_summary("spam, trash, and deleted views", fields)
+        }
+        Some("pull_render_cases_start") => "pull: rendering case views".to_string(),
+        Some("pull_render_cases_done") => render_done_summary("case views", fields),
+        Some("pull_render_archives_start") => "pull: rendering archive views".to_string(),
+        Some("pull_render_archives_done") => render_done_summary("archive views", fields),
+        Some("pull_render_cache_write_start") => "pull: writing render cache".to_string(),
+        Some("pull_render_cache_write_done") => render_done_summary("render cache", fields),
         Some("pull_render_done") => "pull: refreshed generated views".to_string(),
         Some(phase) => format!("pull: {phase}"),
         None => "pull".to_string(),
     }
+}
+
+fn render_done_summary(label: &str, fields: &Map<String, Value>) -> String {
+    let elapsed_ms = value_u64(fields.get("elapsed_ms")).unwrap_or(0);
+    let written = value_u64(fields.get("triage_written_count"))
+        .or_else(|| value_u64(fields.get("message_written_count")))
+        .or_else(|| value_u64(fields.get("case_view_written_count")))
+        .or_else(|| value_u64(fields.get("archive_message_view_written_count")));
+    let unchanged = value_u64(fields.get("triage_unchanged_count"))
+        .or_else(|| value_u64(fields.get("message_unchanged_count")))
+        .or_else(|| value_u64(fields.get("case_view_unchanged_count")))
+        .or_else(|| value_u64(fields.get("archive_message_view_unchanged_count")));
+    match (written, unchanged) {
+        (Some(written), Some(unchanged)) => {
+            format!("rendered {label} in {elapsed_ms} ms, {written} written, {unchanged} unchanged")
+        }
+        _ => format!("rendered {label} in {elapsed_ms} ms"),
+    }
+}
+
+fn render_progress_summary(label: &str, fields: &Map<String, Value>) -> String {
+    let processed = value_u64(fields.get("processed_count")).unwrap_or(0);
+    let total = value_u64(fields.get("total_count")).unwrap_or(0);
+    let written = value_u64(fields.get("triage_written_count"))
+        .or_else(|| value_u64(fields.get("message_written_count")))
+        .or_else(|| value_u64(fields.get("case_view_written_count")))
+        .or_else(|| value_u64(fields.get("archive_message_view_written_count")))
+        .unwrap_or(0);
+    let unchanged = value_u64(fields.get("triage_unchanged_count"))
+        .or_else(|| value_u64(fields.get("message_unchanged_count")))
+        .or_else(|| value_u64(fields.get("case_view_unchanged_count")))
+        .or_else(|| value_u64(fields.get("archive_message_view_unchanged_count")))
+        .unwrap_or(0);
+    format!("rendering {label}: {processed}/{total}, {written} written, {unchanged} unchanged")
 }
 
 fn pull_bodies_summary(mailbox: &str, fields: &Map<String, Value>) -> String {
@@ -450,7 +601,33 @@ fn progress_message(command: &str, phase: &str) -> &'static str {
         ("pull", "pull_reconcile_start") => "reconciling local remote state",
         ("pull", "pull_reconcile_done") => "reconciled local remote state",
         ("pull", "pull_render_start") => "refreshing generated views",
+        ("pull", "pull_render_triage_start") => "refreshing triage views",
+        ("pull", "pull_render_triage_progress") => "refreshing triage views",
+        ("pull", "pull_render_triage_done") => "refreshed triage views",
+        ("pull", "pull_render_dispositions_start") => "refreshing disposition views",
+        ("pull", "pull_render_dispositions_done") => "refreshed disposition views",
+        ("pull", "pull_render_cases_start") => "refreshing case views",
+        ("pull", "pull_render_cases_done") => "refreshed case views",
+        ("pull", "pull_render_archives_start") => "refreshing archive views",
+        ("pull", "pull_render_archives_done") => "refreshed archive views",
+        ("pull", "pull_render_cache_write_start") => "writing render cache",
+        ("pull", "pull_render_cache_write_done") => "wrote render cache",
         ("pull", "pull_render_done") => "refreshed generated views",
+        ("render", "render_start") => "refreshing generated views",
+        ("render", "render_materialize_start") => "rebuilding message cache",
+        ("render", "render_materialize_done") => "rebuilt message cache",
+        ("render", "render_triage_start") => "refreshing triage views",
+        ("render", "render_triage_progress") => "refreshing triage views",
+        ("render", "render_triage_done") => "refreshed triage views",
+        ("render", "render_dispositions_start") => "refreshing disposition views",
+        ("render", "render_dispositions_done") => "refreshed disposition views",
+        ("render", "render_cases_start") => "refreshing case views",
+        ("render", "render_cases_done") => "refreshed case views",
+        ("render", "render_archives_start") => "refreshing archive views",
+        ("render", "render_archives_done") => "refreshed archive views",
+        ("render", "render_cache_write_start") => "writing render cache",
+        ("render", "render_cache_write_done") => "wrote render cache",
+        ("render", "render_done") => "refreshed generated views",
         ("push", "push_start") => "pushing queued remote effects",
         ("push", "push_item_start") => "pushing queued item",
         ("push", "push_item_done") => "pushed queued item",

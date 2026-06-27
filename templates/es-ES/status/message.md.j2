@@ -1,0 +1,11 @@
+---
+kind: {{ frontmatter.kind }}
+message_id: {{ frontmatter.message_id }}
+status: {{ frontmatter.status }}
+---
+
+# {% if view.title %}{{ view.title }}{% else %}{% if view.status == 'spam' %}Mensaje de spam{% elif view.status == 'trashed' %}Mensaje en la papelera{% else %}Mensaje eliminado en el servidor{% endif %}{% endif %}
+
+Estado del workspace: {% if view.status == 'spam' %}Spam{% elif view.status == 'trashed' %}Papelera{% else %}Eliminado en el servidor{% endif %} (`{{ view.status }}`)
+
+{{ view.conversation }}

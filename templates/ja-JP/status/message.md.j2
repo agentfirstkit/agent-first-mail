@@ -1,0 +1,11 @@
+---
+kind: {{ frontmatter.kind }}
+message_id: {{ frontmatter.message_id }}
+status: {{ frontmatter.status }}
+---
+
+# {% if view.title %}{{ view.title }}{% else %}{% if view.status == 'spam' %}迷惑メール{% elif view.status == 'trashed' %}ゴミ箱{% else %}リモート削除済み{% endif %} メッセージ{% endif %}
+
+ワークスペース状態: {% if view.status == 'spam' %}迷惑メール{% elif view.status == 'trashed' %}ゴミ箱{% else %}リモート削除済み{% endif %} (`{{ view.status }}`)
+
+{{ view.conversation }}

@@ -37,31 +37,157 @@ impl Workspace {
     }
 
     pub fn refresh_triage_views(&self) -> Result<Value> {
+        self.refresh_triage_views_inner(None, None, None)
+    }
+
+    pub(super) fn refresh_triage_views_cached_with_progress(
+        &self,
+        cache: &mut RenderCache,
+        progress: Option<&mut crate::progress::ProgressCallback<'_>>,
+        progress_phase: &'static str,
+    ) -> Result<Value> {
+        self.refresh_triage_views_inner(Some(cache), progress, Some(progress_phase))
+    }
+
+    fn refresh_triage_views_inner(
+        &self,
+        mut cache: Option<&mut RenderCache>,
+        progress: Option<&mut crate::progress::ProgressCallback<'_>>,
+        progress_phase: Option<&'static str>,
+    ) -> Result<Value> {
         self.require_workspace()?;
         create_dir_all(&self.root.join("triage"))?;
-        let cases = CaseIndex::build(self)?;
         let contact_map = self.contact_email_map()?;
         let config = MailConfig::load(&self.root)?;
+        let mut renderer = MarkdownTemplateRenderer::new(&self.root, config.template_language());
+        let mut cases = None;
+        let mut relation_index = None;
+        let mut overlay_index = None;
         let mut desired = BTreeSet::new();
         let mut written_count = 0usize;
-        for path in message_json_paths(&self.root)? {
+        let mut unchanged_count = 0usize;
+        let paths = message_json_paths(&self.root)?;
+        let total_count = paths.len();
+        let mut progress = progress;
+        for (index, path) in paths.into_iter().enumerate() {
+            let message_id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let view_path = self.root.join("triage").join(format!("{message_id}.md"));
+            if let Some(cache) = cache.as_deref_mut() {
+                if view_path.is_file() {
+                    let (suggested_case_uids, suggested_reason) =
+                        existing_triage_suggestion(&view_path)?;
+                    let input_hash = self.render_input_hash_cached(
+                        cache,
+                        "triage_view",
+                        &view_path,
+                        &[TemplateKey::TriageView, TemplateKey::MessageSection],
+                        json!({
+                            "message_hash": message_file_fingerprint(&path)?,
+                            "suggested_case_uids": suggested_case_uids,
+                            "suggested_reason": suggested_reason,
+                        }),
+                    )?;
+                    if cache.entry_matches(
+                        &rel_path(&self.root, &view_path),
+                        "triage_view",
+                        &input_hash,
+                    ) {
+                        desired.insert(message_id);
+                        unchanged_count += 1;
+                        emit_triage_progress(
+                            &mut progress,
+                            progress_phase,
+                            index + 1,
+                            total_count,
+                            desired.len(),
+                            written_count,
+                            unchanged_count,
+                        );
+                        continue;
+                    }
+                }
+            }
             let mut message = read_message(&path)?;
-            self.apply_materialized_workspace_overlays(&mut message)?;
+            let before_overlays = message.clone();
+            let overlay_index = match &overlay_index {
+                Some(index) => index,
+                None => {
+                    overlay_index = Some(self.materialized_overlay_index()?);
+                    let Some(index) = overlay_index.as_ref() else {
+                        return Err(AppError::new(
+                            "internal",
+                            "overlay index was not initialized",
+                        ));
+                    };
+                    index
+                }
+            };
+            self.apply_materialized_workspace_overlays_with_index(&mut message, overlay_index)?;
             self.apply_identity_match(&mut message, &config)?;
             self.apply_contact_link(&mut message, &contact_map);
             message.workspace.remote_sync = None;
-            self.write_message_materialized_cache(&message)?;
-            if self.triage_candidate(&message, &cases)? {
-                desired.insert(message.message_id.clone());
-                self.write_triage_view(&message)?;
-                written_count += 1;
+            if message != before_overlays {
+                self.write_message_materialized_cache(&message)?;
             }
+            let cases = match &cases {
+                Some(index) => index,
+                None => {
+                    cases = Some(CaseIndex::build(self)?);
+                    let Some(index) = cases.as_ref() else {
+                        return Err(AppError::new("internal", "case index was not initialized"));
+                    };
+                    index
+                }
+            };
+            if self.triage_candidate(&message, cases)? {
+                desired.insert(message.message_id.clone());
+                let relation_index = match &relation_index {
+                    Some(index) => index,
+                    None => {
+                        relation_index = Some(MessageRelationIndex::build(self)?);
+                        let Some(index) = relation_index.as_ref() else {
+                            return Err(AppError::new(
+                                "internal",
+                                "message relation index was not initialized",
+                            ));
+                        };
+                        index
+                    }
+                };
+                let outcome = self.write_triage_view_inner(
+                    &message,
+                    Some(&path),
+                    Some(relation_index),
+                    &config,
+                    &mut renderer,
+                    cache.as_deref_mut(),
+                )?;
+                match outcome {
+                    FileWriteOutcome::Written => written_count += 1,
+                    FileWriteOutcome::Unchanged => unchanged_count += 1,
+                }
+            }
+            let processed_count = index + 1;
+            emit_triage_progress(
+                &mut progress,
+                progress_phase,
+                processed_count,
+                total_count,
+                desired.len(),
+                written_count,
+                unchanged_count,
+            );
         }
         let stale_count = self.remove_stale_triage_views(&desired)?;
         Ok(json!({
             "code": "triage_refreshed",
             "triage_count": desired.len(),
             "triage_written_count": written_count,
+            "triage_unchanged_count": unchanged_count,
             "stale_triage_removed_count": stale_count
         }))
     }
@@ -76,7 +202,27 @@ pub(crate) fn render_triage_view(
     suggested_reason: Option<String>,
     related_messages: Vec<Value>,
 ) -> Result<String> {
-    let generated_rfc3339 = now_rfc3339();
+    let mut renderer = MarkdownTemplateRenderer::new(root, language);
+    render_triage_view_with_renderer(
+        &mut renderer,
+        language,
+        message,
+        conversation,
+        suggested_case_uids,
+        suggested_reason,
+        related_messages,
+    )
+}
+
+fn render_triage_view_with_renderer(
+    renderer: &mut MarkdownTemplateRenderer<'_>,
+    language: TemplateLanguage,
+    message: &MessageFile,
+    conversation: &str,
+    suggested_case_uids: Vec<String>,
+    suggested_reason: Option<String>,
+    related_messages: Vec<Value>,
+) -> Result<String> {
     let suggested_reason = suggested_reason.as_deref().unwrap_or("");
     let suggested_reason_yaml = if suggested_reason.is_empty() {
         String::new()
@@ -84,16 +230,13 @@ pub(crate) fn render_triage_view(
         yaml_double_quote(suggested_reason)
     };
     let view_suggested_case_uids = suggested_case_uids.clone();
-    render_template(
-        root,
-        language,
+    renderer.render(
         TemplateKey::TriageView,
         &json!({
             "frontmatter": {
                 "kind": "triage_view",
                 "message_id": message.message_id.as_str(),
                 "message_ids": [message.message_id.as_str()],
-                "generated_rfc3339": generated_rfc3339.as_str(),
                 "message_count": 1,
                 "attachment_count": message.attachments.len(),
                 "suggested_case_uids": &suggested_case_uids,
@@ -104,7 +247,6 @@ pub(crate) fn render_triage_view(
             "view": {
                 "language": language.as_str(),
                 "title": message.subject.as_deref().unwrap_or(""),
-                "generated_rfc3339": generated_rfc3339.as_str(),
                 "attachment_count": message.attachments.len(),
                 "suggested_case_uids": view_suggested_case_uids,
                 "suggested_reason": suggested_reason,
@@ -131,6 +273,24 @@ impl Workspace {
         Ok(count)
     }
 
+    pub(super) fn refresh_all_case_message_views_cached(
+        &self,
+        cache: &mut RenderCache,
+    ) -> Result<CaseViewRefresh> {
+        let language = self.template_language()?;
+        let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
+        let mut totals = CaseViewRefresh::default();
+        for (_, case_path) in self.all_case_entries()? {
+            let refresh =
+                self.refresh_case_message_views_with_cache(&case_path, &mut renderer, cache)?;
+            totals.case_index_count += refresh.case_index_count;
+            totals.case_message_count += refresh.case_message_count;
+            totals.case_index_unchanged_count += refresh.case_index_unchanged_count;
+            totals.case_message_unchanged_count += refresh.case_message_unchanged_count;
+        }
+        Ok(totals)
+    }
+
     pub(super) fn refresh_case_message_views(&self, case_path: &Path) -> Result<()> {
         let language = self.template_language()?;
         let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
@@ -143,6 +303,24 @@ impl Workspace {
         case_path: &Path,
         renderer: &mut MarkdownTemplateRenderer<'_>,
     ) -> Result<CaseViewRefresh> {
+        self.refresh_case_message_views_inner(case_path, renderer, None)
+    }
+
+    pub(super) fn refresh_case_message_views_with_cache(
+        &self,
+        case_path: &Path,
+        renderer: &mut MarkdownTemplateRenderer<'_>,
+        cache: &mut RenderCache,
+    ) -> Result<CaseViewRefresh> {
+        self.refresh_case_message_views_inner(case_path, renderer, Some(cache))
+    }
+
+    fn refresh_case_message_views_inner(
+        &self,
+        case_path: &Path,
+        renderer: &mut MarkdownTemplateRenderer<'_>,
+        mut cache: Option<&mut RenderCache>,
+    ) -> Result<CaseViewRefresh> {
         if !case_json_path(case_path).is_file() {
             return Ok(CaseViewRefresh::default());
         }
@@ -154,40 +332,95 @@ impl Workspace {
         let mut desired = BTreeSet::new();
         let mut case_conversation = Vec::new();
         let mut messages = Vec::new();
-        let mut message_count = 0usize;
+        let mut message_stats = RenderWriteStats::default();
         for message_id in case_fm.message_ids() {
             let message = self.read_message_by_id(&message_id)?;
             desired.insert(message_id.clone());
+            let view_path = case_message_view_path(case_path, &message_id);
+            let outcome = if let Some(cache) = cache.as_deref_mut() {
+                let input_hash = self.render_input_hash_cached(
+                    cache,
+                    "case_message",
+                    &view_path,
+                    &[TemplateKey::CaseMessage, TemplateKey::MessageSection],
+                    json!({
+                        "case_uid": case_uid.as_str(),
+                        "case_name": case_fm.collection_name.as_str(),
+                        "message_hash": blake3_json_fingerprint(&message)?,
+                    }),
+                )?;
+                self.render_cached_string(cache, &view_path, "case_message", input_hash, || {
+                    self.render_case_message_view(
+                        &case_uid,
+                        &case_fm.collection_name,
+                        &message,
+                        renderer,
+                        view_path.parent(),
+                    )
+                })?
+            } else {
+                let view = self.render_case_message_view(
+                    &case_uid,
+                    &case_fm.collection_name,
+                    &message,
+                    renderer,
+                    view_path.parent(),
+                )?;
+                write_string(&view_path, &view)?;
+                FileWriteOutcome::Written
+            };
+            message_stats.record(outcome);
             case_conversation.push(self.message_conversation_with_renderer(
                 &message,
                 &config,
                 renderer,
                 Some(case_path),
             )?);
-            let view_path = case_message_view_path(case_path, &message_id);
-            let view = self.render_case_message_view(
-                &case_uid,
-                &case_fm.collection_name,
-                &message,
-                renderer,
-                view_path.parent(),
-            )?;
-            write_string(&view_path, &view)?;
             messages.push(message);
-            message_count += 1;
         }
         self.remove_stale_case_message_views(&messages_dir, &desired)?;
-        let case_doc = self.render_case_document(
-            &case_fm,
-            &messages,
-            &case_conversation.join("\n\n"),
-            &config,
-            renderer,
-        )?;
-        write_string(&case_path.join("case.md"), &case_doc)?;
+        let case_index_path = case_path.join("case.md");
+        let case_index_outcome = if let Some(cache) = cache {
+            let input_hash = self.render_input_hash_cached(
+                cache,
+                "case_index",
+                &case_index_path,
+                &[TemplateKey::CaseDocument, TemplateKey::MessageSection],
+                json!({
+                    "case_hash": blake3_json_fingerprint(&case_fm)?,
+                    "message_hashes": messages
+                        .iter()
+                        .map(blake3_json_fingerprint)
+                        .collect::<Result<Vec<_>>>()?,
+                }),
+            )?;
+            self.render_cached_string(cache, &case_index_path, "case_index", input_hash, || {
+                self.render_case_document(
+                    &case_fm,
+                    &messages,
+                    &case_conversation.join("\n\n"),
+                    &config,
+                    renderer,
+                )
+            })?
+        } else {
+            let case_doc = self.render_case_document(
+                &case_fm,
+                &messages,
+                &case_conversation.join("\n\n"),
+                &config,
+                renderer,
+            )?;
+            write_string(&case_index_path, &case_doc)?;
+            FileWriteOutcome::Written
+        };
         Ok(CaseViewRefresh {
-            case_index_count: 1,
-            case_message_count: message_count,
+            case_index_count: usize::from(case_index_outcome == FileWriteOutcome::Written),
+            case_message_count: message_stats.written_count,
+            case_index_unchanged_count: usize::from(
+                case_index_outcome == FileWriteOutcome::Unchanged,
+            ),
+            case_message_unchanged_count: message_stats.unchanged_count,
         })
     }
 
@@ -201,7 +434,6 @@ impl Workspace {
     ) -> Result<String> {
         let config = MailConfig::load(&self.root)?;
         let title = message.subject.as_deref().unwrap_or("");
-        let generated_rfc3339 = now_rfc3339();
         let message_value = message_template_value(message)?;
         let conversation =
             self.message_conversation_with_renderer(message, &config, renderer, output_dir)?;
@@ -211,7 +443,6 @@ impl Workspace {
                 "case_uid": case_uid,
                 "case_name": case_name,
                 "message_id": message.message_id.as_str(),
-                "generated_rfc3339": generated_rfc3339.as_str(),
             },
             "case": {
                 "case_uid": case_uid,
@@ -221,7 +452,6 @@ impl Workspace {
             "view": {
                 "language": config.resolved_language_bcp47(),
                 "title": title,
-                "generated_rfc3339": generated_rfc3339.as_str(),
                 "conversation": conversation.trim(),
             },
         });
@@ -290,7 +520,6 @@ impl Workspace {
             let mut item = thread_item_common(
                 message,
                 &offset,
-                config.template_language(),
                 format!("views/messages/{}.md", message.message_id),
                 title,
             )?;
@@ -303,7 +532,6 @@ impl Workspace {
         }
         let case_value = serde_json::to_value(&case_view)
             .map_err(|e| AppError::json("serialize case frontmatter", &e))?;
-        let generated_rfc3339 = now_rfc3339();
         let messages_value = sorted
             .iter()
             .map(message_template_value)
@@ -313,7 +541,6 @@ impl Workspace {
                 "kind": "case_index",
                 "case_uid": case_uid,
                 "case_name": case_fm.collection_name.as_str(),
-                "generated_rfc3339": generated_rfc3339.as_str(),
                 "message_count": items.len(),
             },
             "case": case_value,
@@ -324,7 +551,6 @@ impl Workspace {
                 "title": case_fm.collection_name.as_str(),
                 "status": case_fm.status.as_str(),
                 "message_count": items.len(),
-                "generated_rfc3339": generated_rfc3339.as_str(),
                 "conversation": conversation.trim(),
             },
         });
@@ -370,17 +596,70 @@ impl Workspace {
     }
 
     pub(super) fn write_triage_view(&self, message: &MessageFile) -> Result<()> {
+        let config = MailConfig::load(&self.root)?;
+        let mut renderer = MarkdownTemplateRenderer::new(&self.root, config.template_language());
+        self.write_triage_view_inner(message, None, None, &config, &mut renderer, None)?;
+        Ok(())
+    }
+
+    fn write_triage_view_inner(
+        &self,
+        message: &MessageFile,
+        message_source_path: Option<&Path>,
+        relation_index: Option<&MessageRelationIndex>,
+        config: &MailConfig,
+        renderer: &mut MarkdownTemplateRenderer<'_>,
+        cache: Option<&mut RenderCache>,
+    ) -> Result<FileWriteOutcome> {
         let path = self
             .root
             .join("triage")
             .join(format!("{}.md", message.message_id));
-        let conversation = self.message_conversation_for_dir(message, path.parent())?;
         let (suggested_case_uids, suggested_reason) = existing_triage_suggestion(&path)?;
-        let related_message_ids = self.related_message_ids(&message.message_id)?;
+        let related_message_ids = match relation_index {
+            Some(index) => index.related_message_ids(message),
+            None => self.related_message_ids(&message.message_id)?,
+        };
+        if let Some(cache) = cache {
+            let input_hash = self.render_input_hash_cached(
+                cache,
+                "triage_view",
+                &path,
+                &[TemplateKey::TriageView, TemplateKey::MessageSection],
+                json!({
+                    "message_hash": match message_source_path {
+                        Some(path) => message_file_fingerprint(path)?,
+                        None => blake3_json_fingerprint(message)?,
+                    },
+                    "suggested_case_uids": suggested_case_uids.clone(),
+                    "suggested_reason": suggested_reason.clone(),
+                }),
+            )?;
+            return self.render_cached_string(cache, &path, "triage_view", input_hash, || {
+                let related_messages = self.related_message_rows(&related_message_ids)?;
+                let conversation = self.message_conversation_with_renderer(
+                    message,
+                    config,
+                    renderer,
+                    path.parent(),
+                )?;
+                render_triage_view_with_renderer(
+                    renderer,
+                    config.template_language(),
+                    message,
+                    &conversation,
+                    suggested_case_uids,
+                    suggested_reason,
+                    related_messages,
+                )
+            });
+        }
+
         let related_messages = self.related_message_rows(&related_message_ids)?;
-        let config = MailConfig::load(&self.root)?;
-        let rendered = render_triage_view(
-            &self.root,
+        let conversation =
+            self.message_conversation_with_renderer(message, config, renderer, path.parent())?;
+        let rendered = render_triage_view_with_renderer(
+            renderer,
             config.template_language(),
             message,
             &conversation,
@@ -388,7 +667,8 @@ impl Workspace {
             suggested_reason,
             related_messages,
         )?;
-        write_string(&path, &rendered)
+        write_string(&path, &rendered)?;
+        Ok(FileWriteOutcome::Written)
     }
 
     pub(super) fn related_message_rows(
@@ -438,4 +718,44 @@ impl Workspace {
         }
         Ok(removed)
     }
+}
+
+fn message_file_fingerprint(path: &Path) -> Result<String> {
+    let metadata = fs::metadata(path).map_err(|err| AppError::io("read message metadata", &err))?;
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    Ok(format!("file:{}:{}", metadata.len(), modified_ns))
+}
+
+fn emit_triage_progress(
+    progress: &mut Option<&mut crate::progress::ProgressCallback<'_>>,
+    phase: Option<&'static str>,
+    processed_count: usize,
+    total_count: usize,
+    triage_count: usize,
+    written_count: usize,
+    unchanged_count: usize,
+) {
+    let Some(phase) = phase else {
+        return;
+    };
+    if processed_count != total_count && !processed_count.is_multiple_of(250) {
+        return;
+    }
+    crate::progress::emit(
+        progress,
+        phase,
+        json!({
+            "render_stage": "triage",
+            "processed_count": processed_count,
+            "total_count": total_count,
+            "triage_count": triage_count,
+            "triage_written_count": written_count,
+            "triage_unchanged_count": unchanged_count,
+        }),
+    );
 }

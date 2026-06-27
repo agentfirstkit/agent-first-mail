@@ -3,6 +3,13 @@ use crate::imap_client::ImapClientSession;
 
 const BODY_FETCH_BATCH_SIZE: usize = 25;
 
+/// Safety valve: refuse to download/parse/store a single message whose
+/// server-reported `RFC822.SIZE` exceeds this. A hostile or misbehaving IMAP
+/// server cannot drive an unbounded allocation (and the later full-file read +
+/// mail-parser parse) from one pathological message; the pull fails with a clear
+/// error naming the UID instead of OOM-ing. Generous so real mail is unaffected.
+const MAX_MESSAGE_BYTES: u32 = 100 * 1024 * 1024;
+
 pub(super) fn fetch_mailboxes(imap: &ImapConfig) -> Result<Vec<MailboxInfo>> {
     let mut session = ImapClientSession::connect(imap)?;
     session.list_mailboxes()
@@ -85,6 +92,17 @@ pub(super) fn fetch_current_mailbox_uid_batch<T: std::io::Read + std::io::Write>
         let uid = uid as u64;
         if !uid_set.contains(&uid) {
             continue;
+        }
+        if let Some(size) = fetch.size {
+            if size > MAX_MESSAGE_BYTES {
+                return Err(AppError::new(
+                    "imap_message_too_large",
+                    format!(
+                        "message uid {uid} in {mailbox:?} is {size} bytes, over the \
+                         {MAX_MESSAGE_BYTES}-byte safety limit; afmail will not download it"
+                    ),
+                ));
+            }
         }
         let Some(body) = fetch.body() else {
             continue;

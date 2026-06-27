@@ -66,8 +66,6 @@ fn web_host_args(command: &UiCommand, snapshot_path: &Path) -> Vec<OsString> {
         OsString::from(command.host.as_str()),
         OsString::from("--port"),
         OsString::from(command.port.to_string()),
-        OsString::from("--appearance"),
-        OsString::from("dockview"),
     ];
     if command.terminal {
         args.push(OsString::from("--enable-terminals"));
@@ -79,14 +77,14 @@ fn web_host_args(command: &UiCommand, snapshot_path: &Path) -> Vec<OsString> {
     args
 }
 
-fn snapshot_with_lock() -> Result<agent_first_ui::AfuiMessage> {
+fn snapshot_with_lock() -> Result<agent_first_ui::AgentFirstUiMessage> {
     let cwd = env::current_dir().map_err(|e| AppError::io("current dir", &e))?;
     let workspace = Workspace::discover(&cwd)?;
     let _lock = WorkspaceLock::acquire(workspace.root(), LockMode::Shared)?;
     crate::ui::workspace_snapshot(&workspace)
 }
 
-fn write_temp_snapshot(message: &agent_first_ui::AfuiMessage) -> Result<PathBuf> {
+fn write_temp_snapshot(message: &agent_first_ui::AgentFirstUiMessage) -> Result<PathBuf> {
     let mut path = env::temp_dir();
     path.push(format!(
         "afmail-ui-{}-{}.afui.json",
@@ -170,7 +168,7 @@ fn is_file(path: &Path) -> bool {
 
 fn afui_not_found_error() -> AppError {
     AppError::new("afui_not_found", "afui host binary was not found").with_hint(
-        "Install afui or run `afmail ui snapshot > mail.afui.json`, then serve it with `afui web serve mail.afui.json --appearance dockview --enable-terminals`.",
+        "Install afui or run `afmail ui snapshot > mail.afui.json`, then serve it with `afui web serve mail.afui.json --enable-terminals`.",
     )
 }
 
@@ -186,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn default_web_host_args_enable_dockview_and_browser_without_terminal() {
+    fn default_web_host_args_open_browser_without_terminal_or_appearance() {
         let args = args_as_strings(&UiCommand {
             action: None,
             no_open: false,
@@ -195,8 +193,8 @@ mod tests {
             afui_bin: None,
             terminal: false,
         });
-        assert!(args.contains(&"--appearance".to_string()));
-        assert!(args.contains(&"dockview".to_string()));
+        assert!(!args.contains(&"--appearance".to_string()));
+        assert!(!args.contains(&"dockview".to_string()));
         assert!(!args.contains(&"termail".to_string()));
         assert!(!args.contains(&"--enable-terminals".to_string()));
         assert!(args.contains(&"--open".to_string()));

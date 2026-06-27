@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-mail"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm."
 license = "MIT"
@@ -21,18 +21,24 @@ ui = ["dep:agent-first-ui"]
 # crates via `.cargo/config.toml` (`paths = [...]`), which is not copied into the
 # registry/image build. Keeping `path` out of the manifest keeps it out of
 # Cargo.lock too, so a release never has to strip it.
+# agent-first-config lib-only: `json` gives the serde_json bridge.
+agent-first-config = { version = "0.1.0", default-features = false, features = ["json"] }
 agent-first-data = { version = "0.14.2", features = ["cli-help", "cli-help-markdown", "skill-admin"] }
+agent-first-slug = "0.1.0"
 agent-first-ui = { version = "0.1.0", optional = true }
+blake3 = "1.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-imap = { version = "2.4", default-features = false }
+imap = { version = "3.0.0-alpha.15", default-features = false }
+imap-proto = "0.16"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls", "pool"] }
 mail-parser = { version = "0.11", features = ["full_encoding"] }
 rustls-connector = { version = "0.23", default-features = false, features = ["webpki-root-certs", "rustls--ring"] }
 serde_yaml = "0.9.34"
 minijinja = "2"
+include_dir = "0.7"
 mime_guess = { version = "2", default-features = false }
 fs4 = "1.1"
 atomic-write-file = "0.3"

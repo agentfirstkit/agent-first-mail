@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use super::*;
 
 #[test]
@@ -24,7 +26,11 @@ fn config_defaults_pull_and_tls() {
             .message_archive
             .by_source_mailbox_id
             .get("inbox")
-            .map(|m| first_move_to_mailbox_id(&m.steps)),
+            .map(|m| {
+                m.steps
+                    .iter()
+                    .find_map(|step| step.move_to_mailbox_id.as_deref())
+            }),
         Some(Some("archive"))
     );
     assert_eq!(
@@ -60,11 +66,27 @@ fn default_config_serializes_explicit_mailboxes_and_actions() {
         json!([{"append_to_mailbox_id": "drafts"}])
     );
     assert_eq!(
+        value["actions"]["draft.send"]["steps"],
+        json!([
+            {"append_to_mailbox_id": "drafts"},
+            {"smtp_send": {}},
+            {"append_to_mailbox_id": "sent"},
+            {"add_flags": ["\\Seen", "\\Answered"], "on": "reply_to_message"}
+        ])
+    );
+    assert_eq!(
         value["actions"]["pull"]["default_mailbox_ids"],
         json!(["inbox", "sent", "archive", "junk", "trash"])
     );
-    assert_eq!(value["mailboxes"]["sent"]["mailbox_name"], Value::Null);
-    assert_eq!(value["mailboxes"]["sent"]["special_use"], json!("\\Sent"));
+    assert_eq!(
+        value["mailboxes"]["sent"]["resolve"],
+        json!([
+            {"special_use": "\\Sent"},
+            {"mailbox_name": "Sent"},
+            {"mailbox_name": "Sent Mail"},
+            {"mailbox_name": "Sent Messages"}
+        ])
+    );
     assert!(value["mailboxes"].get("all").is_none());
     assert!(value["mailboxes"].get("flagged").is_none());
     assert!(value.get("imap_mailboxes").is_none());
@@ -78,6 +100,45 @@ fn default_config_serializes_explicit_mailboxes_and_actions() {
     );
     assert_eq!(value["workspace"]["language_bcp47"], Value::Null);
     assert!(value["workspace"].get("timezone_utc_offset").is_some());
+}
+
+#[test]
+fn default_config_sparse_value_is_empty() {
+    let cfg = MailConfig::default();
+    assert_eq!(cfg.sparse_value().unwrap_or(Value::Null), json!({}));
+}
+
+#[test]
+fn sparse_config_merges_with_current_defaults() {
+    let sparse = json!({
+        "imap": {
+            "host": "imap.example.com"
+        },
+        "actions": {
+            "draft.send": {
+                "steps": [
+                    {"smtp_send": {}},
+                    {"append_to_mailbox_id": "sent"}
+                ]
+            }
+        }
+    });
+    let config: MailConfig =
+        serde_json::from_value(merge_with_defaults(sparse).unwrap_or(Value::Null))
+            .unwrap_or_default();
+    assert_eq!(config.imap.host.as_deref(), Some("imap.example.com"));
+    assert_eq!(config.imap.port, 993);
+    assert_eq!(
+        config
+            .actions
+            .draft_save
+            .steps
+            .first()
+            .and_then(|step| step.append_to_mailbox_id.as_deref()),
+        Some("drafts")
+    );
+    assert_eq!(config.actions.draft_send.steps.len(), 2);
+    assert!(config.actions.draft_send.steps[0].smtp_send.is_some());
 }
 
 #[test]
@@ -117,10 +178,15 @@ fn config_rejects_legacy_schema() {
 #[test]
 fn config_set_and_get_key() {
     let mut cfg = MailConfig::default();
+    assert!(cfg.set_key("schema_name", &["config".to_string()]).is_ok());
+    assert!(cfg.set_key("schema_version", &["1".to_string()]).is_ok());
     assert!(cfg.set_key("imap.tls", &["false".to_string()]).is_ok());
     assert_eq!(cfg.get_key("imap.tls"), Ok(json!(false)));
     assert!(cfg
-        .set_key("mailboxes.extra.mailbox_name", &["Extra".to_string()])
+        .set_key(
+            "mailboxes.extra.resolve",
+            &[r#"[{"mailbox_name":"Extra"}]"#.to_string()]
+        )
         .is_ok());
     assert!(cfg
         .set_key(
@@ -144,12 +210,14 @@ fn config_set_and_get_key() {
     );
     assert!(cfg
         .set_key(
-            "actions.message.archive.by_source_mailbox_id.inbox.move_to_mailbox_id",
+            "actions.message.archive.by_source_mailbox_id.inbox.steps.0.move_to_mailbox_id",
             &["archive".to_string()]
         )
         .is_ok());
     assert_eq!(
-        cfg.get_key("actions.message.archive.by_source_mailbox_id.inbox.move_to_mailbox_id"),
+        cfg.get_key(
+            "actions.message.archive.by_source_mailbox_id.inbox.steps.0.move_to_mailbox_id"
+        ),
         Ok(json!("archive"))
     );
     assert!(cfg
@@ -163,6 +231,32 @@ fn config_set_and_get_key() {
         Ok(json!(["summary", "link"]))
     );
     assert!(cfg
+        .set_key(
+            "actions.case.add.steps",
+            &[r#"[{"append_to_mailbox_id":"drafts"}]"#.to_string()]
+        )
+        .is_ok());
+    assert_eq!(
+        cfg.get_key("actions.case.add.steps"),
+        Ok(json!([{"append_to_mailbox_id": "drafts"}]))
+    );
+    assert!(cfg
+        .set_key(
+            "actions.message.archive.by_source_mailbox_id.inbox.steps",
+            &[r#"[{"move_to_mailbox_id":"archive"}]"#.to_string()]
+        )
+        .is_ok());
+    assert_eq!(
+        cfg.get_key("actions.message.archive.by_source_mailbox_id.inbox.steps"),
+        Ok(json!([{"move_to_mailbox_id": "archive"}]))
+    );
+    let mailboxes_json = serde_json::to_string(&cfg.mailboxes).unwrap_or_default();
+    assert!(cfg.set_key("mailboxes", &[mailboxes_json]).is_ok());
+    let actions_json = serde_json::to_string(&cfg.actions).unwrap_or_default();
+    assert!(cfg.set_key("actions", &[actions_json]).is_ok());
+    let archive_json = serde_json::to_string(&cfg.archive).unwrap_or_default();
+    assert!(cfg.set_key("archive", &[archive_json]).is_ok());
+    assert!(cfg
         .set_key("audit.reason_mode", &["optional".to_string()])
         .is_ok());
     assert_eq!(cfg.get_key("audit.reason_mode"), Ok(json!("optional")));
@@ -173,7 +267,7 @@ fn config_set_and_get_key() {
     assert!(cfg
         .set_key("workspace.language_bcp47", &["fr-FR".to_string()])
         .is_ok());
-    assert_eq!(cfg.template_language(), TemplateLanguage::EnUs);
+    assert_eq!(cfg.template_language(), TemplateLanguage::FrFr);
     assert!(cfg
         .set_key("workspace.language_bcp47", &["not a tag".to_string()])
         .is_err());
@@ -196,9 +290,18 @@ fn config_set_and_get_key() {
         Ok(json!("AFMAIL_IMAP_PASSWORD_SECRET"))
     );
     assert_eq!(cfg.get_key("imap.password_secret"), Ok(Value::Null));
+    assert!(cfg
+        .set_key(
+            "identities",
+            &[r#"[{"identity":"support","name":"Support","email":"support@example.com","default":true}]"#
+                .to_string()]
+        )
+        .is_ok());
     assert_eq!(
         cfg.get_key("identities"),
-        Ok(json!([{"identity": "me", "name": "Me", "email": "me@example.com", "default": true}]))
+        Ok(
+            json!([{"identity": "support", "name": "Support", "email": "support@example.com", "default": true}])
+        )
     );
 }
 
@@ -272,6 +375,32 @@ fn invalid_mailbox_config_fails() {
     let err = cfg.validate();
     assert!(err.is_err());
     assert_eq!(err.err().map(|e| e.error_code), Some("config_invalid"));
+}
+
+#[test]
+fn invalid_mailbox_resolve_config_fails() {
+    let mut cfg = MailConfig::default();
+    assert!(cfg
+        .set_key("mailboxes.archive.resolve", &[r#"[]"#.to_string()])
+        .is_err());
+    assert!(cfg
+        .set_key(
+            "mailboxes.archive.resolve",
+            &[r#"[{"mailbox_name":"Archive","special_use":"\\Archive"}]"#.to_string()]
+        )
+        .is_err());
+    assert!(cfg
+        .set_key(
+            "mailboxes.archive.resolve",
+            &[r#"[{"mailbox_name":""}]"#.to_string()]
+        )
+        .is_err());
+    assert!(cfg
+        .set_key(
+            "mailboxes.archive.resolve",
+            &[r#"[{"unknown":"Archive"}]"#.to_string()]
+        )
+        .is_err());
 }
 
 #[test]
@@ -362,6 +491,97 @@ fn identity_config_validation() {
     assert!(cfg.validate().is_ok());
 
     let mut cfg = MailConfig::default();
+    cfg.identities.push(IdentityConfig {
+        identity: "身份一".to_string(),
+        name: "Unicode Identity".to_string(),
+        email: "unicode@example.com".to_string(),
+        default: false,
+    });
+    assert!(cfg.validate().is_ok());
+
+    let mut cfg = MailConfig::default();
+    cfg.identities[0].identity = "bad/path".to_string();
+    assert!(cfg.validate().is_err());
+
+    let mut cfg = MailConfig::default();
+    cfg.identities[0].identity = "support@flfgsc.cn".to_string();
+    assert!(cfg.validate().is_err());
+
+    let mut cfg = MailConfig::default();
     cfg.identities[0].email = "not an email".to_string();
     assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn config_add_and_remove_keyed_identity() {
+    let mut cfg = MailConfig::default();
+
+    // Append a second, non-default identity to the `identities` keyed list. The
+    // slug becomes its `identity`; `default` falls back to false.
+    cfg.add_key(
+        "identities",
+        "support",
+        &[
+            ("name".to_string(), "Support".to_string()),
+            ("email".to_string(), "support@example.com".to_string()),
+        ],
+    )
+    .expect("add identity");
+    assert_eq!(cfg.identities.len(), 2);
+    assert_eq!(
+        cfg.get_key("identities.support.email"),
+        Ok(json!("support@example.com"))
+    );
+    assert!(cfg
+        .identities
+        .iter()
+        .any(|i| i.identity == "support" && !i.default));
+
+    cfg.add_key(
+        "identities",
+        "法律法规速查小客服",
+        &[
+            ("name".to_string(), "法律法规速查小客服".to_string()),
+            ("email".to_string(), "support@flfgsc.cn".to_string()),
+        ],
+    )
+    .expect("add unicode identity");
+    assert_eq!(
+        cfg.get_key("identities.法律法规速查小客服.email"),
+        Ok(json!("support@flfgsc.cn"))
+    );
+
+    assert!(cfg
+        .add_key(
+            "identities",
+            "support@flfgsc.cn",
+            &[
+                ("name".to_string(), "Dot Identity".to_string()),
+                ("email".to_string(), "dot@example.com".to_string()),
+            ],
+        )
+        .is_err());
+
+    // Removing by slug shrinks the list; removing a missing slug errors.
+    cfg.remove_key("identities", "support")
+        .expect("remove identity");
+    cfg.remove_key("identities", "法律法规速查小客服")
+        .expect("remove unicode identity");
+    assert_eq!(cfg.identities.len(), 1);
+    assert!(cfg.remove_key("identities", "missing").is_err());
+
+    // A second default violates the one-default invariant (fresh config, since a
+    // failed set leaves the in-memory config mutated — callers reload from disk).
+    let mut cfg = MailConfig::default();
+    assert!(cfg
+        .add_key(
+            "identities",
+            "dupe",
+            &[
+                ("name".to_string(), "Dupe".to_string()),
+                ("email".to_string(), "dupe@example.com".to_string()),
+                ("default".to_string(), "true".to_string()),
+            ],
+        )
+        .is_err());
 }

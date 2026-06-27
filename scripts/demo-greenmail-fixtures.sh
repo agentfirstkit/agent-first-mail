@@ -127,12 +127,12 @@ write_config() {
     "password_secret": "secret"
   },
   "mailboxes": {
-    "inbox": {"mailbox_name": "INBOX", "special_use": null},
-    "sent": {"mailbox_name": "Sent", "special_use": null},
-    "archive": {"mailbox_name": "Archive", "special_use": null},
-    "junk": {"mailbox_name": "Junk", "special_use": null},
-    "trash": {"mailbox_name": "Trash", "special_use": null},
-    "drafts": {"mailbox_name": "Drafts", "special_use": null}
+    "inbox": {"resolve": [{"mailbox_name": "INBOX"}]},
+    "sent": {"resolve": [{"mailbox_name": "Sent"}]},
+    "archive": {"resolve": [{"mailbox_name": "Archive"}]},
+    "junk": {"resolve": [{"mailbox_name": "Junk"}]},
+    "trash": {"resolve": [{"mailbox_name": "Trash"}]},
+    "drafts": {"resolve": [{"mailbox_name": "Drafts"}]}
   },
   "actions": {
     "pull": {

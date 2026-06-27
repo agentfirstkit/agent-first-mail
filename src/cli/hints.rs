@@ -85,7 +85,7 @@ const ROOT_COMMANDS: &[&str] = &[
 ];
 const CASE_ACTIONS: &[&str] = &[
     "create", "list", "show", "add", "move", "rename", "notes", "archive", "reopen", "tag",
-    "untag", "draft", "merge",
+    "trash", "untag", "draft", "merge",
 ];
 const MESSAGE_ACTIONS: &[&str] = &["show", "spam", "trash", "restore", "attachment"];
 const MESSAGE_ATTACHMENT_ACTIONS: &[&str] = &["fetch"];
@@ -99,7 +99,7 @@ const ARCHIVE_MESSAGE_ACTIONS: &[&str] = &[
     "set-summary",
     "notes",
 ];
-const ARCHIVE_CASE_ACTIONS: &[&str] = &["show", "restore", "rename", "notes"];
+const ARCHIVE_CASE_ACTIONS: &[&str] = &["show", "restore", "trash", "rename", "notes"];
 const ARCHIVE_LIST_ACTIONS: &[&str] = &["cases", "messages"];
 const CONFIG_ACTIONS: &[&str] = &["show", "get", "set"];
 const REMOTE_ACTIONS: &[&str] = &["test", "folders"];

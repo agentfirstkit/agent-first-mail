@@ -178,11 +178,7 @@ pub(super) fn validate_steps(config: &MailConfig, label: &str, steps: &[ActionSt
                     format!("{label}[{index}] references unknown mailbox id: {target}"),
                 )
             })?;
-            if let Some(kind) = mailbox
-                .special_use
-                .as_deref()
-                .and_then(SpecialUseKind::from_attribute)
-            {
+            if let Some(kind) = mailbox.first_special_use_kind() {
                 if step.move_to_mailbox_id.is_some() && !kind.can_move_to() {
                     return Err(AppError::new(
                         "config_invalid",
@@ -195,12 +191,6 @@ pub(super) fn validate_steps(config: &MailConfig, label: &str, steps: &[ActionSt
     Ok(())
 }
 
-pub(super) fn first_move_to_mailbox_id(steps: &[ActionStep]) -> Option<&str> {
-    steps
-        .iter()
-        .find_map(|step| step.move_to_mailbox_id.as_deref())
-}
-
 pub(super) fn single(values: &[String], key: &str) -> Result<String> {
     if values.len() != 1 {
         return Err(AppError::new(
@@ -209,26 +199,6 @@ pub(super) fn single(values: &[String], key: &str) -> Result<String> {
         ));
     }
     Ok(values[0].clone())
-}
-
-pub(super) fn parse_bool(value: &str, key: &str) -> Result<bool> {
-    match value {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(AppError::new(
-            "invalid_request",
-            format!("config key {key} expects true or false"),
-        )),
-    }
-}
-
-pub(super) fn parse_u16(value: &str, key: &str) -> Result<u16> {
-    value.parse::<u16>().map_err(|_| {
-        AppError::new(
-            "invalid_request",
-            format!("config key {key} expects an integer port"),
-        )
-    })
 }
 
 pub(super) fn validate_config_id(label: &str, value: &str) -> Result<()> {

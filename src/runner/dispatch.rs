@@ -92,6 +92,8 @@ fn execute_command_unlocked(
                 ConfigAction::Show => ws.config_show(),
                 ConfigAction::Get { key } => ws.config_get(&key),
                 ConfigAction::Set { key, values } => ws.config_set(&key, &values),
+                ConfigAction::Add { key, slug, fields } => ws.config_add(&key, &slug, &fields),
+                ConfigAction::Remove { key, slug } => ws.config_remove(&key, &slug),
             }
         }
         Command::Remote { action } => {
@@ -207,6 +209,9 @@ fn execute_command_unlocked(
                 },
                 CaseCommand::Archive { case_ref, reason } => {
                     ws.archive_case(&case_ref, reason.as_deref())
+                }
+                CaseCommand::Trash { case_ref, reason } => {
+                    ws.trash_case(&case_ref, reason.as_deref())
                 }
                 CaseCommand::Reopen { case_ref, reason } => {
                     ws.reopen_case(&case_ref, reason.as_deref())
@@ -481,6 +486,9 @@ fn execute_command_unlocked(
                         group,
                         reason,
                     } => ws.archive_case_restore(&case_ref, &group, reason.as_deref()),
+                    ArchiveCaseAction::Trash { case_ref, reason } => {
+                        ws.archive_case_trash(&case_ref, reason.as_deref())
+                    }
                     ArchiveCaseAction::Rename {
                         case_ref,
                         name,
@@ -503,7 +511,7 @@ fn execute_command_unlocked(
         Command::Render { action } => {
             let ws = Workspace::discover(cwd)?;
             match action {
-                RenderAction::Refresh => ws.render_refresh(),
+                RenderAction::Refresh => ws.render_refresh_with_progress(progress),
                 RenderAction::Templates { force } => ws.render_templates(force),
             }
         }

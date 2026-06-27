@@ -391,7 +391,6 @@ fn minimal_template_context(language: TemplateLanguage) -> Value {
             "language": language.as_str(),
             "title": "doctor",
             "status": "active",
-            "status_label": "active",
             "message_count": 0,
             "attachment_count": 0,
             "generated_rfc3339": "2026-06-09T00:00:00Z",
@@ -403,7 +402,6 @@ fn minimal_template_context(language: TemplateLanguage) -> Value {
             "suggested_reason": "",
             "body_text_visible_block": "\n",
             "body_text_fence": "```",
-            "display_heading": "doctor",
             "security": {
                 "authentication": {
                     "check": false,
@@ -447,4 +445,29 @@ fn minimal_template_context(language: TemplateLanguage) -> Value {
         },
         "item": {},
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_builtin_template_renders_in_every_language() {
+        // The release gate only renders en-US/zh-CN with real data, so a Jinja
+        // syntax error in another language pack would otherwise slip through.
+        // Render every (language, key) against the smoke context here.
+        for language in TemplateLanguage::ALL {
+            let mut renderer = MarkdownTemplateRenderer::builtin(language);
+            for key in TemplateKey::ALL {
+                let result = renderer.render(key, &minimal_template_context(language));
+                assert!(
+                    result.is_ok(),
+                    "builtin template {}/{} failed to render: {}",
+                    language.as_str(),
+                    key.as_str(),
+                    result.err().map(|e| e.message).unwrap_or_default()
+                );
+            }
+        }
+    }
 }

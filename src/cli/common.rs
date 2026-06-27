@@ -2,12 +2,20 @@ use clap::Subcommand;
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigAction {
-    /// Show local .afmail/config.json.
+    /// Show effective config after applying built-in defaults.
     Show,
     /// Get one config key.
     Get { key: String },
     /// Set one config key. Multiple values become an array for array keys.
     Set { key: String, values: Vec<String> },
+    /// Add an element to a keyed list (e.g. `identities`). FIELDS are key=value.
+    Add {
+        key: String,
+        slug: String,
+        fields: Vec<String>,
+    },
+    /// Remove a keyed-list element by its slug.
+    Remove { key: String, slug: String },
 }
 
 #[derive(Subcommand, Debug)]

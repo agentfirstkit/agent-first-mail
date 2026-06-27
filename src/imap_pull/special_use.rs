@@ -7,28 +7,40 @@ pub fn resolve_special_use_from_mailboxes(
 ) -> SpecialUseTarget {
     if let Some(id) = config.mailbox_id_for_special_use(kind) {
         if let Ok(mailbox_config) = config.mailbox(&id) {
-            if let Some(folder) = &mailbox_config.mailbox_name {
-                return special_use_target(
-                    config,
-                    kind,
-                    folder.clone(),
-                    SpecialUseSource::Mailboxes,
-                );
-            }
-            if let Some(special_use) = &mailbox_config.special_use {
-                if let Some(mailbox) = mailboxes.iter().find(|mailbox| {
-                    mailbox
-                        .attributes
+            let mut configured_folder = None;
+            for rule in &mailbox_config.resolve {
+                if let Some(folder) = &rule.mailbox_name {
+                    if mailboxes
                         .iter()
-                        .any(|attribute| attribute.eq_ignore_ascii_case(special_use))
-                }) {
-                    return special_use_target(
-                        config,
-                        kind,
-                        mailbox.name.clone(),
-                        SpecialUseSource::Mailboxes,
-                    );
+                        .any(|mailbox| mailbox.name.eq_ignore_ascii_case(folder))
+                    {
+                        return special_use_target(
+                            config,
+                            kind,
+                            folder.clone(),
+                            SpecialUseSource::Mailboxes,
+                        );
+                    }
+                    configured_folder.get_or_insert_with(|| folder.clone());
                 }
+                if let Some(special_use) = &rule.special_use {
+                    if let Some(mailbox) = mailboxes.iter().find(|mailbox| {
+                        mailbox
+                            .attributes
+                            .iter()
+                            .any(|attribute| attribute.eq_ignore_ascii_case(special_use))
+                    }) {
+                        return special_use_target(
+                            config,
+                            kind,
+                            mailbox.name.clone(),
+                            SpecialUseSource::Mailboxes,
+                        );
+                    }
+                }
+            }
+            if let Some(folder) = configured_folder {
+                return special_use_target(config, kind, folder, SpecialUseSource::Mailboxes);
             }
         }
     }
@@ -108,16 +120,15 @@ pub(super) fn special_use_matches_for_mailbox(
             .mailbox_id_for_special_use(kind)
             .and_then(|id| config.mailbox(&id).ok().cloned());
         if configured.is_some_and(|configured| {
-            configured.mailbox_name.as_deref() == Some(mailbox.name.as_str())
-                || configured
-                    .special_use
-                    .as_deref()
-                    .is_some_and(|special_use| {
+            configured.resolve.iter().any(|rule| {
+                rule.mailbox_name.as_deref() == Some(mailbox.name.as_str())
+                    || rule.special_use.as_deref().is_some_and(|special_use| {
                         mailbox
                             .attributes
                             .iter()
                             .any(|attribute| attribute.eq_ignore_ascii_case(special_use))
                     })
+            })
         }) {
             matches.push(special_use_match_json(
                 config,

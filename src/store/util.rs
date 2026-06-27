@@ -1,4 +1,5 @@
 use super::*;
+use agent_first_slug::{EmptyOutputPolicy, SlugConfig};
 
 /// Removes a directory on drop unless `commit()` was called first.
 /// Use this to ensure newly-created workspace directories are cleaned up
@@ -33,6 +34,12 @@ impl Drop for DirGuard {
 pub(super) struct ManagedBlockChange {
     pub(super) created: bool,
     pub(super) updated: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FileWriteOutcome {
+    Written,
+    Unchanged,
 }
 
 pub(super) fn path_file_name(path: &Path) -> String {
@@ -113,6 +120,29 @@ pub(super) fn write_string_if_missing(path: &Path, value: &str) -> Result<()> {
         return Ok(());
     }
     write_string(path, value)
+}
+
+pub(super) fn write_string_if_changed(path: &Path, value: &str) -> Result<FileWriteOutcome> {
+    if path.is_file() {
+        match fs::read_to_string(path) {
+            Ok(existing) if existing == value => return Ok(FileWriteOutcome::Unchanged),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {}
+            Err(err) => return Err(AppError::io("read existing file", &err)),
+        }
+    }
+    write_string(path, value)?;
+    Ok(FileWriteOutcome::Written)
+}
+
+pub(super) fn write_json_pretty_if_changed<T: Serialize>(
+    path: &Path,
+    value: &T,
+) -> Result<FileWriteOutcome> {
+    let data = serde_json::to_string_pretty(value)
+        .map_err(|e| AppError::json("serialize json", &e))?
+        + "\n";
+    write_string_if_changed(path, &data)
 }
 
 pub(super) fn ensure_managed_block_file(
@@ -545,24 +575,13 @@ pub(super) fn archive_dir_name(archive_uid: &str, name: &str) -> String {
 }
 
 pub(super) fn human_slug(value: &str) -> String {
-    let mut out = String::new();
-    let mut last_dash = false;
-    for ch in value.trim().chars() {
-        let keep = !ch.is_control() && !matches!(ch, '/' | '\\' | ':');
-        if keep && !ch.is_whitespace() {
-            out.push(ch);
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    let slug = out.trim_matches('-').to_string();
-    if slug.is_empty() {
-        "untitled".to_string()
-    } else {
-        slug
-    }
+    let config = SlugConfig {
+        empty_output_policy: EmptyOutputPolicy::UseFallbackSlug("untitled".to_string()),
+        ..SlugConfig::default()
+    };
+    agent_first_slug::slugify(value, &config)
+        .map(|result| result.slug)
+        .unwrap_or_else(|_| "untitled".to_string())
 }
 
 pub(super) fn validate_contact_uid(value: &str) -> Result<()> {
@@ -679,18 +698,7 @@ pub(super) fn validate_name(label: &str, value: &str) -> Result<()> {
 }
 
 pub(super) fn validate_id(label: &str, value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.contains('/')
-        || value.contains('\\')
-        || value == "."
-        || value == ".."
-    {
-        return Err(AppError::new(
-            "invalid_request",
-            format!("invalid {label}: must be a single path segment"),
-        ));
-    }
-    Ok(())
+    crate::slug::validate_path_segment(label, value)
 }
 
 pub(super) fn validate_file_name(label: &str, value: &str) -> Result<()> {
@@ -714,6 +722,24 @@ pub(super) fn rel_path(root: &Path, path: &Path) -> String {
         .unwrap_or_else(|_| path_to_string(path))
 }
 
+/// Parse `key=value` CLI tokens into ordered field pairs for `config add`.
+pub(super) fn parse_field_assignments(fields: &[String]) -> Result<Vec<(String, String)>> {
+    fields
+        .iter()
+        .map(|field| {
+            field
+                .split_once('=')
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .ok_or_else(|| {
+                    AppError::new(
+                        "invalid_request",
+                        format!("config add fields must be key=value, got: {field}"),
+                    )
+                })
+        })
+        .collect()
+}
+
 pub(super) fn config_value_for_output(key: &str, value: Value) -> Value {
     if config_key_is_secret(key) && !value.is_null() {
         json!("***")
@@ -726,6 +752,28 @@ pub(super) fn config_key_is_secret(key: &str) -> bool {
     key.rsplit('.')
         .next()
         .is_some_and(|leaf| leaf.ends_with("_secret"))
+}
+
+/// Recursively redact every `*_secret` field in a serialized config tree to
+/// `"***"`, leaving non-null values masked. Used so `config show` cannot leak an
+/// inline `password_secret` the way `config get`/`set` already guard single
+/// keys. `*_secret_env` keys hold env var names, not values, and are left as-is.
+pub(super) fn redact_config_secrets(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, val)| {
+                    if key.ends_with("_secret") && !val.is_null() {
+                        (key, json!("***"))
+                    } else {
+                        (key, redact_config_secrets(val))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(redact_config_secrets).collect()),
+        other => other,
+    }
 }
 
 impl Workspace {
@@ -870,5 +918,30 @@ impl Workspace {
         self.root
             .join("messages")
             .join(format!("{message_id}.json"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::human_slug;
+
+    #[test]
+    fn human_slug_keeps_unicode_letters_and_digits() {
+        assert_eq!(
+            human_slug("現在的Nobody，未來的Somebody！"),
+            "現在的nobody-未來的somebody"
+        );
+        assert_eq!(
+            human_slug("牙好，胃口就好，身体倍儿棒，吃嘛嘛香。"),
+            "牙好-胃口就好-身体倍儿棒-吃嘛嘛香"
+        );
+        assert_eq!(human_slug("お元気ですか？"), "お元気ですか");
+    }
+
+    #[test]
+    fn human_slug_collapses_path_unsafe_characters() {
+        assert_eq!(human_slug("Ubuntu 16.04"), "ubuntu-16-04");
+        assert_eq!(human_slug(" A:B/C\\D  😀  "), "a-b-c-d");
+        assert_eq!(human_slug("!!!"), "untitled");
     }
 }

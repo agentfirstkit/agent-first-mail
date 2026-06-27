@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
 pub struct UiCommand {
-    /// UI action. With none, afmail delegates to `afui web serve --appearance dockview`.
+    /// UI action. With none, afmail delegates to `afui web serve`.
     #[command(subcommand)]
     pub action: Option<UiAction>,
 

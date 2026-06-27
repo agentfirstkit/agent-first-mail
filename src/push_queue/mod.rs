@@ -225,6 +225,8 @@ pub fn push_with_progress(
     let remote = crate::remote::ImapSmtpRemote::new(&config);
     let mut pushed = 0usize;
     let mut failed = 0usize;
+    let mut stopped_after_failure = false;
+    let mut remaining_count = 0usize;
     let mut failures = Vec::new();
     let item_count = items.len();
     crate::progress::emit(
@@ -304,6 +306,9 @@ pub fn push_with_progress(
                     "push_item_failed",
                     push_item_progress_fields(&item, index, item_count, Some(&err)),
                 );
+                stopped_after_failure = true;
+                remaining_count = item_count.saturating_sub(index + 1);
+                break;
             }
         }
     }
@@ -314,6 +319,8 @@ pub fn push_with_progress(
             "item_count": item_count,
             "pushed_count": pushed,
             "failed_count": failed,
+            "stopped_after_failure": stopped_after_failure,
+            "remaining_count": remaining_count,
         }),
     );
     Ok(json!({
@@ -321,6 +328,8 @@ pub fn push_with_progress(
         "confirmed": true,
         "pushed_count": pushed,
         "failed_count": failed,
+        "stopped_after_failure": stopped_after_failure,
+        "remaining_count": remaining_count,
         "failures": failures
     }))
 }
@@ -398,6 +407,28 @@ pub fn remove_outbound_for_draft(
             })
         })
         .collect::<Vec<_>>();
+    if let Some(item) = items.iter().find(|item| item.has_started_steps()) {
+        let outbound = item.outbound();
+        return Err(AppError::new(
+            "push_already_started",
+            format!(
+                "outbound push item already started and cannot be removed locally: {}",
+                item.push_id
+            ),
+        )
+        .with_hint("Run `afmail push --confirm` to retry incomplete steps; do not remove a draft after remote processing has started.")
+        .with_details(json!({
+            "push_id": item.push_id.as_str(),
+            "case_uid": outbound.map(|outbound| outbound.case_uid.as_str()),
+            "draft_name": outbound.map(|outbound| outbound.draft_name.as_str()),
+            "action": outbound.map(|outbound| outbound.action.as_str()),
+            "step_states": &item.step_states,
+            "suggested_commands": [
+                "afmail push --confirm",
+                "afmail push list"
+            ]
+        })));
+    }
     let mut removed = Vec::new();
     for item in items {
         removed.push(RemovedOutbound {

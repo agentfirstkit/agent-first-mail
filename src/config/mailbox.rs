@@ -32,33 +32,107 @@ impl Default for ImapSection {
 #[serde(deny_unknown_fields)]
 pub struct ImapMailboxConfig {
     #[serde(default)]
+    pub resolve: Vec<MailboxResolveRule>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxResolveRule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mailbox_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub special_use: Option<String>,
 }
 
 impl ImapMailboxConfig {
-    pub(super) fn empty() -> Self {
+    pub(crate) fn mailbox_name(name: &str) -> Self {
         Self {
-            mailbox_name: None,
+            resolve: vec![MailboxResolveRule::mailbox_name(name)],
+        }
+    }
+
+    pub(super) fn special_use(kind: SpecialUseKind) -> Self {
+        let mut resolve = vec![MailboxResolveRule::special_use(kind.attribute())];
+        resolve.extend(
+            kind.fallback_names()
+                .iter()
+                .map(|name| MailboxResolveRule::mailbox_name(name)),
+        );
+        Self { resolve }
+    }
+
+    pub(super) fn validate(&self, id: &str) -> Result<()> {
+        if self.resolve.is_empty() {
+            return Err(AppError::new(
+                "config_invalid",
+                format!("mailboxes.{id}.resolve must contain at least one rule"),
+            ));
+        }
+        for (index, rule) in self.resolve.iter().enumerate() {
+            rule.validate(id, index)?;
+        }
+        Ok(())
+    }
+
+    pub fn offline_mailbox_name(&self) -> Option<String> {
+        self.resolve
+            .iter()
+            .find_map(MailboxResolveRule::offline_mailbox_name)
+    }
+
+    pub fn matches_mailbox_offline(&self, mailbox_name: &str) -> bool {
+        self.resolve
+            .iter()
+            .any(|rule| rule.matches_mailbox_offline(mailbox_name))
+    }
+
+    pub fn contains_special_use(&self, kind: SpecialUseKind) -> bool {
+        let attribute = kind.attribute();
+        self.resolve.iter().any(|rule| {
+            rule.special_use
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case(attribute))
+        })
+    }
+
+    pub fn first_special_use_kind(&self) -> Option<SpecialUseKind> {
+        self.resolve.iter().find_map(|rule| {
+            rule.special_use
+                .as_deref()
+                .and_then(SpecialUseKind::from_attribute)
+        })
+    }
+}
+
+impl MailboxResolveRule {
+    pub(crate) fn mailbox_name(name: &str) -> Self {
+        Self {
+            mailbox_name: Some(name.to_string()),
             special_use: None,
         }
     }
 
-    pub(super) fn validate(&self, id: &str) -> Result<()> {
+    pub(crate) fn special_use(special_use: &str) -> Self {
+        Self {
+            mailbox_name: None,
+            special_use: Some(special_use.to_string()),
+        }
+    }
+
+    pub(super) fn validate(&self, id: &str, index: usize) -> Result<()> {
         match (&self.mailbox_name, &self.special_use) {
             (Some(mailbox), None) if !mailbox.trim().is_empty() => {}
             (None, Some(special_use)) if !special_use.trim().is_empty() => {}
             (Some(_), Some(_)) => {
                 return Err(AppError::new(
                     "config_invalid",
-                    format!("mailboxes.{id}.mailbox_name and special_use are mutually exclusive"),
+                    format!("mailboxes.{id}.resolve[{index}] must set exactly one selector field"),
                 ));
             }
             _ => {
                 return Err(AppError::new(
                     "config_invalid",
-                    format!("mailboxes.{id} must set exactly one of mailbox_name or special_use"),
+                    format!("mailboxes.{id}.resolve[{index}] must set exactly one selector field"),
                 ));
             }
         }

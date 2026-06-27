@@ -146,31 +146,6 @@ pub(super) fn subject_has_prefix(subject: &str, prefixes: &[&str]) -> bool {
         .any(|prefix| lower.starts_with(&prefix.to_ascii_lowercase()))
 }
 
-pub(super) fn thread_label(
-    direction: ThreadDirection,
-    action: ThreadAction,
-    language: TemplateLanguage,
-) -> &'static str {
-    match language {
-        TemplateLanguage::EnUs => match (direction, action) {
-            (ThreadDirection::Received, ThreadAction::Message) => "\u{2190} Received",
-            (ThreadDirection::Received, ThreadAction::Reply) => "\u{2190} Received reply",
-            (ThreadDirection::Received, ThreadAction::Forward) => "\u{2190} Received forward",
-            (ThreadDirection::Sent, ThreadAction::Message) => "\u{2192} Sent",
-            (ThreadDirection::Sent, ThreadAction::Reply) => "\u{2192} Sent reply",
-            (ThreadDirection::Sent, ThreadAction::Forward) => "\u{2192} Sent forward",
-        },
-        TemplateLanguage::ZhCn => match (direction, action) {
-            (ThreadDirection::Received, ThreadAction::Message) => "\u{2190} 收到",
-            (ThreadDirection::Received, ThreadAction::Reply) => "\u{2190} 收到回复",
-            (ThreadDirection::Received, ThreadAction::Forward) => "\u{2190} 收到转发",
-            (ThreadDirection::Sent, ThreadAction::Message) => "\u{2192} 发送",
-            (ThreadDirection::Sent, ThreadAction::Reply) => "\u{2192} 发送回复",
-            (ThreadDirection::Sent, ThreadAction::Forward) => "\u{2192} 发送转发",
-        },
-    }
-}
-
 pub(super) fn thread_action_kind(direction: ThreadDirection, action: ThreadAction) -> &'static str {
     match (direction, action) {
         (ThreadDirection::Received, ThreadAction::Message) => "received",
@@ -182,33 +157,28 @@ pub(super) fn thread_action_kind(direction: ThreadDirection, action: ThreadActio
     }
 }
 
+// Returns the structured contact kind ("from"/"to") and value. The localized
+// label ("From"/"发件人"/…) is rendered by the per-language template from the
+// `contact_kind`, not here — no human-language strings live in this code.
 pub(super) fn thread_contact(
     message: &MessageFile,
     direction: ThreadDirection,
-    language: TemplateLanguage,
-) -> (&'static str, &'static str, String) {
-    match (direction, language) {
-        (ThreadDirection::Received, TemplateLanguage::EnUs) => {
-            ("from", "From", message.from.clone().unwrap_or_default())
-        }
-        (ThreadDirection::Received, TemplateLanguage::ZhCn) => {
-            ("from", "发件人", message.from.clone().unwrap_or_default())
-        }
-        (ThreadDirection::Sent, TemplateLanguage::EnUs) => ("to", "To", message.to.join(", ")),
-        (ThreadDirection::Sent, TemplateLanguage::ZhCn) => ("to", "收件人", message.to.join(", ")),
+) -> (&'static str, String) {
+    match direction {
+        ThreadDirection::Received => ("from", message.from.clone().unwrap_or_default()),
+        ThreadDirection::Sent => ("to", message.to.join(", ")),
     }
 }
 
 pub(super) fn thread_item_common(
     message: &MessageFile,
     offset: &FixedOffset,
-    language: TemplateLanguage,
     link: String,
     title: String,
 ) -> Result<Value> {
     let direction = message_thread_direction(message);
     let action = message_thread_action(message);
-    let (contact_kind, contact_label, contact) = thread_contact(message, direction, language);
+    let (contact_kind, contact) = thread_contact(message, direction);
     let time = message_time_context(message, offset);
     let display_time = time
         .get("datetime")
@@ -241,11 +211,9 @@ pub(super) fn thread_item_common(
             },
             "action": action_kind,
             "action_kind": thread_action_kind(direction, action),
-            "action_label": thread_label(direction, action, language),
             "is_reply": action == ThreadAction::Reply,
             "is_forward": action == ThreadAction::Forward,
             "contact_kind": contact_kind,
-            "contact_label": contact_label,
             "contact": contact.as_str(),
             "display_contact": markdown_inline(&contact),
             "display_subject": message
@@ -350,31 +318,12 @@ pub(super) fn message_section_context(
         ThreadDirection::Received => message.from.clone().unwrap_or_default(),
         ThreadDirection::Sent => message.to.join(", "),
     };
-    let display_counterparty = markdown_inline(if counterparty.trim().is_empty() {
-        match language {
-            TemplateLanguage::EnUs => "unknown",
-            TemplateLanguage::ZhCn => "未知",
-        }
-    } else {
-        &counterparty
-    });
-    let (message_action, display_heading) = match (direction, language) {
-        (ThreadDirection::Received, TemplateLanguage::EnUs) => (
-            "received",
-            format!("Received from {display_counterparty} - {display_time}"),
-        ),
-        (ThreadDirection::Sent, TemplateLanguage::EnUs) => (
-            "sent",
-            format!("Sent to {display_counterparty} - {display_time}"),
-        ),
-        (ThreadDirection::Received, TemplateLanguage::ZhCn) => (
-            "received",
-            format!("收到自 {display_counterparty} - {display_time}"),
-        ),
-        (ThreadDirection::Sent, TemplateLanguage::ZhCn) => (
-            "sent",
-            format!("发送给 {display_counterparty} - {display_time}"),
-        ),
+    // Pass structured pieces only; the per-language template builds the heading
+    // ("Received from …" / "收到自 …") and the empty-counterparty word from these.
+    let display_counterparty = markdown_inline(&counterparty);
+    let message_action = match direction {
+        ThreadDirection::Received => "received",
+        ThreadDirection::Sent => "sent",
     };
     let from = message.from.as_deref().unwrap_or("");
     let mut hints = Vec::new();
@@ -480,7 +429,7 @@ pub(super) fn message_section_context(
             json!({
                 "part_id": attachment.part_id.as_str(),
                 "filename": attachment.filename.as_str(),
-                "display_filename": markdown_inline(&attachment.filename),
+                "display_filename": markdown_code_span(&attachment.filename),
                 "image_alt": markdown_image_alt(&attachment.filename),
                 "content_type": attachment.content_type.as_str(),
                 "size_bytes": attachment.size_bytes,
@@ -498,7 +447,7 @@ pub(super) fn message_section_context(
         "view": {
             "language": language.as_str(),
             "timestamp_rfc3339": timestamp_rfc3339,
-            "display_heading": display_heading,
+            "display_time": display_time,
             "message_action": message_action,
             "display_counterparty": display_counterparty,
             "body_text": body_text,
@@ -615,6 +564,14 @@ pub(super) fn message_template_value(message: &MessageFile) -> Result<Value> {
 
 pub(super) fn markdown_inline(value: &str) -> String {
     value.replace(['\r', '\n'], " ").trim().to_string()
+}
+
+/// Sanitize a value rendered inside a backtick code span (e.g. attachment
+/// filenames). Strips CR/LF like `markdown_inline`, and replaces backticks so a
+/// crafted filename cannot close the span and smuggle imperative Markdown after
+/// it.
+pub(super) fn markdown_code_span(value: &str) -> String {
+    markdown_inline(value).replace('`', "'")
 }
 
 pub(super) fn markdown_image_alt(value: &str) -> String {

@@ -119,12 +119,40 @@ pub(super) fn existing_triage_suggestion(path: &Path) -> Result<(Vec<String>, Op
     if !path.exists() {
         return Ok((Vec::new(), None));
     }
-    let text = read_to_string(path, "read triage file")?;
-    let (fm, _) = read_doc::<TriageFrontmatter>(&text)?;
-    if fm.suggested_case_uids.is_empty() {
-        return Ok((Vec::new(), None));
+    let file = fs::File::open(path).map_err(|err| AppError::io("read triage file", &err))?;
+    let mut lines = BufReader::new(file).lines();
+    match lines.next() {
+        Some(Ok(line)) if line == "---" => {}
+        Some(Ok(_)) => {
+            return Err(AppError::new(
+                "invalid_request",
+                "markdown file is missing frontmatter",
+            ));
+        }
+        Some(Err(err)) => return Err(AppError::io("read triage file", &err)),
+        None => {
+            return Err(AppError::new(
+                "invalid_request",
+                "markdown file is missing frontmatter",
+            ));
+        }
     }
-    Ok((fm.suggested_case_uids, fm.suggested_reason))
+    let mut frontmatter = Vec::new();
+    for line in lines {
+        let line = line.map_err(|err| AppError::io("read triage file", &err))?;
+        if line == "---" {
+            let fm = parse_frontmatter::<TriageFrontmatter>(&frontmatter.join("\n"))?;
+            if fm.suggested_case_uids.is_empty() {
+                return Ok((Vec::new(), None));
+            }
+            return Ok((fm.suggested_case_uids, fm.suggested_reason));
+        }
+        frontmatter.push(line);
+    }
+    Err(AppError::new(
+        "invalid_request",
+        "markdown frontmatter is not closed",
+    ))
 }
 
 impl Workspace {
@@ -416,7 +444,7 @@ impl Workspace {
             ),
         )
         .with_hint(
-            "Queue drafts with `afmail case draft save` or `afmail case draft send`, push them, or remove drafts before archive/merge.",
+            "Queue drafts with `afmail case draft save` or `afmail case draft send`, push them, or remove drafts before archive/merge/trash.",
         )
         .with_details(json!({
             "case_uid": case_uid,
@@ -461,7 +489,9 @@ impl Workspace {
                 push_ids.join(", ")
             ),
         )
-        .with_hint("Push queued drafts or remove the corresponding drafts before archive/merge.")
+        .with_hint(
+            "Push queued drafts or remove the corresponding drafts before archive/merge/trash.",
+        )
         .with_details(json!({
             "case_uid": case_uid,
             "push_ids": push_ids,
@@ -469,6 +499,62 @@ impl Workspace {
                 "afmail push --dry-run",
                 "afmail push --confirm",
                 format!("afmail case draft remove {case_uid} DRAFT_NAME --reason TEXT")
+            ]
+        })))
+    }
+
+    pub(super) fn ensure_case_messages_unreferenced_except(
+        &self,
+        case_uid: &str,
+        case_path: &Path,
+        message_ids: &[String],
+    ) -> Result<()> {
+        let ids = message_ids.iter().cloned().collect::<BTreeSet<_>>();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let source_path = rel_path(&self.root, case_path);
+        let mut references = Vec::new();
+        for (_, other_case_path) in self.all_case_entries()? {
+            if rel_path(&self.root, &other_case_path) == source_path {
+                continue;
+            }
+            let data_path = case_json_path(&other_case_path);
+            if !data_path.exists() {
+                continue;
+            }
+            let data = read_to_string(&data_path, "read case metadata")?;
+            let value = serde_json::from_str::<Value>(&data)
+                .map_err(|e| AppError::json("parse case metadata", &e))?;
+            if json_contains_any_id(&value, &ids) {
+                references.push(rel_path(&self.root, &data_path));
+            }
+        }
+        self.collect_draft_references(&ids, &mut references)?;
+        self.collect_push_references(&ids, None, &mut references)?;
+        self.collect_direct_archive_references(&ids, &mut references)?;
+        if references.is_empty() {
+            return Ok(());
+        }
+        Err(AppError::new(
+            "case_messages_referenced",
+            format!(
+                "case {case_uid} messages cannot be trashed while referenced by {}",
+                references.join(", ")
+            ),
+        )
+        .with_hint(
+            "Remove or move the listed case/archive/push references before trashing the case.",
+        )
+        .with_details(json!({
+            "case_uid": case_uid,
+            "message_ids": message_ids,
+            "references": references,
+            "suggested_commands": [
+                "afmail status",
+                "afmail push list",
+                format!("afmail case show {case_uid}"),
+                "afmail archive message show ARCHIVE_REF"
             ]
         })))
     }
@@ -519,6 +605,13 @@ impl Workspace {
             "from_path": from_path,
             "case_path": rel_path(&self.root, &archived_path)
         }))
+    }
+
+    pub fn trash_case(&self, case_ref: &str, reason: Option<&str>) -> Result<Value> {
+        self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
+        let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
+        self.trash_case_workspace(&case_uid, &case_path, "active", reason)
     }
 
     pub fn reopen_case(&self, case_ref: &str, reason: Option<&str>) -> Result<Value> {
@@ -859,6 +952,13 @@ impl Workspace {
         }))
     }
 
+    pub fn archive_case_trash(&self, case_ref: &str, reason: Option<&str>) -> Result<Value> {
+        self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
+        let (case_uid, entry) = self.resolve_archived_case(case_ref)?;
+        self.trash_case_workspace(&case_uid, &entry.path, "archived", reason)
+    }
+
     pub fn archive_case_rename(
         &self,
         case_ref: &str,
@@ -969,6 +1069,88 @@ impl Workspace {
             self.remove_empty_case_container_dir(&parent)?;
         }
         Ok(archived_path)
+    }
+
+    fn trash_case_workspace(
+        &self,
+        case_uid: &str,
+        case_path: &Path,
+        source_status: &str,
+        reason: Option<&str>,
+    ) -> Result<Value> {
+        self.ensure_case_has_no_local_drafts(case_uid, case_path)?;
+        self.ensure_case_has_no_outbound_push(case_uid)?;
+        let messages = read_case_messages(case_path, case_uid)?;
+        let message_ids = messages.message_ids();
+        self.ensure_case_messages_unreferenced_except(case_uid, case_path, &message_ids)?;
+        let config = MailConfig::load(&self.root)?;
+        let locations = self.message_remote_locations(&message_ids)?;
+        let mut eligible_message_ids = Vec::new();
+        for location in &locations {
+            merge_string(&mut eligible_message_ids, &location.message_id);
+        }
+        let source_path = rel_path(&self.root, case_path);
+        let source_parent = case_path.parent().map(Path::to_path_buf);
+        let mut transaction_paths = vec![
+            source_path.clone(),
+            "trash/data/trash.json".to_string(),
+            ".afmail/push".to_string(),
+        ];
+        for message_id in &message_ids {
+            transaction_paths.push(format!("messages/{message_id}.json"));
+        }
+        let transaction = self.begin_transaction("case_trash", transaction_paths)?;
+        let item = crate::push_queue::queue_action_steps(
+            &self.root,
+            "message.trash",
+            &eligible_message_ids,
+            &locations,
+            &config.actions.message_trash.steps,
+            None,
+        )?;
+        self.update_messages_workspace(&message_ids, MessageStatus::Trashed.as_str())?;
+        if let Some(item) = &item {
+            self.record_pending_push_item(item)?;
+        }
+        remove_dir_all(case_path)?;
+        if let Some(parent) = source_parent {
+            self.remove_empty_case_container_dir(&parent)?;
+        }
+        self.refresh_messages_after_ref_change(&message_ids)?;
+        self.refresh_disposition_views()?;
+        transaction.commit()?;
+        let push_ids = item
+            .as_ref()
+            .map(|item| vec![item.push_id.clone()])
+            .unwrap_or_default();
+        let queued_location_count = if item.is_some() { locations.len() } else { 0 };
+        self.append_audit_event(
+            "case_trashed",
+            vec![audit_target("case", case_uid)],
+            reason,
+            json!({
+                "case_uid": case_uid,
+                "source_status": source_status,
+                "from_path": source_path.clone(),
+                "message_ids": message_ids.clone(),
+                "eligible_message_ids": eligible_message_ids.clone(),
+                "push_ids": push_ids.clone(),
+            }),
+        )?;
+        Ok(json!({
+            "code": "case_trashed",
+            "case_uid": case_uid,
+            "source_status": source_status,
+            "from_path": source_path,
+            "message_ids": message_ids,
+            "trashed_message_count": messages.message_count,
+            "eligible_message_ids": eligible_message_ids,
+            "location_count": locations.len(),
+            "queued_location_count": queued_location_count,
+            "queued": item.is_some(),
+            "push_ids": push_ids,
+            "push_id": item.as_ref().map(|item| item.push_id.clone()),
+        }))
     }
 
     pub(super) fn remove_empty_case_container_dir(&self, dir: &Path) -> Result<bool> {

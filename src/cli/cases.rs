@@ -55,6 +55,14 @@ pub enum CaseCommand {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Move every message in this active case to local trash and queue Trash moves.
+    Trash {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Why this whole case should be discarded; required by default.
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Reopen this case as active work without changing its tags.
     Reopen {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.

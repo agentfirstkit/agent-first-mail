@@ -22,6 +22,7 @@ pub(super) fn actions_for(
         return Ok(match outbound.action {
             OutboundAction::Send => {
                 vec![
+                    "append_to_mailbox_id_drafts".to_string(),
                     "smtp_send".to_string(),
                     "append_to_mailbox_id_sent".to_string(),
                 ]

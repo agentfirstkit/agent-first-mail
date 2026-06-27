@@ -21,18 +21,6 @@ impl PullImportAs {
             PullImportAs::Trashed => "trashed",
         }
     }
-
-    pub(super) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "triage" => Ok(Self::Triage),
-            "spam" => Ok(Self::Spam),
-            "trashed" => Ok(Self::Trashed),
-            _ => Err(AppError::new(
-                "invalid_request",
-                "actions.pull.by_mailbox_id.<id>.import_as expects one of: triage, spam, trashed",
-            )),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -50,17 +38,18 @@ impl MailDirection {
             MailDirection::Outbound => "outbound",
         }
     }
+}
 
-    pub(super) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "inbound" => Ok(Self::Inbound),
-            "outbound" => Ok(Self::Outbound),
-            _ => Err(AppError::new(
-                "invalid_request",
-                "direction expects inbound or outbound",
-            )),
-        }
-    }
+pub(crate) fn default_draft_send_steps() -> Vec<ActionStep> {
+    vec![
+        ActionStep::append_to_mailbox_id("drafts"),
+        ActionStep::smtp_send(),
+        ActionStep::append_to_mailbox_id("sent"),
+        ActionStep::add_flags_on(
+            vec!["\\Seen".to_string(), "\\Answered".to_string()],
+            ActionStepOn::ReplyToMessage,
+        ),
+    ]
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -90,14 +79,7 @@ impl Default for ActionsSection {
                 steps: vec![ActionStep::append_to_mailbox_id("drafts")],
             },
             draft_send: ActionRule {
-                steps: vec![
-                    ActionStep::smtp_send(),
-                    ActionStep::append_to_mailbox_id("sent"),
-                    ActionStep::add_flags_on(
-                        vec!["\\Seen".to_string(), "\\Answered".to_string()],
-                        ActionStepOn::ReplyToMessage,
-                    ),
-                ],
+                steps: default_draft_send_steps(),
             },
             message_spam: ActionRule {
                 steps: vec![
@@ -245,7 +227,10 @@ impl PullActionSection {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+// `default` tolerates partial objects: afconfig's generic
+// `set actions.pull.by_mailbox_id.<id>.<field>` creates a new entry with only the
+// one field present, so the sibling field must fall back to Default.
+#[serde(default, deny_unknown_fields)]
 pub struct PullMailboxAction {
     pub import_as: PullImportAs,
     pub direction: MailDirection,

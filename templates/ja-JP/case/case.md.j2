@@ -1,0 +1,22 @@
+# {{ case.collection_name }}
+
+ケース: {{ case.collection_uid }} · 状態: {{ view.status }} · メッセージ: {{ view.message_count }}
+
+{% if items | length == 0 %}_メッセージはありません。_
+{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.action_kind == 'received' %}受信{% elif item.view.action_kind == 'received_reply' %}返信を受信{% elif item.view.action_kind == 'received_forward' %}転送を受信{% elif item.view.action_kind == 'sent' %}送信{% elif item.view.action_kind == 'sent_reply' %}返信を送信{% elif item.view.action_kind == 'sent_forward' %}転送を送信{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
+
+{% if item.view.display_contact %}- {% if item.view.contact_kind == 'from' %}差出人{% else %}宛先{% endif %}: {{ item.view.display_contact }}
+{% endif %}- メッセージ: [{{ item.message.message_id }}]({{ item.view.link }})
+{% if item.view.time.datetime %}- 時刻: {{ item.view.time.datetime }}
+{% endif %}
+
+{% endfor %}{% endif %}
+{% if view.conversation %}
+## 会話
+
+<!-- afmail:conversation:start -->
+
+{{ view.conversation }}
+
+<!-- afmail:conversation:end -->
+{% endif %}

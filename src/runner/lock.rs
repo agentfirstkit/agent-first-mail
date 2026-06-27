@@ -33,7 +33,9 @@ fn lock_mode(command: &Command) -> LockMode {
         },
         Command::Config { action } => match action {
             ConfigAction::Show | ConfigAction::Get { .. } => LockMode::Shared,
-            ConfigAction::Set { .. } => LockMode::Exclusive,
+            ConfigAction::Set { .. } | ConfigAction::Add { .. } | ConfigAction::Remove { .. } => {
+                LockMode::Exclusive
+            }
         },
         Command::Remote { action } => match action {
             RemoteAction::Test | RemoteAction::Folders => LockMode::Shared,
@@ -104,6 +106,9 @@ fn lock_mode(command: &Command) -> LockMode {
 pub(super) fn workspace_progress_command(command: &Command) -> Option<&'static str> {
     match command {
         Command::Pull { .. } => Some("pull"),
+        Command::Render {
+            action: RenderAction::Refresh,
+        } => Some("render"),
         Command::Push {
             dry_run,
             confirm,

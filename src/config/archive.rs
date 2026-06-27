@@ -65,23 +65,6 @@ impl ArchiveMessageIndexField {
             Self::Link => "link",
         }
     }
-
-    pub(super) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "time" => Ok(Self::Time),
-            "from" => Ok(Self::From),
-            "to" => Ok(Self::To),
-            "subject" => Ok(Self::Subject),
-            "summary" => Ok(Self::Summary),
-            "message_id" => Ok(Self::MessageId),
-            "archive_time" => Ok(Self::ArchiveTime),
-            "link" => Ok(Self::Link),
-            _ => Err(AppError::new(
-                "invalid_request",
-                format!("archive.message_index.item_fields contains unsupported field: {value}"),
-            )),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -95,16 +78,6 @@ impl ArchiveMessageIndexSort {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::DateDesc => "date_desc",
-        }
-    }
-
-    pub(super) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "date_desc" => Ok(Self::DateDesc),
-            _ => Err(AppError::new(
-                "invalid_request",
-                "archive.message_index.sort expects date_desc",
-            )),
         }
     }
 }

@@ -1,6 +1,7 @@
 #[cfg(feature = "ui")]
 use agent_first_ui::{
-    prepare_user_action, validate_document, AfuiMessage, PrepareUserActionOptions, PreparedStatus,
+    find_unit, prepare_request, validate_space, validate_space_bindings, AgentFirstUiMessage,
+    MessagePayload, PrepareRequestSpec, PreparedStatus,
 };
 use serde_json::{json, Value};
 use std::fs;
@@ -250,7 +251,7 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(status, 0, "{stdout}");
 
     #[cfg(feature = "ui")]
-    assert_fixture_ui_snapshot(root.path(), &attachment_id, &case_uid, &archive_uid);
+    assert_fixture_ui_room_snapshot(root.path(), &attachment_id, &case_uid, &archive_uid);
 
     let (status, stdout) = run(root.path(), &["push", "--dry-run"]);
     assert_eq!(status, 0, "{stdout}");
@@ -600,14 +601,14 @@ fn test_config(imap_port: u16, smtp_port: u16) -> Value {
         },
         "mailboxes": {
             // GreenMail does not advertise RFC 6154 special-use attributes, so
-            // pin folders by name (pull resolves mailbox_name directly). The
-            // matching folders are created over IMAP in the test setup.
-            "inbox": {"mailbox_name": "INBOX", "special_use": null},
-            "sent": {"mailbox_name": "Sent", "special_use": null},
-            "archive": {"mailbox_name": "Archive", "special_use": null},
-            "junk": {"mailbox_name": "Junk", "special_use": null},
-            "trash": {"mailbox_name": "Trash", "special_use": null},
-            "drafts": {"mailbox_name": "Drafts", "special_use": null}
+            // resolve folders by fallback names. The matching folders are
+            // created over IMAP in the test setup.
+            "inbox": {"resolve": [{"mailbox_name": "INBOX"}]},
+            "sent": {"resolve": [{"mailbox_name": "Sent"}]},
+            "archive": {"resolve": [{"mailbox_name": "Archive"}]},
+            "junk": {"resolve": [{"mailbox_name": "Junk"}]},
+            "trash": {"resolve": [{"mailbox_name": "Trash"}]},
+            "drafts": {"resolve": [{"mailbox_name": "Drafts"}]}
         },
         "actions": {
             "pull": {
@@ -627,6 +628,7 @@ fn test_config(imap_port: u16, smtp_port: u16) -> Value {
             "case.add": {"steps": []},
             "draft.save": {"steps": [{"append_to_mailbox_id": "drafts"}]},
             "draft.send": {"steps": [
+                {"append_to_mailbox_id": "drafts"},
                 {"smtp_send": {}},
                 {"append_to_mailbox_id": "sent"},
                 {"add_flags": ["\\Answered"], "on": "reply_to_message"}
@@ -689,7 +691,7 @@ fn seed_fixture_batch(imap_port: u16, batch: &test_fixtures::MailBatch) -> Resul
             )
         })?;
         let raw = batch.raw_message(message)?;
-        let appended = session.append(folder, raw.as_slice());
+        let appended = session.append(folder, raw.as_slice()).finish();
         if let Err(err) = appended {
             let _ = session.logout();
             return Err(format!(
@@ -749,7 +751,7 @@ fn assert_fixture_imports(root: &Path, batch: &test_fixtures::MailBatch) {
 }
 
 #[cfg(feature = "ui")]
-fn assert_fixture_ui_snapshot(
+fn assert_fixture_ui_room_snapshot(
     root: &Path,
     triage_message_id: &str,
     case_uid: &str,
@@ -758,21 +760,27 @@ fn assert_fixture_ui_snapshot(
     let (status, stdout) = run(root, &["ui", "snapshot"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["type"], "ui_snapshot");
-    let message = serde_json::from_value::<AfuiMessage>(value);
+    assert_eq!(value["agent_first_ui"], "0.2");
+    assert_eq!(value["type"], "snapshot");
+    let message = serde_json::from_value::<AgentFirstUiMessage>(value);
     assert!(message.is_ok(), "{message:?}");
     let Ok(message) = message else {
         return;
     };
-    let snapshot = message.as_snapshot();
-    assert!(snapshot.is_ok(), "{snapshot:?}");
-    let Ok(snapshot) = snapshot else {
+    assert!(
+        matches!(&message.payload, MessagePayload::Snapshot { .. }),
+        "ui snapshot should be a space snapshot"
+    );
+    let MessagePayload::Snapshot { space, .. } = message.payload else {
         return;
     };
-    let validation = validate_document(&snapshot.document);
+    let validation = validate_space(&space);
     assert!(validation.is_ok(), "{validation:?}");
+    let binding_validation = validate_space_bindings(&space);
+    assert!(binding_validation.is_ok(), "{binding_validation:?}");
+    let afmail = &space.as_value()["afmail"];
 
-    for view_id in [
+    for unit_id in [
         "mailbox_status",
         "inbox_triage",
         "active_cases",
@@ -783,36 +791,22 @@ fn assert_fixture_ui_snapshot(
         "mail_terminal",
     ] {
         assert!(
-            snapshot.document.find_view(view_id).is_some(),
-            "{view_id} missing"
+            find_unit(&space, "afmail", unit_id).is_some(),
+            "{unit_id} missing"
         );
     }
-    let pulse = snapshot.document.find_view("mailbox_status");
+    let pulse = find_unit(&space, "afmail", "mailbox_status");
     assert!(pulse.is_some());
     let Some(pulse) = pulse else {
         return;
     };
     assert_eq!(pulse.field("title"), Some(&json!("Mailbox Status")));
-    assert_eq!(
-        pulse.field("dockview"),
-        Some(&json!({
-            "role": "utility",
-            "priority": 30,
-            "preferred_height": 170
-        }))
-    );
+    assert_eq!(pulse.field("dockview"), None);
 
-    let triage = snapshot.document.find_view("inbox_triage");
+    let triage = find_unit(&space, "afmail", "inbox_triage");
     assert!(triage.is_some());
-    let Some(triage) = triage else {
-        return;
-    };
-    let triage_items = snapshot.state.as_value()["ui"]["triage_items"].as_array();
-    assert!(
-        triage_items.is_some(),
-        "{:?}",
-        snapshot.state.as_value()["ui"]
-    );
+    let triage_items = afmail["ui"]["triage_items"].as_array();
+    assert!(triage_items.is_some(), "{:?}", afmail["ui"]);
     let Some(triage_items) = triage_items else {
         return;
     };
@@ -820,19 +814,22 @@ fn assert_fixture_ui_snapshot(
         triage_items.len() >= 20,
         "UI snapshot should reflect the 30-message Docker fixture corpus"
     );
-    let triage_item = triage_items
+    let triage_match = triage_items
         .iter()
-        .find(|item| item["message"]["message_id"].as_str() == Some(triage_message_id));
-    assert!(triage_item.is_some(), "{triage_items:?}");
-    let Some(triage_item) = triage_item else {
+        .enumerate()
+        .find(|(_, item)| item["message"]["message_id"].as_str() == Some(triage_message_id));
+    assert!(
+        triage_match.is_some(),
+        "triage item missing: {triage_items:?}"
+    );
+    let Some((triage_index, _)) = triage_match else {
         return;
     };
-    let prepared = prepare_user_action(
-        &snapshot,
-        Some(triage),
-        "afmail.message.trash",
-        Some(triage_item),
-        &PrepareUserActionOptions::default(),
+    let prepared = prepare_request(
+        &space,
+        PrepareRequestSpec::new("session_operator", "afmail", "message_trash")
+            .with_source_unit_id("inbox_triage")
+            .with_record_path(format!("/afmail/ui/triage_items/{triage_index}")),
     );
     assert!(prepared.is_ok(), "{prepared:?}");
     let Ok(prepared) = prepared else {
@@ -841,33 +838,26 @@ fn assert_fixture_ui_snapshot(
     assert_eq!(prepared.status, PreparedStatus::Ready);
     assert_eq!(prepared.input["message_id"], triage_message_id);
 
-    let cases = snapshot.document.find_view("active_cases");
+    let cases = find_unit(&space, "afmail", "active_cases");
     assert!(cases.is_some());
-    let Some(cases) = cases else {
-        return;
-    };
-    let case_items = snapshot.state.as_value()["ui"]["case_items"].as_array();
-    assert!(
-        case_items.is_some(),
-        "{:?}",
-        snapshot.state.as_value()["ui"]
-    );
+    let case_items = afmail["ui"]["case_items"].as_array();
+    assert!(case_items.is_some(), "{:?}", afmail["ui"]);
     let Some(case_items) = case_items else {
         return;
     };
-    let case_item = case_items
+    let case_match = case_items
         .iter()
-        .find(|item| item["case"]["collection_uid"].as_str() == Some(case_uid));
-    assert!(case_item.is_some(), "{case_items:?}");
-    let Some(case_item) = case_item else {
+        .enumerate()
+        .find(|(_, item)| item["case"]["collection_uid"].as_str() == Some(case_uid));
+    assert!(case_match.is_some(), "case item missing: {case_items:?}");
+    let Some((case_index, _)) = case_match else {
         return;
     };
-    let prepared = prepare_user_action(
-        &snapshot,
-        Some(cases),
-        "afmail.case.show",
-        Some(case_item),
-        &PrepareUserActionOptions::default(),
+    let prepared = prepare_request(
+        &space,
+        PrepareRequestSpec::new("session_operator", "afmail", "case_show")
+            .with_source_unit_id("active_cases")
+            .with_record_path(format!("/afmail/ui/case_items/{case_index}")),
     );
     assert!(prepared.is_ok(), "{prepared:?}");
     let Ok(prepared) = prepared else {
@@ -876,33 +866,29 @@ fn assert_fixture_ui_snapshot(
     assert_eq!(prepared.status, PreparedStatus::Ready);
     assert_eq!(prepared.input["case_ref"], case_uid);
 
-    let archives = snapshot.document.find_view("message_archives");
+    let archives = find_unit(&space, "afmail", "message_archives");
     assert!(archives.is_some());
-    let Some(archives) = archives else {
-        return;
-    };
-    let archive_items = snapshot.state.as_value()["ui"]["archive_message_items"].as_array();
-    assert!(
-        archive_items.is_some(),
-        "{:?}",
-        snapshot.state.as_value()["ui"]
-    );
+    let archive_items = afmail["ui"]["archive_message_items"].as_array();
+    assert!(archive_items.is_some(), "{:?}", afmail["ui"]);
     let Some(archive_items) = archive_items else {
         return;
     };
-    let archive_item = archive_items
+    let archive_match = archive_items
         .iter()
-        .find(|item| item["archive"]["collection_uid"].as_str() == Some(archive_uid));
-    assert!(archive_item.is_some(), "{archive_items:?}");
-    let Some(archive_item) = archive_item else {
+        .enumerate()
+        .find(|(_, item)| item["archive"]["collection_uid"].as_str() == Some(archive_uid));
+    assert!(
+        archive_match.is_some(),
+        "archive item missing: {archive_items:?}"
+    );
+    let Some((archive_index, _)) = archive_match else {
         return;
     };
-    let prepared = prepare_user_action(
-        &snapshot,
-        Some(archives),
-        "afmail.archive.message.show",
-        Some(archive_item),
-        &PrepareUserActionOptions::default(),
+    let prepared = prepare_request(
+        &space,
+        PrepareRequestSpec::new("session_operator", "afmail", "archive_message_show")
+            .with_source_unit_id("message_archives")
+            .with_record_path(format!("/afmail/ui/archive_message_items/{archive_index}")),
     );
     assert!(prepared.is_ok(), "{prepared:?}");
     let Ok(prepared) = prepared else {
@@ -1385,12 +1371,12 @@ fn minimal_config() -> Value {
             "password_secret": null
         },
         "mailboxes": {
-            "inbox": {"mailbox_name": "INBOX", "special_use": null},
-            "sent": {"special_use": "\\Sent", "mailbox_name": null},
-            "archive": {"special_use": "\\Archive", "mailbox_name": null},
-            "junk": {"special_use": "\\Junk", "mailbox_name": null},
-            "trash": {"special_use": "\\Trash", "mailbox_name": null},
-            "drafts": {"special_use": "\\Drafts", "mailbox_name": null}
+            "inbox": {"resolve": [{"mailbox_name": "INBOX"}]},
+            "sent": {"resolve": [{"special_use": "\\Sent"}, {"mailbox_name": "Sent"}, {"mailbox_name": "Sent Mail"}, {"mailbox_name": "Sent Messages"}]},
+            "archive": {"resolve": [{"special_use": "\\Archive"}, {"mailbox_name": "Archive"}, {"mailbox_name": "Archives"}]},
+            "junk": {"resolve": [{"special_use": "\\Junk"}, {"mailbox_name": "Junk"}, {"mailbox_name": "Spam"}, {"mailbox_name": "Junk Email"}, {"mailbox_name": "Junk E-mail"}]},
+            "trash": {"resolve": [{"special_use": "\\Trash"}, {"mailbox_name": "Trash"}, {"mailbox_name": "Deleted Items"}, {"mailbox_name": "Deleted Messages"}, {"mailbox_name": "Bin"}]},
+            "drafts": {"resolve": [{"special_use": "\\Drafts"}, {"mailbox_name": "Drafts"}, {"mailbox_name": "Draft"}]}
         },
         "actions": {
             "pull": {

@@ -1,3 +1,5 @@
+use agent_first_slug::{AllowedCharacterSet, EmptyOutputPolicy, SlugConfig};
+
 use crate::error::{AppError, Result};
 use crate::store::{clean_body_text, render_message_section};
 use crate::types::{
@@ -523,23 +525,14 @@ fn mailing_list_headers(message: &mail_parser::Message<'_>) -> Vec<String> {
 }
 
 pub fn slugify(value: &str) -> String {
-    let mut out = String::new();
-    let mut last_dash = false;
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() {
-        "message".to_string()
-    } else {
-        trimmed
-    }
+    let config = SlugConfig {
+        allowed_character_set: AllowedCharacterSet::AsciiAlphanumericCharacters,
+        empty_output_policy: EmptyOutputPolicy::UseFallbackSlug("message".to_string()),
+        ..SlugConfig::default()
+    };
+    agent_first_slug::slugify(value, &config)
+        .map(|result| result.slug)
+        .unwrap_or_else(|_| "message".to_string())
 }
 
 #[cfg(test)]

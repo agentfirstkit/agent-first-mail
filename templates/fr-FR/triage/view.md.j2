@@ -1,0 +1,32 @@
+---
+kind: {{ frontmatter.kind }}
+message_id: {{ frontmatter.message_id }}
+message_ids:
+{% for message_id in frontmatter.message_ids %}  - {{ message_id }}
+{% endfor %}message_count: {{ frontmatter.message_count }}
+attachment_count: {{ frontmatter.attachment_count }}
+{% if frontmatter.suggested_case_uids | length > 0 %}suggested_case_uids:
+{% for case_uid in frontmatter.suggested_case_uids %}  - {{ case_uid }}
+{% endfor %}{% if frontmatter.suggested_reason %}suggested_reason: "{{ frontmatter.suggested_reason_yaml }}"
+{% endif %}{% endif %}---
+
+# {% if view.title %}{{ view.title }}{% else %}Courrier entrant{% endif %}
+{% if view.suggested_case_uids | length > 0 %}
+
+UID de dossier suggérés: {% for case_uid in view.suggested_case_uids %}{% if not loop.first %}, {% endif %}`{{ case_uid }}`{% endfor %}
+{% endif %}{% if view.related_messages | length > 0 %}
+
+## Messages liés
+
+Ces messages sont liés par des en-têtes RFC (`In-Reply-To` / `References`). Ajoutez-les explicitement à un dossier avant traitement.
+
+| Message | Direction | De | Objet | Heure | Statut du workspace |
+| --- | --- | --- | --- | --- | --- |
+{% for item in view.related_messages %}| `{{ item.message.message_id }}` | {{ item.view.direction }} | {{ item.view.from }} | {{ item.view.subject }} | {{ item.view.time }} | {{ item.view.status }} |
+{% endfor %}{% endif %}
+
+<!-- afmail:conversation:start -->
+
+{{ view.conversation }}
+
+<!-- afmail:conversation:end -->

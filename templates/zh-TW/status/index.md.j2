@@ -1,0 +1,18 @@
+---
+kind: {{ frontmatter.kind }}
+status: {{ frontmatter.status }}
+message_count: {{ frontmatter.message_count }}
+---
+
+# {% if view.status == 'spam' %}垃圾郵件{% elif view.status == 'trashed' %}廢棄郵件{% else %}遠端已刪除{% endif %}
+
+{% if items | length == 0 %}_沒有郵件。_
+{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.direction_kind == 'received' %}收到{% else %}發送{% endif %}{% if item.view.action == 'reply' %}回覆{% elif item.view.action == 'forward' %}轉寄{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
+
+{% if item.view.display_contact %}- {% if item.view.contact_kind == 'from' %}寄件人{% else %}收件人{% endif %}: {{ item.view.display_contact }}
+{% endif %}- 郵件: [{{ item.message.message_id }}]({{ item.view.link }})
+- 工作區狀態: {% if view.status == 'spam' %}垃圾郵件{% elif view.status == 'trashed' %}廢棄郵件{% else %}遠端已刪除{% endif %} (`{{ view.status }}`)
+{% if item.view.time.datetime %}- 時間: {{ item.view.time.datetime }}
+{% endif %}
+
+{% endfor %}{% endif %}

@@ -153,6 +153,11 @@ impl Drop for ImapClientSession {
 }
 
 pub(crate) fn login_plain(config: &ImapConfig) -> Result<imap::Session<TcpStream>> {
+    crate::util::ensure_plaintext_credentials_allowed(
+        "IMAP",
+        &config.host,
+        !config.password_secret.is_empty(),
+    )?;
     let stream = TcpStream::connect((config.host.as_str(), config.port))
         .map_err(|e| AppError::new("imap_connect_failed", e.to_string()))?;
     configure_stream_timeout(&stream)?;
@@ -224,13 +229,21 @@ pub(crate) fn capability_move<T: std::io::Read + std::io::Write>(
     Ok(capabilities.has_str("MOVE"))
 }
 
-fn format_name_attribute(attribute: &imap::types::NameAttribute<'_>) -> String {
+fn format_name_attribute(attribute: &imap_proto::NameAttribute<'_>) -> String {
     match attribute {
-        imap::types::NameAttribute::NoInferiors => "\\Noinferiors".to_string(),
-        imap::types::NameAttribute::NoSelect => "\\Noselect".to_string(),
-        imap::types::NameAttribute::Marked => "\\Marked".to_string(),
-        imap::types::NameAttribute::Unmarked => "\\Unmarked".to_string(),
-        imap::types::NameAttribute::Custom(value) => value.to_string(),
+        imap_proto::NameAttribute::NoInferiors => "\\Noinferiors".to_string(),
+        imap_proto::NameAttribute::NoSelect => "\\Noselect".to_string(),
+        imap_proto::NameAttribute::Marked => "\\Marked".to_string(),
+        imap_proto::NameAttribute::Unmarked => "\\Unmarked".to_string(),
+        imap_proto::NameAttribute::All => "\\All".to_string(),
+        imap_proto::NameAttribute::Archive => "\\Archive".to_string(),
+        imap_proto::NameAttribute::Drafts => "\\Drafts".to_string(),
+        imap_proto::NameAttribute::Flagged => "\\Flagged".to_string(),
+        imap_proto::NameAttribute::Junk => "\\Junk".to_string(),
+        imap_proto::NameAttribute::Sent => "\\Sent".to_string(),
+        imap_proto::NameAttribute::Trash => "\\Trash".to_string(),
+        imap_proto::NameAttribute::Extension(value) => value.to_string(),
+        other => format!("{other:?}"),
     }
 }
 
@@ -249,15 +262,14 @@ pub(crate) fn append_message_session<T: std::io::Read + std::io::Write>(
     raw_eml: &[u8],
     draft: bool,
 ) -> Result<()> {
+    let mut append = session.append(folder, raw_eml);
     if draft {
-        session
-            .append_with_flags(folder, raw_eml, &[imap::types::Flag::Draft])
-            .map_err(|e| AppError::new("imap_append_failed", e.to_string()))
-    } else {
-        session
-            .append(folder, raw_eml)
-            .map_err(|e| AppError::new("imap_append_failed", e.to_string()))
+        append.flag(imap::types::Flag::Draft);
     }
+    append
+        .finish()
+        .map(|_| ())
+        .map_err(|e| AppError::new("imap_append_failed", e.to_string()))
 }
 
 pub(crate) fn append_draft_and_find_uid_session<T: std::io::Read + std::io::Write>(

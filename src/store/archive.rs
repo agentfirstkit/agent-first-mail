@@ -702,6 +702,31 @@ impl Workspace {
         Ok(())
     }
 
+    pub(super) fn refresh_archive_indexes_cached(
+        &self,
+        cache: &mut RenderCache,
+    ) -> Result<ArchiveMessageViewRefresh> {
+        create_dir_all(&self.root.join("archive/cases"))?;
+        create_dir_all(&self.root.join("archive/notifications"))?;
+        let language = self.template_language()?;
+        let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
+        let mut totals = ArchiveMessageViewRefresh::default();
+        for archive_uid in self.archive_message_category_ids()? {
+            let refresh = self.refresh_archive_message_category_with_cache(
+                &archive_uid,
+                &mut renderer,
+                true,
+                cache,
+            )?;
+            totals.archive_message_index_count += refresh.archive_message_index_count;
+            totals.archive_message_count += refresh.archive_message_count;
+            totals.archive_message_index_unchanged_count +=
+                refresh.archive_message_index_unchanged_count;
+            totals.archive_message_unchanged_count += refresh.archive_message_unchanged_count;
+        }
+        Ok(totals)
+    }
+
     pub(super) fn refresh_archive_message_category(&self, archive_uid: &str) -> Result<()> {
         let language = self.template_language()?;
         let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
@@ -714,6 +739,26 @@ impl Workspace {
         archive_uid: &str,
         renderer: &mut MarkdownTemplateRenderer<'_>,
         sync_state: bool,
+    ) -> Result<ArchiveMessageViewRefresh> {
+        self.refresh_archive_message_category_inner(archive_uid, renderer, sync_state, None)
+    }
+
+    pub(super) fn refresh_archive_message_category_with_cache(
+        &self,
+        archive_uid: &str,
+        renderer: &mut MarkdownTemplateRenderer<'_>,
+        sync_state: bool,
+        cache: &mut RenderCache,
+    ) -> Result<ArchiveMessageViewRefresh> {
+        self.refresh_archive_message_category_inner(archive_uid, renderer, sync_state, Some(cache))
+    }
+
+    fn refresh_archive_message_category_inner(
+        &self,
+        archive_uid: &str,
+        renderer: &mut MarkdownTemplateRenderer<'_>,
+        sync_state: bool,
+        mut cache: Option<&mut RenderCache>,
     ) -> Result<ArchiveMessageViewRefresh> {
         validate_archive_uid(archive_uid)?;
         let archive_dir = self.archive_message_dir(archive_uid);
@@ -746,22 +791,46 @@ impl Workspace {
             .iter()
             .map(|item| item.message_id.clone())
             .collect::<BTreeSet<_>>();
-        let mut message_count = 0usize;
+        let mut message_stats = RenderWriteStats::default();
         for item in &items {
             let message = self.read_message_by_id(&item.message_id)?;
             let view_path = self.archive_message_view_path(archive_uid, &item.message_id);
-            write_string(
-                &view_path,
-                &self.render_archive_message_view(
+            let outcome = if let Some(cache) = cache.as_deref_mut() {
+                let input_hash = self.render_input_hash_cached(
+                    cache,
+                    "archive_message",
+                    &view_path,
+                    &[TemplateKey::ArchiveMessage, TemplateKey::MessageSection],
+                    json!({
+                        "archive_uid": archive_uid,
+                        "archive_name": data.collection_name.as_str(),
+                        "item": item,
+                        "message_hash": blake3_json_fingerprint(&message)?,
+                    }),
+                )?;
+                self.render_cached_string(cache, &view_path, "archive_message", input_hash, || {
+                    self.render_archive_message_view(
+                        &message,
+                        archive_uid,
+                        &data.collection_name,
+                        item,
+                        renderer,
+                        view_path.parent(),
+                    )
+                })?
+            } else {
+                let rendered = self.render_archive_message_view(
                     &message,
                     archive_uid,
                     &data.collection_name,
                     item,
                     renderer,
                     view_path.parent(),
-                )?,
-            )?;
-            message_count += 1;
+                )?;
+                write_string(&view_path, &rendered)?;
+                FileWriteOutcome::Written
+            };
+            message_stats.record(outcome);
         }
         if messages_dir.exists() {
             for entry in read_dir(&messages_dir, "read archive message views")? {
@@ -778,19 +847,59 @@ impl Workspace {
             }
         }
         let config = MailConfig::load(&self.root)?;
-        write_string(
-            &archive_dir.join("archive.md"),
-            &self.render_archive_message_index(
+        let index_path = archive_dir.join("archive.md");
+        let index_outcome = if let Some(cache) = cache {
+            let input_hash = self.render_input_hash_cached(
+                cache,
+                "archive_message_index",
+                &index_path,
+                &[TemplateKey::ArchiveMessageIndex],
+                json!({
+                    "archive_uid": archive_uid,
+                    "archive_name": data.collection_name.as_str(),
+                    "items": items.clone(),
+                    "message_hashes": items
+                        .iter()
+                        .map(|item| {
+                            self.read_message_by_id(&item.message_id)
+                                .and_then(|message| blake3_json_fingerprint(&message))
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                }),
+            )?;
+            self.render_cached_string(
+                cache,
+                &index_path,
+                "archive_message_index",
+                input_hash,
+                || {
+                    self.render_archive_message_index(
+                        archive_uid,
+                        &data.collection_name,
+                        &items,
+                        &config,
+                        renderer,
+                    )
+                },
+            )?
+        } else {
+            let rendered = self.render_archive_message_index(
                 archive_uid,
                 &data.collection_name,
                 &items,
                 &config,
                 renderer,
-            )?,
-        )?;
+            )?;
+            write_string(&index_path, &rendered)?;
+            FileWriteOutcome::Written
+        };
         Ok(ArchiveMessageViewRefresh {
-            archive_message_index_count: 1,
-            archive_message_count: message_count,
+            archive_message_index_count: usize::from(index_outcome == FileWriteOutcome::Written),
+            archive_message_count: message_stats.written_count,
+            archive_message_index_unchanged_count: usize::from(
+                index_outcome == FileWriteOutcome::Unchanged,
+            ),
+            archive_message_unchanged_count: message_stats.unchanged_count,
         })
     }
 
@@ -808,7 +917,6 @@ impl Workspace {
         let message_value = message_template_value(message)?;
         let item_value = serde_json::to_value(item)
             .map_err(|e| AppError::json("serialize archive message item", &e))?;
-        let generated_rfc3339 = now_rfc3339();
         let conversation =
             self.message_conversation_with_renderer(message, &config, renderer, output_dir)?;
         let context = json!({
@@ -818,7 +926,6 @@ impl Workspace {
                 "archive_uid": archive_uid,
                 "archive_name": archive_name,
                 "added_rfc3339": item.added_rfc3339.as_str(),
-                "generated_rfc3339": generated_rfc3339.as_str(),
             },
             "archive": {
                 "archive_uid": archive_uid,
@@ -831,7 +938,6 @@ impl Workspace {
                 "title": title,
                 "summary": item.summary.as_deref().unwrap_or(""),
                 "added_rfc3339": item.added_rfc3339.as_str(),
-                "generated_rfc3339": generated_rfc3339.as_str(),
                 "conversation": conversation.trim(),
             },
         });
@@ -906,7 +1012,6 @@ impl Workspace {
             let mut rendered_item = thread_item_common(
                 &message,
                 &offset,
-                config.template_language(),
                 format!("views/messages/{}.md", item.message_id),
                 title,
             )?;
@@ -943,7 +1048,6 @@ impl Workspace {
             }
             rendered_items.push(rendered_item);
         }
-        let generated_rfc3339 = now_rfc3339();
         let context = json!({
             "archive": {
                 "archive_uid": archive_uid,
@@ -953,7 +1057,6 @@ impl Workspace {
             "view": {
                 "language": config.resolved_language_bcp47(),
                 "message_count": rendered_items.len(),
-                "generated_rfc3339": generated_rfc3339,
             },
             "config": {
                 "archive": {

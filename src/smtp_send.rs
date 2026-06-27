@@ -299,6 +299,11 @@ fn build_transport(config: &SmtpConfig) -> Result<SmtpTransport> {
             .map_err(|e| AppError::new("smtp_connect_failed", e.to_string()))?
             .port(config.port)
     } else {
+        crate::util::ensure_plaintext_credentials_allowed(
+            "SMTP",
+            &config.host,
+            config.username.is_some() && config.password_secret.is_some(),
+        )?;
         SmtpTransport::builder_dangerous(&config.host).port(config.port)
     };
     if let (Some(username), Some(password)) = (&config.username, &config.password_secret) {

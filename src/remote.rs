@@ -1,4 +1,4 @@
-use crate::config::{ImapConfig, MailConfig, SpecialUseKind};
+use crate::config::{ImapConfig, MailConfig};
 use crate::error::{AppError, Result};
 use crate::imap_client::{ImapClientSession, MailboxInfo, MoveOutcome};
 use crate::types::RemoteLocation;
@@ -99,23 +99,8 @@ impl MailRemote for ImapSmtpRemote<'_> {
 
     fn action_mailbox_folder(&self, mailbox_id: &str) -> Result<String> {
         let mailbox = self.config.mailbox(mailbox_id)?;
-        if let Some(folder) = &mailbox.mailbox_name {
-            return Ok(folder.clone());
-        }
-        if let Some(kind) = mailbox
-            .special_use
-            .as_deref()
-            .and_then(SpecialUseKind::from_attribute)
-        {
-            let mailboxes = self.cached_mailboxes()?;
-            return Ok(crate::imap_pull::resolve_special_use_from_mailboxes(
-                self.config,
-                kind,
-                &mailboxes,
-            )
-            .mailbox_name);
-        }
-        self.config.offline_mailbox_name(mailbox_id)
+        let mailboxes = self.cached_mailboxes()?;
+        crate::imap_pull::resolve_configured_mailbox(mailbox_id, mailbox, &mailboxes)
     }
 
     fn append_message(&self, folder: &str, raw_eml: &[u8], draft: bool) -> Result<()> {

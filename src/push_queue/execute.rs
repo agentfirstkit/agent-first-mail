@@ -36,14 +36,7 @@ pub(super) fn push_outbound(
         }
         OutboundAction::Send => {
             if config.actions.draft_send.steps.is_empty() {
-                vec![
-                    ActionStep::smtp_send(),
-                    ActionStep::append_to_mailbox_id("sent"),
-                    ActionStep::add_flags_on(
-                        vec!["\\Seen".to_string(), "\\Answered".to_string()],
-                        ActionStepOn::ReplyToMessage,
-                    ),
-                ]
+                crate::config::default_draft_send_steps()
             } else {
                 config.actions.draft_send.steps.clone()
             }
@@ -571,12 +564,6 @@ pub(super) fn mailbox_is_kind(config: &MailConfig, mailbox_id: &str, kind: Speci
     config
         .mailbox(mailbox_id)
         .ok()
-        .and_then(|mailbox| {
-            mailbox
-                .special_use
-                .as_deref()
-                .and_then(SpecialUseKind::from_attribute)
-        })
-        .is_some_and(|candidate| candidate == kind)
+        .is_some_and(|mailbox| mailbox.contains_special_use(kind))
         || mailbox_id == kind.as_str()
 }

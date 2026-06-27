@@ -7,6 +7,7 @@ mod mailbox;
 mod validation;
 mod workspace;
 
+pub(crate) use actions::default_draft_send_steps;
 pub use actions::{
     ActionRule, ActionStep, ActionStepOn, ActionsSection, MailDirection, MessageArchiveAction,
     PullActionSection, PullImportAs, PullMailboxAction,
@@ -16,8 +17,8 @@ pub use archive::{
 };
 pub use identity::{IdentityConfig, MessageIdentityMatch, ResolvedIdentity};
 pub use mailbox::{
-    special_use_kinds, ImapConfig, ImapMailboxConfig, ImapSection, SpecialUseKind,
-    SpecialUseSource, SpecialUseTarget,
+    special_use_kinds, ImapConfig, ImapMailboxConfig, ImapSection, MailboxResolveRule,
+    SpecialUseKind, SpecialUseSource, SpecialUseTarget,
 };
 pub use workspace::{
     AuditSection, CaseSection, ContactSection, ReasonMode, SmtpConfig, SmtpSection,
@@ -28,7 +29,7 @@ use crate::error::{AppError, Result};
 use chrono::{FixedOffset, Offset};
 use defaults::*;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -75,6 +76,58 @@ impl Default for MailConfig {
     }
 }
 
+fn merge_with_defaults(override_value: Value) -> Result<Value> {
+    let mut value = MailConfig::default_template_value()?;
+    merge_json_value(&mut value, override_value);
+    Ok(value)
+}
+
+fn merge_json_value(base: &mut Value, override_value: Value) {
+    match (base, override_value) {
+        (Value::Object(base_map), Value::Object(override_map)) => {
+            for (key, value) in override_map {
+                if let Some(base_value) = base_map.get_mut(&key) {
+                    merge_json_value(base_value, value);
+                } else {
+                    base_map.insert(key, value);
+                }
+            }
+        }
+        (base_value, override_value) => {
+            *base_value = override_value;
+        }
+    }
+}
+
+fn sparse_diff(value: &Value, default: &Value) -> Option<Value> {
+    if value == default {
+        return None;
+    }
+    match (value, default) {
+        (Value::Object(value_map), Value::Object(default_map)) => {
+            let mut diff = Map::new();
+            for (key, child) in value_map {
+                match default_map.get(key) {
+                    Some(default_child) => {
+                        if let Some(child_diff) = sparse_diff(child, default_child) {
+                            diff.insert(key.clone(), child_diff);
+                        }
+                    }
+                    None => {
+                        diff.insert(key.clone(), child.clone());
+                    }
+                }
+            }
+            if diff.is_empty() {
+                None
+            } else {
+                Some(Value::Object(diff))
+            }
+        }
+        _ => Some(value.clone()),
+    }
+}
+
 impl MailConfig {
     pub fn load(workspace_root: &Path) -> Result<Self> {
         let path = workspace_root.join(".afmail/config.json");
@@ -82,7 +135,7 @@ impl MailConfig {
         let raw: Value =
             serde_json::from_str(&data).map_err(|e| AppError::json("parse config", &e))?;
         reject_legacy_config(&raw)?;
-        let config: Self = serde_json::from_value(raw)
+        let config: Self = serde_json::from_value(merge_with_defaults(raw)?)
             .map_err(|e| AppError::new("config_invalid", format!("invalid config schema: {e}")))?;
         config.validate()?;
         config.validate_identity_files(workspace_root)?;
@@ -92,9 +145,18 @@ impl MailConfig {
     pub fn write(&self, workspace_root: &Path) -> Result<()> {
         self.validate()?;
         let path = workspace_root.join(".afmail/config.json");
-        let data = serde_json::to_string_pretty(self)
-            .map_err(|e| AppError::json("serialize config", &e))?;
-        fs::write(path, data + "\n").map_err(|e| AppError::io("write config", &e))
+        crate::util::write_json_pretty(&path, &self.sparse_value()?)
+    }
+
+    pub fn default_template_value() -> Result<Value> {
+        serde_json::to_value(Self::default()).map_err(|e| AppError::json("serialize config", &e))
+    }
+
+    pub fn sparse_value(&self) -> Result<Value> {
+        let value =
+            serde_json::to_value(self).map_err(|e| AppError::json("serialize config", &e))?;
+        let default = Self::default_template_value()?;
+        Ok(sparse_diff(&value, &default).unwrap_or_else(|| json!({})))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -254,15 +316,10 @@ impl MailConfig {
     }
 
     pub fn mailbox_id_for_special_use(&self, kind: SpecialUseKind) -> Option<String> {
-        let attribute = kind.attribute();
         self.mailboxes
             .iter()
             .find(|(id, mailbox)| {
-                id.as_str() == kind.as_str()
-                    || mailbox
-                        .special_use
-                        .as_deref()
-                        .is_some_and(|value| value.eq_ignore_ascii_case(attribute))
+                id.as_str() == kind.as_str() || mailbox.contains_special_use(kind)
             })
             .map(|(id, _)| id.clone())
     }

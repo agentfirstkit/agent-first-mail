@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-mail",
   "name": "Agent-First Mail",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.",
@@ -13,13 +13,15 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Add afmail contact subcommand for managing contact cards with CRUD operations, per-group organisation, email/phone fields, tags, archival, and extracting contacts from message senders; email addresses are globally unique across all contacts",
-    "Materialise sender contact links directly onto message views, refreshed automatically when a contact's emails or name change",
-    "Add identity registry: workspaces define named send personas in config with optional identities/<slug>.md footer notes; draft commands accept --identity SLUG and write footers into the draft body for review before push",
-    "Fix skill install to add each installed skill directory to the workspace .gitignore managed block, covering both .codex/ and .claude/ agent paths without duplication",
-    "Fix interrupted-transaction sentinel preservation so retried commands correctly detect and recover from previously-failed transactions",
-    "Roll back newly-created case and archive directories automatically if any step in the create command fails, preventing orphan directories in the workspace",
-    "Validate related-message constraint in archive message create before creating any files, and document in the skill that messages with related_message_ids must be grouped into a case"
+    "Add fully localized render-template packs for Traditional Chinese, German, Spanish, French, Japanese, Korean, and Brazilian Portuguese, selected by workspace.language_bcp47",
+    "Move every human-language string out of the Rust code into the per-language template packs, so labels, headings, and disposition titles are translated in the templates and adding a language is just dropping a directory",
+    "Replace the hand-coded config dispatch with agent-first-config dot-path traversal, and add a prune command, imap-archive origin provenance, attachment MIME-type detection, and pending-push counts in status and triage output",
+    "Add archive case trash and restore commands",
+    "Show the full product name in --help headings and generated docs while keeping the short afmail binary name in usage strings",
+    "Resolve mailbox import rules in configured order and parse nonstandard message date headers",
+    "Speed up the pull render cache and report render sub-stage progress",
+    "Harden outbound push safety, support sparse config, and unify identity-config slug validation",
+    "Upgrade the IMAP client and other dependencies"
   ],
   "bonds": [
     {
@@ -27,6 +29,12 @@
       "uri": "cmn://agentfirstkit.com/b3.39kCSa6orKxAaLcSGpisgLo3KXCxzCw2KutvdhgajCV3",
       "id": "agent-first-data",
       "reason": "All structured output, field suffixes, secret handling, and JSONL events follow Agent-First Data conventions"
+    },
+    {
+      "relation": "depends_on",
+      "uri": "cmn://agentfirstkit.com/b3.78EFvApdz7hgdDzzaDYA5dXGV9TMh98vBehLjeTqDwSe",
+      "id": "agent-first-slug",
+      "reason": "Path/URL slug generation and path-segment validation use Agent-First Slug"
     }
   ],
   "tree": {

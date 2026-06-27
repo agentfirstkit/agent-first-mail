@@ -1,4 +1,3 @@
-use super::validation::validate_config_id;
 use crate::error::{AppError, Result};
 use crate::frontmatter::IdentityFileFrontmatter;
 use crate::markdown::read_doc;
@@ -56,7 +55,7 @@ struct IdentityFile {
 
 impl IdentityConfig {
     pub(super) fn validate(&self) -> Result<()> {
-        validate_config_id("identity slug", &self.identity)
+        crate::slug::validate_config_path_segment("identity slug", &self.identity)
             .map_err(|err| AppError::new("config_invalid", err.message))?;
         if self.name.trim().is_empty() {
             return Err(AppError::new(
@@ -573,6 +572,33 @@ mod tests {
             assert_eq!(identity.email, "hello@example.com");
             assert_eq!(identity.footer.as_deref(), Some("--\nHelp Desk"));
             assert_eq!(identity.notes.as_deref(), Some("Use for support mail."));
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unicode_identity_file_enriches_without_overriding_address() {
+        let root = temp_root("unicode-file");
+        let _ = fs::create_dir_all(root.join("identities"));
+        let _ = fs::write(
+            root.join("identities/身份一.md"),
+            "---\nkind: identity\nidentity: 身份一\nname: Unicode Identity\n---\nUnicode identity notes.\n",
+        );
+        let config = super::super::MailConfig {
+            identities: vec![IdentityConfig {
+                identity: "身份一".to_string(),
+                name: "Support".to_string(),
+                email: "unicode@example.com".to_string(),
+                default: true,
+            }],
+            ..super::super::MailConfig::default()
+        };
+        let resolved = config.resolve_identity(&root, Some("身份一"));
+        assert!(resolved.is_ok());
+        if let Ok(identity) = resolved {
+            assert_eq!(identity.name, "Unicode Identity");
+            assert_eq!(identity.email, "unicode@example.com");
+            assert_eq!(identity.notes.as_deref(), Some("Unicode identity notes."));
         }
         let _ = fs::remove_dir_all(root);
     }

@@ -1,76 +1,30 @@
 use super::*;
+use agent_first_config::{
+    add_keyed, get_path, remove_keyed, set_path, KeyedList, Value as AfValue,
+};
 use agent_first_data::normalize_utc_offset;
 
+/// Arrays addressed by a slug segment rather than a numeric index. Everything
+/// else in the config is plain object/scalar traversal that afconfig handles
+/// generically — only these need a registration so `identities.<slug>` routes to
+/// the element whose `identity` field matches.
+const KEYED_LISTS: &[KeyedList] = &[KeyedList {
+    prefix: "identities",
+    slug_field: "identity",
+}];
+
 impl MailConfig {
+    /// Read one config key via afconfig dot-path traversal over the serialized config.
     pub fn get_key(&self, key: &str) -> Result<Value> {
-        match key {
-            "schema_name" => Ok(json!(self.schema_name)),
-            "schema_version" => Ok(json!(self.schema_version)),
-            "imap.host" => Ok(json!(self.imap.host)),
-            "imap.port" => Ok(json!(self.imap.port)),
-            "imap.tls" => Ok(json!(self.imap.tls)),
-            "imap.username" => Ok(json!(self.imap.username)),
-            "imap.password_secret" => Ok(json!(self.imap.password_secret)),
-            "imap.password_secret_env" => Ok(json!(self.imap.password_secret_env)),
-            "mailboxes" => Ok(json!(self.mailboxes)),
-            key if key.starts_with("mailboxes.") => self.get_mailbox_key(key),
-            "actions" => Ok(json!(self.actions)),
-            "actions.pull.default_mailbox_ids" => Ok(json!(self.actions.pull.default_mailbox_ids)),
-            key if key.starts_with("actions.pull.by_mailbox_id.") => {
-                self.get_pull_mailbox_action_key(key)
-            }
-            key if key.starts_with("actions.message.archive.by_source_mailbox_id.") => {
-                self.get_archive_action_key(key)
-            }
-            "actions.case.add.steps" => Ok(json!(self.actions.case_add.steps)),
-            "actions.draft.save.steps" => Ok(json!(self.actions.draft_save.steps)),
-            "actions.draft.send.steps" => Ok(json!(self.actions.draft_send.steps)),
-            "actions.message.spam.steps" => Ok(json!(self.actions.message_spam.steps)),
-            "actions.message.trash.steps" => Ok(json!(self.actions.message_trash.steps)),
-            "case.default_group" => Ok(json!(self.case.default_group)),
-            "contact.default_group" => Ok(json!(self.contact.default_group)),
-            "identities" => Ok(json!(self.identities)),
-            "archive" => Ok(json!(self.archive)),
-            "archive.message_index.item_fields" => {
-                Ok(json!(self.archive.message_index.item_fields))
-            }
-            "archive.message_index.sort" => Ok(json!(self.archive.message_index.sort.as_str())),
-            "audit.reason_mode" => Ok(json!(self.audit.reason_mode.as_str())),
-            "smtp.host" => Ok(json!(self.smtp.host)),
-            "smtp.port" => Ok(json!(self.smtp.port)),
-            "smtp.starttls" => Ok(json!(self.smtp.starttls)),
-            "smtp.tls_wrapper" => Ok(json!(self.smtp.tls_wrapper)),
-            "smtp.username" => Ok(json!(self.smtp.username)),
-            "smtp.password_secret" => Ok(json!(self.smtp.password_secret)),
-            "smtp.password_secret_env" => Ok(json!(self.smtp.password_secret_env)),
-            "workspace.language_bcp47" => Ok(json!(self.workspace.language_bcp47)),
-            "workspace.timezone_utc_offset" => Ok(json!(self.workspace.timezone_utc_offset)),
-            _ => Err(AppError::new(
-                "invalid_request",
-                format!("unknown config key: {key}"),
-            )),
-        }
+        let root = self.as_config_value()?;
+        let value = get_path(&root, key, KEYED_LISTS).map_err(|e| config_key_error(key, e))?;
+        Ok(Value::from(value))
     }
 
-    fn get_mailbox_key(&self, key: &str) -> Result<Value> {
-        let rest = &key["mailboxes.".len()..];
-        let (id, field) = rest.split_once('.').ok_or_else(|| {
-            AppError::new(
-                "invalid_request",
-                "mailboxes key expects mailboxes.<id>.<field>",
-            )
-        })?;
-        let mailbox = self.mailbox(id)?;
-        match field {
-            "mailbox_name" => Ok(json!(mailbox.mailbox_name)),
-            "special_use" => Ok(json!(mailbox.special_use)),
-            _ => Err(AppError::new(
-                "invalid_request",
-                format!("unknown config key: {key}"),
-            )),
-        }
-    }
-
+    /// Set one config key. Keys whose semantics afconfig cannot express — typed
+    /// normalization, mutually-exclusive fields, the `move_to_mailbox_id` alias —
+    /// are handled by `apply_domain_override`; the rest go through afconfig's
+    /// generic coercing setter. Either way the result is re-validated.
     pub fn set_key(&mut self, key: &str, values: &[String]) -> Result<()> {
         if values.is_empty() {
             return Err(AppError::new(
@@ -78,11 +32,55 @@ impl MailConfig {
                 "config set requires at least one value",
             ));
         }
+
+        // `none` is a CLI sentinel for "clear this step list"; afconfig has no
+        // such notion, so rewrite it to an explicit empty array before coercion.
+        let cleared;
+        let values = if key.ends_with(".steps") && values == ["none"] {
+            cleared = [String::from("[]")];
+            &cleared[..]
+        } else {
+            values
+        };
+
+        if !self.apply_domain_override(key, values)? {
+            let mut root = self.as_config_value()?;
+            set_path(&mut root, key, values, KEYED_LISTS).map_err(|e| config_key_error(key, e))?;
+            self.replace_from_value(Value::from(root), key)?;
+        }
+
+        self.validate()?;
+        Ok(())
+    }
+
+    /// Append an element to a keyed list (only `identities` today). The slug
+    /// becomes the element's `identity`; `fields` are `name=…`, `email=…`,
+    /// `default=…` pairs coerced by afconfig.
+    pub fn add_key(&mut self, key: &str, slug: &str, fields: &[(String, String)]) -> Result<()> {
+        let mut root = self.as_config_value()?;
+        add_keyed(&mut root, key, slug, KEYED_LISTS, None, fields)
+            .map_err(|e| config_key_error(key, e))?;
+        self.replace_from_value(Value::from(root), key)?;
+        self.validate()?;
+        Ok(())
+    }
+
+    /// Remove the keyed-list element whose slug matches.
+    pub fn remove_key(&mut self, key: &str, slug: &str) -> Result<()> {
+        let mut root = self.as_config_value()?;
+        remove_keyed(&mut root, key, slug, KEYED_LISTS).map_err(|e| config_key_error(key, e))?;
+        self.replace_from_value(Value::from(root), key)?;
+        self.validate()?;
+        Ok(())
+    }
+
+    /// Handle keys whose behavior afconfig's value-shaped coercion can't capture.
+    /// Returns `true` when the key was consumed here, `false` to fall through to
+    /// the generic setter.
+    fn apply_domain_override(&mut self, key: &str, values: &[String]) -> Result<bool> {
         match key {
-            "imap.host" => self.imap.host = Some(single(values, key)?),
-            "imap.port" => self.imap.port = parse_u16(&single(values, key)?, key)?,
-            "imap.tls" => self.imap.tls = parse_bool(&single(values, key)?, key)?,
-            "imap.username" => self.imap.username = Some(single(values, key)?),
+            // Password source is one-of: setting either side clears the other so
+            // validation can never see both populated.
             "imap.password_secret" => {
                 self.imap.password_secret = Some(single(values, key)?);
                 self.imap.password_secret_env = None;
@@ -91,6 +89,26 @@ impl MailConfig {
                 self.imap.password_secret_env = Some(single(values, key)?);
                 self.imap.password_secret = None;
             }
+            "smtp.password_secret" => {
+                self.smtp.password_secret = Some(single(values, key)?);
+                self.smtp.password_secret_env = None;
+            }
+            "smtp.password_secret_env" => {
+                self.smtp.password_secret_env = Some(single(values, key)?);
+                self.smtp.password_secret = None;
+            }
+            // These accept human inputs (`+0530`, `UTC`, `null`) that have to be
+            // normalized/validated into canonical stored form.
+            "workspace.language_bcp47" => {
+                self.workspace.language_bcp47 =
+                    parse_optional_language_bcp47(&single(values, key)?)?;
+            }
+            "workspace.timezone_utc_offset" => {
+                self.workspace.timezone_utc_offset =
+                    parse_optional_timezone_utc_offset(&single(values, key)?)?;
+            }
+            // Each id is validated and duplicates collapsed — afconfig would store
+            // the raw multi-value array verbatim.
             "actions.pull.default_mailbox_ids" => {
                 let mut ids = Vec::new();
                 for value in values {
@@ -101,199 +119,32 @@ impl MailConfig {
                 }
                 self.actions.pull.default_mailbox_ids = ids;
             }
-            "case.default_group" => self.case.default_group = single(values, key)?,
-            "contact.default_group" => self.contact.default_group = single(values, key)?,
-            "audit.reason_mode" => {
-                self.audit.reason_mode = ReasonMode::parse(&single(values, key)?)?;
-            }
-            "smtp.host" => self.smtp.host = Some(single(values, key)?),
-            "smtp.port" => self.smtp.port = parse_u16(&single(values, key)?, key)?,
-            "smtp.starttls" => self.smtp.starttls = parse_bool(&single(values, key)?, key)?,
-            "smtp.tls_wrapper" => self.smtp.tls_wrapper = parse_bool(&single(values, key)?, key)?,
-            "smtp.username" => self.smtp.username = Some(single(values, key)?),
-            "smtp.password_secret" => {
-                self.smtp.password_secret = Some(single(values, key)?);
-                self.smtp.password_secret_env = None;
-            }
-            "smtp.password_secret_env" => {
-                self.smtp.password_secret_env = Some(single(values, key)?);
-                self.smtp.password_secret = None;
-            }
-            "workspace.language_bcp47" => {
-                let value = single(values, key)?;
-                self.workspace.language_bcp47 = parse_optional_language_bcp47(&value)?;
-            }
-            "workspace.timezone_utc_offset" => {
-                let value = single(values, key)?;
-                self.workspace.timezone_utc_offset = parse_optional_timezone_utc_offset(&value)?;
-            }
-            key if key.starts_with("mailboxes.") => self.set_mailbox_key(key, values)?,
-            key if key.starts_with("actions.pull.by_mailbox_id.") => {
-                self.set_pull_mailbox_action_key(key, values)?
-            }
-            key if key.starts_with("actions.message.archive.by_source_mailbox_id.") => {
-                self.set_archive_action_key(key, values)?
-            }
-            "archive.message_index.item_fields" => {
-                self.archive.message_index.item_fields = values
-                    .iter()
-                    .map(|value| ArchiveMessageIndexField::parse(value))
-                    .collect::<Result<Vec<_>>>()?;
-            }
-            "archive.message_index.sort" => {
-                self.archive.message_index.sort =
-                    ArchiveMessageIndexSort::parse(&single(values, key)?)?;
-            }
-            _ => {
-                return Err(AppError::new(
-                    "invalid_request",
-                    format!("unknown config key: {key}"),
-                ))
-            }
+            _ => return Ok(false),
         }
-        self.validate()?;
+        Ok(true)
+    }
+
+    /// Serialize the live config to afconfig's value IR. Optional fields carry no
+    /// `skip_serializing_if`, so the value is dense (absent → `null`) and every
+    /// key is traversable.
+    fn as_config_value(&self) -> Result<AfValue> {
+        let json = serde_json::to_value(self)
+            .map_err(|e| AppError::new("internal", format!("serialize config: {e}")))?;
+        Ok(AfValue::from(json))
+    }
+
+    /// Re-hydrate `self` from a mutated value, surfacing serde type/shape errors
+    /// (e.g. a string coerced where a `u16` was expected) against the key.
+    fn replace_from_value(&mut self, value: Value, key: &str) -> Result<()> {
+        *self = serde_json::from_value(value).map_err(|e| {
+            config_key_error(key, agent_first_config::ConfigError::from_serde(key, e))
+        })?;
         Ok(())
     }
+}
 
-    fn set_mailbox_key(&mut self, key: &str, values: &[String]) -> Result<()> {
-        let rest = &key["mailboxes.".len()..];
-        let (id, field) = rest.split_once('.').ok_or_else(|| {
-            AppError::new(
-                "invalid_request",
-                "mailboxes key expects mailboxes.<id>.<field>",
-            )
-        })?;
-        validate_config_id("mailboxes id", id)?;
-        let mailbox = self
-            .mailboxes
-            .entry(id.to_string())
-            .or_insert_with(ImapMailboxConfig::empty);
-        match field {
-            "mailbox_name" => {
-                mailbox.mailbox_name = Some(single(values, key)?);
-                mailbox.special_use = None;
-            }
-            "special_use" => {
-                mailbox.special_use = Some(single(values, key)?);
-                mailbox.mailbox_name = None;
-            }
-            _ => {
-                return Err(AppError::new(
-                    "invalid_request",
-                    format!("unknown config key: {key}"),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn get_pull_mailbox_action_key(&self, key: &str) -> Result<Value> {
-        let rest = &key["actions.pull.by_mailbox_id.".len()..];
-        let (id, field) = rest.split_once('.').ok_or_else(|| {
-            AppError::new(
-                "invalid_request",
-                "actions pull key expects actions.pull.by_mailbox_id.<id>.<field>",
-            )
-        })?;
-        let action = self.pull_action(id)?;
-        match field {
-            "import_as" => Ok(json!(action.import_as.as_str())),
-            "direction" => Ok(json!(action.direction.as_str())),
-            _ => Err(AppError::new(
-                "invalid_request",
-                format!("unknown config key: {key}"),
-            )),
-        }
-    }
-
-    fn set_pull_mailbox_action_key(&mut self, key: &str, values: &[String]) -> Result<()> {
-        let rest = &key["actions.pull.by_mailbox_id.".len()..];
-        let (id, field) = rest.split_once('.').ok_or_else(|| {
-            AppError::new(
-                "invalid_request",
-                "actions pull key expects actions.pull.by_mailbox_id.<id>.<field>",
-            )
-        })?;
-        validate_config_id("actions.pull.by_mailbox_id id", id)?;
-        let action = self
-            .actions
-            .pull
-            .by_mailbox_id
-            .entry(id.to_string())
-            .or_default();
-        match field {
-            "import_as" => action.import_as = PullImportAs::parse(&single(values, key)?)?,
-            "direction" => action.direction = MailDirection::parse(&single(values, key)?)?,
-            _ => {
-                return Err(AppError::new(
-                    "invalid_request",
-                    format!("unknown config key: {key}"),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn get_archive_action_key(&self, key: &str) -> Result<Value> {
-        let rest = &key["actions.message.archive.by_source_mailbox_id.".len()..];
-        let (id, field) = rest.split_once('.').ok_or_else(|| {
-            AppError::new(
-                "invalid_request",
-                "archive action key expects actions.message.archive.by_source_mailbox_id.<id>.<field>",
-            )
-        })?;
-        let rule = self
-            .actions
-            .message_archive
-            .by_source_mailbox_id
-            .get(id)
-            .ok_or_else(|| {
-                AppError::new(
-                    "unknown_mailbox_id",
-                    format!("unknown archive source mailbox id: {id}"),
-                )
-            })?;
-        match field {
-            "steps" => Ok(json!(rule.steps)),
-            "move_to_mailbox_id" => Ok(json!(first_move_to_mailbox_id(&rule.steps))),
-            _ => Err(AppError::new(
-                "invalid_request",
-                format!("unknown config key: {key}"),
-            )),
-        }
-    }
-
-    fn set_archive_action_key(&mut self, key: &str, values: &[String]) -> Result<()> {
-        let rest = &key["actions.message.archive.by_source_mailbox_id.".len()..];
-        let (id, field) = rest.split_once('.').ok_or_else(|| {
-            AppError::new(
-                "invalid_request",
-                "archive action key expects actions.message.archive.by_source_mailbox_id.<id>.<field>",
-            )
-        })?;
-        validate_config_id("actions.message.archive source id", id)?;
-        let rule = self
-            .actions
-            .message_archive
-            .by_source_mailbox_id
-            .entry(id.to_string())
-            .or_default();
-        match field {
-            "move_to_mailbox_id" | "steps.move_to_mailbox_id" => {
-                rule.steps = vec![ActionStep::move_to_mailbox_id(single(values, key)?)];
-            }
-            "steps" if values == ["none"] || values == ["[]"] => {
-                rule.steps.clear();
-            }
-            _ => {
-                return Err(AppError::new(
-                    "invalid_request",
-                    format!("unknown config key: {key}"),
-                ));
-            }
-        }
-        Ok(())
-    }
+fn config_key_error(key: &str, err: agent_first_config::ConfigError) -> AppError {
+    AppError::new("invalid_request", format!("config key {key}: {err}"))
 }
 
 fn parse_optional_language_bcp47(value: &str) -> Result<Option<String>> {

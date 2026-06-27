@@ -1,18 +1,17 @@
 ---
 kind: {{ frontmatter.kind }}
 status: {{ frontmatter.status }}
-generated_rfc3339: "{{ frontmatter.generated_rfc3339 }}"
 message_count: {{ frontmatter.message_count }}
 ---
 
-# {{ view.title }}
+# {% if view.status == 'spam' %}Spam{% elif view.status == 'trashed' %}Trash{% else %}Remote Deleted{% endif %}
 
 {% if items | length == 0 %}_No messages._
-{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.action_label }}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
+{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.direction_kind == 'received' %}Received{% else %}Sent{% endif %}{% if item.view.action == 'reply' %} reply{% elif item.view.action == 'forward' %} forward{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
 
-{% if item.view.display_contact %}- {{ item.view.contact_label }}: {{ item.view.display_contact }}
+{% if item.view.display_contact %}- {% if item.view.contact_kind == 'from' %}From{% else %}To{% endif %}: {{ item.view.display_contact }}
 {% endif %}- Message: [{{ item.message.message_id }}]({{ item.view.link }})
-- Workspace status: {{ view.status_label }} (`{{ view.status }}`)
+- Workspace status: {% if view.status == 'spam' %}Spam{% elif view.status == 'trashed' %}Trash{% else %}Remote deleted{% endif %} (`{{ view.status }}`)
 {% if item.view.time.datetime %}- Time: {{ item.view.time.datetime }}
 {% endif %}
 

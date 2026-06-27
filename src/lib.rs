@@ -11,6 +11,7 @@ pub mod push_queue;
 pub mod remote;
 pub mod runner;
 pub mod skill_admin;
+mod slug;
 pub mod smtp_send;
 pub mod store;
 pub mod templates;
