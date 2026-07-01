@@ -66,8 +66,8 @@ pub struct ActionsSection {
     pub message_spam: ActionRule,
     #[serde(rename = "message.trash")]
     pub message_trash: ActionRule,
-    #[serde(rename = "message.archive")]
-    pub message_archive: MessageArchiveAction,
+    #[serde(rename = "message.notification")]
+    pub message_notification: MessageNotificationAction,
 }
 
 impl Default for ActionsSection {
@@ -90,7 +90,7 @@ impl Default for ActionsSection {
             message_trash: ActionRule {
                 steps: vec![ActionStep::move_to_mailbox_id("trash")],
             },
-            message_archive: MessageArchiveAction::default(),
+            message_notification: MessageNotificationAction::default(),
         }
     }
 }
@@ -111,17 +111,17 @@ impl ActionsSection {
             "actions.message.trash.steps",
             &self.message_trash.steps,
         )?;
-        for (id, rule) in &self.message_archive.by_source_mailbox_id {
-            validate_config_id("actions.message.archive source id", id)?;
+        for (id, rule) in &self.message_notification.by_source_mailbox_id {
+            validate_config_id("actions.message.notification source id", id)?;
             if !config.mailboxes.contains_key(id) {
                 return Err(AppError::new(
                     "config_invalid",
-                    format!("actions.message.archive.by_source_mailbox_id.{id} references unknown mailbox id"),
+                    format!("actions.message.notification.by_source_mailbox_id.{id} references unknown mailbox id"),
                 ));
             }
             validate_steps(
                 config,
-                &format!("actions.message.archive.by_source_mailbox_id.{id}.steps"),
+                &format!("actions.message.notification.by_source_mailbox_id.{id}.steps"),
                 &rule.steps,
             )?;
         }
@@ -254,12 +254,12 @@ pub struct ActionRule {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct MessageArchiveAction {
+pub struct MessageNotificationAction {
     #[serde(default)]
     pub by_source_mailbox_id: BTreeMap<String, ActionRule>,
 }
 
-impl Default for MessageArchiveAction {
+impl Default for MessageNotificationAction {
     fn default() -> Self {
         let mut by_source_mailbox_id = BTreeMap::new();
         by_source_mailbox_id.insert(

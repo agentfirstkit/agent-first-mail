@@ -158,7 +158,7 @@ pub(super) fn push_action_steps(
         .message_action()
         .ok_or_else(|| AppError::new("push_item_invalid", "push item is not a message action"))?;
     match payload.action {
-        MessagePushAction::Archive => {
+        MessagePushAction::Notification => {
             workspace.ensure_archive_eligible(&payload.message_ids, Some(&current_push_path))?;
         }
         MessagePushAction::Spam | MessagePushAction::Trash => {
@@ -192,10 +192,21 @@ pub(super) fn execute_tracked_steps(
     let mut progress = progress;
     ensure_step_states(item, steps);
     for (index, step) in steps.iter().enumerate() {
+        let label = step_label(step);
         if step_succeeded(item, index) {
+            if item.local_stage.is_none() {
+                refresh_after_successful_step(
+                    context,
+                    item,
+                    step,
+                    index,
+                    steps.len(),
+                    &label,
+                    &mut progress,
+                )?;
+            }
             continue;
         }
-        let label = step_label(step);
         crate::progress::emit(
             &mut progress,
             "push_step_start",
@@ -221,6 +232,15 @@ pub(super) fn execute_tracked_steps(
                         None,
                     ),
                 );
+                refresh_after_successful_step(
+                    context,
+                    item,
+                    step,
+                    index,
+                    steps.len(),
+                    &label,
+                    &mut progress,
+                )?;
             }
             Err(err) => {
                 mark_step_failed(item, index, step, &err);
@@ -244,6 +264,56 @@ pub(super) fn execute_tracked_steps(
         }
     }
     Ok(())
+}
+
+fn refresh_after_successful_step(
+    context: PushExecutionContext<'_>,
+    item: &PushItem,
+    step: &ActionStep,
+    index: usize,
+    step_count: usize,
+    label: &str,
+    progress: &mut Option<&mut ProgressCallback<'_>>,
+) -> Result<()> {
+    let message_ids = message_ids_for_step_refresh(context.root, item, step)?;
+    if message_ids.is_empty() {
+        return Ok(());
+    }
+    crate::progress::emit(
+        progress,
+        "push_step_refresh_start",
+        push_step_progress_fields(item, context.progress, index, step_count, label, None),
+    );
+    crate::store::Workspace::at(context.root).refresh_message_push_views(&message_ids)?;
+    crate::progress::emit(
+        progress,
+        "push_step_refresh_done",
+        push_step_progress_fields(item, context.progress, index, step_count, label, None),
+    );
+    Ok(())
+}
+
+fn message_ids_for_step_refresh(
+    root: &Path,
+    item: &PushItem,
+    step: &ActionStep,
+) -> Result<Vec<String>> {
+    if step.add_flags.is_empty()
+        && step.move_to_mailbox_id.is_none()
+        && step.append_to_mailbox_id.is_none()
+    {
+        return Ok(Vec::new());
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    if !step.add_flags.is_empty() || step.move_to_mailbox_id.is_some() {
+        for location in action_locations(root, item, step)? {
+            ids.insert(location.message_id);
+        }
+    }
+    if step.append_to_mailbox_id.is_some() {
+        ids.extend(item.message_ids().iter().cloned());
+    }
+    Ok(ids.into_iter().collect())
 }
 
 fn push_step_progress_fields(

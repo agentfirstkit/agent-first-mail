@@ -95,14 +95,14 @@ workspaces do not create empty disposition directories or JSON; a disposition
 data file is created when the first message enters that disposition and may
 remain if the collection later becomes empty.
 
-Direct archived message:
+Notification message:
 
 ```json
 {
   "workspace": {
-    "status": "archived",
-    "archive_uid": "a20260521001",
-    "archived_rfc3339": "2026-06-01T17:30:00Z"
+    "status": "notification",
+    "notification_uid": "n20260521001",
+    "notification_rfc3339": "2026-06-01T17:30:00Z"
   }
 }
 ```
@@ -169,7 +169,8 @@ copied into case files by assignment or case creation:
 
 The managed `.gitignore` ignores rebuildable `messages/*.json`, generated
 Markdown read views, `.afmail/push/`, `.afmail/logs/`, `.afmail/transactions/`,
-`.afmail/workspace.lock`, `.afmail/workspace.progress.json`, and installed
+`.afmail/workspace.lock`, `.afmail/workspace.progress.json`,
+`.afmail/render-cache.json`, `.afmail/config.example.json`, and installed
 workspace skill directories such as `.codex/skills/agent-first-mail/` or
 `.claude/skills/agent-first-mail/`. It intentionally does not ignore
 `.afmail/messages/`. If you track
@@ -180,16 +181,18 @@ sidecar metadata, and raw attachment bytes.
 
 Generated triage views live at `triage/<message_id>.md` and include YAML
 frontmatter with `kind: triage_view`, `message_id`, `message_ids`,
-`generated_rfc3339`, counts, and optional suggestion fields. Triage views are
+`message_count`, `attachment_count`, and optional suggestion fields
+(`suggested_case_uids`, `suggested_reason`). Triage views are
 rebuildable and are not a notes surface.
 
 ## Case Workspace
 
 Active cases live at `cases/<group>/<case_uid>-<name>/`; archived cases live at
-`archive/cases/<case_uid>-<name>/`.
+`archive/cases/<group>/<case_uid>-<name>/`. The `<group>` segment is a case
+group retained for history/lookup, not an archive category.
 
-`case_uid` is a stable `cYYYYMMDDNNN` identity and `archive_uid` is a stable
-`aYYYYMMDDNNN` identity. Human-readable names live in the shared
+`case_uid` is a stable `cYYYYMMDDNNN` identity and `notification_uid` is a stable
+`nYYYYMMDDNNN` identity. Human-readable names live in the shared
 `collection_name` field and in the directory suffix. Refs may be either the bare
 UID or `UID-any-readable-suffix`; names alone are not valid refs. Human names
 may use Unicode path segments such as Chinese, but they must not contain path
@@ -221,10 +224,10 @@ Case metadata is canonical in `data/case.json`:
 ```
 
 Archived cases set `status: "archived"` and `archived_rfc3339`. Cases do not
-store direct-message archive categories.
+store notification collections.
 
 Case membership is canonical in `data/case.json` under `items[]`; each item uses
-the same message collection item shape as notification archives:
+the same message collection item shape as notification collections:
 `message_id`, optional `summary`, and `added_rfc3339`.
 
 Generated case read views live at `case.md` and
@@ -325,15 +328,15 @@ email→contact index file; the sender→contact link is materialized onto each
 message's `contact` field (see Message JSON) at pull/render time and on contact
 changes.
 
-## Direct Message Archive Category
+## Notification Collection
 
-`archive/notifications/<archive_uid>-<name>/data/notification.json` is canonical:
+`notifications/<notification_uid>-<name>/data/notification.json` is canonical:
 
 ```json
 {
   "schema_name": "notification",
   "schema_version": 1,
-  "collection_uid": "a20260521001",
+  "collection_uid": "n20260521001",
   "collection_name": "服务通知",
   "items": [
     {
@@ -345,14 +348,14 @@ changes.
 }
 ```
 
-`archive.md` is generated and rebuildable. By default it renders each message as
+`notification.md` is generated and rebuildable. By default it renders each message as
 a numbered heading (the queued action label plus the message summary, or the
 subject when the summary is empty), followed by bullets for the sender, a
 message-id link to the detail view, and the time. The configurable
-`archive.message_index.item_fields` (default time, sender, summary) is exposed to
+`notification.message_index.item_fields` (default time, from, summary) is exposed to
 templates as `view.fields` for custom layouts.
 Message views live at
-`archive/notifications/<archive_uid>-<name>/views/messages/<message_id>.md` and
+`notifications/<notification_uid>-<name>/views/messages/<message_id>.md` and
 preserve the readable message rendering used elsewhere.
 
 ## Generated Templates
@@ -362,7 +365,7 @@ human-facing scaffolds. A workspace can override templates under
 `templates/<language>/`. Legacy `.afmail/templates/` files are ignored.
 
 Template keys include `case/case.md.j2`, `case/message.md.j2`,
-`archive-message/archive.md.j2`, `archive-message/message.md.j2`,
+`notification/notification.md.j2`, `notification/message.md.j2`,
 `triage/view.md.j2`, `message/section.md.j2`, `status/index.md.j2`,
 `status/message.md.j2`, `draft/*.md.j2`, `notes/*.md.j2`, and `workspace/*.j2`.
 
@@ -371,11 +374,11 @@ materialized `messages/<message_id>.json` record, while `view` holds Markdown
 rendering facts such as display titles, security notes, attachment previews, and
 conversation text. Index rows follow the same split with `item.message` and
 `item.view`; container data lives under namespaces such as `frontmatter`,
-`case`, `archive`, `item`, `items`, `messages`, and `config`. Template failures
+`case`, `notification`, `item`, `items`, `messages`, and `config`. Template failures
 return `template_render_failed`; afmail does not fall back to built-ins when a
 selected-language workspace override exists but is invalid.
 
-`afmail render templates` exports all built-in `en-US` and `zh-CN` templates.
+`afmail render templates` exports the built-in templates for every supported language.
 Existing language-specific workspace templates are kept unless `--force` is
 used.
 
@@ -387,7 +390,7 @@ Push items live in `.afmail/push/<push_id>.json`. Each item uses
 - `kind: "outbound"` stores `action: "save_draft" | "send"`, `case_uid`,
   `draft_name`, timestamps, and step retry state. It does not store a staged
   `.eml`, a draft hash, or a precomputed outbound message id.
-- `kind: "message_action"` stores `action: "archive" | "spam" | "trash" |
+- `kind: "message_action"` stores `action: "notification" | "spam" | "trash" |
   "case_add"`, message ids, remote locations, and configured action steps.
 
 Remote writes occur only through explicit `afmail push --confirm`, which applies
@@ -412,13 +415,14 @@ phase-specific `fields`, and final `result` or `error` summaries. Read it with
 
 ## Audit Events
 
-Audit logs are JSONL records in `.afmail/logs/events.jsonl`. Archive-related
-events include:
+Audit logs are JSONL records in `.afmail/logs/events.jsonl`. Notification and
+archive-related events include:
 
-- `message_archived`
-- `message_archive_moved`
-- `message_archive_category_renamed`
-- `message_archive_summary_set`
+- `notification_created`
+- `notification_message_added`
+- `notification_message_moved`
+- `notification_renamed`
+- `notification_summary_set`
 - `message_restored`
 - `case_archived`
 - `case_restored`

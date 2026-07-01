@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-mail"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm."
 license = "MIT"
@@ -44,6 +44,12 @@ fs4 = "1.1"
 atomic-write-file = "0.3"
 ring = "0.17.14"
 sanitize-filename = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+xattr = "1.6.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 imap-codec = "1"

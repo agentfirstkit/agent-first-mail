@@ -158,7 +158,7 @@ write_config() {
       {"move_to_mailbox_id": "junk"}
     ]},
     "message.trash": {"steps": [{"move_to_mailbox_id": "trash"}]},
-    "message.archive": {"by_source_mailbox_id": {
+    "message.notification": {"by_source_mailbox_id": {
       "inbox": {"steps": [{"move_to_mailbox_id": "archive"}]},
       "sent": {"steps": []},
       "archive": {"steps": []},
@@ -167,7 +167,7 @@ write_config() {
       "drafts": {"steps": []}
     }}
   },
-  "case": {"default_group": "open"},
+  "case": {},
   "audit": {"reason_mode": "required"},
   "smtp": {
     "host": "127.0.0.1",
@@ -494,7 +494,7 @@ CONTRACT_ATTACHMENT=$(message_id_by_subject 'Acme renewal contract')
 demo_cmd message show "$REFUND_INITIAL"
 demo_cmd message attachment fetch "$CONTRACT_ATTACHMENT"
 
-CASE_JSON=$(demo_capture case create --name refund-order-4471 --message "$REFUND_INITIAL" --group open --reason 'customer refund thread needs a reply')
+CASE_JSON=$(demo_capture case create --name refund-order-4471 --message "$REFUND_INITIAL" --group support --reason 'customer refund thread needs a reply')
 CASE_UID=$(printf '%s' "$CASE_JSON" | json_field case_uid)
 CASE_PATH=$(printf '%s' "$CASE_JSON" | json_field case_path)
 demo_cmd case add "$CASE_UID" "$REFUND_FOLLOWUP" --reason 'same refund thread'

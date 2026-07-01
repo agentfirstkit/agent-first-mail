@@ -37,10 +37,10 @@ struct MessageDispositionResult {
 }
 
 #[derive(Debug, Serialize)]
-struct MessageArchiveResult {
+struct MessageNotificationResult {
     code: &'static str,
     message_id: String,
-    archive_uid: String,
+    notification_uid: String,
     path: String,
     special_use: String,
     eligible_message_ids: Vec<String>,
@@ -127,8 +127,8 @@ fn write_message_remote_file(root: &Path, remote: &MessageRemoteFile) -> Result<
 fn default_message_workspace() -> WorkspaceState {
     WorkspaceState {
         status: "triage".to_string(),
-        archive_uid: None,
-        archived_rfc3339: None,
+        notification_uid: None,
+        notification_rfc3339: None,
         origin: None,
         remote_sync: None,
         push: None,
@@ -252,7 +252,7 @@ pub(super) struct MessageRelationIndex {
 pub(super) struct MaterializedOverlayIndex {
     cases: CaseIndex,
     dispositions: BTreeMap<String, MessageStatus>,
-    direct_archives: BTreeMap<String, (String, String)>,
+    notifications: BTreeMap<String, (String, String)>,
     pending_push: BTreeMap<String, Vec<WorkspacePendingPush>>,
 }
 
@@ -509,6 +509,12 @@ impl Workspace {
     pub(super) fn materialized_overlay_index(&self) -> Result<MaterializedOverlayIndex> {
         let mut pending_push: BTreeMap<String, Vec<WorkspacePendingPush>> = BTreeMap::new();
         for item in crate::push_queue::pending_items(&self.root)? {
+            if item
+                .local_stage
+                .is_some_and(|stage| stage >= PushLocalStage::PendingCleared)
+            {
+                continue;
+            }
             for message_id in item.message_ids() {
                 pending_push
                     .entry(message_id.clone())
@@ -527,7 +533,7 @@ impl Workspace {
         Ok(MaterializedOverlayIndex {
             cases: CaseIndex::build(self)?,
             dispositions: self.disposition_state_by_message()?,
-            direct_archives: self.direct_archive_state_by_message()?,
+            notifications: self.notification_state_by_message()?,
             pending_push,
         })
     }
@@ -537,17 +543,17 @@ impl Workspace {
         message: &mut MessageFile,
         index: &MaterializedOverlayIndex,
     ) -> Result<()> {
-        message.workspace.archive_uid = None;
-        message.workspace.archived_rfc3339 = None;
+        message.workspace.notification_uid = None;
+        message.workspace.notification_rfc3339 = None;
         if let Some(status) = index.dispositions.get(&message.message_id) {
             message.workspace.status = status.as_str().to_string();
             message.workspace.origin = None;
-        } else if let Some((archive_uid, archived_rfc3339)) =
-            index.direct_archives.get(&message.message_id)
+        } else if let Some((notification_uid, notification_rfc3339)) =
+            index.notifications.get(&message.message_id)
         {
-            message.workspace.status = "archived".to_string();
-            message.workspace.archive_uid = Some(archive_uid.clone());
-            message.workspace.archived_rfc3339 = Some(archived_rfc3339.clone());
+            message.workspace.status = MessageStatus::Notification.as_str().to_string();
+            message.workspace.notification_uid = Some(notification_uid.clone());
+            message.workspace.notification_rfc3339 = Some(notification_rfc3339.clone());
             message.workspace.origin = None;
         } else if index.cases.has_any_reference(&message.message_id) {
             message.workspace.status = MessageStatus::Case.as_str().to_string();
@@ -664,12 +670,15 @@ impl Workspace {
         Ok(totals)
     }
 
-    fn direct_archive_state_by_message(&self) -> Result<BTreeMap<String, (String, String)>> {
+    fn notification_state_by_message(&self) -> Result<BTreeMap<String, (String, String)>> {
         let mut out = BTreeMap::new();
-        for archive_uid in self.archive_message_category_ids()? {
-            let data = self.read_archive_messages(&archive_uid)?;
+        for notification_uid in self.notification_ids()? {
+            let data = self.read_notifications(&notification_uid)?;
             for item in data.items {
-                out.insert(item.message_id, (archive_uid.clone(), item.added_rfc3339));
+                out.insert(
+                    item.message_id,
+                    (notification_uid.clone(), item.added_rfc3339),
+                );
             }
         }
         Ok(out)
@@ -795,15 +804,16 @@ impl Workspace {
                 "message_restored",
                 reason,
             ),
-            "archived" => {
-                let archive_uid = message.workspace.archive_uid.clone().ok_or_else(|| {
-                    AppError::new(
-                        "invalid_request",
-                        format!("message {message_id} is not directly archived"),
-                    )
-                })?;
-                self.restore_direct_archive_message(
-                    &archive_uid,
+            "notification" => {
+                let notification_uid =
+                    message.workspace.notification_uid.clone().ok_or_else(|| {
+                        AppError::new(
+                            "invalid_request",
+                            format!("message {message_id} is not in a notification"),
+                        )
+                    })?;
+                self.restore_direct_notification(
+                    &notification_uid,
                     message_id,
                     reason,
                     "message_restored",
@@ -817,50 +827,56 @@ impl Workspace {
         }
     }
 
-    pub fn archive_message(
+    pub fn notification_add_message(
         &self,
         message_id: &str,
-        archive_ref: &str,
+        notification_ref: &str,
         summary: Option<&str>,
         reason: Option<&str>,
     ) -> Result<Value> {
         self.require_workspace()?;
         let reason = self.checked_reason(reason)?;
         validate_id("message_id", message_id)?;
-        let (archive_uid, archive_dir) = self.resolve_archive_message_category(archive_ref)?;
+        let (notification_uid, notification_dir) = self.resolve_notification(notification_ref)?;
         self.ensure_no_related_conversation(message_id)?;
         let transaction = self.begin_transaction(
-            "message_archive",
+            "notification_message_add",
             vec![
                 format!("messages/{message_id}.json"),
-                format!("archive/notifications/{archive_uid}"),
+                format!("notifications/{notification_uid}"),
                 ".afmail/push".to_string(),
             ],
         )?;
-        let archived_rfc3339 = self.set_direct_message_archive(message_id, &archive_uid)?;
-        self.upsert_archive_message_item(&archive_uid, message_id, summary, &archived_rfc3339)?;
-        self.refresh_archive_message_category(&archive_uid)?;
+        let notification_rfc3339 =
+            self.set_direct_message_notification(message_id, &notification_uid)?;
+        self.upsert_notification_item(
+            &notification_uid,
+            message_id,
+            summary,
+            &notification_rfc3339,
+        )?;
+        self.refresh_notification(&notification_uid)?;
         let queue = self.queue_archive_for_archived_messages(&[message_id.to_string()], None)?;
         transaction.commit()?;
         self.append_audit_event(
-            "message_archived",
+            "notification_message_added",
             vec![
                 audit_target("message", message_id),
-                audit_target("archive", &archive_uid),
+                audit_target("notification", &notification_uid),
             ],
             reason,
             json!({
                 "message_id": message_id,
-                "archive_uid": archive_uid,
+                "notification_uid": notification_uid,
                 "summary": summary,
-                "to_path": format!("{}/views/messages/{message_id}.md", rel_path(&self.root, &archive_dir)),
+                "to_path": format!("{}/views/messages/{message_id}.md", rel_path(&self.root, &notification_dir)),
             }),
         )?;
-        serde_json::to_value(MessageArchiveResult {
-            code: "message_archived",
+        serde_json::to_value(MessageNotificationResult {
+            code: "notification_message_added",
             message_id: message_id.to_string(),
-            archive_uid,
-            path: rel_path(&self.root, &archive_dir),
+            notification_uid,
+            path: rel_path(&self.root, &notification_dir),
             special_use: SpecialUseKind::Archive.as_str().to_string(),
             eligible_message_ids: queue.eligible_message_ids,
             location_count: queue.location_count,
@@ -873,7 +889,7 @@ impl Workspace {
                 .collect::<Vec<_>>(),
             push_id: queue.items.first().map(|item| item.push_id.clone()),
         })
-        .map_err(|e| AppError::json("serialize message archive result", &e))
+        .map_err(|e| AppError::json("serialize message notification result", &e))
     }
 
     pub fn trash_message(&self, message_id: &str, reason: Option<&str>) -> Result<Value> {
@@ -957,10 +973,10 @@ impl Workspace {
                 }
             }
         }
-        if let Some(archive_uid) = message.workspace.archive_uid.as_deref() {
-            let archive_view = self.archive_message_view_path(archive_uid, message_id);
-            if archive_view.is_file() {
-                return Ok(Some(rel_path(&self.root, &archive_view)));
+        if let Some(notification_uid) = message.workspace.notification_uid.as_deref() {
+            let notification_view = self.notification_view_path(notification_uid, message_id);
+            if notification_view.is_file() {
+                return Ok(Some(rel_path(&self.root, &notification_view)));
             }
         }
         Ok(None)
@@ -1025,7 +1041,7 @@ impl Workspace {
             return Ok(());
         }
         let mut suggested_commands = vec![format!(
-            "afmail case create --name NAME --message {message_id} --reason TEXT"
+            "afmail case create --name NAME --group CATEGORY --message {message_id} --reason TEXT"
         )];
         for related_id in &related_message_ids {
             suggested_commands.push(format!(
@@ -1065,7 +1081,7 @@ impl Workspace {
             self.remove_triage_view_for_message(message_id)?;
         }
         self.refresh_all_case_message_views()?;
-        self.refresh_archive_indexes()
+        self.refresh_notification_indexes()
     }
 
     pub(super) fn refresh_message_after_ref_change(&self, message_id: &str) -> Result<()> {
@@ -1099,8 +1115,8 @@ impl Workspace {
             let mut msg = self.read_message_by_id(message_id)?;
             msg.workspace.status = status.as_str().to_string();
             if matches!(status, MessageStatus::Spam | MessageStatus::Trashed) {
-                msg.workspace.archive_uid = None;
-                msg.workspace.archived_rfc3339 = None;
+                msg.workspace.notification_uid = None;
+                msg.workspace.notification_rfc3339 = None;
                 msg.workspace.origin = None;
             }
             msg.workspace.remote_sync = None;

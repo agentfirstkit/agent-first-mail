@@ -246,18 +246,24 @@ impl Workspace {
                 changed_fields.push("subject".to_string());
             }
         }
-        if !change.to.is_empty() && fm.to != change.to {
-            fm.to = change.to.to_vec();
-            changed_fields.push("to".to_string());
+        if !change.to.is_empty() {
+            let to = normalize_recipient_list(change.to, "to")?;
+            if fm.to != to {
+                fm.to = to;
+                changed_fields.push("to".to_string());
+            }
         }
         if change.clear_cc {
             if !fm.cc.is_empty() {
                 fm.cc.clear();
                 changed_fields.push("cc".to_string());
             }
-        } else if !change.cc.is_empty() && fm.cc != change.cc {
-            fm.cc = change.cc.to_vec();
-            changed_fields.push("cc".to_string());
+        } else if !change.cc.is_empty() {
+            let cc = normalize_recipient_list(change.cc, "cc")?;
+            if fm.cc != cc {
+                fm.cc = cc;
+                changed_fields.push("cc".to_string());
+            }
         }
         if let Some(new_body) = body_override {
             let config = MailConfig::load(&self.root)?;
@@ -402,7 +408,7 @@ impl Workspace {
             .map(|_| ())
     }
 
-    pub(crate) fn consume_outbound_draft_after_push(
+    pub(crate) fn record_outbound_after_push(
         &self,
         item: &PushItem,
         config: &MailConfig,
@@ -411,7 +417,6 @@ impl Workspace {
             return Ok(());
         };
         let (case_uid, case_path) = self.resolve_active_case(&outbound.case_uid)?;
-        let draft_path = case_path.join("drafts").join(&outbound.draft_name);
         if outbound.action == OutboundAction::Send {
             let prepared = crate::smtp_send::prepare_outbound(
                 &self.root,
@@ -430,6 +435,15 @@ impl Workspace {
                 config,
             )?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn remove_outbound_draft_after_push(&self, item: &PushItem) -> Result<()> {
+        let Some(outbound) = item.outbound() else {
+            return Ok(());
+        };
+        let (case_uid, case_path) = self.resolve_active_case(&outbound.case_uid)?;
+        let draft_path = case_path.join("drafts").join(&outbound.draft_name);
         let draft_deleted = if draft_path.is_file() {
             remove_file(&draft_path)?;
             true
@@ -581,6 +595,8 @@ impl Workspace {
         let resolved_identity = config
             .resolve_identity(&self.root, draft.identity)
             .map_err(identity_draft_error)?;
+        let to = normalize_recipient_list(draft.to, "to")?;
+        let cc = normalize_recipient_list(draft.cc, "cc")?;
         let fm = DraftFrontmatter {
             kind: Some("draft".to_string()),
             case_uid: case_uid.to_string(),
@@ -588,8 +604,8 @@ impl Workspace {
             reply_to_message_id: None,
             identity: Some(resolved_identity.identity.clone()),
             subject: Some(draft.subject.to_string()),
-            to: draft.to.to_vec(),
-            cc: draft.cc.to_vec(),
+            to,
+            cc,
             attachments: Vec::new(),
         };
         let slug = {
@@ -664,6 +680,7 @@ impl Workspace {
             }
             None => {
                 let message = self.read_message_by_id(message_id)?;
+                ensure_attachment_fetch_allowed(&message)?;
                 let mut items = Vec::new();
                 for attachment in &message.attachments {
                     let saved = self.fetch_attachment_to(message_id, &attachment.part_id, &dest)?;
@@ -731,6 +748,8 @@ impl Workspace {
         if fm.to.is_empty() {
             return Err(AppError::new("draft_invalid", "draft to is required"));
         }
+        normalize_recipient_list(&fm.to, "to")?;
+        normalize_recipient_list(&fm.cc, "cc")?;
         let config = MailConfig::load(&self.root)?;
         config
             .resolve_identity(&self.root, fm.identity.as_deref())
@@ -764,6 +783,7 @@ impl Workspace {
     ) -> Result<SavedAttachment> {
         validate_id("message_id", message_id)?;
         let mut message = self.read_message_by_id(message_id)?;
+        ensure_attachment_fetch_allowed(&message)?;
         let Some(pos) = message
             .attachments
             .iter()
@@ -783,6 +803,7 @@ impl Workspace {
                     let size_bytes = fs::metadata(&existing)
                         .map_err(|e| AppError::io("stat attachment", &e))?
                         .len();
+                    let download_marked = mark_downloaded(&existing);
                     return Ok(SavedAttachment {
                         part_id: attachment.part_id,
                         filename: attachment.filename,
@@ -790,6 +811,7 @@ impl Workspace {
                         content_type: attachment.content_type,
                         path: existing,
                         size_bytes,
+                        download_marked,
                     });
                 }
             }
@@ -809,6 +831,7 @@ impl Workspace {
             let bytes = crate::mail::attachment_bytes(&raw, part_id)?;
             fs::write(&dest, bytes).map_err(|e| AppError::io("write attachment", &e))?;
         }
+        let download_marked = mark_downloaded(&dest);
         let size_bytes = fs::metadata(&dest)
             .map_err(|e| AppError::io("stat attachment", &e))?
             .len();
@@ -822,8 +845,19 @@ impl Workspace {
             content_type: attachment.content_type,
             path: dest,
             size_bytes,
+            download_marked,
         })
     }
+}
+
+fn ensure_attachment_fetch_allowed(message: &MessageFile) -> Result<()> {
+    if MessageStatus::parse(&message.workspace.status)? == MessageStatus::Spam {
+        return Err(AppError::new(
+            "attachment_fetch_blocked",
+            "spam message attachments cannot be fetched",
+        ));
+    }
+    Ok(())
 }
 
 fn draft_body_override(body: Option<&str>, body_file: Option<&str>) -> Result<Option<String>> {
@@ -897,6 +931,13 @@ fn identity_draft_error(err: AppError) -> AppError {
     }
 }
 
+fn normalize_recipient_list(values: &[String], field: &str) -> Result<Vec<String>> {
+    values
+        .iter()
+        .map(|value| crate::smtp_send::normalize_recipient_address(value, field))
+        .collect()
+}
+
 fn write_draft_validation_state(
     case_path: &Path,
     draft_name: &str,
@@ -962,6 +1003,7 @@ pub(super) struct SavedAttachment {
     content_type: String,
     path: PathBuf,
     size_bytes: u64,
+    download_marked: bool,
 }
 
 pub(super) fn saved_attachment_value(
@@ -980,7 +1022,56 @@ pub(super) fn saved_attachment_value(
         "storage": "message_cache",
         "file_path": rel_path(root, &saved.path),
         "size_bytes": saved.size_bytes,
+        "download_marked": saved.download_marked,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn mark_downloaded(path: &Path) -> bool {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let value = format!("0081;{timestamp:x};afmail;");
+    xattr::set(path, "com.apple.quarantine", value.as_bytes()).is_ok()
+}
+
+#[cfg(windows)]
+fn mark_downloaded(path: &Path) -> bool {
+    mark_downloaded_windows(path).is_ok()
+}
+
+#[cfg(windows)]
+fn mark_downloaded_windows(path: &Path) -> windows::core::Result<()> {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+        COINIT_DISABLE_OLE1DDE,
+    };
+    use windows::Win32::UI::Shell::{AttachmentServices, IAttachmentExecute};
+
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+    if hr.is_err() && hr != RPC_E_CHANGED_MODE {
+        return Err(hr.into());
+    }
+
+    let attachment: IAttachmentExecute =
+        unsafe { CoCreateInstance(&AttachmentServices, None, CLSCTX_INPROC_SERVER)? };
+    let local_path = HSTRING::from(path.as_os_str().to_string_lossy().as_ref());
+    unsafe {
+        attachment.SetClientTitle(&HSTRING::from("afmail"))?;
+        attachment.SetSource(&HSTRING::from("about:internet"))?;
+        attachment.SetLocalPath(&local_path)?;
+        attachment.Save()
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn mark_downloaded(_path: &Path) -> bool {
+    false
 }
 
 pub(super) fn saved_filename_for_attachment(attachment: &AttachmentRef) -> String {

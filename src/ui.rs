@@ -20,11 +20,12 @@ pub fn workspace_snapshot(workspace: &Workspace) -> Result<AgentFirstUiMessage> 
     let triage = workspace.triage_list()?;
     let cases = workspace.case_list()?;
     let archive = workspace.archive_list()?;
+    let notification_list = workspace.notification_list()?;
     let push = workspace.push_list()?;
     let logs = workspace.log_list(20)?;
     let afmail_facts = json!({
         "title": "Agent-First Mail",
-        "description": "Local mail workspace: triage, cases, push queue, and archives as data units with safe capabilities.",
+        "description": "Local mail workspace: triage, cases, notifications, push queue, and archived cases as data units with safe capabilities.",
         "workspace": {
             "path": workspace.root().to_string_lossy().replace('\\', "/"),
             "version": env!("CARGO_PKG_VERSION"),
@@ -34,7 +35,7 @@ pub fn workspace_snapshot(workspace: &Workspace) -> Result<AgentFirstUiMessage> 
             "triage_items": to_items(workspace.inbox_message_views(&triage)?)?,
             "case_items": to_items(workspace.case_summary_views(&cases)?)?,
             "archive_case_items": to_items(workspace.archive_case_summary_views(&archive)?)?,
-            "archive_message_items": to_items(workspace.archive_category_views(&archive)?)?,
+            "notification_items": to_items(workspace.notification_views(&notification_list)?)?,
             "push_items": to_items(workspace.push_summary_views(&push)?)?,
             "log_items": log_items(&logs),
         },
@@ -45,7 +46,7 @@ pub fn workspace_snapshot(workspace: &Workspace) -> Result<AgentFirstUiMessage> 
         inbox_triage(),
         active_cases(),
         push_queue(),
-        message_archives(),
+        notifications(),
         case_archives(),
         activity_log(),
         mail_terminal(),
@@ -87,7 +88,7 @@ pub fn workspace_snapshot(workspace: &Workspace) -> Result<AgentFirstUiMessage> 
             "selection": {
                 "message_id": null,
                 "case_ref": null,
-                "archive_ref": null,
+                "notification_ref": null,
                 "push_id": null
             }
         }
@@ -194,7 +195,7 @@ fn mailbox_status() -> Unit {
                 {"label": "Inbox", "value_binding": "space:afmail.status.triage_count"},
                 {"label": "Active cases", "value_binding": "space:afmail.status.case_count"},
                 {"label": "Push queue", "value_binding": "space:afmail.status.push_count"},
-                {"label": "Message archives", "value_binding": "space:afmail.status.archive_message_category_count"},
+                {"label": "Notifications", "value_binding": "space:afmail.status.notification_category_count"},
                 {"label": "Case archives", "value_binding": "space:afmail.status.archived_case_count"},
                 {"label": "Activity", "value_binding": "space:afmail.logs.count"}
             ]),
@@ -264,7 +265,7 @@ fn inbox_triage() -> Unit {
             json!([
                 "message_show",
                 "case_create",
-                "archive_message_add",
+                "notification_add",
                 "message_trash"
             ]),
         )
@@ -411,76 +412,76 @@ fn case_archives() -> Unit {
         )
 }
 
-fn message_archives() -> Unit {
+fn notifications() -> Unit {
     with_salience_state(
-        Unit::new("message_archives", "list"),
+        Unit::new("notifications", "list"),
         Some(Prominence::Subtle),
         SalienceState::Neutral,
     )
-        .set_field("title", json!("Message Archives"))
+        .set_field("title", json!("Notifications"))
         .set_field(
             "summary",
-            json!({ "count_binding": "space:afmail.status.archive_message_category_count" }),
+            json!({ "count_binding": "space:afmail.status.notification_count" }),
         )
         .set_field(
             "description",
-            json!("Archived message buckets and their notes."),
+            json!("Notification collections and their notes."),
         )
         .set_field(
             "source_binding",
-            json!("space:afmail.ui.archive_message_items"),
+            json!("space:afmail.ui.notification_items"),
         )
         .set_field(
             "count_binding",
-            json!("space:afmail.status.archive_message_category_count"),
+            json!("space:afmail.status.notification_count"),
         )
         .set_field(
             "input_bindings",
-            json!({ "archive_ref": "record:archive.collection_uid" }),
+            json!({ "notification_ref": "record:notification.collection_uid" }),
         )
-        .set_field("id_key", json!("archive.collection_uid"))
-        .set_field("reference_binding", json!("record:archive.collection_uid"))
-        .set_field("reference_label", json!("Copy archive id"))
-        .set_field("title_key", json!("archive.collection_name"))
-        .set_field("subtitle_key", json!("archive.collection_uid"))
+        .set_field("id_key", json!("notification.collection_uid"))
+        .set_field("reference_binding", json!("record:notification.collection_uid"))
+        .set_field("reference_label", json!("Copy notification id"))
+        .set_field("title_key", json!("notification.collection_name"))
+        .set_field("subtitle_key", json!("notification.collection_uid"))
         .set_field("meta_key", json!("view.updated_rfc3339"))
-        .set_field("badge_key", json!("archive.message_count"))
+        .set_field("badge_key", json!("notification.message_count"))
         .set_field("preview_key", json!("view.notes_text"))
         .set_field("preview_length", json!(160))
         .set_field("body_key", json!("view.notes_text"))
         .set_field("body_format", json!("markdown"))
-        .set_field("empty_text", json!("No message archives."))
+        .set_field("empty_text", json!("No notifications."))
         .set_field(
             "labels",
-            count_labels("archive.message_count", "message", "messages"),
+            count_labels("notification.message_count", "message", "messages"),
         )
         .set_field(
             "fields",
             json!([
-                {"key": "archive.collection_uid", "label": "Archive"},
-                {"key": "archive.message_count", "label": "Messages"},
+                {"key": "notification.collection_uid", "label": "Notification"},
+                {"key": "notification.message_count", "label": "Messages"},
                 {"key": "view.updated_rfc3339", "label": "Updated", "show_as": "relative_time", "salience": {"state": "neutral"}}
             ]),
         )
-        .set_field("activate_capability", json!("archive_message_show"))
-        .set_field("primary_capability", json!("archive_message_show"))
+        .set_field("activate_capability", json!("notification_show"))
+        .set_field("primary_capability", json!("notification_show"))
         .set_field(
             "interactions",
             json!({
                 "select": [
-                    {"type": "set_actor_state", "path": "selection.archive_ref", "value_binding": "record:archive.collection_uid"}
+                    {"type": "set_actor_state", "path": "selection.notification_ref", "value_binding": "record:notification.collection_uid"}
                 ],
                 "activate": [
-                    {"type": "request", "capability": "archive_message_show", "input_bindings": {"archive_ref": "record:archive.collection_uid"}}
+                    {"type": "request", "capability": "notification_show", "input_bindings": {"notification_ref": "record:notification.collection_uid"}}
                 ]
             }),
         )
         .set_field(
             "row_capabilities",
             json!([
-                "archive_message_show",
-                "archive_message_restore",
-                "archive_message_rename"
+                "notification_show",
+                "notification_restore",
+                "notification_rename"
             ]),
         )
 }
@@ -614,7 +615,7 @@ fn layouts() -> Vec<Layout> {
             .role(LayoutRole::Summary)
             .subtle()
             .build(),
-        LayoutBuilder::new("archives", ["message_archives", "case_archives"])
+        LayoutBuilder::new("archives", ["notifications", "case_archives"])
             .description("Lookup and restore surfaces.")
             .relation(LayoutRelation::Supporting)
             .role(LayoutRole::History)
@@ -734,9 +735,9 @@ fn capabilities() -> Vec<Capability> {
         read_capability("triage_list", "Triage List"),
         read_capability("message_show", "Show Message")
             .with_input(input_schema(&[field("message_id", "string", true)])),
-        local_capability("archive_message_add", "Add To Archive")
+        local_capability("notification_add", "Add To Notification")
             .with_input(input_schema(&[
-                field("archive_ref", "string", true),
+                field("notification_ref", "string", true),
                 field("message_id", "string", true),
                 field("summary", "string", true),
                 field("reason", "string", false),
@@ -883,52 +884,52 @@ fn capabilities() -> Vec<Capability> {
             ])),
         read_capability("archive_list", "Archive List"),
         read_capability("archive_list_cases", "Archive Case List"),
-        read_capability("archive_list_messages", "Archive Message List"),
-        local_capability("archive_message_create", "Create Message Archive")
+        read_capability("notification_list", "Notification List"),
+        local_capability("notification_create", "Create Notification")
             .with_input(input_schema(&[
                 field("name", "string", true),
                 field("message_id", "string", false),
                 field("summary", "string", false),
                 field("reason", "string", false),
             ])),
-        read_capability("archive_message_show", "Show Message Archive")
-            .with_input(input_schema(&[field("archive_ref", "string", true)])),
-        local_capability("archive_message_restore", "Restore Archived Message")
+        read_capability("notification_show", "Show Notification")
+            .with_input(input_schema(&[field("notification_ref", "string", true)])),
+        local_capability("notification_restore", "Restore Notification Message")
             .with_input(input_schema(&[
-                field("archive_ref", "string", true),
+                field("notification_ref", "string", true),
                 field("message_id", "string", true),
                 field("reason", "string", false),
             ])),
-        local_capability("archive_message_move", "Move Archived Message")
+        local_capability("notification_move", "Move Notification Message")
             .with_input(input_schema(&[
-                field("archive_ref", "string", true),
+                field("notification_ref", "string", true),
                 field("message_id", "string", true),
-                field("new_archive_ref", "string", true),
+                field("new_notification_ref", "string", true),
                 field("reason", "string", false),
             ])),
-        local_capability("archive_message_rename", "Rename Message Archive")
+        local_capability("notification_rename", "Rename Notification")
             .with_input(input_schema(&[
-                field("archive_ref", "string", true),
+                field("notification_ref", "string", true),
                 field("name", "string", true),
                 field("reason", "string", false),
             ])),
-        local_capability("archive_message_set_summary", "Set Archive Summary")
+        local_capability("notification_set_summary", "Set Notification Summary")
             .with_input(input_schema(&[
-                field("archive_ref", "string", true),
+                field("notification_ref", "string", true),
                 field("message_id", "string", true),
                 field("summary", "string", true),
                 field("reason", "string", false),
             ])),
-        read_capability("archive_message_notes_show", "Show Archive Notes")
-            .with_input(input_schema(&[field("archive_ref", "string", true)])),
-        local_capability("archive_message_notes_append", "Append Archive Notes")
+        read_capability("notification_notes_show", "Show Notification Notes")
+            .with_input(input_schema(&[field("notification_ref", "string", true)])),
+        local_capability("notification_notes_append", "Append Notification Notes")
             .with_input(input_schema(&[
-                field("archive_ref", "string", true),
+                field("notification_ref", "string", true),
                 markdown_field("text", true),
             ])),
-        local_capability("archive_message_notes_replace", "Replace Archive Notes")
+        local_capability("notification_notes_replace", "Replace Notification Notes")
             .with_input(input_schema(&[
-                field("archive_ref", "string", true),
+                field("notification_ref", "string", true),
                 markdown_field("text", true),
             ])),
         read_capability("archive_case_show", "Show Archived Case")
@@ -966,8 +967,8 @@ fn capabilities() -> Vec<Capability> {
             .with_input(input_schema(&[field("message_id", "string", true)])),
         read_capability("log_case", "Case Log")
             .with_input(input_schema(&[field("case_ref", "string", true)])),
-        read_capability("log_archive", "Archive Log")
-            .with_input(input_schema(&[field("archive_ref", "string", true)])),
+        read_capability("log_archive", "Notification Log")
+            .with_input(input_schema(&[field("notification_ref", "string", true)])),
         read_capability("skill_status", "Skill Status"),
         local_capability("skill_install", "Install Skill"),
         local_capability("skill_uninstall", "Uninstall Skill"),

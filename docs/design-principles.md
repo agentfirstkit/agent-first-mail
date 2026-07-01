@@ -11,8 +11,10 @@ fetching attachments, and writing audit events.
 `triage/` is for unprocessed message views. `cases/` is for active case work.
 `archive/` is for completed classified items:
 
-- `archive/cases/<case_uid>-<name>/` is an archived case workspace.
-- `archive/notifications/<archive_uid>-<name>/` is a direct-message archive category.
+- `archive/cases/<group>/<case_uid>-<name>/` is an archived case workspace; its
+  `<group>` segment is the case group carried forward from active work, not an
+  archive category.
+- `notifications/<notification_uid>-<name>/` is a notification collection.
 
 Active commands operate on active surfaces. Archived items are addressed through
 `afmail archive ...` commands. Reads are exempt: `afmail case show` and
@@ -21,9 +23,10 @@ Active commands operate on active surfaces. Archived items are addressed through
 ## 3. Identity Is Stable
 
 `message_id` is the stable local identity for mail. `case_uid` is a stable
-`cYYYYMMDDNNN` identity across active and archived cases, and `archive_uid` is a
-stable `aYYYYMMDDNNN` identity for direct archive categories. Remote IMAP moves
-update recorded locations but do not rename local message ids.
+`cYYYYMMDDNNN` identity across active and archived cases, and
+`notification_uid` is a stable `nYYYYMMDDNNN` identity for notification
+collections. Remote IMAP moves update recorded locations but do not rename local
+message ids.
 
 Human names are separate labels. Directories use `<uid>-<name>`, and
 `rename --name` changes the label and suffix without changing the UID. Commands
@@ -34,20 +37,20 @@ dot-only segments are not valid names.
 
 ## 4. Cases Are The Multi-Context Tool
 
-A direct archived message may belong to exactly one archive category. If a
-message needs multiple classifications, use cases instead of placing one direct
-message into multiple archive categories. A message may be referenced by multiple
+A notification message may belong to exactly one notification collection. If a
+message needs multiple classifications, use cases instead of placing one message
+into multiple notification collections. A message may be referenced by multiple
 active or archived cases.
 
 ## 5. Archive Is Local First, Remote Explicit
 
-Archive commands change local attention/archive state and may queue configured
-remote moves. They do not create IMAP archive category folders and they do not
+Notification and archive commands change local attention/archive state and may
+queue configured remote moves. They do not create IMAP notification/category folders and they do not
 mutate remote mail until `afmail push --confirm` runs. Bare `afmail push`
 previews the whole queue; `--confirm` applies all of it.
 
 Remote archive moves are rule-driven by recorded source mailbox id via
-`actions.message.archive.by_source_mailbox_id.<id>.steps`. Default `inbox` moves to
+`actions.message.notification.by_source_mailbox_id.<id>.steps`. Default `inbox` moves to
 `archive`; default non-inbox sources have no archive remote steps.
 
 ## 6. Notes Are Human Memory
@@ -58,8 +61,8 @@ notes. Command reasons and machine history belong in
 
 ## 7. Generated Views Are Rebuildable
 
-Generated triage views, case `case.md`, case `views/messages/*.md`, archive
-`archive.md`, and archive `views/messages/*.md` should be reproducible from
+Generated triage views, case `case.md`, case `views/messages/*.md`,
+notification `notification.md`, and notification `views/messages/*.md` should be reproducible from
 message evidence and canonical `data/*.json` state. Persistent human edits
 belong in notes, drafts, files, or `templates/` when the user is
 intentionally customizing generated read-view templates.
@@ -98,15 +101,16 @@ audit log.
 ## Lifecycle Summary
 
 ```text
-message imported as triage -> triage/ -> active case -> archive/cases/<case_uid>-<name>/
-message imported as triage -> triage/ -> direct archive category
+message imported as triage -> triage/ -> active case -> archive/cases/<group>/<case_uid>-<name>/
+message imported as triage -> triage/ -> notification collection
 unreferenced remote-missing message -> deleted/
-archived direct message -> archive message restore -> triage/
+notification message -> notification restore -> triage/
 archived case -> archive case restore -> cases/<group>/<case_uid>-<name>/
 ```
 
-`spam`, `trash`, and `deleted_remote` are negative/discard dispositions. Direct
-archive categories are for completed local filing, not remote folder design.
+`spam`, `trash`, and `deleted_remote` are negative/discard dispositions.
+Notification collections are for completed local filing, not remote folder
+design.
 
 ## Skill Design: Behavior, Not Flag Reference
 

@@ -71,6 +71,22 @@ fn run(cwd: &Path, args: &[&str]) -> (i32, String) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let output = Command::new(bin()).current_dir(cwd).args(args).output();
+    command_output(output)
+}
+
+fn run_with_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> (i32, String) {
+    let _command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut command = Command::new(bin());
+    command.current_dir(cwd).args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command_output(command.output())
+}
+
+fn command_output(output: std::io::Result<std::process::Output>) -> (i32, String) {
     assert!(output.is_ok());
     let output = match output {
         Ok(v) => v,
@@ -265,7 +281,7 @@ fn ui_snapshot_emits_valid_afui_space() {
             "--message",
             &refund_initial,
             "--group",
-            "open",
+            "support",
             "--reason",
             "customer refund thread needs a reply",
         ],
@@ -291,8 +307,7 @@ fn ui_snapshot_emits_valid_afui_space() {
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
-            "message",
+            "notification",
             "create",
             "--name",
             "receipts",
@@ -306,8 +321,10 @@ fn ui_snapshot_emits_valid_afui_space() {
     );
     assert_eq!(status, 0, "{stdout}");
     let archive_created = parse_one(&stdout);
-    let archive_uid = archive_created["archive_uid"].as_str().unwrap_or_default();
-    assert!(!archive_uid.is_empty(), "{archive_created}");
+    let notification_uid = archive_created["notification_uid"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(!notification_uid.is_empty(), "{archive_created}");
 
     let (status, stdout) = run(
         &root,
@@ -355,7 +372,7 @@ fn ui_snapshot_emits_valid_afui_space() {
         "inbox_triage",
         "active_cases",
         "push_queue",
-        "message_archives",
+        "notifications",
         "case_archives",
         "activity_log",
         "mail_terminal",
@@ -405,7 +422,7 @@ fn ui_snapshot_emits_valid_afui_space() {
     let glance = &layouts[1];
     assert_eq!(glance.extra.get("role"), Some(&json!("summary")));
     let archives = &layouts[2];
-    assert_eq!(archives.members, ["message_archives", "case_archives"]);
+    assert_eq!(archives.members, ["notifications", "case_archives"]);
     assert!(archives.overlay);
     assert_eq!(archives.extra.get("relation"), Some(&json!("supporting")));
     assert_eq!(archives.extra.get("role"), Some(&json!("history")));
@@ -536,7 +553,7 @@ fn ui_snapshot_emits_valid_afui_space() {
         return;
     };
     let case_json = read_json(&root.join(format!(
-        "cases/open/{case_uid}-refund-order-4471/data/case.json"
+        "cases/support/{case_uid}-refund-order-4471/data/case.json"
     )));
     assert_eq!(case_item["case"], case_json);
     assert_eq!(case_item["case"]["collection_name"], "refund-order-4471");
@@ -556,68 +573,72 @@ fn ui_snapshot_emits_valid_afui_space() {
     assert_eq!(prepared.status, PreparedStatus::Ready);
     assert_eq!(prepared.input["case_ref"], case_uid);
 
-    let archive_messages = find_unit(&space, "afmail", "message_archives");
-    assert!(archive_messages.is_some());
-    let Some(archive_messages) = archive_messages else {
+    let notifications = find_unit(&space, "afmail", "notifications");
+    assert!(notifications.is_some());
+    let Some(notifications) = notifications else {
         return;
     };
-    assert_eq!(archive_messages.kind, "list");
+    assert_eq!(notifications.kind, "list");
     assert_eq!(
-        archive_messages.field("body_key"),
+        notifications.field("body_key"),
         Some(&json!("view.notes_text"))
     );
     assert_eq!(
-        archive_messages.field("reference_binding"),
-        Some(&json!("record:archive.collection_uid"))
+        notifications.field("reference_binding"),
+        Some(&json!("record:notification.collection_uid"))
     );
     assert_eq!(
-        archive_messages.field("input_bindings"),
-        Some(&json!({ "archive_ref": "record:archive.collection_uid" }))
+        notifications.field("input_bindings"),
+        Some(&json!({ "notification_ref": "record:notification.collection_uid" }))
     );
-    assert_eq!(archive_messages.field("archive_ref_binding"), None);
-    assert_eq!(
-        archive_messages.field("body_format"),
-        Some(&json!("markdown"))
-    );
-    let archive_items = afmail["ui"]["archive_message_items"].as_array();
-    assert!(archive_items.is_some(), "{:?}", afmail["ui"]);
-    let Some(archive_items) = archive_items else {
+    assert_eq!(notifications.field("notification_ref_binding"), None);
+    assert_eq!(notifications.field("body_format"), Some(&json!("markdown")));
+    let notification_items = afmail["ui"]["notification_items"].as_array();
+    assert!(notification_items.is_some(), "{:?}", afmail["ui"]);
+    let Some(notification_items) = notification_items else {
         return;
     };
-    let archive_match = archive_items
-        .iter()
-        .enumerate()
-        .find(|(_, item)| item["archive"]["collection_uid"].as_str() == Some(archive_uid));
+    let notification_match = notification_items.iter().enumerate().find(|(_, item)| {
+        item["notification"]["collection_uid"].as_str() == Some(notification_uid)
+    });
     assert!(
-        archive_match.is_some(),
-        "archive item missing: {archive_items:?}"
+        notification_match.is_some(),
+        "notification item missing: {notification_items:?}"
     );
-    let Some((archive_index, archive_item)) = archive_match else {
+    let Some((notification_index, notification_item)) = notification_match else {
         return;
     };
     let archive_json = read_json(&root.join(format!(
-        "archive/notifications/{archive_uid}-receipts/data/notification.json"
+        "notifications/{notification_uid}-receipts/data/notification.json"
     )));
-    assert_eq!(archive_item["archive"], archive_json);
-    assert_eq!(archive_item["archive"]["collection_name"], "receipts");
-    let archived_message_json = read_json(&root.join(format!("messages/{receipt_cloud}.json")));
-    assert_eq!(archive_item["items"][0]["message"], archived_message_json);
+    assert_eq!(notification_item["notification"], archive_json);
     assert_eq!(
-        archive_item["items"][0]["item"]["summary"],
+        notification_item["notification"]["collection_name"],
+        "receipts"
+    );
+    let archived_message_json = read_json(&root.join(format!("messages/{receipt_cloud}.json")));
+    assert_eq!(
+        notification_item["items"][0]["message"],
+        archived_message_json
+    );
+    assert_eq!(
+        notification_item["items"][0]["item"]["summary"],
         "cloud service receipt"
     );
     let prepared = prepare_request(
         &space,
-        PrepareRequestSpec::new("session_operator", "afmail", "archive_message_show")
-            .with_source_unit_id("message_archives")
-            .with_record_path(format!("/afmail/ui/archive_message_items/{archive_index}")),
+        PrepareRequestSpec::new("session_operator", "afmail", "notification_show")
+            .with_source_unit_id("notifications")
+            .with_record_path(format!(
+                "/afmail/ui/notification_items/{notification_index}"
+            )),
     );
     assert!(prepared.is_ok(), "{prepared:?}");
     let Ok(prepared) = prepared else {
         return;
     };
     assert_eq!(prepared.status, PreparedStatus::Ready);
-    assert_eq!(prepared.input["archive_ref"], archive_uid);
+    assert_eq!(prepared.input["notification_ref"], notification_uid);
 
     let archive_cases = find_unit(&space, "afmail", "case_archives");
     assert!(archive_cases.is_some());
@@ -784,7 +805,7 @@ fn test_config(imap_port: Option<u16>, smtp_port: Option<u16>) -> Value {
                 {"move_to_mailbox_id": "junk"}
             ]},
             "message.trash": {"steps": [{"move_to_mailbox_id": "trash"}]},
-            "message.archive": {"by_source_mailbox_id": {
+            "message.notification": {"by_source_mailbox_id": {
                 "inbox": {"steps": [{"move_to_mailbox_id": "archive"}]},
                 "sent": {"steps": []},
                 "archive": {"steps": []},
@@ -796,7 +817,7 @@ fn test_config(imap_port: Option<u16>, smtp_port: Option<u16>) -> Value {
         "identities": [
             {"identity": "me", "name": "Me", "email": "me@example.com", "default": true}
         ],
-        "case": {"default_group": "open"},
+        "case": {},
         "audit": {"reason_mode": "required"},
         "smtp": {
             "host": smtp_port.map(|_| "127.0.0.1"),
@@ -1009,10 +1030,8 @@ fn create_case(
         "--name".to_string(),
         name.to_string(),
     ];
-    if let Some(group) = group {
-        args.push("--group".to_string());
-        args.push(group.to_string());
-    }
+    args.push("--group".to_string());
+    args.push(group.unwrap_or("support").to_string());
     if let Some(message_id) = message_id {
         args.push("--message".to_string());
         args.push(message_id.to_string());
@@ -1032,7 +1051,7 @@ fn create_case(
     (case_uid, root.join(case_path), value)
 }
 
-fn create_archive_message(
+fn create_notification(
     root: &Path,
     name: &str,
     message_id: Option<&str>,
@@ -1040,8 +1059,7 @@ fn create_archive_message(
     reason: Option<&str>,
 ) -> (String, PathBuf, Value) {
     let mut args = vec![
-        "archive".to_string(),
-        "message".to_string(),
+        "notification".to_string(),
         "create".to_string(),
         "--name".to_string(),
         name.to_string(),
@@ -1062,14 +1080,52 @@ fn create_archive_message(
     let (status, stdout) = run(root, &refs);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    let archive_uid = value["archive_uid"]
+    let notification_uid = value["notification_uid"]
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(!archive_uid.is_empty(), "{value}");
+    assert!(!notification_uid.is_empty(), "{value}");
     let path = value["path"].as_str().unwrap_or_default();
     assert!(!path.is_empty(), "{value}");
-    (archive_uid, root.join(path), value)
+    (notification_uid, root.join(path), value)
+}
+
+#[test]
+fn case_create_requires_explicit_group() {
+    let root = temp_root("case-requires-group");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_message(&root, "message_group_required", 1, Some("INBOX"));
+
+    let _command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let output = Command::new(bin())
+        .current_dir(&root)
+        .args([
+            "case",
+            "create",
+            "--name",
+            "needs-category",
+            "--message",
+            "message_group_required",
+            "--reason",
+            "needs handling",
+        ])
+        .output();
+    assert!(output.is_ok(), "run afmail: {output:?}");
+    let output = match output {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stderr.contains("--group") || stdout.contains("--group"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
 }
 
 fn write_case_fixture(
@@ -1559,15 +1615,21 @@ struct SmtpTestServer {
 }
 
 fn start_smtp_server() -> Option<SmtpTestServer> {
+    start_smtp_server_connections(1)
+}
+
+fn start_smtp_server_connections(connection_count: usize) -> Option<SmtpTestServer> {
     let listener = bind_loopback_listener()?;
     let addr = listener.local_addr().ok()?;
     let (data_tx, data_rx) = mpsc::channel();
     let handle = thread::spawn(move || {
-        let accepted = listener.accept();
-        let Ok((stream, _)) = accepted else {
-            return;
-        };
-        serve_smtp_connection(stream, data_tx);
+        for _ in 0..connection_count {
+            let accepted = listener.accept();
+            let Ok((stream, _)) = accepted else {
+                return;
+            };
+            serve_smtp_connection(stream, data_tx.clone());
+        }
     });
     Some(SmtpTestServer {
         addr,
@@ -1717,7 +1779,7 @@ fn init_status_and_afdata_output_formats_work() {
     assert_eq!(status, 0);
     assert!(stdout.contains("<CASE_REF> <MESSAGE_ID>"));
     assert!(stdout.contains("--reason"));
-    let (status, stdout) = run(&root, &["archive", "message", "--help"]);
+    let (status, stdout) = run(&root, &["notification", "--help"]);
     assert_eq!(status, 0);
     assert!(stdout.contains("create"));
     assert!(stdout.contains("show"));
@@ -1747,7 +1809,7 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(stdout.contains("# Agent-First Mail"));
     assert!(stdout.contains("afmail case show c20260603001"));
     assert!(stdout.contains("afmail archive case show REF"));
-    assert!(stdout.contains("afmail archive message show a20260603001"));
+    assert!(stdout.contains("afmail notification show n20260603001"));
     assert!(!stdout.contains("afmail message ignore"));
     assert!(!stdout.contains("--mode"));
     let (status, stdout) = run(&root, &["--mode", "pipe"]);
@@ -1852,7 +1914,7 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(gitignore.contains("*.tmp"));
     assert!(gitignore.contains("# BEGIN afmail managed"));
     assert!(gitignore.contains("messages/*.json"));
-    assert!(gitignore.contains("archive/notifications/*/views/**/*.md"));
+    assert!(gitignore.contains("notifications/*/views/**/*.md"));
     assert_ne!(
         fs::read_to_string(root.join(".afmail/DO_NOT_EDIT.txt")).unwrap_or_default(),
         "custom warning"
@@ -1865,7 +1927,7 @@ fn init_status_and_afdata_output_formats_work() {
             "promote",
             "case-one",
             "--group",
-            "open",
+            "support",
         ],
     );
     assert_eq!(status, 2);
@@ -1962,12 +2024,6 @@ fn init_status_and_afdata_output_formats_work() {
         parse_one(&stdout)["value"],
         json!([{"mailbox_name": "Archive"}])
     );
-    let (status, stdout) = run(&root, &["config", "get", "case.default_group"]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["value"], "open");
-    let (status, stdout) = run(&root, &["config", "set", "case.default_group", "todo"]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["value"], "todo");
     let (status, stdout) = run(&root, &["config", "get", "audit.reason_mode"]);
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["value"], "required");
@@ -2155,6 +2211,7 @@ fn status_progress_uses_progress_percent_field() {
     let (status, stdout) = run(&root, &["status"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
+    assert_eq!(value["progress"]["status"], "stale");
     assert_eq!(value["progress"]["progress_percent"], 25.0);
     assert!(
         value["progress"]
@@ -2192,6 +2249,7 @@ fn status_progress_uses_progress_percent_field() {
     let (status, stdout) = run(&root, &["status"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
+    assert_eq!(value["progress"]["status"], "stale");
     assert_eq!(value["progress"]["render_stage"], "triage");
     assert_eq!(value["progress"]["elapsed_ms"], 1500);
     assert_eq!(value["progress"]["triage_count"], 3);
@@ -2261,13 +2319,13 @@ fn incomplete_transaction_blocks_writers_and_doctor_reports_it() {
             "schema_name": "local_transaction",
             "schema_version": 1,
             "transaction_id": "transaction_test",
-            "kind": "message_archive",
+            "kind": "message_notification",
             "created_rfc3339": "2026-06-09T00:00:00Z",
             "paths": ["messages/message_1.json"]
         }),
     );
 
-    let (status, stdout) = run(&root, &["config", "set", "case.default_group", "waiting"]);
+    let (status, stdout) = run(&root, &["config", "set", "audit.reason_mode", "optional"]);
     assert_eq!(status, 1, "{stdout}");
     assert_eq!(parse_one(&stdout)["error_code"], "transaction_incomplete");
 
@@ -2421,24 +2479,24 @@ fn reason_mode_controls_required_reason_and_audit_writes() {
     assert!(log.contains("\"kind\":\"case_message_added\""));
     assert!(log.contains("\"reason\":\"belongs to the case\""));
 
-    write_message(&root, "message_archive_reason", 3, None);
-    write_triage(&root, "message_archive_reason", "archive");
-    let (_archive_uid, archive_path, value) = create_archive_message(
+    write_message(&root, "message_notification_reason", 3, None);
+    write_triage(&root, "message_notification_reason", "archive");
+    let (_notification_uid, archive_path, value) = create_notification(
         &root,
         "receipts",
-        Some("message_archive_reason"),
+        Some("message_notification_reason"),
         Some("receipt notification"),
         Some("receipt notification"),
     );
-    assert_eq!(value["code"], "archive_message_created");
+    assert_eq!(value["code"], "notification_created");
     assert!(!root
-        .join(".afmail/messages/message_archive_reason.notes.md")
+        .join(".afmail/messages/message_notification_reason.notes.md")
         .exists());
     assert!(archive_path
-        .join("views/messages/message_archive_reason.md")
+        .join("views/messages/message_notification_reason.md")
         .exists());
     let log = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
-    assert!(log.contains("\"kind\":\"archive_message_created\""));
+    assert!(log.contains("\"kind\":\"notification_created\""));
     assert!(log.contains("\"reason\":\"receipt notification\""));
     let _ = fs::remove_dir_all(root);
 }
@@ -2597,8 +2655,8 @@ fn pull_progress_logs_real_phases_when_requested() {
         "pull_render_dispositions_done",
         "pull_render_cases_start",
         "pull_render_cases_done",
-        "pull_render_archives_start",
-        "pull_render_archives_done",
+        "pull_render_notifications_start",
+        "pull_render_notifications_done",
         "pull_render_cache_write_start",
         "pull_render_cache_write_done",
         "pull_render_done",
@@ -2881,7 +2939,7 @@ fn pull_archive_imports_as_triage_without_direct_archive_category() {
     assert!(message.is_ok());
     let message = message.unwrap_or(Value::Null);
     assert_eq!(message["workspace"]["status"], "triage");
-    assert!(message["workspace"].get("archive_uid").is_none());
+    assert!(message["workspace"].get("notification_uid").is_none());
     assert_eq!(message["remote"]["locations"][0]["mailbox_name"], "Archive");
     assert!(server.handle.join().is_ok());
     let _ = fs::remove_dir_all(root);
@@ -3107,7 +3165,7 @@ fn pull_defaults_unprocessed_folders_to_triage() {
     )
     .unwrap_or(Value::Null);
     assert_eq!(message["workspace"]["status"], "triage");
-    assert!(message["workspace"].get("archive_uid").is_none());
+    assert!(message["workspace"].get("notification_uid").is_none());
     // Provenance is preserved in the location, not baked into the status.
     assert_eq!(message["remote"]["locations"][0]["mailbox_name"], "Archive");
     assert!(server.handle.join().is_ok());
@@ -3260,7 +3318,7 @@ fn pull_suggests_existing_case_without_modifying_case() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "case-one",
-        Some("open"),
+        Some("support"),
         Some("message_001"),
         Some("initial case"),
     );
@@ -3537,15 +3595,15 @@ fn triage_archive_files_without_case_and_queues_archive_mapping() {
     write_message(&root, "message_notice", 42, None);
     write_triage(&root, "message_notice", "invoice notice");
 
-    let (archive_uid, archive_path, value) = create_archive_message(
+    let (notification_uid, archive_path, value) = create_notification(
         &root,
         "billing",
         Some("message_notice"),
         Some("invoice notice"),
         Some("invoice notice"),
     );
-    assert_eq!(value["code"], "archive_message_created");
-    assert_eq!(value["archive_uid"], archive_uid);
+    assert_eq!(value["code"], "notification_created");
+    assert_eq!(value["notification_uid"], notification_uid);
     assert_eq!(value["eligible_message_ids"], json!(["message_notice"]));
     assert_eq!(value["queued"], true);
     assert!(!root.join("triage/message_notice.md").exists());
@@ -3559,8 +3617,8 @@ fn triage_archive_files_without_case_and_queues_archive_mapping() {
         &fs::read_to_string(root.join("messages/message_notice.json")).unwrap_or_default(),
     )
     .unwrap_or(Value::Null);
-    assert_eq!(message["workspace"]["status"], "archived");
-    assert_eq!(message["workspace"]["archive_uid"], archive_uid);
+    assert_eq!(message["workspace"]["status"], "notification");
+    assert_eq!(message["workspace"]["notification_uid"], notification_uid);
     assert!(message["workspace"].get("buckets").is_none());
     assert_eq!(
         message["workspace"]["remote_sync"]["archive_eligible"],
@@ -3569,14 +3627,14 @@ fn triage_archive_files_without_case_and_queues_archive_mapping() {
     assert!(archive_path
         .join("views/messages/message_notice.md")
         .exists());
-    assert!(fs::read_to_string(archive_path.join("archive.md"))
+    assert!(fs::read_to_string(archive_path.join("notification.md"))
         .unwrap_or_default()
         .contains("invoice notice"));
 
     let push = parse_one(&run(&root, &["push", "list"]).1);
     assert_eq!(push["count"], 1);
     assert_eq!(push["items"][0]["kind"], "message_action");
-    assert_eq!(push["items"][0]["action"], "archive");
+    assert_eq!(push["items"][0]["action"], "notification");
     assert_eq!(
         push["items"][0]["steps"],
         json!([{"move_to_mailbox_id": "archive"}])
@@ -3593,7 +3651,7 @@ fn message_restore_undoes_direct_archive_and_removes_pending_push() {
     write_message(&root, "message_notice", 42, None);
     write_triage(&root, "message_notice", "invoice notice");
 
-    let (archive_uid, archive_path, archived) = create_archive_message(
+    let (notification_uid, archive_path, archived) = create_notification(
         &root,
         "billing",
         Some("message_notice"),
@@ -3619,7 +3677,7 @@ fn message_restore_undoes_direct_archive_and_removes_pending_push() {
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
     assert_eq!(value["code"], "message_restored");
-    assert_eq!(value["archive_uid"], archive_uid);
+    assert_eq!(value["notification_uid"], notification_uid);
     assert_eq!(value["removed_push_count"], 1);
     assert_eq!(value["push_ids"], json!([push_id]));
     assert!(root.join("triage/message_notice.md").exists());
@@ -3631,21 +3689,21 @@ fn message_restore_undoes_direct_archive_and_removes_pending_push() {
     )
     .unwrap_or(Value::Null);
     assert_eq!(message["workspace"]["status"], "triage");
-    assert!(message["workspace"]["archive_uid"].is_null());
+    assert!(message["workspace"]["notification_uid"].is_null());
     assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn archive_message_move_restore_and_log_filters_work() {
-    let root = temp_root("archive-message-restore");
+fn notification_move_restore_and_log_filters_work() {
+    let root = temp_root("notification-restore");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     write_json(&root.join(".afmail/config.json"), &test_config(None, None));
     write_message(&root, "message_notice", 42, None);
     write_triage(&root, "message_notice", "invoice notice");
 
-    let (billing_uid, billing_path, _value) = create_archive_message(
+    let (billing_uid, billing_path, _value) = create_notification(
         &root,
         "billing",
         Some("message_notice"),
@@ -3653,20 +3711,19 @@ fn archive_message_move_restore_and_log_filters_work() {
         Some("invoice notice"),
     );
     let (receipts_uid, receipts_path, _value) =
-        create_archive_message(&root, "receipts", None, None, Some("receipts category"));
+        create_notification(&root, "receipts", None, None, Some("receipts category"));
     assert!(billing_path
         .join("views/messages/message_notice.md")
         .exists());
 
-    let (status, stdout) = run(&root, &["archive", "message", "show", &billing_uid]);
+    let (status, stdout) = run(&root, &["notification", "show", &billing_uid]);
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["message_count"], 1);
 
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
-            "message",
+            "notification",
             "move",
             &billing_uid,
             "message_notice",
@@ -3676,7 +3733,7 @@ fn archive_message_move_restore_and_log_filters_work() {
         ],
     );
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["archive_uid"], receipts_uid);
+    assert_eq!(parse_one(&stdout)["notification_uid"], receipts_uid);
     assert!(!billing_path
         .join("views/messages/message_notice.md")
         .exists());
@@ -3687,8 +3744,7 @@ fn archive_message_move_restore_and_log_filters_work() {
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
-            "message",
+            "notification",
             "restore",
             &billing_uid,
             "message_notice",
@@ -3697,13 +3753,15 @@ fn archive_message_move_restore_and_log_filters_work() {
         ],
     );
     assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "archive_entry_not_found");
+    assert_eq!(
+        parse_one(&stdout)["error_code"],
+        "notification_entry_not_found"
+    );
 
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
-            "message",
+            "notification",
             "set-summary",
             &receipts_uid,
             "message_notice",
@@ -3719,8 +3777,7 @@ fn archive_message_move_restore_and_log_filters_work() {
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
-            "message",
+            "notification",
             "restore",
             &receipts_uid,
             "message_notice",
@@ -3741,7 +3798,7 @@ fn archive_message_move_restore_and_log_filters_work() {
     )
     .unwrap_or(Value::Null);
     assert_eq!(message["workspace"]["status"], "triage");
-    assert!(message["workspace"]["archive_uid"].is_null());
+    assert!(message["workspace"]["notification_uid"].is_null());
     assert!(message["workspace"].get("buckets").is_none());
 
     let (status, stdout) = run(&root, &["log", "message", "message_notice"]);
@@ -3765,13 +3822,19 @@ fn case_archive_defers_remote_archive_until_all_case_refs_are_archived() {
     let (case_one_uid, _case_one_path, _) = create_case(
         &root,
         "case-one",
-        Some("open"),
+        Some("support"),
         Some("message_shared"),
         Some("shared case"),
     );
     assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
     let case_two_uid = "c20260521002";
-    write_case_fixture(&root, "open", case_two_uid, "case-two", &["message_shared"]);
+    write_case_fixture(
+        &root,
+        "support",
+        case_two_uid,
+        "case-two",
+        &["message_shared"],
+    );
 
     let (status, stdout) = run(
         &root,
@@ -3807,7 +3870,7 @@ fn case_archive_defers_remote_archive_until_all_case_refs_are_archived() {
     let push = parse_one(&run(&root, &["push", "list"]).1);
     assert_eq!(push["count"], 1);
     assert_eq!(push["items"][0]["kind"], "message_action");
-    assert_eq!(push["items"][0]["action"], "archive");
+    assert_eq!(push["items"][0]["action"], "notification");
 
     let (status, stdout) = run(
         &root,
@@ -3817,18 +3880,17 @@ fn case_archive_defers_remote_archive_until_all_case_refs_are_archived() {
             "restore",
             &case_one_uid,
             "--group",
-            "open",
+            "support",
             "--reason",
             "new reply",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "case_restored");
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["failed_count"], 1);
-    assert_eq!(value["failures"][0]["error_code"], "message_referenced");
+    assert_eq!(value["code"], "case_restored");
+    assert_eq!(value["removed_push_count"], 1);
+    assert_eq!(value["push_ids"], json!([push["items"][0]["push_id"]]));
+    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
 
     let (status, stdout) = run(
         &root,
@@ -4051,7 +4113,7 @@ fn push_archive_and_trash_use_configured_action_steps() {
     write_message(&root, "message_trash", 44, None);
     write_triage(&root, "message_trash", "delete");
 
-    create_archive_message(
+    create_notification(
         &root,
         "done",
         Some("message_arch"),
@@ -4075,7 +4137,7 @@ fn push_archive_and_trash_use_configured_action_steps() {
     assert!(push["items"].as_array().is_some_and(|items| {
         items.iter().any(|item| {
             item["kind"] == "message_action"
-                && item["action"] == "archive"
+                && item["action"] == "notification"
                 && item["steps"][0]["move_to_mailbox_id"] == "archive"
         })
     }));
@@ -4108,7 +4170,9 @@ fn push_archive_and_trash_use_configured_action_steps() {
     // Ids are immutable: archive/trash moves keep the original message ids and
     // only update the recorded remote location.
     assert!(root.join("messages/message_arch.json").exists());
-    assert!(!root.join("messages/message_archive_44_900.json").exists());
+    assert!(!root
+        .join("messages/message_notification_44_900.json")
+        .exists());
     assert!(root.join("messages/message_trash.json").exists());
     assert!(!root.join("messages/message_trash_44_900.json").exists());
     let arch_data = fs::read_to_string(root.join("messages/message_arch.json"));
@@ -4188,7 +4252,9 @@ fn case_group_dirs_are_cleaned_only_when_empty() {
     );
     assert!(root.join("cases/waiting/keep.txt").exists());
     assert!(root
-        .join(format!("archive/cases/{case_beta_uid}-case-beta/case.md"))
+        .join(format!(
+            "archive/cases/waiting/{case_beta_uid}-case-beta/case.md"
+        ))
         .exists());
     let _ = fs::remove_dir_all(root);
 }
@@ -4233,7 +4299,7 @@ fn archive_case_notes_rename_restore_and_active_hint_work() {
     assert_eq!(value["code"], "case");
     assert_eq!(value["case_uid"], case_uid);
     assert_eq!(value["case_name"], "case-archive");
-    assert_eq!(value["group"], "open");
+    assert_eq!(value["group"], "support");
     assert_eq!(
         root.join(value["case_path"].as_str().unwrap_or_default()),
         case_path
@@ -4263,7 +4329,7 @@ fn archive_case_notes_rename_restore_and_active_hint_work() {
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["code"], "case_archived");
     assert!(!case_path.exists());
-    let archived_path = root.join(format!("archive/cases/{case_uid}-case-archive"));
+    let archived_path = root.join(format!("archive/cases/support/{case_uid}-case-archive"));
     assert!(archived_path.exists());
 
     // Reads ignore lifecycle: `case show` now resolves an archived case too.
@@ -4320,7 +4386,7 @@ fn archive_case_notes_rename_restore_and_active_hint_work() {
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["case_uid"], case_uid);
     assert!(!archived_path.exists());
-    let renamed_archive_path = root.join(format!("archive/cases/{case_uid}-case-renamed"));
+    let renamed_archive_path = root.join(format!("archive/cases/support/{case_uid}-case-renamed"));
     assert!(renamed_archive_path.exists());
 
     let (status, stdout) = run(
@@ -4331,14 +4397,14 @@ fn archive_case_notes_rename_restore_and_active_hint_work() {
             "restore",
             &case_uid,
             "--group",
-            "open",
+            "support",
             "--reason",
             "needs attention",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["code"], "case_restored");
-    let restored_path = root.join(format!("cases/open/{case_uid}-case-renamed"));
+    let restored_path = root.join(format!("cases/support/{case_uid}-case-renamed"));
     assert!(restored_path.join("case.md").exists());
     assert!(!renamed_archive_path.exists());
 
@@ -4358,7 +4424,7 @@ fn archive_case_notes_rename_restore_and_active_hint_work() {
 }
 
 #[test]
-fn notes_show_and_archive_refresh_preserve_plain_markdown_bytes() {
+fn notes_show_and_notification_refresh_preserve_plain_markdown_bytes() {
     let root = temp_root("notes-read-only");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
@@ -4389,7 +4455,7 @@ fn notes_show_and_archive_refresh_preserve_plain_markdown_bytes() {
 
     let (status, stdout) = run(&root, &["case", "archive", &case_uid, "--reason", "done"]);
     assert_eq!(status, 0, "{stdout}");
-    let archived_path = root.join(format!("archive/cases/{case_uid}-notes-case"));
+    let archived_path = root.join(format!("archive/cases/support/{case_uid}-notes-case"));
     assert_eq!(
         fs::read_to_string(archived_path.join("notes.md")).unwrap_or_default(),
         active_notes
@@ -4406,29 +4472,26 @@ fn notes_show_and_archive_refresh_preserve_plain_markdown_bytes() {
         active_notes
     );
 
-    write_message(&root, "message_archive_notes", 53, None);
-    write_triage(&root, "message_archive_notes", "archive notes");
-    let (archive_uid, archive_path, _) = create_archive_message(
+    write_message(&root, "message_notification_notes", 53, None);
+    write_triage(&root, "message_notification_notes", "archive notes");
+    let (notification_uid, archive_path, _) = create_notification(
         &root,
         "notes-archive",
-        Some("message_archive_notes"),
+        Some("message_notification_notes"),
         Some("archive summary"),
         Some("archive notes"),
     );
     let archive_notes = "---\ncategory: kept\n---\n\n# Archive Notes\n";
     assert!(fs::write(archive_path.join("notes.md"), archive_notes).is_ok());
 
-    let (status, stdout) = run(&root, &["archive", "message", "show", &archive_uid]);
+    let (status, stdout) = run(&root, &["notification", "show", &notification_uid]);
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(
         fs::read_to_string(archive_path.join("notes.md")).unwrap_or_default(),
         archive_notes
     );
 
-    let (status, stdout) = run(
-        &root,
-        &["archive", "message", "notes", "show", &archive_uid],
-    );
+    let (status, stdout) = run(&root, &["notification", "notes", "show", &notification_uid]);
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(
         parse_one(&stdout)["text"].as_str().unwrap_or_default(),
@@ -4621,7 +4684,7 @@ fn case_new_and_draft_new_from_scratch() {
     let (case_uid, case_path, value) = create_case(
         &root,
         "new-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("new outbound case"),
     );
@@ -4637,7 +4700,7 @@ fn case_new_and_draft_new_from_scratch() {
             "new",
             &case_uid,
             "--to",
-            "plumber@example.com",
+            "plumber@example.com <plumber@example.com>",
             "--subject",
             "Leak under the sink",
         ],
@@ -4647,7 +4710,11 @@ fn case_new_and_draft_new_from_scratch() {
     assert_eq!(value["code"], "draft_created");
     let draft_name = value["draft_name"].as_str().unwrap_or_default().to_string();
     assert!(!draft_name.is_empty());
-    assert!(case_path.join(format!("drafts/{draft_name}")).exists());
+    let draft_path = case_path.join(format!("drafts/{draft_name}"));
+    assert!(draft_path.exists());
+    let draft_text = fs::read_to_string(&draft_path).unwrap_or_default();
+    assert!(draft_text.contains("plumber@example.com"));
+    assert!(!draft_text.contains("plumber@example.com <plumber@example.com>"));
 
     // The scaffolded draft validates against the case with no inbound message.
     let (status, stdout) = run(
@@ -4667,7 +4734,7 @@ fn draft_attach_copies_external_file_and_updates_frontmatter() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "attach-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("new outbound case"),
     );
@@ -4743,7 +4810,7 @@ fn draft_show_reports_content_queue_and_attachment_status() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "show-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("show draft case"),
     );
@@ -4797,7 +4864,7 @@ fn draft_show_missing_draft_returns_not_found() {
     let (case_uid, _, _) = create_case(
         &root,
         "show-missing-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("show missing draft case"),
     );
@@ -4817,7 +4884,7 @@ fn draft_remove_deletes_draft_state_and_outbound_queue() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "remove-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("remove draft case"),
     );
@@ -4902,7 +4969,7 @@ fn draft_change_updates_requested_fields_and_validates() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "change-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("change draft case"),
     );
@@ -4996,7 +5063,7 @@ fn draft_save_send_queue_is_idempotent_and_switches_action() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "queue-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("queue draft case"),
     );
@@ -5073,7 +5140,7 @@ fn draft_remove_rejects_started_outbound_push() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "sent-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("sent draft case"),
     );
@@ -5141,7 +5208,7 @@ fn draft_remove_rejects_in_progress_outbound_push() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "in-progress-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("in progress draft case"),
     );
@@ -5322,7 +5389,7 @@ fn case_index_renders_thread_blocks_with_local_times_and_actions() {
 }
 
 #[test]
-fn archive_message_index_renders_thread_blocks_with_summary_fallbacks() {
+fn notification_index_renders_thread_blocks_with_summary_fallbacks() {
     let root = temp_root("archive-thread-index");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
@@ -5330,8 +5397,8 @@ fn archive_message_index_renders_thread_blocks_with_summary_fallbacks() {
     config["workspace"]["timezone_utc_offset"] = json!("+08:00");
     write_json(&root.join(".afmail/config.json"), &config);
 
-    write_message(&root, "message_archive_reply", 96, None);
-    update_message_json(&root, "message_archive_reply", |message| {
+    write_message(&root, "message_notification_reply", 96, None);
+    update_message_json(&root, "message_notification_reply", |message| {
         message["direction"] = json!("outbound");
         message["subject"] = json!("Original subject");
         message["from"] = json!("Me <me@example.com>");
@@ -5340,29 +5407,28 @@ fn archive_message_index_renders_thread_blocks_with_summary_fallbacks() {
         message["sent_rfc3339"] = json!("2026-05-21T01:00:00Z");
         message["in_reply_to"] = json!("<external@example.com>");
     });
-    write_triage(&root, "message_archive_reply", "reply archive");
-    let (archive_uid, archive_path, _) = create_archive_message(
+    write_triage(&root, "message_notification_reply", "reply archive");
+    let (notification_uid, archive_path, _) = create_notification(
         &root,
         "thread-archive",
-        Some("message_archive_reply"),
+        Some("message_notification_reply"),
         Some("Invoice summary"),
         Some("archive reply"),
     );
 
-    write_message(&root, "message_archive_forward", 97, None);
-    update_message_json(&root, "message_archive_forward", |message| {
+    write_message(&root, "message_notification_forward", 97, None);
+    update_message_json(&root, "message_notification_forward", |message| {
         message["subject"] = json!("转发: Fallback subject");
         message["received_rfc3339"] = json!("2026-05-21T15:00:00+08:00");
     });
-    write_triage(&root, "message_archive_forward", "forward archive");
+    write_triage(&root, "message_notification_forward", "forward archive");
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
-            "message",
+            "notification",
             "add",
-            &archive_uid,
-            "message_archive_forward",
+            &notification_uid,
+            "message_notification_forward",
             "--summary",
             "",
             "--reason",
@@ -5371,17 +5437,18 @@ fn archive_message_index_renders_thread_blocks_with_summary_fallbacks() {
     );
     assert_eq!(status, 0, "{stdout}");
 
-    let index = fs::read_to_string(archive_path.join("archive.md")).unwrap_or_default();
+    let index = fs::read_to_string(archive_path.join("notification.md")).unwrap_or_default();
     assert!(index.contains("## 1. ← Received forward: 转发: Fallback subject"));
     assert!(index.contains("## 2. → Sent reply: Invoice summary"));
     assert!(!index.contains("→ Sent reply: Original subject"));
     assert!(index.contains("- From: alice@example.com"));
     assert!(index.contains("- To: alice@example.com"));
     assert!(index.contains(
-        "- Message: [message_archive_forward](views/messages/message_archive_forward.md)"
+        "- Message: [message_notification_forward](views/messages/message_notification_forward.md)"
     ));
-    assert!(index
-        .contains("- Message: [message_archive_reply](views/messages/message_archive_reply.md)"));
+    assert!(index.contains(
+        "- Message: [message_notification_reply](views/messages/message_notification_reply.md)"
+    ));
     assert!(index.contains("- Time: 2026-05-21 15:00"));
     assert!(index.contains("- Time: 2026-05-21 09:00"));
     assert!(!index.contains(" — "));
@@ -5414,11 +5481,11 @@ fn render_refresh_rebuilds_generated_views_and_removes_obsolete_case_indexes() {
         run(&root, &["case", "archive", &done_uid, "--reason", "done"],).0,
         0
     );
-    let archived_done_path = root.join(format!("archive/cases/{done_uid}-done-case"));
+    let archived_done_path = root.join(format!("archive/cases/support/{done_uid}-done-case"));
 
     write_message(&root, "message_notice", 83, None);
     write_triage(&root, "message_notice", "notice");
-    let (_billing_uid, billing_path, _) = create_archive_message(
+    let (_billing_uid, billing_path, _) = create_notification(
         &root,
         "billing",
         Some("message_notice"),
@@ -5436,7 +5503,7 @@ fn render_refresh_rebuilds_generated_views_and_removes_obsolete_case_indexes() {
     assert!(fs::remove_file(active_path.join("views/messages/message_active.md")).is_ok());
     assert!(fs::remove_file(archived_done_path.join("case.md")).is_ok());
     assert!(fs::remove_file(archived_done_path.join("views/messages/message_done.md")).is_ok());
-    assert!(fs::remove_file(billing_path.join("archive.md")).is_ok());
+    assert!(fs::remove_file(billing_path.join("notification.md")).is_ok());
     assert!(fs::remove_file(billing_path.join("views/messages/message_notice.md")).is_ok());
     let before_push = parse_one(&run(&root, &["push", "list"]).1)["count"].clone();
 
@@ -5446,8 +5513,8 @@ fn render_refresh_rebuilds_generated_views_and_removes_obsolete_case_indexes() {
     assert_eq!(value["code"], "render_refreshed");
     assert_eq!(value["generated"]["case/case.md.j2"], 2);
     assert_eq!(value["generated"]["case/message.md.j2"], 2);
-    assert_eq!(value["generated"]["archive-message/archive.md.j2"], 1);
-    assert_eq!(value["generated"]["archive-message/message.md.j2"], 1);
+    assert_eq!(value["generated"]["notification/notification.md.j2"], 1);
+    assert_eq!(value["generated"]["notification/message.md.j2"], 1);
     assert_eq!(value["template_sources"]["case/case.md.j2"]["builtin"], 2);
     assert_eq!(
         parse_one(&run(&root, &["push", "list"]).1)["count"],
@@ -5474,7 +5541,7 @@ fn render_refresh_rebuilds_generated_views_and_removes_obsolete_case_indexes() {
     assert!(archived_done_path
         .join("views/messages/message_done.md")
         .exists());
-    assert!(billing_path.join("archive.md").exists());
+    assert!(billing_path.join("notification.md").exists());
     assert!(billing_path
         .join("views/messages/message_notice.md")
         .exists());
@@ -5514,8 +5581,8 @@ fn render_refresh_progress_logs_render_substages() {
         "render_dispositions_done",
         "render_cases_start",
         "render_cases_done",
-        "render_archives_start",
-        "render_archives_done",
+        "render_notifications_start",
+        "render_notifications_done",
         "render_cache_write_start",
         "render_cache_write_done",
         "render_done",
@@ -5554,12 +5621,12 @@ fn render_refresh_uses_user_templates_per_generated_file_type() {
         Some("message_case"),
         Some("case"),
     );
-    write_message(&root, "message_archive", 85, None);
-    write_triage(&root, "message_archive", "archive");
-    let (_archive_uid, archive_path, _) = create_archive_message(
+    write_message(&root, "message_notification", 85, None);
+    write_triage(&root, "message_notification", "archive");
+    let (_notification_uid, archive_path, _) = create_notification(
         &root,
         "billing",
-        Some("message_archive"),
+        Some("message_notification"),
         Some("billing summary"),
         Some("archive"),
     );
@@ -5598,7 +5665,7 @@ fn render_refresh_uses_user_templates_per_generated_file_type() {
             .unwrap_or_default()
             .contains("kind: case_message")
     );
-    assert!(!fs::read_to_string(archive_path.join("archive.md"))
+    assert!(!fs::read_to_string(archive_path.join("notification.md"))
         .unwrap_or_default()
         .contains("USER CASE"));
 
@@ -5629,7 +5696,7 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
     assert_eq!(value["workspace_count"], 126);
     assert!(root.join("templates/en-US/case/case.md.j2").is_file());
     assert!(root
-        .join("templates/zh-CN/archive-message/message.md.j2")
+        .join("templates/zh-CN/notification/message.md.j2")
         .is_file());
 
     assert!(fs::write(
@@ -5731,7 +5798,7 @@ fn draft_save_send_validate_current_content_without_freshness_gate() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "fresh-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("fresh draft case"),
     );
@@ -5880,33 +5947,33 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["code"], "case");
 
-    write_message(&root, "message_archive_list", 54, None);
-    write_triage(&root, "message_archive_list", "archive seed");
-    let (archive_uid, _archive_path, _) = create_archive_message(
+    write_message(&root, "message_notification_list", 54, None);
+    write_triage(&root, "message_notification_list", "archive seed");
+    let (notification_uid, _archive_path, _) = create_notification(
         &root,
         "archive-locator",
-        Some("message_archive_list"),
+        Some("message_notification_list"),
         Some("reference notification"),
         Some("file it"),
     );
-    let (status, stdout) = run(&root, &["archive", "list", "messages"]);
+    let (status, stdout) = run(&root, &["notification", "list"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "archive_message_list");
+    assert_eq!(value["code"], "notification_list");
     assert_eq!(value["count"], 1);
     let item = value["items"][0].clone();
-    assert_eq!(item["archive_uid"], archive_uid);
-    assert_eq!(item["archive_name"], "archive-locator");
-    assert!(item["archive_dir"]
+    assert_eq!(item["notification_uid"], notification_uid);
+    assert_eq!(item["notification_name"], "archive-locator");
+    assert!(item["notification_dir"]
         .as_str()
-        .is_some_and(|path| path.starts_with(&archive_uid)));
+        .is_some_and(|path| path.starts_with(&notification_uid)));
     assert_eq!(
         value["path_templates"]["view_path"],
-        "archive/notifications/{archive_dir}/archive.md"
+        "notifications/{notification_dir}/notification.md"
     );
     assert_eq!(
         value["path_templates"]["data_path"],
-        "archive/notifications/{archive_dir}/data/notification.json"
+        "notifications/{notification_dir}/data/notification.json"
     );
     assert!(item.get("view_path").is_none());
     assert!(item.get("data_path").is_none());
@@ -5923,16 +5990,17 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
     let item = value["items"][0].clone();
     assert_eq!(item["case_uid"], case_uid);
     assert_eq!(item["case_name"], "active-locator");
+    assert_eq!(item["group"], "waiting");
     assert!(item["case_dir"]
         .as_str()
         .is_some_and(|path| path.starts_with(&case_uid)));
     assert_eq!(
         value["path_templates"]["view_path"],
-        "archive/cases/{case_dir}/case.md"
+        "archive/cases/{group}/{case_dir}/case.md"
     );
     assert_eq!(
         value["path_templates"]["data_path"],
-        "archive/cases/{case_dir}/data/case.json"
+        "archive/cases/{group}/{case_dir}/data/case.json"
     );
     assert!(item.get("view_path").is_none());
     assert!(item.get("data_path").is_none());
@@ -5943,28 +6011,26 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
     let value = parse_one(&stdout);
     assert_eq!(value["code"], "archive_list");
     assert_eq!(value["case_count"], 1);
-    assert_eq!(value["message_count"], 1);
     assert_eq!(value["cases"][0]["case_uid"], case_uid);
-    assert_eq!(value["messages"][0]["archive_uid"], archive_uid);
+    assert_eq!(value["cases"][0]["group"], "waiting");
+    assert!(value.get("message_count").is_none());
+    assert!(value.get("messages").is_none());
     assert_eq!(
         value["case_path_templates"]["view_path"],
-        "archive/cases/{case_dir}/case.md"
+        "archive/cases/{group}/{case_dir}/case.md"
     );
-    assert_eq!(
-        value["message_path_templates"]["view_path"],
-        "archive/notifications/{archive_dir}/archive.md"
-    );
+    assert!(value.get("message_path_templates").is_none());
 
     let (status, stdout) = run(&root, &["status"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
     assert_eq!(value["case_count"], 0);
     assert_eq!(value["archived_case_count"], 1);
-    assert_eq!(value["archive_message_category_count"], 1);
+    assert_eq!(value["notification_count"], 1);
     assert_eq!(value["progress"]["status"], "idle");
     assert!(value.get("cases").is_none());
     assert!(value.get("archived_cases").is_none());
-    assert!(value.get("archive_message_categories").is_none());
+    assert!(value.get("notification_categories").is_none());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -6054,15 +6120,14 @@ fn header_related_messages_require_case_for_direct_disposition() {
             .unwrap_or_default()
             .contains("afmail case trash CASE_REF"))));
 
-    let (done_archive_uid, _done_archive_path, _) =
-        create_archive_message(&root, "done", None, None, Some("done archive"));
+    let (done_notification_uid, _done_archive_path, _) =
+        create_notification(&root, "done", None, None, Some("done archive"));
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
-            "message",
+            "notification",
             "add",
-            &done_archive_uid,
+            &done_notification_uid,
             "message_health_reply",
             "--summary",
             "reply done",
@@ -6133,11 +6198,11 @@ fn header_related_messages_require_case_for_direct_disposition() {
     assert_eq!(value["code"], "case_archived");
     assert_eq!(
         value["case_path"],
-        format!("archive/cases/{case_uid}-health-conversation")
+        format!("archive/cases/support/{case_uid}-health-conversation")
     );
     assert!(root
         .join(format!(
-            "archive/cases/{case_uid}-health-conversation/case.md"
+            "archive/cases/support/{case_uid}-health-conversation/case.md"
         ))
         .exists());
     let _ = fs::remove_dir_all(root);
@@ -6159,6 +6224,8 @@ fn case_trash_discards_entire_related_conversation() {
         value["sent_rfc3339"] = json!("2026-05-21T10:05:00Z");
         value["in_reply_to"] = json!("<message_trash_parent@example.com>");
         value["references"] = json!(["<message_trash_parent@example.com>"]);
+        value["remote"]["locations"][0]["mailbox_id"] = json!("sent");
+        value["remote"]["locations"][0]["mailbox_name"] = json!("Sent");
     });
     write_triage(&root, "message_trash_parent", "parent");
     write_triage(&root, "message_trash_reply", "reply");
@@ -6204,10 +6271,10 @@ fn case_trash_discards_entire_related_conversation() {
     );
     assert_eq!(
         value["eligible_message_ids"],
-        json!(["message_trash_parent"])
+        json!(["message_trash_parent", "message_trash_reply"])
     );
-    assert_eq!(value["location_count"], 1);
-    assert_eq!(value["queued_location_count"], 1);
+    assert_eq!(value["location_count"], 2);
+    assert_eq!(value["queued_location_count"], 2);
     assert_eq!(value["queued"], true);
     assert!(!case_path.exists());
 
@@ -6229,7 +6296,7 @@ fn case_trash_discards_entire_related_conversation() {
     assert_eq!(push["items"][0]["action"], "trash");
     assert_eq!(
         push["items"][0]["message_ids"],
-        json!(["message_trash_parent"])
+        json!(["message_trash_parent", "message_trash_reply"])
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -6240,16 +6307,16 @@ fn archive_case_trash_discards_archived_case_without_restore() {
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     let mut config = test_config(None, None);
-    config["actions"]["message.archive"]["by_source_mailbox_id"]["inbox"]["steps"] = json!([]);
+    config["actions"]["message.notification"]["by_source_mailbox_id"]["inbox"]["steps"] = json!([]);
     write_json(&root.join(".afmail/config.json"), &config);
-    write_message(&root, "message_archive_case_trash", 81, None);
-    write_triage(&root, "message_archive_case_trash", "done");
+    write_message(&root, "message_notification_case_trash", 81, None);
+    write_triage(&root, "message_notification_case_trash", "done");
 
     let (case_uid, _case_path, _value) = create_case(
         &root,
         "archived-trash",
         None,
-        Some("message_archive_case_trash"),
+        Some("message_notification_case_trash"),
         Some("conversation done"),
     );
     let (status, stdout) = run(
@@ -6283,15 +6350,20 @@ fn archive_case_trash_discards_archived_case_without_restore() {
     let value = parse_one(&stdout);
     assert_eq!(value["code"], "case_trashed");
     assert_eq!(value["source_status"], "archived");
-    assert_eq!(value["message_ids"], json!(["message_archive_case_trash"]));
+    assert_eq!(
+        value["message_ids"],
+        json!(["message_notification_case_trash"])
+    );
     assert_eq!(
         value["eligible_message_ids"],
-        json!(["message_archive_case_trash"])
+        json!(["message_notification_case_trash"])
     );
     assert!(!archived_path.exists());
-    let message = read_json(&root.join("messages/message_archive_case_trash.json"));
+    let message = read_json(&root.join("messages/message_notification_case_trash.json"));
     assert_eq!(message["workspace"]["status"], "trashed");
-    assert!(root.join("trash/message_archive_case_trash.md").exists());
+    assert!(root
+        .join("trash/message_notification_case_trash.md")
+        .exists());
     let push = parse_one(&run(&root, &["push", "list"]).1);
     assert_eq!(push["count"], 1);
     assert_eq!(push["items"][0]["action"], "trash");
@@ -6761,7 +6833,7 @@ fn triage_spam_rejects_when_message_is_referenced_by_case() {
     write_message(&root, "message_spam", 42, None);
     write_triage(&root, "message_spam", "phishing note");
     let case_uid = "c20260521001";
-    let _case_path = write_case_fixture(&root, "open", case_uid, "case-ref", &["message_spam"]);
+    let _case_path = write_case_fixture(&root, "support", case_uid, "case-ref", &["message_spam"]);
 
     let (status, stdout) = run(
         &root,
@@ -6778,7 +6850,7 @@ fn triage_spam_rejects_when_message_is_referenced_by_case() {
     assert_eq!(value["code"], "error");
     assert_eq!(value["error_code"], "message_referenced");
     assert!(value["error"].as_str().is_some_and(
-        |error| error.contains(&format!("cases/open/{case_uid}-case-ref/data/case.json"))
+        |error| error.contains(&format!("cases/support/{case_uid}-case-ref/data/case.json"))
     ));
     assert!(root.join("triage/message_spam.md").exists());
     assert!(root.join("messages/message_spam.json").exists());
@@ -6814,7 +6886,7 @@ fn push_spam_rejects_when_message_becomes_referenced_before_sync() {
         0
     );
     let case_uid = "c20260521001";
-    let _case_path = write_case_fixture(&root, "open", case_uid, "case-ref", &["message_spam"]);
+    let _case_path = write_case_fixture(&root, "support", case_uid, "case-ref", &["message_spam"]);
 
     let (status, stdout) = run(&root, &["push", "--confirm"]);
     assert_eq!(status, 0, "{stdout}");
@@ -6824,7 +6896,7 @@ fn push_spam_rejects_when_message_becomes_referenced_before_sync() {
     assert_eq!(value["failed_count"], 1);
     assert_eq!(value["failures"][0]["error_code"], "message_referenced");
     assert!(value["failures"][0]["error"].as_str().is_some_and(
-        |error| error.contains(&format!("cases/open/{case_uid}-case-ref/data/case.json"))
+        |error| error.contains(&format!("cases/support/{case_uid}-case-ref/data/case.json"))
     ));
     assert!(root.join("messages/message_spam.json").exists());
     let blocked: Value = serde_json::from_str(
@@ -6862,7 +6934,7 @@ fn legacy_config_is_rejected() {
         "schema_version": 1,
             "imap": {"host": null, "port": 993, "tls": true, "username": null, "password_secret": null},
             "pull": {"folders": ["INBOX"]},
-            "case": {"default_group": "open"},
+            "case": {},
             "special_use": {},
             "smtp": {"host": null, "port": 587, "starttls": true, "tls_wrapper": false, "username": null, "password_secret": null, "from": null},
             "push": {"spam_mark_seen": true}
@@ -6905,7 +6977,7 @@ fn push_drafts_send_does_not_require_imap_move() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "case-one",
-        Some("open"),
+        Some("support"),
         Some("message_001"),
         Some("reply test case"),
     );
@@ -6977,7 +7049,7 @@ fn push_drafts_send_new_message_skips_reply_to_step() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "new-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("new outbound case"),
     );
@@ -7048,6 +7120,188 @@ fn push_drafts_send_new_message_skips_reply_to_step() {
 }
 
 #[test]
+fn push_multiple_sends_logs_incremental_refresh_progress() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("multi-send-render-progress");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let smtp = start_smtp_server_connections(2);
+    assert!(smtp.is_some());
+    let smtp = match smtp {
+        Some(server) => server,
+        None => return,
+    };
+    let mut config = test_config(None, Some(smtp.addr.port()));
+    config["actions"]["draft.send"]["steps"] = json!([
+        {"smtp_send": {}}
+    ]);
+    write_json(&root.join(".afmail/config.json"), &config);
+
+    let (case_one_uid, case_one_path, _) = create_case(
+        &root,
+        "multi-one",
+        Some("support"),
+        None,
+        Some("first send"),
+    );
+    let draft_one = format!("---\nkind: draft\ncase_uid: {case_one_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"One\"\nattachments:\n---\n\nFirst body\n");
+    assert!(fs::write(case_one_path.join("drafts/one.md"), draft_one).is_ok());
+    let (case_two_uid, case_two_path, _) = create_case(
+        &root,
+        "multi-two",
+        Some("support"),
+        None,
+        Some("second send"),
+    );
+    let draft_two = format!("---\nkind: draft\ncase_uid: {case_two_uid}\nsend_intent: new\nto:\n  - sue@example.com\ncc: []\nsubject: \"Two\"\nattachments:\n---\n\nSecond body\n");
+    assert!(fs::write(case_two_path.join("drafts/two.md"), draft_two).is_ok());
+    assert_eq!(
+        run(&root, &["case", "draft", "send", &case_one_uid, "one.md"]).0,
+        0
+    );
+    assert_eq!(
+        run(&root, &["case", "draft", "send", &case_two_uid, "two.md"]).0,
+        0
+    );
+
+    let (status, stdout) = run(&root, &["--log", "progress", "push", "--confirm"]);
+    assert_eq!(status, 0, "{stdout}");
+    let lines = parse_lines(&stdout);
+    let progress = lines
+        .iter()
+        .filter(|line| line["code"] == "log" && line["event"] == "progress")
+        .collect::<Vec<_>>();
+    assert!(
+        progress
+            .iter()
+            .any(|line| line["phase"] == "push_local_refresh_start"),
+        "{stdout}"
+    );
+    assert!(
+        progress
+            .iter()
+            .any(|line| line["phase"] == "push_local_refresh_done"),
+        "{stdout}"
+    );
+    assert!(
+        progress
+            .iter()
+            .all(|line| line["phase"] != "render_start" && line["phase"] != "push_render_start"),
+        "{stdout}"
+    );
+    let result = lines.last().cloned().unwrap_or(Value::Null);
+    assert_eq!(result["code"], "push_result");
+    assert_eq!(result["pushed_count"], 2, "{result}");
+    assert_eq!(result["failed_count"], 0);
+    assert!(result.get("render").is_none(), "{result}");
+    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
+    let sent_bodies = [
+        smtp.data_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_default(),
+        smtp.data_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_default(),
+    ];
+    assert!(sent_bodies.iter().any(|body| body.contains("First body")));
+    assert!(sent_bodies.iter().any(|body| body.contains("Second body")));
+    assert!(smtp.handle.join().is_ok());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn push_send_recovers_from_each_local_finalize_stage() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for stage in [
+        "remote_succeeded",
+        "outbound_recorded",
+        "draft_removed",
+        "pending_cleared",
+    ] {
+        let root = temp_root(&format!("push-finalize-recover-{stage}"));
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert_eq!(run(&root, &["init"]).0, 0);
+        let smtp = start_smtp_server();
+        assert!(smtp.is_some());
+        let smtp = match smtp {
+            Some(server) => server,
+            None => return,
+        };
+        let mut config = test_config(None, Some(smtp.addr.port()));
+        config["actions"]["draft.send"]["steps"] = json!([
+            {"smtp_send": {}}
+        ]);
+        write_json(&root.join(".afmail/config.json"), &config);
+        let (case_uid, case_path, _) = create_case(
+            &root,
+            &format!("recover-{stage}"),
+            Some("support"),
+            None,
+            Some("recover send"),
+        );
+        let draft_path = case_path.join("drafts/recover.md");
+        let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"Recover {stage}\"\nattachments:\n---\n\nRecover body {stage}\n");
+        assert!(fs::write(&draft_path, draft).is_ok());
+        assert_eq!(
+            run(&root, &["case", "draft", "send", &case_uid, "recover.md"]).0,
+            0
+        );
+        let push = parse_one(&run(&root, &["push", "list"]).1);
+        let push_id = push["items"][0]["push_id"].as_str().unwrap_or_default();
+        let message_id = format!(
+            "message_sent_{}",
+            push_id.strip_prefix("push_").unwrap_or(push_id)
+        );
+
+        let (status, stdout) = run_with_env(
+            &root,
+            &["push", "--confirm"],
+            &[("AFMAIL_TEST_FAIL_PUSH_LOCAL_STAGE_AFTER", stage)],
+        );
+        assert_eq!(status, 1, "{stdout}");
+        let error = parse_one(&stdout);
+        assert_eq!(error["error_code"], "push_local_stage_test_failure");
+        assert!(smtp
+            .data_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map(|body| body.contains(stage))
+            .unwrap_or(false));
+        assert!(smtp.handle.join().is_ok());
+        let failed_push = parse_one(&run(&root, &["push", "list"]).1);
+        assert_eq!(failed_push["count"], 1, "{failed_push}");
+        assert_eq!(failed_push["items"][0]["local_stage"], stage);
+
+        let (status, stdout) = run(&root, &["push", "--confirm"]);
+        assert_eq!(status, 0, "{stage}: {stdout}");
+        let value = parse_one(&stdout);
+        assert_eq!(value["code"], "push_result");
+        assert_eq!(value["pushed_count"], 1, "{stage}: {value}");
+        assert_eq!(value["failed_count"], 0, "{stage}: {value}");
+        assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
+        assert!(!draft_path.exists(), "{stage}");
+        assert!(root
+            .join(format!(".afmail/messages/{message_id}.eml"))
+            .is_file());
+        let transactions = fs::read_dir(root.join(".afmail/transactions"))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry.path().extension().and_then(|s| s.to_str()) == Some("json")
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(transactions, 0, "{stage}");
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
 fn push_drafts_send_resumes_after_completed_smtp_step() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -7059,7 +7313,7 @@ fn push_drafts_send_resumes_after_completed_smtp_step() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "resume-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("resume outbound case"),
     );
@@ -7138,7 +7392,7 @@ fn draft_save_send_intent_toggles_in_place() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "toggle-thread",
-        Some("open"),
+        Some("support"),
         None,
         Some("toggle outbound case"),
     );
@@ -7197,7 +7451,7 @@ fn push_failure_records_step_level_state() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "step-state",
-        Some("open"),
+        Some("support"),
         None,
         Some("step state case"),
     );
@@ -7251,11 +7505,16 @@ fn push_confirm_stops_after_first_failure() {
     write_json(&root.join(".afmail/config.json"), &config);
 
     let (case_one_uid, case_one_path, _) =
-        create_case(&root, "fail-one", Some("open"), None, Some("first send"));
+        create_case(&root, "fail-one", Some("support"), None, Some("first send"));
     let draft_one = format!("---\nkind: draft\ncase_uid: {case_one_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"One\"\nattachments:\n---\n\nFirst body\n");
     assert!(fs::write(case_one_path.join("drafts/one.md"), draft_one).is_ok());
-    let (case_two_uid, case_two_path, _) =
-        create_case(&root, "fail-two", Some("open"), None, Some("second send"));
+    let (case_two_uid, case_two_path, _) = create_case(
+        &root,
+        "fail-two",
+        Some("support"),
+        None,
+        Some("second send"),
+    );
     let draft_two = format!("---\nkind: draft\ncase_uid: {case_two_uid}\nsend_intent: new\nto:\n  - sue@example.com\ncc: []\nsubject: \"Two\"\nattachments:\n---\n\nSecond body\n");
     assert!(fs::write(case_two_path.join("drafts/two.md"), draft_two).is_ok());
     assert_eq!(
@@ -7316,14 +7575,14 @@ fn special_use_push_list_and_push_lock_work() {
     write_message(&root, "message_001", 1, None);
     write_triage(&root, "message_001", "internal note");
 
-    let (_archive_uid, _archive_path, value) = create_archive_message(
+    let (_notification_uid, _archive_path, value) = create_notification(
         &root,
         "done",
         Some("message_001"),
         Some("archive later"),
         Some("archive later"),
     );
-    assert_eq!(value["code"], "archive_message_created");
+    assert_eq!(value["code"], "notification_created");
     assert_eq!(value["queued"], true);
     assert_eq!(value["location_count"], 1);
     let push_id = value["push_id"].as_str().unwrap_or_default().to_string();
@@ -7335,7 +7594,7 @@ fn special_use_push_list_and_push_lock_work() {
     assert_eq!(value["code"], "push_list");
     assert_eq!(value["count"], 1);
     assert_eq!(value["items"][0]["kind"], "message_action");
-    assert_eq!(value["items"][0]["action"], "archive");
+    assert_eq!(value["items"][0]["action"], "notification");
     assert_eq!(
         value["items"][0]["steps"],
         json!([{"move_to_mailbox_id": "archive"}])
@@ -7534,28 +7793,28 @@ fn triage_archive_already_in_archive_marks_archived_without_push() {
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_archived", 7, None);
-    let message_path = root.join("messages/message_archived.json");
+    write_message(&root, "message_notificationd", 7, None);
+    let message_path = root.join("messages/message_notificationd.json");
     let mut message: Value =
         serde_json::from_str(&fs::read_to_string(&message_path).unwrap_or_default())
             .unwrap_or(Value::Null);
     message["remote"]["locations"][0]["mailbox_name"] = json!("Archive");
     message["remote"]["locations"][0]["mailbox_id"] = json!("archive");
     write_json(&message_path, &message);
-    write_triage(&root, "message_archived", "already handled");
+    write_triage(&root, "message_notificationd", "already handled");
 
-    let (archive_uid, _archive_path, value) = create_archive_message(
+    let (notification_uid, _archive_path, value) = create_notification(
         &root,
         "done",
-        Some("message_archived"),
+        Some("message_notificationd"),
         Some("already archived"),
         Some("already archived"),
     );
-    assert_eq!(value["code"], "archive_message_created");
+    assert_eq!(value["code"], "notification_created");
     assert_eq!(value["queued"], false);
     assert_eq!(value["location_count"], 1);
     assert_eq!(value["queued_location_count"], 0);
-    assert!(!root.join("triage/message_archived.md").exists());
+    assert!(!root.join("triage/message_notificationd.md").exists());
     assert_eq!(
         root.join(".afmail/push")
             .read_dir()
@@ -7569,8 +7828,8 @@ fn triage_archive_already_in_archive_marks_archived_without_push() {
     let message: Value =
         serde_json::from_str(&fs::read_to_string(&message_path).unwrap_or_default())
             .unwrap_or(Value::Null);
-    assert_eq!(message["workspace"]["status"], "archived");
-    assert_eq!(message["workspace"]["archive_uid"], archive_uid);
+    assert_eq!(message["workspace"]["status"], "notification");
+    assert_eq!(message["workspace"]["notification_uid"], notification_uid);
     assert!(message["workspace"].get("buckets").is_none());
     let _ = fs::remove_dir_all(root);
 }
@@ -7589,7 +7848,7 @@ fn triage_assign_move_draft_and_send_contract_work() {
     let (case_uid, case_path, value) = create_case(
         &root,
         "acme-contract",
-        Some("open"),
+        Some("support"),
         Some("message_001"),
         Some("new contract case"),
     );
@@ -7750,7 +8009,7 @@ fn triage_assign_attachment_fetch_work() {
     let (case_uid, case_path, _) = create_case(
         &root,
         "case-one",
-        Some("open"),
+        Some("support"),
         Some("message_001"),
         Some("first case message"),
     );
@@ -7765,7 +8024,7 @@ fn triage_assign_attachment_fetch_work() {
         Some("new missing case"),
     );
     assert_eq!(value["code"], "case_created");
-    assert_eq!(value["group"], "open");
+    assert_eq!(value["group"], "support");
     assert!(!root.join("triage/message_missing.md").is_file());
 
     write_message(&root, "message_002", 2, None);
@@ -7778,7 +8037,7 @@ fn triage_assign_attachment_fetch_work() {
             &case_uid,
             "message_002",
             "--group",
-            "open",
+            "support",
             "--reason",
             "same case",
         ],
@@ -7814,6 +8073,7 @@ fn triage_assign_attachment_fetch_work() {
     let value = parse_one(&stdout);
     assert_eq!(value["code"], "attachment_saved");
     assert_eq!(value["storage"], "message_cache");
+    assert!(value.get("download_marked").is_some());
     assert!(root
         .join(".afmail/messages/message_001.files/pricing.txt")
         .is_file());
@@ -7821,6 +8081,54 @@ fn triage_assign_attachment_fetch_work() {
     let message_view =
         fs::read_to_string(case_path.join("views/messages/message_001.md")).unwrap_or_default();
     assert!(message_view.contains("fetched: `.afmail/messages/message_001.files/pricing.txt`"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn spam_attachment_fetch_is_blocked() {
+    let root = temp_root("spam-attachment-fetch");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    assert!(fs::create_dir_all(root.join("source")).is_ok());
+    assert!(fs::write(root.join("source/malware.txt"), "payload").is_ok());
+
+    write_message(
+        &root,
+        "message_spam_attachment",
+        1,
+        Some("source/malware.txt"),
+    );
+    write_triage(&root, "message_spam_attachment", "spam attachment");
+    let (status, stdout) = run(
+        &root,
+        &[
+            "message",
+            "spam",
+            "message_spam_attachment",
+            "--reason",
+            "unsafe attachment",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "message",
+            "attachment",
+            "fetch",
+            "message_spam_attachment",
+            "2",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "error");
+    assert_eq!(value["error_code"], "attachment_fetch_blocked");
+    assert!(!root
+        .join(".afmail/messages/message_spam_attachment.files/malware.txt")
+        .exists());
 
     let _ = fs::remove_dir_all(root);
 }

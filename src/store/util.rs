@@ -550,7 +550,7 @@ pub(super) fn next_uid_for_date(
     for uid in existing {
         let valid = match prefix {
             'c' => validate_case_uid(&uid).is_ok(),
-            'a' => validate_archive_uid(&uid).is_ok(),
+            'n' => validate_notification_uid(&uid).is_ok(),
             'p' => validate_contact_uid(&uid).is_ok(),
             _ => false,
         };
@@ -570,8 +570,8 @@ pub(super) fn case_dir_name(case_uid: &str, name: &str) -> String {
     format!("{case_uid}-{}", human_slug(name))
 }
 
-pub(super) fn archive_dir_name(archive_uid: &str, name: &str) -> String {
-    format!("{archive_uid}-{}", human_slug(name))
+pub(super) fn notification_dir_name(notification_uid: &str, name: &str) -> String {
+    format!("{notification_uid}-{}", human_slug(name))
 }
 
 pub(super) fn human_slug(value: &str) -> String {
@@ -624,9 +624,9 @@ pub(super) fn parse_case_ref(value: &str) -> Result<String> {
     })
 }
 
-pub(super) fn parse_archive_ref(value: &str) -> Result<String> {
-    parse_uid_ref(value, 'a', "archive_ref").and_then(|uid| {
-        validate_archive_uid(&uid)?;
+pub(super) fn parse_notification_ref(value: &str) -> Result<String> {
+    parse_uid_ref(value, 'n', "notification_ref").and_then(|uid| {
+        validate_notification_uid(&uid)?;
         Ok(uid)
     })
 }
@@ -662,8 +662,8 @@ pub(super) fn validate_case_uid(value: &str) -> Result<()> {
     validate_uid("case_uid", value, 'c')
 }
 
-pub(super) fn validate_archive_uid(value: &str) -> Result<()> {
-    validate_uid("archive_uid", value, 'a')
+pub(super) fn validate_notification_uid(value: &str) -> Result<()> {
+    validate_uid("notification_uid", value, 'n')
 }
 
 pub(super) fn validate_uid(label: &str, value: &str, prefix: char) -> Result<()> {
@@ -679,11 +679,11 @@ pub(super) fn validate_uid(label: &str, value: &str, prefix: char) -> Result<()>
     Ok(())
 }
 
-pub(super) fn archive_uid_from_dir_name(value: &str) -> Option<String> {
+pub(super) fn notification_uid_from_dir_name(value: &str) -> Option<String> {
     value
         .split('-')
         .next()
-        .filter(|uid| validate_archive_uid(uid).is_ok())
+        .filter(|uid| validate_notification_uid(uid).is_ok())
         .map(ToString::to_string)
 }
 
@@ -891,15 +891,6 @@ impl Workspace {
             .unwrap_or_else(|| workspace_local_date(&offset)))
     }
 
-    pub(super) fn message_date(&self, message_id: &str) -> Result<String> {
-        let message = self.read_message_by_id(message_id)?;
-        let offset = self.workspace_date_offset()?;
-        Ok(message_time(&message)
-            .and_then(|time| DateTime::parse_from_rfc3339(&time).ok())
-            .map(|time| time.with_timezone(&offset).format("%Y%m%d").to_string())
-            .unwrap_or_else(|| workspace_local_date(&offset)))
-    }
-
     pub(super) fn next_case_uid(&self, date: &str) -> Result<String> {
         next_uid_for_date(
             'c',
@@ -910,8 +901,8 @@ impl Workspace {
         )
     }
 
-    pub(super) fn next_archive_uid(&self, date: &str) -> Result<String> {
-        next_uid_for_date('a', date, self.archive_message_category_ids()?.into_iter())
+    pub(super) fn next_notification_uid(&self, date: &str) -> Result<String> {
+        next_uid_for_date('n', date, self.notification_ids()?.into_iter())
     }
 
     pub(super) fn message_path(&self, message_id: &str) -> PathBuf {

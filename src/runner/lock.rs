@@ -1,7 +1,7 @@
 use crate::cli::{
-    ArchiveAction, ArchiveCaseAction, ArchiveCaseNotesAction, ArchiveMessageCommand,
-    ArchiveMessageNotesAction, CaseCommand, CaseNotesAction, Command, ConfigAction, ContactCommand,
-    ContactNotesAction, DoctorAction, MessageAction, PushAction, RemoteAction, RenderAction,
+    ArchiveAction, ArchiveCaseAction, ArchiveCaseNotesAction, CaseCommand, CaseNotesAction,
+    Command, ConfigAction, ContactCommand, ContactNotesAction, DoctorAction, MessageAction,
+    NotificationCommand, NotificationNotesAction, PushAction, RemoteAction, RenderAction,
     TriageAction,
 };
 use crate::error::Result;
@@ -69,19 +69,20 @@ fn lock_mode(command: &Command) -> LockMode {
         },
         Command::Archive { action } => match action {
             ArchiveAction::List { .. } => LockMode::Shared,
-            ArchiveAction::Message {
-                action:
-                    ArchiveMessageCommand::Show { .. }
-                    | ArchiveMessageCommand::Notes {
-                        action: ArchiveMessageNotesAction::Show { .. },
-                    },
-            } => LockMode::Shared,
             ArchiveAction::Case {
                 action:
                     ArchiveCaseAction::Show { .. }
                     | ArchiveCaseAction::Notes {
                         action: ArchiveCaseNotesAction::Show { .. },
                     },
+            } => LockMode::Shared,
+            _ => LockMode::Exclusive,
+        },
+        Command::Notification { action } => match action {
+            NotificationCommand::List
+            | NotificationCommand::Show { .. }
+            | NotificationCommand::Notes {
+                action: NotificationNotesAction::Show { .. },
             } => LockMode::Shared,
             _ => LockMode::Exclusive,
         },

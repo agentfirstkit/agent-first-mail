@@ -1,26 +1,15 @@
 use super::defaults::{
-    default_case_group, default_contact_group, default_reason_mode, default_smtp_port,
-    default_timezone_utc_offset, default_timezone_utc_offset_option, default_true,
+    default_contact_group, default_reason_mode, default_smtp_port, default_timezone_utc_offset,
+    default_timezone_utc_offset_option, default_true,
 };
 use super::validation::validate_language_bcp47;
 use crate::error::{AppError, Result};
 use agent_first_data::normalize_utc_offset;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct CaseSection {
-    #[serde(default = "default_case_group")]
-    pub default_group: String,
-}
-
-impl Default for CaseSection {
-    fn default() -> Self {
-        Self {
-            default_group: default_case_group(),
-        }
-    }
-}
+pub struct CaseSection {}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

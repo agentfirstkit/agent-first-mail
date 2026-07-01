@@ -20,8 +20,8 @@ pub enum TemplateKey {
     TriageView,
     CaseDocument,
     CaseMessage,
-    ArchiveMessageIndex,
-    ArchiveMessage,
+    NotificationIndex,
+    NotificationMessage,
     StatusIndex,
     StatusMessage,
 }
@@ -38,8 +38,8 @@ impl TemplateKey {
         Self::TriageView,
         Self::CaseDocument,
         Self::CaseMessage,
-        Self::ArchiveMessageIndex,
-        Self::ArchiveMessage,
+        Self::NotificationIndex,
+        Self::NotificationMessage,
         Self::StatusIndex,
         Self::StatusMessage,
     ];
@@ -56,8 +56,8 @@ impl TemplateKey {
             Self::TriageView => "triage/view.md.j2",
             Self::CaseDocument => "case/case.md.j2",
             Self::CaseMessage => "case/message.md.j2",
-            Self::ArchiveMessageIndex => "archive-message/archive.md.j2",
-            Self::ArchiveMessage => "archive-message/message.md.j2",
+            Self::NotificationIndex => "notification/notification.md.j2",
+            Self::NotificationMessage => "notification/message.md.j2",
             Self::StatusIndex => "status/index.md.j2",
             Self::StatusMessage => "status/message.md.j2",
         }

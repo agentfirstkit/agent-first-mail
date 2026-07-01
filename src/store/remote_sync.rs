@@ -109,18 +109,18 @@ impl Workspace {
 
         crate::progress::emit(
             &mut progress,
-            "pull_render_archives_start",
-            json!({"render_stage": "archives"}),
+            "pull_render_notifications_start",
+            json!({"render_stage": "notifications"}),
         );
         let render_step_started = Instant::now();
-        let archive_refresh = self.refresh_archive_indexes_cached(&mut render_cache)?;
+        let notification_refresh = self.refresh_notification_indexes_cached(&mut render_cache)?;
         crate::progress::emit(
             &mut progress,
-            "pull_render_archives_done",
+            "pull_render_notifications_done",
             render_step_done_fields(
-                "archives",
+                "notifications",
                 render_step_started,
-                archive_refresh_progress_fields(&archive_refresh),
+                notification_refresh_progress_fields(&notification_refresh),
             ),
         );
 
@@ -173,24 +173,24 @@ impl Workspace {
                 ),
             );
             map.insert(
-                "archive_message_category_count".to_string(),
+                "notification_count".to_string(),
                 json!(
-                    archive_refresh.archive_message_index_count
-                        + archive_refresh.archive_message_index_unchanged_count
+                    notification_refresh.notification_index_count
+                        + notification_refresh.notification_index_unchanged_count
                 ),
             );
             map.insert(
-                "archive_message_view_written_count".to_string(),
+                "notification_view_written_count".to_string(),
                 json!(
-                    archive_refresh.archive_message_index_count
-                        + archive_refresh.archive_message_count
+                    notification_refresh.notification_index_count
+                        + notification_refresh.notification_message_count
                 ),
             );
             map.insert(
-                "archive_message_view_unchanged_count".to_string(),
+                "notification_view_unchanged_count".to_string(),
                 json!(
-                    archive_refresh.archive_message_index_unchanged_count
-                        + archive_refresh.archive_message_unchanged_count
+                    notification_refresh.notification_index_unchanged_count
+                        + notification_refresh.notification_message_unchanged_count
                 ),
             );
         }
@@ -211,24 +211,24 @@ impl Workspace {
                 ),
             );
             map.insert(
-                "archive_message_category_count".to_string(),
+                "notification_count".to_string(),
                 json!(
-                    archive_refresh.archive_message_index_count
-                        + archive_refresh.archive_message_index_unchanged_count
+                    notification_refresh.notification_index_count
+                        + notification_refresh.notification_index_unchanged_count
                 ),
             );
             map.insert(
-                "archive_message_view_written_count".to_string(),
+                "notification_view_written_count".to_string(),
                 json!(
-                    archive_refresh.archive_message_index_count
-                        + archive_refresh.archive_message_count
+                    notification_refresh.notification_index_count
+                        + notification_refresh.notification_message_count
                 ),
             );
             map.insert(
-                "archive_message_view_unchanged_count".to_string(),
+                "notification_view_unchanged_count".to_string(),
                 json!(
-                    archive_refresh.archive_message_index_unchanged_count
-                        + archive_refresh.archive_message_unchanged_count
+                    notification_refresh.notification_index_unchanged_count
+                        + notification_refresh.notification_message_unchanged_count
                 ),
             );
         }
@@ -281,8 +281,8 @@ impl Workspace {
                 tombstoned_message_ids.push(id);
             } else {
                 message.workspace.status = MessageStatus::DeletedRemote.as_str().to_string();
-                message.workspace.archive_uid = None;
-                message.workspace.archived_rfc3339 = None;
+                message.workspace.notification_uid = None;
+                message.workspace.notification_rfc3339 = None;
                 message.workspace.origin = None;
                 message.workspace.remote_sync = None;
                 message.workspace.push = None;
@@ -338,15 +338,15 @@ fn case_refresh_progress_fields(refresh: &CaseViewRefresh) -> Value {
     })
 }
 
-fn archive_refresh_progress_fields(refresh: &ArchiveMessageViewRefresh) -> Value {
+fn notification_refresh_progress_fields(refresh: &NotificationViewRefresh) -> Value {
     json!({
-        "archive_message_category_count": refresh.archive_message_index_count + refresh.archive_message_index_unchanged_count,
-        "archive_message_view_written_count": refresh.archive_message_index_count + refresh.archive_message_count,
-        "archive_message_view_unchanged_count": refresh.archive_message_index_unchanged_count + refresh.archive_message_unchanged_count,
-        "archive_message_index_written_count": refresh.archive_message_index_count,
-        "archive_message_index_unchanged_count": refresh.archive_message_index_unchanged_count,
-        "archive_message_written_count": refresh.archive_message_count,
-        "archive_message_unchanged_count": refresh.archive_message_unchanged_count,
+        "notification_count": refresh.notification_index_count + refresh.notification_index_unchanged_count,
+        "notification_view_written_count": refresh.notification_index_count + refresh.notification_message_count,
+        "notification_view_unchanged_count": refresh.notification_index_unchanged_count + refresh.notification_message_unchanged_count,
+        "notification_index_written_count": refresh.notification_index_count,
+        "notification_index_unchanged_count": refresh.notification_index_unchanged_count,
+        "notification_message_written_count": refresh.notification_message_count,
+        "notification_message_unchanged_count": refresh.notification_message_unchanged_count,
     })
 }
 
@@ -593,7 +593,7 @@ impl Workspace {
             };
             let Some(rule) = config
                 .actions
-                .message_archive
+                .message_notification
                 .by_source_mailbox_id
                 .get(&source_id)
             else {
@@ -616,7 +616,7 @@ impl Workspace {
             }
             let Some(rule) = config
                 .actions
-                .message_archive
+                .message_notification
                 .by_source_mailbox_id
                 .get(&source_id)
             else {
@@ -624,7 +624,7 @@ impl Workspace {
             };
             if let Some(item) = crate::push_queue::queue_action_steps(
                 &self.root,
-                "message.archive",
+                "message.notification",
                 &queue_message_ids,
                 &queue_locations,
                 &rule.steps,
@@ -704,7 +704,7 @@ impl Workspace {
                     "afmail status",
                     "afmail push list",
                     "afmail case show CASE_REF",
-                    "afmail archive message show ARCHIVE_REF"
+                    "afmail notification show NOTIFICATION_REF"
                 ]
             })))
         }
@@ -728,11 +728,11 @@ impl Workspace {
         let message = self.read_message_by_id(message_id)?;
         let cases = CaseIndex::build(self)?;
         let mut blockers = Vec::new();
-        let has_archive_state = message.workspace.archive_uid.is_some()
+        let has_archive_state = message.workspace.notification_uid.is_some()
             || message.workspace.status == "archived"
             || cases.has_archived_reference(message_id);
         if !has_archive_state {
-            blockers.push(format!("messages/{message_id}.json:archive_uid"));
+            blockers.push(format!("messages/{message_id}.json:notification_uid"));
         }
         let ids = [message_id.to_string()]
             .into_iter()
@@ -862,7 +862,7 @@ impl Workspace {
         let mut references = Vec::new();
         self.collect_case_references(&ids, &mut references)?;
         self.collect_push_references(&ids, allowed_push_path, &mut references)?;
-        self.collect_direct_archive_references(&ids, &mut references)?;
+        self.collect_notification_references(&ids, &mut references)?;
         if references.is_empty() {
             Ok(())
         } else {
@@ -882,7 +882,7 @@ impl Workspace {
                     "afmail status",
                     "afmail push list",
                     "afmail case show CASE_REF",
-                    "afmail archive message show ARCHIVE_REF"
+                    "afmail notification show NOTIFICATION_REF"
                 ]
             })))
         }
@@ -997,7 +997,7 @@ impl Workspace {
         Ok(())
     }
 
-    pub(super) fn collect_direct_archive_references(
+    pub(super) fn collect_notification_references(
         &self,
         ids: &BTreeSet<String>,
         references: &mut Vec<String>,
@@ -1007,8 +1007,8 @@ impl Workspace {
             let Ok(message) = self.read_message_by_id(message_id) else {
                 continue;
             };
-            if message.workspace.archive_uid.is_some() {
-                references.push(format!("{}:archive_uid", rel_path(&self.root, &path)));
+            if message.workspace.notification_uid.is_some() {
+                references.push(format!("{}:notification_uid", rel_path(&self.root, &path)));
             }
         }
         Ok(())

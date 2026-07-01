@@ -236,8 +236,8 @@ impl Workspace {
             for item in data.items {
                 let mut message = self.read_message_by_id(&item.message_id)?;
                 message.workspace.status = spec.status.as_str().to_string();
-                message.workspace.archive_uid = None;
-                message.workspace.archived_rfc3339 = None;
+                message.workspace.notification_uid = None;
+                message.workspace.notification_rfc3339 = None;
                 message.workspace.origin = None;
                 self.apply_identity_match(&mut message, &config)?;
                 desired

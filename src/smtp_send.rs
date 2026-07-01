@@ -106,7 +106,6 @@ pub fn mark_sent_and_append_case(
         &added_rfc3339,
     );
     update_case_metadata_after_append(case_path, &case_data)?;
-    crate::store::Workspace::at(root).render_refresh()?;
     Ok(())
 }
 
@@ -312,10 +311,40 @@ fn build_transport(config: &SmtpConfig) -> Result<SmtpTransport> {
     Ok(builder.build())
 }
 
+pub(crate) fn normalize_recipient_address(value: &str, field: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.parse::<Mailbox>().is_ok() {
+        return Ok(trimmed.to_string());
+    }
+    fallback_angle_address(trimmed)
+        .map(|address| address.to_string())
+        .ok_or_else(|| AppError::new("draft_invalid", format!("invalid {field} address")))
+}
+
 fn parse_mailbox(value: &str, field: &str) -> Result<Mailbox> {
-    value
-        .parse::<Mailbox>()
-        .map_err(|e| AppError::new("draft_invalid", format!("invalid {field} address: {e}")))
+    let trimmed = value.trim();
+    match trimmed.parse::<Mailbox>() {
+        Ok(mailbox) => Ok(mailbox),
+        Err(err) => {
+            if let Some(address) = fallback_angle_address(trimmed) {
+                Ok(Mailbox::new(None, address))
+            } else {
+                Err(AppError::new(
+                    "draft_invalid",
+                    format!("invalid {field} address: {err}"),
+                ))
+            }
+        }
+    }
+}
+
+fn fallback_angle_address(value: &str) -> Option<Address> {
+    let (display, rest) = value.rsplit_once('<')?;
+    if display.trim().is_empty() || !rest.ends_with('>') {
+        return None;
+    }
+    let address = rest.strip_suffix('>')?.trim();
+    address.parse::<Address>().ok()
 }
 
 struct ReplyHeaders {
@@ -438,7 +467,7 @@ mod tests {
     #[test]
     fn builds_plain_draft_message() {
         let root = temp_root("build");
-        let case_path = root.join("cases/open/c20260521001");
+        let case_path = root.join("cases/support/c20260521001");
         let _ = fs::create_dir_all(case_path.join("drafts"));
         let fm = draft(
             "kind: draft\ncase_uid: c20260521001\nto:\n  - alice@example.com\nsubject: Hello",
@@ -459,6 +488,38 @@ mod tests {
         assert!(raw.contains("Subject: Hello"));
         assert!(raw.contains("Hi"));
         assert!(raw.contains("Message-ID: <msg@example.com>"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn builds_message_with_email_as_display_name_recipient() {
+        let root = temp_root("email-display");
+        let case_path = root.join("cases/support/c20260521001");
+        let _ = fs::create_dir_all(case_path.join("drafts"));
+        let fm = draft(
+            "kind: draft\ncase_uid: c20260521001\nto:\n  - alice@example.com <alice@example.com>\nsubject: Hello",
+        );
+        let msg = build_message(
+            &root,
+            &case_path,
+            "c20260521001",
+            &fm,
+            "Hi",
+            &test_identity(),
+            "<msg@example.com>",
+        );
+        assert!(msg.is_ok());
+        let envelope_to = msg
+            .map(|message| {
+                message
+                    .envelope()
+                    .to()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert_eq!(envelope_to, vec!["alice@example.com"]);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -498,8 +559,8 @@ mod tests {
             observed_recipient_emails: Vec::new(),
             workspace: crate::types::WorkspaceState {
                 status: "triage".to_string(),
-                archive_uid: None,
-                archived_rfc3339: None,
+                notification_uid: None,
+                notification_rfc3339: None,
                 origin: None,
                 remote_sync: None,
                 push: None,
@@ -511,7 +572,7 @@ mod tests {
     #[test]
     fn reply_builds_full_references_chain() {
         let root = temp_root("reply-chain");
-        let case_path = root.join("cases/open/c20260521001");
+        let case_path = root.join("cases/support/c20260521001");
         let _ = fs::create_dir_all(case_path.join("drafts"));
         // Parent already carries a References chain (bracket-less, as stored).
         write_parent(
@@ -543,7 +604,7 @@ mod tests {
     #[test]
     fn reply_without_parent_references_falls_back_to_parent_id() {
         let root = temp_root("reply-fallback");
-        let case_path = root.join("cases/open/c20260521001");
+        let case_path = root.join("cases/support/c20260521001");
         let _ = fs::create_dir_all(case_path.join("drafts"));
         write_parent(&root, "message_p", "parent@example.com", &[]);
         let identity = test_identity();

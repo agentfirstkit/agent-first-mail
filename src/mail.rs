@@ -48,8 +48,8 @@ pub fn parse_inbound_message(
             direction: Some("inbound".to_string()),
             workspace: WorkspaceState {
                 status: "triage".to_string(),
-                archive_uid: None,
-                archived_rfc3339: None,
+                notification_uid: None,
+                notification_rfc3339: None,
                 origin: None,
                 remote_sync: None,
                 push: None,
@@ -190,8 +190,8 @@ pub fn parse_outbound_message_with_status(
             direction: Some("outbound".to_string()),
             workspace: WorkspaceState {
                 status: workspace_status,
-                archive_uid: None,
-                archived_rfc3339: None,
+                notification_uid: None,
+                notification_rfc3339: None,
                 origin: None,
                 remote_sync: None,
                 push: None,

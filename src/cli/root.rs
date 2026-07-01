@@ -2,7 +2,8 @@
 use super::UiCommand;
 use super::{
     ArchiveAction, CaseCommand, ConfigAction, ContactCommand, DoctorAction, LogAction,
-    MessageAction, PurgeAction, PushAction, RemoteAction, RenderAction, SkillAction, TriageAction,
+    MessageAction, NotificationCommand, PurgeAction, PushAction, RemoteAction, RenderAction,
+    SkillAction, TriageAction,
 };
 use clap::{Parser, Subcommand};
 
@@ -42,10 +43,10 @@ cases/<group>/<case_uid>-<name>/data/ canonical case state
 cases/<group>/<case_uid>-<name>/views/ generated case detail views
 contacts/<group>/<contact_uid>-<name>.md canonical contact cards
 archive/contacts/<contact_uid>-<name>.md archived contact cards
-archive/cases/<case_uid>-<name>/ archived case workspaces
-archive/notifications/<archive_uid>-<name>/archive.md generated archive entry view
-archive/notifications/<archive_uid>-<name>/data/ canonical archive state
-archive/notifications/<archive_uid>-<name>/views/ generated archive detail views
+archive/cases/<group>/<case_uid>-<name>/ archived case workspaces; <group> is a case group, not an archive category
+notifications/<notification_uid>-<name>/notification.md generated notification entry view
+notifications/<notification_uid>-<name>/data/ canonical notification state
+notifications/<notification_uid>-<name>/views/ generated notification detail views
 ```
 
 ### Examples
@@ -60,19 +61,19 @@ afmail doctor
 afmail pull
 afmail pull sent archive
 afmail remote folders
-afmail case create --name 应用反馈-肥料登记 --message message_inbox_607146690_21 --group open --reason "new feedback thread"
+afmail case create --name 应用反馈-肥料登记 --group support --message message_inbox_607146690_21 --reason "new feedback thread"
 afmail case show c20260603001
 afmail case add c20260603001 message_inbox_607146690_22 --reason "follow-up belongs to same feedback case"
-afmail archive message create --name 服务通知 --message message_inbox_607146690_23 --summary "billing notification" --reason "billing notification"
-afmail archive message show a20260603001
-afmail archive message restore a20260603001 message_inbox_607146690_23 --reason "needs triage again"
+afmail notification create --name 服务通知 --message message_inbox_607146690_23 --summary "billing notification" --reason "billing notification"
+afmail notification show n20260603001
+afmail notification restore n20260603001 message_inbox_607146690_23 --reason "needs triage again"
 afmail message spam message_inbox_607146690_23 --reason "phishing attempt"
 afmail message trash message_inbox_607146690_24 --reason "duplicate no longer needed"
 afmail render refresh
 afmail doctor repair --confirm
 afmail case move c20260603001 waiting
 afmail case archive c20260603001 --reason "feedback handled"
-afmail archive case restore c20260603001 --group open --reason "customer replied"
+afmail archive case restore c20260603001 --group support --reason "customer replied"
 afmail case tag c20260603001 legal --reason "legal review needed"
 afmail contact create --name "Zhang San" --email zhang@example.com --org Acme --role Buyer
 afmail contact list --group people
@@ -197,7 +198,12 @@ pub enum Command {
         #[command(subcommand)]
         action: ContactCommand,
     },
-    /// Inspect and manage archived cases and direct-message archive categories.
+    /// Inspect and manage notification collections.
+    Notification {
+        #[command(subcommand)]
+        action: NotificationCommand,
+    },
+    /// Inspect and manage archived cases.
     Archive {
         #[command(subcommand)]
         action: ArchiveAction,

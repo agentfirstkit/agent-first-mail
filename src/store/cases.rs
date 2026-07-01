@@ -3,6 +3,7 @@ use super::*;
 #[derive(Debug, Clone)]
 pub(super) struct ArchivedCaseEntry {
     pub(super) case_uid: String,
+    pub(super) group: String,
     pub(super) path: PathBuf,
 }
 
@@ -174,8 +175,13 @@ impl Workspace {
         if let Some(message_id) = message_id {
             validate_id("message_id", message_id)?;
         }
+        let group = group.ok_or_else(|| {
+            AppError::new(
+                "invalid_request",
+                "case create requires --group CATEGORY; choose a meaningful path-safe category in the mailbox/workspace language, such as support, invoice, 客服, 发票, 合同, or 退款",
+            )
+        })?;
         let config = MailConfig::load(&self.root)?;
-        let group = group.unwrap_or(config.case.default_group.as_str());
         validate_id("group", group)?;
         let date = if let Some(message_id) = message_id {
             self.first_related_message_date(message_id)?
@@ -532,7 +538,7 @@ impl Workspace {
         }
         self.collect_draft_references(&ids, &mut references)?;
         self.collect_push_references(&ids, None, &mut references)?;
-        self.collect_direct_archive_references(&ids, &mut references)?;
+        self.collect_notification_references(&ids, &mut references)?;
         if references.is_empty() {
             return Ok(());
         }
@@ -554,7 +560,7 @@ impl Workspace {
                 "afmail status",
                 "afmail push list",
                 format!("afmail case show {case_uid}"),
-                "afmail archive message show ARCHIVE_REF"
+                "afmail notification show NOTIFICATION_REF"
             ]
         })))
     }
@@ -571,7 +577,7 @@ impl Workspace {
             "case_archive",
             vec![
                 from_path.clone(),
-                format!("archive/cases/{case_uid}"),
+                format!("archive/cases/*/{case_uid}"),
                 ".afmail/push".to_string(),
             ],
         )?;
@@ -931,6 +937,8 @@ impl Workspace {
         }
         fs::rename(&entry.path, &active_path).map_err(|e| AppError::io("restore case", &e))?;
         let message_ids = messages.message_ids();
+        let removed_pushes =
+            self.remove_pending_message_pushes_for_messages(&message_ids, "message.notification")?;
         self.refresh_messages_after_ref_change(&message_ids)?;
         self.refresh_case_message_views(&active_path)?;
         self.append_audit_event(
@@ -942,13 +950,16 @@ impl Workspace {
                 "to_group": group,
                 "from_path": rel_path(&self.root, &entry.path),
                 "to_path": rel_path(&self.root, &active_path),
+                "removed_push_ids": removed_pushes,
             }),
         )?;
         Ok(json!({
             "code": "case_restored",
             "case_uid": case_uid,
             "group": group,
-            "case_path": rel_path(&self.root, &active_path)
+            "case_path": rel_path(&self.root, &active_path),
+            "removed_push_count": removed_pushes.len(),
+            "push_ids": removed_pushes
         }))
     }
 
@@ -970,7 +981,7 @@ impl Workspace {
         validate_name("case_name", name)?;
         let (case_uid, entry) = self.resolve_archived_case(case_ref)?;
         let old_name = case_name(&entry.path)?;
-        let to = self.archive_case_path_for_name(&case_uid, name);
+        let to = self.archive_case_path_for_name(&entry.group, &case_uid, name);
         let changed_path = to != entry.path;
         if changed_path && to.exists() {
             return Err(AppError::new(
@@ -1049,7 +1060,18 @@ impl Workspace {
         let dir_name = case_path
             .file_name()
             .ok_or_else(|| AppError::new("store_error", "case has no directory name"))?;
-        let archived_path = self.root.join("archive").join("cases").join(dir_name);
+        let group = case_path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| AppError::new("store_error", "case has no group directory"))?;
+        validate_id("group", group)?;
+        let archived_path = self
+            .root
+            .join("archive")
+            .join("cases")
+            .join(group)
+            .join(dir_name);
         if archived_path.exists() {
             return Err(AppError::new(
                 "case_exists",
@@ -1084,7 +1106,7 @@ impl Workspace {
         let message_ids = messages.message_ids();
         self.ensure_case_messages_unreferenced_except(case_uid, case_path, &message_ids)?;
         let config = MailConfig::load(&self.root)?;
-        let locations = self.message_remote_locations(&message_ids)?;
+        let locations = self.message_remote_locations_any(&message_ids)?;
         let mut eligible_message_ids = Vec::new();
         for location in &locations {
             merge_string(&mut eligible_message_ids, &location.message_id);
@@ -1221,6 +1243,7 @@ impl Workspace {
                 json!({
                     "case_uid": entry.case_uid,
                     "case_name": case_name(&entry.path).unwrap_or_default(),
+                    "group": entry.group,
                     "case_dir": entry
                         .path
                         .file_name()
@@ -1425,18 +1448,34 @@ impl Workspace {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        for case_entry in read_dir(&cases_dir, "read archived cases")? {
-            let case_path = case_entry.path();
-            if !case_path.is_dir() || !case_json_path(&case_path).is_file() {
+        for group_entry in read_dir(&cases_dir, "read archived cases")? {
+            let group_path = group_entry.path();
+            if !group_path.is_dir() {
                 continue;
             }
-            let fm = read_case_file(&case_path)?;
-            out.push(ArchivedCaseEntry {
-                case_uid: fm.collection_uid,
-                path: case_path,
-            });
+            let group = group_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            for case_entry in read_dir(&group_path, "read archived case group")? {
+                let case_path = case_entry.path();
+                if !case_path.is_dir() || !case_json_path(&case_path).is_file() {
+                    continue;
+                }
+                let fm = read_case_file(&case_path)?;
+                out.push(ArchivedCaseEntry {
+                    case_uid: fm.collection_uid,
+                    group: group.clone(),
+                    path: case_path,
+                });
+            }
         }
-        out.sort_by(|a, b| a.case_uid.cmp(&b.case_uid));
+        out.sort_by(|a, b| {
+            let a_key = (&a.group, &a.case_uid);
+            let b_key = (&b.group, &b.case_uid);
+            a_key.cmp(&b_key)
+        });
         Ok(out)
     }
 

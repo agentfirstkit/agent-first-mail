@@ -60,7 +60,7 @@ impl Workspace {
                 "git_checked": false,
                 "messages": true,
                 "cases": true,
-                "archives": true,
+                "notifications": true,
                 "push_queue": true,
                 "templates": true,
                 "transactions": true,
@@ -113,7 +113,7 @@ impl Workspace {
         self.check_transactions(&mut issues)?;
         self.check_messages(&mut issues)?;
         self.check_case_refs(&mut issues)?;
-        self.check_archive_refs(&mut issues)?;
+        self.check_notification_refs(&mut issues)?;
         self.check_push_overlay(&mut issues)?;
         self.check_templates(&mut issues)?;
         Ok(issues)
@@ -243,23 +243,23 @@ impl Workspace {
         Ok(())
     }
 
-    fn check_archive_refs(&self, issues: &mut Vec<DoctorIssue>) -> Result<()> {
-        for archive_uid in self.archive_message_category_ids()? {
-            let archive = self.read_archive_messages(&archive_uid)?;
-            for item in archive.items {
+    fn check_notification_refs(&self, issues: &mut Vec<DoctorIssue>) -> Result<()> {
+        for notification_uid in self.notification_ids()? {
+            let notification = self.read_notifications(&notification_uid)?;
+            for item in notification.items {
                 if !self.message_path(&item.message_id).is_file() {
                     let mut issue = DoctorIssue::error(
-                        "archive_message_ref_broken",
+                        "notification_message_ref_broken",
                         format!(
-                            "archive {archive_uid} references missing message {}",
+                            "notification {notification_uid} references missing message {}",
                             item.message_id
                         ),
                         Some(rel_path(
                             &self.root,
-                            &self.archive_message_json_path(&archive_uid),
+                            &self.notification_json_path(&notification_uid),
                         )),
                     );
-                    issue.refs = vec![archive_uid.clone(), item.message_id];
+                    issue.refs = vec![notification_uid.clone(), item.message_id];
                     issues.push(issue);
                 }
             }
@@ -364,8 +364,8 @@ fn minimal_template_context(language: TemplateLanguage) -> Value {
             "message_ids": ["message_doctor"],
             "case_uid": "c20260609001",
             "case_name": "doctor",
-            "archive_uid": "a20260609001",
-            "archive_name": "doctor",
+            "notification_uid": "n20260609001",
+            "notification_name": "doctor",
             "status": "active",
             "message_count": 0,
             "attachment_count": 0,
@@ -426,15 +426,15 @@ fn minimal_template_context(language: TemplateLanguage) -> Value {
             "attachments": [],
         },
         "config": {
-            "archive": {
+            "notification": {
                 "message_index": {
                     "item_fields": [],
                 },
             },
         },
-        "archive": {
-            "archive_uid": "a20260609001",
-            "archive_name": "doctor",
+        "notification": {
+            "notification_uid": "n20260609001",
+            "notification_name": "doctor",
         },
         "case": {
             "case_uid": "c20260609001",

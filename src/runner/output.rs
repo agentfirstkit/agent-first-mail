@@ -150,6 +150,7 @@ pub(super) fn command_name(command: &Command) -> &'static str {
         Command::Message { .. } => "message",
         Command::Case { .. } => "case",
         Command::Contact { .. } => "contact",
+        Command::Notification { .. } => "notification",
         Command::Archive { .. } => "archive",
         Command::Render { .. } => "render",
         Command::Log { .. } => "log",

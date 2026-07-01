@@ -87,7 +87,7 @@ fn default_hint(error_code: &str) -> Option<&'static str> {
         "workspace_locked" => Some("Wait for the running afmail command to finish, then retry."),
         "case_not_found" => Some("Check the case ref and whether it is active or archived with `afmail status` and `afmail archive list cases`."),
         "archive_not_found" | "archive_entry_not_found" => {
-            Some("Check archive refs with `afmail archive list messages`, then retry with the correct ref and message id.")
+            Some("Check notification refs with `afmail notification list`, then retry with the correct ref and message id.")
         }
         "draft_not_found" => Some("List the case drafts directory or recreate the draft with `afmail case draft reply` / `afmail case draft new`."),
         "draft_invalid" => Some("Fix the draft markdown/frontmatter, then run `afmail case draft validate CASE_REF DRAFT_NAME`."),

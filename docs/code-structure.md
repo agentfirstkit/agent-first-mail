@@ -50,7 +50,7 @@ src/
 `store/mod.rs` keeps the `Workspace` type, workspace discovery/init/status, and
 high-level wiring. Sibling modules add focused `impl Workspace` blocks:
 
-- `archive.rs` handles direct-message archive categories and archived case IO.
+- `archive.rs` handles notification collections and archived case IO.
 - `cases.rs` handles active case CRUD, membership, notes, tags, and moves.
 - `contacts.rs` handles contact-card CRUD, emails/phones/tags/notes, archive and
   reopen, sender extraction, the ephemeral email→contact map, and the view
@@ -87,14 +87,14 @@ The workspace keeps durable state in a few canonical places:
 - Case state lives in `cases/.../data/case.json` or
   `archive/cases/.../data/case.json`.
 - Direct archive state lives in
-  `archive/notifications/.../data/notification.json`.
+  `notifications/.../data/notification.json`.
 - Local discard state lives in `spam/data/spam.json`,
   `trash/data/trash.json`, and `deleted/data/deleted.json` after the first
   message enters that disposition.
 - Push items live in `.afmail/push/`; audit events live in
   `.afmail/logs/events.jsonl`.
 
-Generated Markdown views (`triage/`, `case.md`, `archive.md`, `views/`,
+Generated Markdown views (`triage/`, `case.md`, `notification.md`, `views/`,
 `spam/*.md`, `trash/*.md`, and `deleted/*.md`) should be rebuildable from those
 canonical files with `afmail render refresh`.
 

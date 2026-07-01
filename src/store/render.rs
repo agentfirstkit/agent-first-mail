@@ -230,12 +230,63 @@ pub(super) fn thread_item_common(
 }
 
 pub fn clean_body_text(input: &str) -> String {
-    input
+    let normalized: String = input
         .replace("\r\n", "\n")
         .replace('\r', "\n")
         .chars()
         .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
-        .collect()
+        .collect();
+    decode_common_html_entities(&normalized)
+}
+
+fn decode_common_html_entities(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find('&') {
+        output.push_str(&rest[..start]);
+        let after_amp = &rest[start + 1..];
+        let Some(end) = after_amp.find(';') else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        let entity = &after_amp[..end];
+        if let Some(decoded) = decode_html_entity(entity) {
+            output.push(decoded);
+        } else {
+            output.push('&');
+            output.push_str(entity);
+            output.push(';');
+        }
+        rest = &after_amp[end + 1..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn decode_html_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "apos" => Some('\''),
+        "gt" => Some('>'),
+        "lt" => Some('<'),
+        "nbsp" => Some(' '),
+        "quot" => Some('"'),
+        _ => decode_numeric_html_entity(entity),
+    }
+}
+
+fn decode_numeric_html_entity(entity: &str) -> Option<char> {
+    let value = if let Some(hex) = entity
+        .strip_prefix("#x")
+        .or_else(|| entity.strip_prefix("#X"))
+    {
+        u32::from_str_radix(hex, 16).ok()?
+    } else if let Some(decimal) = entity.strip_prefix('#') {
+        decimal.parse::<u32>().ok()?
+    } else {
+        return None;
+    };
+    char::from_u32(value)
 }
 
 pub fn render_message_section(message: &MessageFile, body_text: &str) -> Result<String> {

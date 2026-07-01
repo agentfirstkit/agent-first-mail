@@ -5,11 +5,12 @@ mod message;
 mod push;
 
 pub use case_archive::{
-    ArchiveMessageItem, ArchiveMessages, CaseMessages, MessageCollection, MessageCollectionItem,
-    ARCHIVE_NOTIFICATION_SCHEMA_NAME, CASE_SCHEMA_NAME, MESSAGE_COLLECTION_SCHEMA_VERSION,
+    CaseMessages, MessageCollection, MessageCollectionItem, NotificationMessageItem,
+    NotificationMessages, CASE_SCHEMA_NAME, MESSAGE_COLLECTION_SCHEMA_VERSION,
+    NOTIFICATION_SCHEMA_NAME,
 };
 pub use contact::{ContactFrontmatter, CONTACT_KIND};
-pub use ids::{ArchiveUid, CaseUid, MessageId, PushId};
+pub use ids::{CaseUid, MessageId, NotificationUid, PushId};
 pub use message::{
     AttachmentRef, AuthAlignment, AuthVerdict, ImapRef, MailDirection, MessageAuthentication,
     MessageContact, MessageFile, MessageStatus, RemoteLocation, RemoteState, RemoteSyncState,
@@ -17,5 +18,5 @@ pub use message::{
 };
 pub use push::{
     MessageActionPush, MessagePushAction, OutboundAction, OutboundPush, PushItem, PushKind,
-    PushLocation, PushPayload, PushStepState, PushStepStatus,
+    PushLocalStage, PushLocation, PushPayload, PushStepState, PushStepStatus,
 };

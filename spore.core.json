@@ -2,26 +2,24 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-mail",
   "name": "Agent-First Mail",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.",
   "intent": [
     "Give AI agents a local-first email workspace where pulled messages become editable case files rather than a traditional inbox app",
-    "Preserve raw RFC822 mail while exposing mechanically cleaned text, message metadata, active cases, archived cases, direct-message archive categories, drafts, notes, and files through stable filesystem conventions",
-    "Keep the CLI focused on side effects such as read-only pull with case suggestions, explicit triage assignment, case moves, archive and restore operations, attachment fetches, reply draft scaffolding, draft validation, local push queuing, explicit push operations including read/unread flag work, audit log inspection, and local push queue cleanup"
+    "Preserve raw RFC822 mail while exposing mechanically cleaned text, message metadata, active cases, archived cases, contacts, notification collections, send identities, drafts, notes, and files through stable filesystem conventions, with human-readable Markdown rendered in the workspace language",
+    "Keep the CLI focused on side effects such as read-only pull with case suggestions, explicit triage assignment, case moves, archive and restore operations, attachment fetches, contact record management, reply draft scaffolding, draft validation, local push queuing, explicit push operations including read/unread flag work, audit log inspection, and local push queue cleanup"
   ],
   "license": "MIT",
   "mutations": [
-    "Add fully localized render-template packs for Traditional Chinese, German, Spanish, French, Japanese, Korean, and Brazilian Portuguese, selected by workspace.language_bcp47",
-    "Move every human-language string out of the Rust code into the per-language template packs, so labels, headings, and disposition titles are translated in the templates and adding a language is just dropping a directory",
-    "Replace the hand-coded config dispatch with agent-first-config dot-path traversal, and add a prune command, imap-archive origin provenance, attachment MIME-type detection, and pending-push counts in status and triage output",
-    "Add archive case trash and restore commands",
-    "Show the full product name in --help headings and generated docs while keeping the short afmail binary name in usage strings",
-    "Resolve mailbox import rules in configured order and parse nonstandard message date headers",
-    "Speed up the pull render cache and report render sub-stage progress",
-    "Harden outbound push safety, support sparse config, and unify identity-config slug validation",
-    "Upgrade the IMAP client and other dependencies"
+    "Rename the standalone direct-message archive model to notification collections: file reference and notification mail with 'afmail notification create/add' under stable nYYYYMMDDNNN uids and read it via 'afmail notification list/show', leaving the archive command to mean archived cases only",
+    "Require an explicit case category on 'afmail case create --group' with no default and no 'open' catch-all, and nest archived cases under archive/cases/<group>/ so the category survives archival",
+    "Block attachment fetches on spam-classified messages so an agent cannot be lured into pulling hostile payloads from mail it already flagged as spam",
+    "Queue remote trash for every mailbox a case's messages occupy, including Sent, so already-sent replies move to trash with the rest of the conversation when a case is discarded",
+    "Surface a structured audit_warnings entry when a confirmed push effect's audit record cannot be written, instead of silently dropping the lost record",
+    "Add index.md read views to the spam, trash, and deleted folders, and change the notification message-index default fields from sender to from",
+    "Make identity config setup idempotent, fix push incremental refresh, fix restore push cleanup and reply recipients, surface the contact command in CLI error hints, and upgrade dependencies"
   ],
   "bonds": [
     {

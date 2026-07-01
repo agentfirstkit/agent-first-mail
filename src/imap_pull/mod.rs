@@ -709,8 +709,8 @@ mod tests {
             observed_recipient_emails: Vec::new(),
             workspace: crate::types::WorkspaceState {
                 status: "case".to_string(),
-                archive_uid: None,
-                archived_rfc3339: None,
+                notification_uid: None,
+                notification_rfc3339: None,
                 origin: None,
                 remote_sync: None,
                 push: None,
@@ -721,8 +721,8 @@ mod tests {
             rfc822_message_id: Some("<case-two@example.com>".to_string()),
             workspace: crate::types::WorkspaceState {
                 status: "case".to_string(),
-                archive_uid: None,
-                archived_rfc3339: None,
+                notification_uid: None,
+                notification_rfc3339: None,
                 origin: None,
                 remote_sync: None,
                 push: None,
@@ -739,14 +739,14 @@ mod tests {
             "Message-ID: <case-two@example.com>\r\nFrom: Alice <alice@example.com>\r\nTo: Me <me@example.com>\r\nSubject: Case\r\n\r\nCase",
         );
         let _ = crate::store::Workspace::at(&root).write_message_artifacts(&second);
-        let _ = fs::create_dir_all(root.join("cases/open/case-one/data"));
-        let _ = fs::create_dir_all(root.join("cases/open/case-two/data"));
+        let _ = fs::create_dir_all(root.join("cases/support/case-one/data"));
+        let _ = fs::create_dir_all(root.join("cases/support/case-two/data"));
         let _ = write_json_pretty(
-            &root.join("cases/open/case-one/data/case.json"),
+            &root.join("cases/support/case-one/data/case.json"),
             &case_collection("case-one", "Case One", "message_case_1"),
         );
         let _ = write_json_pretty(
-            &root.join("cases/open/case-two/data/case.json"),
+            &root.join("cases/support/case-two/data/case.json"),
             &case_collection("case-two", "Case Two", "message_case_2"),
         );
         let index = load_existing_remote_index(&root);

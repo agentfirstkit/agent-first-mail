@@ -1,0 +1,15 @@
+---
+kind: {{ frontmatter.kind }}
+message_id: {{ frontmatter.message_id }}
+notification_uid: {{ frontmatter.notification_uid }}
+notification_name: {{ frontmatter.notification_name }}
+added_rfc3339: "{{ frontmatter.added_rfc3339 }}"
+---
+
+# {% if view.title %}{{ view.title }}{% else %}通知訊息{% endif %}
+
+通知: {{ notification.notification_name }}（`{{ notification.notification_uid }}`）
+
+摘要: {{ view.summary }}
+
+{{ view.conversation }}

@@ -37,7 +37,7 @@ pub use render::{
 pub(crate) use triage::render_triage_view;
 
 use crate::config::{
-    ArchiveMessageIndexField, MailConfig, ReasonMode, SpecialUseKind, TemplateLanguage,
+    MailConfig, NotificationIndexField, ReasonMode, SpecialUseKind, TemplateLanguage,
 };
 use crate::error::{AppError, Result};
 use crate::frontmatter::{CaseFrontmatter, DraftFrontmatter, TriageFrontmatter};
@@ -45,11 +45,11 @@ use crate::markdown::{parse_frontmatter, read_doc, render_frontmatter};
 use crate::templates::{language_template_path, MarkdownTemplateRenderer, TemplateKey};
 use crate::types::RemoteSyncState;
 use crate::types::{
-    ArchiveMessageItem, ArchiveMessages, AttachmentRef, CaseMessages, MailDirection,
-    MessageCollection, MessageCollectionItem, MessageContact, MessageFile, MessageStatus,
-    OutboundAction, PushItem, PushLocation, RemoteLocation, RemoteState, WorkspacePendingPush,
-    WorkspacePushState, WorkspaceState, ARCHIVE_NOTIFICATION_SCHEMA_NAME, CASE_SCHEMA_NAME,
-    MESSAGE_COLLECTION_SCHEMA_VERSION,
+    AttachmentRef, CaseMessages, MailDirection, MessageCollection, MessageCollectionItem,
+    MessageContact, MessageFile, MessageStatus, NotificationMessageItem, NotificationMessages,
+    OutboundAction, PushItem, PushLocalStage, PushLocation, RemoteLocation, RemoteState,
+    WorkspacePendingPush, WorkspacePushState, WorkspaceState, CASE_SCHEMA_NAME,
+    MESSAGE_COLLECTION_SCHEMA_VERSION, NOTIFICATION_SCHEMA_NAME,
 };
 use crate::util::{
     blake3_fingerprint, blake3_fingerprint_str, canonical_flags, write_json_pretty,
@@ -93,14 +93,15 @@ trash/*.md
 deleted/*.md
 cases/*/*/case.md
 cases/*/*/views/**/*.md
-archive/cases/*/case.md
-archive/cases/*/views/**/*.md
-archive/notifications/*/archive.md
-archive/notifications/*/views/**/*.md
+archive/cases/*/*/case.md
+archive/cases/*/*/views/**/*.md
+notifications/*/notification.md
+notifications/*/views/**/*.md
 "#;
 const AFMAIL_RESERVED_INIT_PATHS: &[&str] = &[
     "triage",
     "cases",
+    "notifications",
     "archive",
     "messages",
     "templates",
@@ -439,26 +440,26 @@ struct CaseViewRefresh {
 }
 
 #[derive(Clone, Debug, Default)]
-struct ArchiveMessageViewRefresh {
-    archive_message_index_count: usize,
-    archive_message_count: usize,
-    archive_message_index_unchanged_count: usize,
-    archive_message_unchanged_count: usize,
+struct NotificationViewRefresh {
+    notification_index_count: usize,
+    notification_message_count: usize,
+    notification_index_unchanged_count: usize,
+    notification_message_unchanged_count: usize,
 }
 
 #[derive(Clone, Debug, Default)]
 struct RenderRefreshTotals {
     active_case_count: usize,
     archived_case_count: usize,
-    archive_message_category_count: usize,
+    notification_count: usize,
     case_index_count: usize,
     case_message_count: usize,
     case_index_unchanged_count: usize,
     case_message_unchanged_count: usize,
-    archive_message_index_count: usize,
-    archive_message_count: usize,
-    archive_message_index_unchanged_count: usize,
-    archive_message_unchanged_count: usize,
+    notification_index_count: usize,
+    notification_message_count: usize,
+    notification_index_unchanged_count: usize,
+    notification_message_unchanged_count: usize,
 }
 
 impl RenderRefreshTotals {
@@ -469,11 +470,11 @@ impl RenderRefreshTotals {
         self.case_message_unchanged_count += refresh.case_message_unchanged_count;
     }
 
-    fn add_archive_message(&mut self, refresh: ArchiveMessageViewRefresh) {
-        self.archive_message_index_count += refresh.archive_message_index_count;
-        self.archive_message_count += refresh.archive_message_count;
-        self.archive_message_index_unchanged_count += refresh.archive_message_index_unchanged_count;
-        self.archive_message_unchanged_count += refresh.archive_message_unchanged_count;
+    fn add_notification(&mut self, refresh: NotificationViewRefresh) {
+        self.notification_index_count += refresh.notification_index_count;
+        self.notification_message_count += refresh.notification_message_count;
+        self.notification_index_unchanged_count += refresh.notification_index_unchanged_count;
+        self.notification_message_unchanged_count += refresh.notification_message_unchanged_count;
     }
 }
 
@@ -506,15 +507,15 @@ fn render_case_done_fields(totals: &RenderRefreshTotals) -> Value {
     })
 }
 
-fn render_archive_done_fields(totals: &RenderRefreshTotals) -> Value {
+fn render_notification_done_fields(totals: &RenderRefreshTotals) -> Value {
     json!({
-        "archive_message_category_count": totals.archive_message_category_count,
-        "archive_message_view_written_count": totals.archive_message_index_count + totals.archive_message_count,
-        "archive_message_view_unchanged_count": totals.archive_message_index_unchanged_count + totals.archive_message_unchanged_count,
-        "archive_message_index_written_count": totals.archive_message_index_count,
-        "archive_message_index_unchanged_count": totals.archive_message_index_unchanged_count,
-        "archive_message_written_count": totals.archive_message_count,
-        "archive_message_unchanged_count": totals.archive_message_unchanged_count,
+        "notification_count": totals.notification_count,
+        "notification_view_written_count": totals.notification_index_count + totals.notification_message_count,
+        "notification_view_unchanged_count": totals.notification_index_unchanged_count + totals.notification_message_unchanged_count,
+        "notification_index_written_count": totals.notification_index_count,
+        "notification_index_unchanged_count": totals.notification_index_unchanged_count,
+        "notification_message_written_count": totals.notification_message_count,
+        "notification_message_unchanged_count": totals.notification_message_unchanged_count,
     })
 }
 
@@ -562,7 +563,7 @@ impl Workspace {
         create_dir_all(&self.root.join("triage"))?;
         create_dir_all(&self.root.join("cases"))?;
         create_dir_all(&self.root.join("archive/cases"))?;
-        create_dir_all(&self.root.join("archive/notifications"))?;
+        create_dir_all(&self.root.join("notifications"))?;
         write_json_if_missing(
             &self.root.join(".afmail/config.json"),
             &crate::config::MailConfig::default().sparse_value()?,
@@ -707,14 +708,14 @@ impl Workspace {
         }
         let push_status = serde_json::to_value(crate::push_queue::push_status(&self.root)?)
             .map_err(|e| AppError::json("serialize push status", &e))?;
-        let archive_messages = self.archive_message_category_items()?;
+        let notifications = self.notification_items()?;
         let archived_cases = self.archive_case_items()?;
         Ok(json!({
             "code": "status",
             "triage_count": count_files_with_ext(&self.root.join("triage"), "md")?,
             "case_count": cases.len(),
             "cases_by_group": cases_by_group,
-            "archive_message_category_count": archive_messages.len(),
+            "notification_count": notifications.len(),
             "archived_case_count": archived_cases.len(),
             "message_count": message_paths.len(),
             "message_status": message_status,
@@ -828,7 +829,7 @@ impl Workspace {
         let mut progress = progress;
         crate::progress::emit(&mut progress, "render_start", json!({}));
         create_dir_all(&self.root.join("archive/cases"))?;
-        create_dir_all(&self.root.join("archive/notifications"))?;
+        create_dir_all(&self.root.join("notifications"))?;
 
         crate::progress::emit(
             &mut progress,
@@ -917,27 +918,27 @@ impl Workspace {
 
         crate::progress::emit(
             &mut progress,
-            "render_archives_start",
-            json!({"render_stage": "archives"}),
+            "render_notifications_start",
+            json!({"render_stage": "notifications"}),
         );
         let step_started = Instant::now();
-        for archive_uid in self.archive_message_category_ids()? {
-            let refresh = self.refresh_archive_message_category_with_cache(
-                &archive_uid,
+        for notification_uid in self.notification_ids()? {
+            let refresh = self.refresh_notification_with_cache(
+                &notification_uid,
                 &mut renderer,
                 false,
                 &mut render_cache,
             )?;
-            totals.archive_message_category_count += 1;
-            totals.add_archive_message(refresh);
+            totals.notification_count += 1;
+            totals.add_notification(refresh);
         }
         crate::progress::emit(
             &mut progress,
-            "render_archives_done",
+            "render_notifications_done",
             render_done_fields(
-                "archives",
+                "notifications",
                 step_started,
-                render_archive_done_fields(&totals),
+                render_notification_done_fields(&totals),
             ),
         );
 
@@ -958,7 +959,7 @@ impl Workspace {
             "code": "render_refreshed",
             "active_case_count": totals.active_case_count,
             "archived_case_count": totals.archived_case_count,
-            "archive_message_category_count": totals.archive_message_category_count,
+            "notification_count": totals.notification_count,
             "message_cache_rebuilt_count": cache.rebuilt_count,
             "text_cache_removed_count": cache.removed_text_cache_count,
             "triage_count": triage.get("triage_count").and_then(Value::as_u64).unwrap_or(0),
@@ -979,8 +980,8 @@ impl Workspace {
                 "status/message.md.j2": dispositions.get("message_written_count").and_then(Value::as_u64).unwrap_or(0),
                 "case/case.md.j2": totals.case_index_count,
                 "case/message.md.j2": totals.case_message_count,
-                "archive-message/archive.md.j2": totals.archive_message_index_count,
-                "archive-message/message.md.j2": totals.archive_message_count,
+                "notification/notification.md.j2": totals.notification_index_count,
+                "notification/message.md.j2": totals.notification_message_count,
             },
             "template_sources": renderer.stats().to_value(),
         });
@@ -1082,9 +1083,9 @@ impl Workspace {
         self.log_filter("case", &case_uid)
     }
 
-    pub fn log_archive(&self, archive_ref: &str) -> Result<Value> {
-        let archive_uid = parse_archive_ref(archive_ref)?;
-        self.log_filter("archive", &archive_uid)
+    pub fn log_notification(&self, notification_ref: &str) -> Result<Value> {
+        let notification_uid = parse_notification_ref(notification_ref)?;
+        self.log_filter("notification", &notification_uid)
     }
 
     fn log_filter(&self, kind: &str, id: &str) -> Result<Value> {

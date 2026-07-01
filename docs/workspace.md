@@ -13,14 +13,17 @@ account-workspace/
   spam/  # created when spam messages first exist
     data/
       spam.json
+    index.md
     <message_id>.md
   trash/  # created when trashed messages first exist
     data/
       trash.json
+    index.md
     <message_id>.md
   deleted/  # created when remote-deleted messages first exist
     data/
       deleted.json
+    index.md
     <message_id>.md
   cases/
     <group>/
@@ -43,26 +46,27 @@ account-workspace/
     contacts/  # created when contacts are archived
       <contact_uid>-<name>.md
     cases/
-      <case_uid>-<name>/
-        case.md
-        notes.md
-        data/
-          case.json
-          drafts.json
-        views/
-          messages/
-            <message_id>.md
-        drafts/
-        files/
-    notifications/
-      <archive_uid>-<name>/
-        archive.md
-        notes.md
-        data/
-          notification.json
-        views/
-          messages/
-            <message_id>.md
+      <group>/
+        <case_uid>-<name>/
+          case.md
+          notes.md
+          data/
+            case.json
+            drafts.json
+          views/
+            messages/
+              <message_id>.md
+          drafts/
+          files/
+  notifications/
+    <notification_uid>-<name>/
+      notification.md
+      notes.md
+      data/
+        notification.json
+      views/
+        messages/
+          <message_id>.md
   messages/
     <message_id>.json
   templates/
@@ -71,8 +75,10 @@ account-workspace/
   .afmail/
     DO_NOT_EDIT.txt
     config.json
+    config.example.json
     workspace.lock
     workspace.progress.json
+    render-cache.json
     logs/events.jsonl
     transactions/
     push/
@@ -85,20 +91,21 @@ account-workspace/
 `triage/` and `cases/` are active attention surfaces. `spam/`, `trash/`, and
 `deleted/` are generated review views for local discard states, created only
 after the first matching message appears.
-`archive/cases/` contains archived case workspaces addressed by case UID.
-`archive/notifications/<archive_uid>-<name>/` contains direct archived messages
-in one archive category.
+`archive/cases/` contains archived case workspaces grouped by case group and
+addressed by case UID.
+`notifications/<notification_uid>-<name>/` contains notification messages
+in one notification collection.
 
 Case roots contain only user-facing Markdown entry points (`case.md` and
-`notes.md`) plus working directories. Direct archive roots contain `archive.md`
+`notes.md`) plus working directories. Notification roots contain `notification.md`
 and `notes.md`. Canonical local object state lives under `data/`; generated,
 rebuildable Markdown detail views live under `views/`. `drafts/` and `files/`
 are user-visible working materials.
 
-`case.md`, `archive.md`, `triage/*.md`, `spam/*.md`, `trash/*.md`,
+`case.md`, `notification.md`, `triage/*.md`, `spam/*.md`, `trash/*.md`,
 `deleted/*.md`, and `views/**/*.md` are generated read views. They are safe to
 rebuild with `afmail render refresh`; use `notes.md` for durable notes instead
-of generated views. Case and archive message links point to
+of generated views. Case and notification message links point to
 `views/messages/<message_id>.md`.
 
 `.afmail/DO_NOT_EDIT.txt` is a warning sentinel. The rest of `.afmail/` is
@@ -137,7 +144,7 @@ files under `.afmail/messages/<message_id>.files/` and refreshes generated read
 views so fetched paths appear in message renderings.
 
 A message can be referenced by multiple active or archived cases. A message can
-belong to at most one direct-message archive category. If a message needs
+belong to at most one notification collection. If a message needs
 multiple contexts, create or use cases instead of multi-archiving the direct
 message.
 
@@ -151,22 +158,25 @@ generated views.
 ## Cases
 
 Active cases live at `cases/<group>/<case_uid>-<name>/`. Archived cases live at
-`archive/cases/<case_uid>-<name>/`. `case_uid` is globally unique and stable
-across active and archived cases. `rename --name` updates `data/case.json` and
-the readable directory suffix.
+`archive/cases/<group>/<case_uid>-<name>/`. The `<group>` segment is the case
+group carried forward from active work, not an archive category; for example,
+`archive/cases/support/...` is an archived case from the `support` case group.
+`case_uid` is globally unique and stable across active and archived cases.
+`rename --name` updates `data/case.json` and the readable directory suffix.
 
-Case refs must start with `cYYYYMMDDNNN`; archive refs must start with
-`aYYYYMMDDNNN`. A ref may include a readable suffix after one dash, so
-`c20260521001-anything` and `c20260521001` are equivalent. Names alone are not
-looked up. Group and tag values are local path-segment identifiers. Human names
-may use Unicode such as Chinese, for example `应用反馈-肥料登记` or `服务通知`.
-Do not use path separators (`/` or `\`) or the dot-only segments `.`/`..`.
+Case refs must start with `cYYYYMMDDNNN`; notification refs must start with
+`nYYYYMMDDNNN`. A ref may include a readable suffix after one dash, so
+`c20260521001-anything` and `c20260521001` are equivalent, as are
+`n20260521001-anything` and `n20260521001`. Names alone are not looked up. Group
+and tag values are local path-segment identifiers. Human names may use Unicode
+such as Chinese, for example `应用反馈-肥料登记` or `服务通知`. Do not use path
+separators (`/` or `\`) or the dot-only segments `.`/`..`.
 
 Case metadata is canonical in `data/case.json`. Active cases use
 `status: "active"`; archived cases use `status: "archived"` plus
 top-level `archived_rfc3339`. Message membership is stored in the same
 `data/case.json` collection under `items[]`, with per-message `summary` and
-`added_rfc3339`. Archived cases do not use direct-message archive categories.
+`added_rfc3339`. Archived cases do not use notification collections.
 
 Case-local `data/drafts.json` files are afmail-managed machine state. They
 record only the last validation hash/time for `drafts/*.md` files. Humans and
@@ -219,16 +229,16 @@ into the draft body immediately so reviewers see the exact body before queueing
 or sending. Send time uses the resolved identity for the RFC 5322 `From` header
 and SMTP envelope sender, but it does not secretly append or mutate footers.
 
-## Direct Message Archive Categories
+## Notification Collections
 
-The canonical membership file for a direct-message archive category is
-`archive/notifications/<archive_uid>-<name>/data/notification.json`:
+The canonical membership file for a notification collection is
+`notifications/<notification_uid>-<name>/data/notification.json`:
 
 ```json
 {
   "schema_name": "notification",
   "schema_version": 1,
-  "collection_uid": "a20260521001",
+  "collection_uid": "n20260521001",
   "collection_name": "服务通知",
   "items": [
     {
@@ -240,10 +250,10 @@ The canonical membership file for a direct-message archive category is
 }
 ```
 
-`summary` is optional. Generated `archive.md` renders a Markdown list using
-`archive.message_index` config. The built-in archive templates display the
+`summary` is optional. Generated `notification.md` renders a Markdown list using
+`notification.message_index` config. The built-in notification templates display the
 message subject when a summary field is empty. Generated message views live
-under `archive/notifications/<archive_uid>-<name>/views/messages/<message_id>.md`.
+under `notifications/<notification_uid>-<name>/views/messages/<message_id>.md`.
 
 ## Generated Read-View Templates
 
@@ -254,7 +264,7 @@ under `templates/<language>/`. Legacy `.afmail/templates/` files are ignored.
 Common generated-view template keys include:
 
 - `case/case.md.j2` and `case/message.md.j2`
-- `archive-message/archive.md.j2` and `archive-message/message.md.j2`
+- `notification/notification.md.j2` and `notification/message.md.j2`
 - `triage/view.md.j2` and `message/section.md.j2`
 
 Run `afmail render templates` to export built-ins, then `afmail render refresh`
@@ -268,18 +278,18 @@ and `item.view`.
 
 ## Deleted Remote Messages
 
-When a remote message disappears and has no case/archive/draft/push reference,
+When a remote message disappears and has no case/notification/draft/push reference,
 afmail keeps the local evidence under `.afmail/messages/`, marks its local
 state as `deleted_remote`, and exposes it under generated `deleted/` views.
 `afmail purge` permanently deletes old local `spam`, `trashed`, and
 `deleted_remote` message records; add `spam`, `trash`, or `deleted` to limit it
 to one disposition, and use `--older-than-days` to override the default 30-day
 threshold. When a referenced remote message disappears, afmail keeps the
-business state such as `case` or `archived` and only marks remote locations
-missing so existing case/archive state stays resolvable.
+business state such as `case` or `notification` and only marks remote locations
+missing so existing case/notification state stays resolvable.
 
 ## Notes
 
 `notes.md` files are plain Markdown with no frontmatter. They exist for active
-cases, archived cases, and direct-message archive categories. They are the only
+cases, archived cases, and notification collections. They are the only
 durable local notes surface inside those objects; generated views are disposable.

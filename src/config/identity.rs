@@ -485,8 +485,8 @@ mod tests {
             observed_recipient_emails: Vec::new(),
             workspace: WorkspaceState {
                 status: "triage".to_string(),
-                archive_uid: None,
-                archived_rfc3339: None,
+                notification_uid: None,
+                notification_rfc3339: None,
                 origin: None,
                 remote_sync: None,
                 push: None,

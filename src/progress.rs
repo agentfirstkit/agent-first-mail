@@ -218,9 +218,9 @@ fn insert_render_progress_fields(out: &mut Map<String, Value>, fields: &Map<Stri
         "case_view_count",
         "case_view_written_count",
         "case_view_unchanged_count",
-        "archive_message_category_count",
-        "archive_message_view_written_count",
-        "archive_message_view_unchanged_count",
+        "notification_count",
+        "notification_view_written_count",
+        "notification_view_unchanged_count",
     ] {
         if let Some(value) = fields.get(key).cloned() {
             out.insert(key.to_string(), value);
@@ -253,9 +253,9 @@ fn insert_pull_progress_fields(out: &mut Map<String, Value>, fields: &Map<String
         "case_view_count",
         "case_view_written_count",
         "case_view_unchanged_count",
-        "archive_message_category_count",
-        "archive_message_view_written_count",
-        "archive_message_view_unchanged_count",
+        "notification_count",
+        "notification_view_written_count",
+        "notification_view_unchanged_count",
     ] {
         if let Some(value) = fields.get(key).cloned() {
             out.insert(key.to_string(), value);
@@ -402,8 +402,8 @@ fn render_phase_summary(phase: Option<&str>, fields: &Value) -> String {
         }
         Some("render_cases_start") => "render: refreshing case views".to_string(),
         Some("render_cases_done") => render_done_summary("case views", fields),
-        Some("render_archives_start") => "render: refreshing archive views".to_string(),
-        Some("render_archives_done") => render_done_summary("archive views", fields),
+        Some("render_notifications_start") => "render: refreshing notification views".to_string(),
+        Some("render_notifications_done") => render_done_summary("notification views", fields),
         Some("render_cache_write_start") => "render: writing render cache".to_string(),
         Some("render_cache_write_done") => render_done_summary("render cache", fields),
         Some("render_done") => "render: refreshed generated views".to_string(),
@@ -446,8 +446,8 @@ fn pull_phase_summary(phase: Option<&str>, fields: &Value) -> String {
         }
         Some("pull_render_cases_start") => "pull: rendering case views".to_string(),
         Some("pull_render_cases_done") => render_done_summary("case views", fields),
-        Some("pull_render_archives_start") => "pull: rendering archive views".to_string(),
-        Some("pull_render_archives_done") => render_done_summary("archive views", fields),
+        Some("pull_render_notifications_start") => "pull: rendering notification views".to_string(),
+        Some("pull_render_notifications_done") => render_done_summary("notification views", fields),
         Some("pull_render_cache_write_start") => "pull: writing render cache".to_string(),
         Some("pull_render_cache_write_done") => render_done_summary("render cache", fields),
         Some("pull_render_done") => "pull: refreshed generated views".to_string(),
@@ -461,11 +461,11 @@ fn render_done_summary(label: &str, fields: &Map<String, Value>) -> String {
     let written = value_u64(fields.get("triage_written_count"))
         .or_else(|| value_u64(fields.get("message_written_count")))
         .or_else(|| value_u64(fields.get("case_view_written_count")))
-        .or_else(|| value_u64(fields.get("archive_message_view_written_count")));
+        .or_else(|| value_u64(fields.get("notification_view_written_count")));
     let unchanged = value_u64(fields.get("triage_unchanged_count"))
         .or_else(|| value_u64(fields.get("message_unchanged_count")))
         .or_else(|| value_u64(fields.get("case_view_unchanged_count")))
-        .or_else(|| value_u64(fields.get("archive_message_view_unchanged_count")));
+        .or_else(|| value_u64(fields.get("notification_view_unchanged_count")));
     match (written, unchanged) {
         (Some(written), Some(unchanged)) => {
             format!("rendered {label} in {elapsed_ms} ms, {written} written, {unchanged} unchanged")
@@ -480,12 +480,12 @@ fn render_progress_summary(label: &str, fields: &Map<String, Value>) -> String {
     let written = value_u64(fields.get("triage_written_count"))
         .or_else(|| value_u64(fields.get("message_written_count")))
         .or_else(|| value_u64(fields.get("case_view_written_count")))
-        .or_else(|| value_u64(fields.get("archive_message_view_written_count")))
+        .or_else(|| value_u64(fields.get("notification_view_written_count")))
         .unwrap_or(0);
     let unchanged = value_u64(fields.get("triage_unchanged_count"))
         .or_else(|| value_u64(fields.get("message_unchanged_count")))
         .or_else(|| value_u64(fields.get("case_view_unchanged_count")))
-        .or_else(|| value_u64(fields.get("archive_message_view_unchanged_count")))
+        .or_else(|| value_u64(fields.get("notification_view_unchanged_count")))
         .unwrap_or(0);
     format!("rendering {label}: {processed}/{total}, {written} written, {unchanged} unchanged")
 }
@@ -608,8 +608,8 @@ fn progress_message(command: &str, phase: &str) -> &'static str {
         ("pull", "pull_render_dispositions_done") => "refreshed disposition views",
         ("pull", "pull_render_cases_start") => "refreshing case views",
         ("pull", "pull_render_cases_done") => "refreshed case views",
-        ("pull", "pull_render_archives_start") => "refreshing archive views",
-        ("pull", "pull_render_archives_done") => "refreshed archive views",
+        ("pull", "pull_render_notifications_start") => "refreshing notification views",
+        ("pull", "pull_render_notifications_done") => "refreshed notification views",
         ("pull", "pull_render_cache_write_start") => "writing render cache",
         ("pull", "pull_render_cache_write_done") => "wrote render cache",
         ("pull", "pull_render_done") => "refreshed generated views",
@@ -623,8 +623,8 @@ fn progress_message(command: &str, phase: &str) -> &'static str {
         ("render", "render_dispositions_done") => "refreshed disposition views",
         ("render", "render_cases_start") => "refreshing case views",
         ("render", "render_cases_done") => "refreshed case views",
-        ("render", "render_archives_start") => "refreshing archive views",
-        ("render", "render_archives_done") => "refreshed archive views",
+        ("render", "render_notifications_start") => "refreshing notification views",
+        ("render", "render_notifications_done") => "refreshed notification views",
         ("render", "render_cache_write_start") => "writing render cache",
         ("render", "render_cache_write_done") => "wrote render cache",
         ("render", "render_done") => "refreshed generated views",

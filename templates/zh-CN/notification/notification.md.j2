@@ -1,4 +1,4 @@
-# 归档消息：{{ archive.archive_name }}（`{{ archive.archive_uid }}`）
+# 通知：{{ notification.notification_name }}（`{{ notification.notification_uid }}`）
 
 {% if items | length == 0 %}_没有消息。_
 {% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.direction_kind == 'received' %}收到{% else %}发送{% endif %}{% if item.view.action == 'reply' %}回复{% elif item.view.action == 'forward' %}转发{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}

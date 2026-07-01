@@ -72,7 +72,7 @@ pub enum PurgeAction {
 
 #[derive(Subcommand, Debug)]
 pub enum RenderAction {
-    /// Rebuild generated case and direct-message archive read views.
+    /// Rebuild generated case and notification read views.
     Refresh,
     /// Export built-in language templates, keeping existing files unless forced.
     Templates {
@@ -96,6 +96,6 @@ pub enum LogAction {
     Message { message_id: String },
     /// List events for one case id.
     Case { case_uid: String },
-    /// List events for one archive category.
-    Archive { archive_uid: String },
+    /// List events for one notification collection.
+    Notification { notification_uid: String },
 }

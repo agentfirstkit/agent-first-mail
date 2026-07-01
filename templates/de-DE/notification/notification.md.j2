@@ -1,4 +1,4 @@
-# Archivierte Nachrichten: {{ archive.archive_name }} (`{{ archive.archive_uid }}`)
+# Archivierte Nachrichten: {{ notification.notification_name }} (`{{ notification.notification_uid }}`)
 
 {% if items | length == 0 %}_Keine Nachrichten._
 {% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.action_kind == 'received' %}Empfangen{% elif item.view.action_kind == 'received_reply' %}Empfangene Antwort{% elif item.view.action_kind == 'received_forward' %}Empfangene Weiterleitung{% elif item.view.action_kind == 'sent' %}Gesendet{% elif item.view.action_kind == 'sent_reply' %}Gesendete Antwort{% else %}Gesendete Weiterleitung{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}

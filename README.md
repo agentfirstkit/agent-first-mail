@@ -34,7 +34,7 @@ afmail status                                            # local counts and late
 afmail push list                                         # pending real-mailbox effects
 afmail pull                                              # read-only: mail → local files
 afmail triage list                                       # locators for what came down
-afmail case create --name "Refund request" \
+afmail case create --name "Refund request" --group support \
   --message message_inbox_88213_4 --summary "refund request for late order" --reason "wants a refund"
 afmail message show message_inbox_88213_4                # read the request: order #4471, arrived late
 ```
@@ -74,10 +74,9 @@ afmail case draft reply c20260606001 message_inbox_88213_4 --body-file refund-re
 afmail case draft send c20260606001 reply-message_inbox_88213_4.md # queue the reply
 ```
 
-Workspaces define explicit send identities in `.afmail/config.json`; optional
-`identities/<slug>.md` files add persona notes and footers. Draft commands accept
-`--identity <slug>`, and footers are written into the draft for review rather
-than appended secretly at send time.
+Replies go out under an explicit send identity you've configured, and any persona
+footer is written into the draft for review rather than appended secretly at send
+time.
 
 If the queued reply needs correction before sending, edit the draft Markdown or
 use `draft change`; the queued item still points at the latest draft content:
@@ -163,10 +162,10 @@ machine evidence in separate places:
   attention.
 - **`cases/`** — a folder per ongoing issue, holding notes, the messages
   involved, and draft replies.
-- **`archive/`** — finished work, filed and out of the way.
-- **Stable refs** — every message, case, and archive category has a durable id,
+- **`notifications/` and `archive/`** — completed notification mail and archived cases, filed and out of the way.
+- **Stable refs** — every message, case, and notification collection has a durable id,
   so an agent can point at the same thing across runs.
-- **Locator lists** — `triage list`, `case list`, and `archive list ...` return
+- **Locator lists** — `triage list`, `case list`, `notification list`, and `archive list ...` return
   compact stable ids plus path templates; the agent expands those templates or
   uses the matching `show` command to read detail.
 

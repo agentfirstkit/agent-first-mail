@@ -103,12 +103,19 @@ pub(super) fn case_search_roots(root: &Path) -> Result<Vec<PathBuf>> {
     }
     let archive_dir = root.join("archive/cases");
     if archive_dir.is_dir() {
-        for case in
+        for group in
             fs::read_dir(&archive_dir).map_err(|e| AppError::io("read archived cases", &e))?
         {
-            let case = case.map_err(|e| AppError::io("read archived cases", &e))?;
-            if case.path().is_dir() {
-                out.push(case.path());
+            let group = group.map_err(|e| AppError::io("read archived cases", &e))?;
+            if group.path().is_dir() {
+                for case in fs::read_dir(group.path())
+                    .map_err(|e| AppError::io("read archived cases", &e))?
+                {
+                    let case = case.map_err(|e| AppError::io("read archived cases", &e))?;
+                    if case.path().is_dir() {
+                        out.push(case.path());
+                    }
+                }
             }
         }
     }

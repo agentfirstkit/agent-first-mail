@@ -70,10 +70,6 @@ pub(super) fn default_timezone_utc_offset() -> String {
     }
 }
 
-pub(super) fn default_case_group() -> String {
-    "open".to_string()
-}
-
 pub(super) fn default_reason_mode() -> ReasonMode {
     ReasonMode::Required
 }
@@ -82,10 +78,10 @@ pub(super) fn default_contact_group() -> String {
     "people".to_string()
 }
 
-pub(super) fn default_archive_message_index_fields() -> Vec<ArchiveMessageIndexField> {
+pub(super) fn default_notification_index_fields() -> Vec<NotificationIndexField> {
     vec![
-        ArchiveMessageIndexField::Time,
-        ArchiveMessageIndexField::From,
-        ArchiveMessageIndexField::Summary,
+        NotificationIndexField::Time,
+        NotificationIndexField::From,
+        NotificationIndexField::Summary,
     ]
 }

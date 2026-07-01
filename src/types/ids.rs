@@ -31,5 +31,5 @@ macro_rules! id_newtype {
 
 id_newtype!(MessageId);
 id_newtype!(CaseUid);
-id_newtype!(ArchiveUid);
+id_newtype!(NotificationUid);
 id_newtype!(PushId);

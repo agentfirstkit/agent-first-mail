@@ -1,6 +1,6 @@
 use super::*;
 use agent_first_config::{
-    add_keyed, get_path, remove_keyed, set_path, KeyedList, Value as AfValue,
+    add_keyed, get_path, remove_keyed, set_path, ConfigError, KeyedList, Value as AfValue,
 };
 use agent_first_data::normalize_utc_offset;
 
@@ -57,7 +57,13 @@ impl MailConfig {
     /// becomes the element's `identity`; `fields` are `name=…`, `email=…`,
     /// `default=…` pairs coerced by afconfig.
     pub fn add_key(&mut self, key: &str, slug: &str, fields: &[(String, String)]) -> Result<()> {
-        let mut root = self.as_config_value()?;
+        let mut config = self.clone();
+        if key == "identities" && identity_fields_set_default(fields) {
+            for identity in &mut config.identities {
+                identity.default = false;
+            }
+        }
+        let mut root = config.as_config_value()?;
         add_keyed(&mut root, key, slug, KEYED_LISTS, None, fields)
             .map_err(|e| config_key_error(key, e))?;
         self.replace_from_value(Value::from(root), key)?;
@@ -68,7 +74,10 @@ impl MailConfig {
     /// Remove the keyed-list element whose slug matches.
     pub fn remove_key(&mut self, key: &str, slug: &str) -> Result<()> {
         let mut root = self.as_config_value()?;
-        remove_keyed(&mut root, key, slug, KEYED_LISTS).map_err(|e| config_key_error(key, e))?;
+        match remove_keyed(&mut root, key, slug, KEYED_LISTS) {
+            Ok(()) | Err(ConfigError::SlugNotFound { .. }) => {}
+            Err(err) => return Err(config_key_error(key, err)),
+        }
         self.replace_from_value(Value::from(root), key)?;
         self.validate()?;
         Ok(())
@@ -141,6 +150,12 @@ impl MailConfig {
         })?;
         Ok(())
     }
+}
+
+fn identity_fields_set_default(fields: &[(String, String)]) -> bool {
+    fields.iter().any(|(field, value)| {
+        field == "default" && matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes")
+    })
 }
 
 fn config_key_error(key: &str, err: agent_first_config::ConfigError) -> AppError {

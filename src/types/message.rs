@@ -6,6 +6,7 @@ use std::fmt;
 pub enum MessageStatus {
     Triage,
     Case,
+    Notification,
     Archived,
     Spam,
     Trashed,
@@ -21,6 +22,7 @@ impl MessageStatus {
         match value.trim() {
             "" | "triage" => Ok(Self::Triage),
             "case" => Ok(Self::Case),
+            "notification" => Ok(Self::Notification),
             "archived" => Ok(Self::Archived),
             "spam" => Ok(Self::Spam),
             "trashed" => Ok(Self::Trashed),
@@ -40,6 +42,7 @@ impl MessageStatus {
         match self {
             Self::Triage => "triage",
             Self::Case => "case",
+            Self::Notification => "notification",
             Self::Archived => "archived",
             Self::Spam => "spam",
             Self::Trashed => "trashed",
@@ -329,9 +332,9 @@ pub struct AttachmentRef {
 pub struct WorkspaceState {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub archive_uid: Option<String>,
+    pub notification_uid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub archived_rfc3339: Option<String>,
+    pub notification_rfc3339: Option<String>,
     /// Provenance tag for messages whose archived status comes from a remote
     /// source rather than an explicit local disposition (e.g. "imap-archive").
     #[serde(skip_serializing_if = "Option::is_none")]

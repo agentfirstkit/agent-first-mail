@@ -2,11 +2,11 @@ use super::lock::{command_lock, workspace_progress_command};
 use super::purge::{resolve_purge_action, ResolvedPurgeAction};
 use super::push::push_confirmed;
 use crate::cli::{
-    ArchiveAction, ArchiveCaseAction, ArchiveCaseNotesAction, ArchiveListAction,
-    ArchiveMessageCommand, ArchiveMessageNotesAction, CaseCommand, CaseDraftAction,
-    CaseNotesAction, Command, ConfigAction, ContactCommand, ContactEmailAction, ContactNotesAction,
-    ContactPhoneAction, DoctorAction, LogAction, MessageAction, MessageAttachmentAction,
-    PushAction, RemoteAction, RenderAction, TriageAction,
+    ArchiveAction, ArchiveCaseAction, ArchiveCaseNotesAction, ArchiveListAction, CaseCommand,
+    CaseDraftAction, CaseNotesAction, Command, ConfigAction, ContactCommand, ContactEmailAction,
+    ContactNotesAction, ContactPhoneAction, DoctorAction, LogAction, MessageAction,
+    MessageAttachmentAction, NotificationCommand, NotificationNotesAction, PushAction,
+    RemoteAction, RenderAction, TriageAction,
 };
 use crate::error::{AppError, Result};
 use crate::progress::{ProgressCallback, WorkspaceProgressSink};
@@ -411,74 +411,6 @@ fn execute_command_unlocked(
                 ArchiveAction::List {
                     target: Some(ArchiveListAction::Cases),
                 } => ws.archive_list_cases(),
-                ArchiveAction::List {
-                    target: Some(ArchiveListAction::Messages),
-                } => ws.archive_list_messages(),
-                ArchiveAction::Message { action } => match action {
-                    ArchiveMessageCommand::Create(args) => ws.create_archive_message_category(
-                        &args.name,
-                        args.message.as_deref(),
-                        args.summary.as_deref(),
-                        args.reason.as_deref(),
-                    ),
-                    ArchiveMessageCommand::Add {
-                        archive_ref,
-                        message_id,
-                        summary,
-                        reason,
-                    } => ws.archive_message(
-                        &message_id,
-                        &archive_ref,
-                        Some(summary.as_str()),
-                        reason.as_deref(),
-                    ),
-                    ArchiveMessageCommand::Show { archive_ref } => {
-                        ws.archive_message_show(&archive_ref)
-                    }
-                    ArchiveMessageCommand::Restore {
-                        archive_ref,
-                        message_id,
-                        reason,
-                    } => ws.archive_message_restore(&archive_ref, &message_id, reason.as_deref()),
-                    ArchiveMessageCommand::Move {
-                        archive_ref,
-                        message_id,
-                        new_archive_ref,
-                        reason,
-                    } => ws.archive_message_move(
-                        &archive_ref,
-                        &message_id,
-                        &new_archive_ref,
-                        reason.as_deref(),
-                    ),
-                    ArchiveMessageCommand::Rename {
-                        archive_ref,
-                        name,
-                        reason,
-                    } => ws.archive_message_rename(&archive_ref, &name, reason.as_deref()),
-                    ArchiveMessageCommand::SetSummary {
-                        archive_ref,
-                        message_id,
-                        summary,
-                        reason,
-                    } => ws.archive_message_set_summary(
-                        &archive_ref,
-                        &message_id,
-                        &summary,
-                        reason.as_deref(),
-                    ),
-                    ArchiveMessageCommand::Notes { action } => match action {
-                        ArchiveMessageNotesAction::Show { archive_ref } => {
-                            ws.archive_message_notes_show(&archive_ref)
-                        }
-                        ArchiveMessageNotesAction::Append { archive_ref, text } => {
-                            ws.archive_message_notes_append(&archive_ref, &text)
-                        }
-                        ArchiveMessageNotesAction::Replace { archive_ref, text } => {
-                            ws.archive_message_notes_replace(&archive_ref, &text)
-                        }
-                    },
-                },
                 ArchiveAction::Case { action } => match action {
                     ArchiveCaseAction::Show { case_ref } => ws.archive_case_show(&case_ref),
                     ArchiveCaseAction::Restore {
@@ -508,6 +440,77 @@ fn execute_command_unlocked(
                 },
             }
         }
+        Command::Notification { action } => {
+            let ws = Workspace::discover(cwd)?;
+            match action {
+                NotificationCommand::Create(args) => ws.create_notification(
+                    &args.name,
+                    args.message.as_deref(),
+                    args.summary.as_deref(),
+                    args.reason.as_deref(),
+                ),
+                NotificationCommand::Add {
+                    notification_ref,
+                    message_id,
+                    summary,
+                    reason,
+                } => ws.notification_add_message(
+                    &message_id,
+                    &notification_ref,
+                    Some(summary.as_str()),
+                    reason.as_deref(),
+                ),
+                NotificationCommand::List => ws.notification_list(),
+                NotificationCommand::Show { notification_ref } => {
+                    ws.notification_show(&notification_ref)
+                }
+                NotificationCommand::Restore {
+                    notification_ref,
+                    message_id,
+                    reason,
+                } => ws.notification_restore(&notification_ref, &message_id, reason.as_deref()),
+                NotificationCommand::Move {
+                    notification_ref,
+                    message_id,
+                    new_notification_ref,
+                    reason,
+                } => ws.notification_move(
+                    &notification_ref,
+                    &message_id,
+                    &new_notification_ref,
+                    reason.as_deref(),
+                ),
+                NotificationCommand::Rename {
+                    notification_ref,
+                    name,
+                    reason,
+                } => ws.notification_rename(&notification_ref, &name, reason.as_deref()),
+                NotificationCommand::SetSummary {
+                    notification_ref,
+                    message_id,
+                    summary,
+                    reason,
+                } => ws.notification_set_summary(
+                    &notification_ref,
+                    &message_id,
+                    &summary,
+                    reason.as_deref(),
+                ),
+                NotificationCommand::Notes { action } => match action {
+                    NotificationNotesAction::Show { notification_ref } => {
+                        ws.notification_notes_show(&notification_ref)
+                    }
+                    NotificationNotesAction::Append {
+                        notification_ref,
+                        text,
+                    } => ws.notification_notes_append(&notification_ref, &text),
+                    NotificationNotesAction::Replace {
+                        notification_ref,
+                        text,
+                    } => ws.notification_notes_replace(&notification_ref, &text),
+                },
+            }
+        }
         Command::Render { action } => {
             let ws = Workspace::discover(cwd)?;
             match action {
@@ -522,7 +525,9 @@ fn execute_command_unlocked(
                 LogAction::Tail => ws.log_tail(),
                 LogAction::Message { message_id } => ws.log_message(&message_id),
                 LogAction::Case { case_uid } => ws.log_case(&case_uid),
-                LogAction::Archive { archive_uid } => ws.log_archive(&archive_uid),
+                LogAction::Notification { notification_uid } => {
+                    ws.log_notification(&notification_uid)
+                }
             }
         }
         #[cfg(feature = "ui")]
@@ -536,7 +541,7 @@ fn execute_command_unlocked(
 
 fn execute_status(cwd: &Path) -> Result<Value> {
     let ws = Workspace::discover(cwd)?;
-    let progress = crate::progress::workspace_status_progress(ws.root())?;
+    let mut progress = crate::progress::workspace_status_progress(ws.root())?;
     let Some(_lock) = WorkspaceLock::try_acquire(ws.root(), LockMode::Shared)? else {
         return Ok(json!({
             "code": "status",
@@ -545,9 +550,20 @@ fn execute_status(cwd: &Path) -> Result<Value> {
             "hint": "Workspace counts are omitted while another afmail command is using this workspace; retry after it finishes for full counts."
         }));
     };
+    mark_unlocked_running_progress_stale(&mut progress);
     let mut status = ws.status()?;
     if let Value::Object(map) = &mut status {
         map.insert("progress".to_string(), progress);
     }
     Ok(status)
+}
+
+fn mark_unlocked_running_progress_stale(progress: &mut Value) {
+    let Value::Object(map) = progress else {
+        return;
+    };
+    if map.get("status").and_then(Value::as_str) != Some("running") {
+        return;
+    }
+    map.insert("status".to_string(), json!("stale"));
 }

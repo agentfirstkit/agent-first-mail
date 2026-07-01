@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const CASE_SCHEMA_NAME: &str = "case";
-pub const ARCHIVE_NOTIFICATION_SCHEMA_NAME: &str = "notification";
+pub const NOTIFICATION_SCHEMA_NAME: &str = "notification";
 pub const MESSAGE_COLLECTION_SCHEMA_VERSION: u64 = 1;
 
 fn is_zero(value: &usize) -> bool {
@@ -47,8 +47,8 @@ pub struct MessageCollection {
 }
 
 pub type CaseMessages = MessageCollection;
-pub type ArchiveMessages = MessageCollection;
-pub type ArchiveMessageItem = MessageCollectionItem;
+pub type NotificationMessages = MessageCollection;
+pub type NotificationMessageItem = MessageCollectionItem;
 
 impl MessageCollection {
     pub fn new(schema_name: &str, collection_uid: &str, collection_name: &str) -> Self {
@@ -78,8 +78,16 @@ impl MessageCollection {
         collection
     }
 
-    pub fn new_notification(archive_uid: &str, archive_name: &str, now_rfc3339: &str) -> Self {
-        let mut collection = Self::new(ARCHIVE_NOTIFICATION_SCHEMA_NAME, archive_uid, archive_name);
+    pub fn new_notification(
+        notification_uid: &str,
+        notification_name: &str,
+        now_rfc3339: &str,
+    ) -> Self {
+        let mut collection = Self::new(
+            NOTIFICATION_SCHEMA_NAME,
+            notification_uid,
+            notification_name,
+        );
         collection.created_rfc3339 = Some(now_rfc3339.to_string());
         collection.updated_rfc3339 = Some(now_rfc3339.to_string());
         collection

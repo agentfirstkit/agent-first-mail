@@ -42,6 +42,8 @@ pub struct PushItem {
     pub attempt_count: u64,
     pub step_states: Vec<PushStepState>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_stage: Option<PushLocalStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
 
@@ -71,6 +73,15 @@ pub enum PushStepStatus {
     Pending,
     Succeeded,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum PushLocalStage {
+    RemoteSucceeded,
+    OutboundRecorded,
+    DraftRemoved,
+    PendingCleared,
 }
 
 impl PushItem {
@@ -202,6 +213,7 @@ fn validate_push_item_keys(value: &Value) -> Result<()> {
         "updated_rfc3339",
         "attempt_count",
         "step_states",
+        "local_stage",
         "last_error",
     ];
     for key in obj.keys() {
@@ -282,7 +294,7 @@ pub struct MessageActionPush {
 #[serde(rename_all = "snake_case")]
 pub enum MessagePushAction {
     CaseAdd,
-    Archive,
+    Notification,
     Spam,
     Trash,
 }
@@ -291,7 +303,7 @@ impl MessagePushAction {
     pub fn from_kind(kind: &str) -> Option<Self> {
         match kind {
             "case.add" | "case_add" => Some(Self::CaseAdd),
-            "message.archive" | "archive" => Some(Self::Archive),
+            "message.notification" | "notification" => Some(Self::Notification),
             "message.spam" | "spam" => Some(Self::Spam),
             "message.trash" | "trash" => Some(Self::Trash),
             _ => None,
@@ -301,7 +313,7 @@ impl MessagePushAction {
     pub fn kind(self) -> &'static str {
         match self {
             Self::CaseAdd => "case.add",
-            Self::Archive => "message.archive",
+            Self::Notification => "message.notification",
             Self::Spam => "message.spam",
             Self::Trash => "message.trash",
         }
@@ -310,7 +322,7 @@ impl MessagePushAction {
     pub fn mode_label(self) -> &'static str {
         match self {
             Self::CaseAdd => "case",
-            Self::Archive => "archive",
+            Self::Notification => "notification",
             Self::Spam => "spam",
             Self::Trash => "trash",
         }

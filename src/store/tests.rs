@@ -82,8 +82,8 @@ fn write_sample_message(root: &Path, message_id: &str) {
         observed_recipient_emails: Vec::new(),
         workspace: WorkspaceState {
             status: "triage".to_string(),
-            archive_uid: None,
-            archived_rfc3339: None,
+            notification_uid: None,
+            notification_rfc3339: None,
             origin: None,
             remote_sync: None,
             push: None,
@@ -99,9 +99,16 @@ fn case_collection(case_uid: &str, case_name: &str, message_id: &str) -> CaseFro
     case
 }
 
-fn archive_collection(archive_uid: &str, archive_name: &str, message_id: &str) -> ArchiveMessages {
-    let mut archive =
-        ArchiveMessages::new_notification(archive_uid, archive_name, "2026-05-22T10:00:00Z");
+fn notification_collection(
+    notification_uid: &str,
+    notification_name: &str,
+    message_id: &str,
+) -> NotificationMessages {
+    let mut archive = NotificationMessages::new_notification(
+        notification_uid,
+        notification_name,
+        "2026-05-22T10:00:00Z",
+    );
     archive.upsert_item(message_id, Some("saved notice"), "2026-05-22T10:00:00Z");
     archive
 }
@@ -188,8 +195,8 @@ fn update_sample_message(root: &Path, message_id: &str, update: impl FnOnce(&mut
         observed_recipient_emails: Vec::new(),
         workspace: WorkspaceState {
             status: "triage".to_string(),
-            archive_uid: None,
-            archived_rfc3339: None,
+            notification_uid: None,
+            notification_rfc3339: None,
             origin: None,
             remote_sync: None,
             push: None,
@@ -248,8 +255,8 @@ fn renders_human_conversation_with_relevant_security_notes() {
         observed_recipient_emails: Vec::new(),
         workspace: WorkspaceState {
             status: "triage".to_string(),
-            archive_uid: None,
-            archived_rfc3339: None,
+            notification_uid: None,
+            notification_rfc3339: None,
             origin: None,
             remote_sync: None,
             push: None,
@@ -345,8 +352,8 @@ fn renders_body_with_dynamic_fence() {
         observed_recipient_emails: Vec::new(),
         workspace: WorkspaceState {
             status: "triage".to_string(),
-            archive_uid: None,
-            archived_rfc3339: None,
+            notification_uid: None,
+            notification_rfc3339: None,
             origin: None,
             remote_sync: None,
             push: None,
@@ -414,8 +421,8 @@ fn crafted_headers_cannot_inject_markdown_blocks() {
         observed_recipient_emails: Vec::new(),
         workspace: WorkspaceState {
             status: "triage".to_string(),
-            archive_uid: None,
-            archived_rfc3339: None,
+            notification_uid: None,
+            notification_rfc3339: None,
             origin: None,
             remote_sync: None,
             push: None,
@@ -491,8 +498,8 @@ fn renders_authentication_warnings_only_for_failures() {
         observed_recipient_emails: Vec::new(),
         workspace: WorkspaceState {
             status: "triage".to_string(),
-            archive_uid: None,
-            archived_rfc3339: None,
+            notification_uid: None,
+            notification_rfc3339: None,
             origin: None,
             remote_sync: None,
             push: None,
@@ -596,8 +603,8 @@ fn message_context_strips_visible_quotes_but_keeps_full_body() {
         observed_recipient_emails: Vec::new(),
         workspace: WorkspaceState {
             status: "triage".to_string(),
-            archive_uid: None,
-            archived_rfc3339: None,
+            notification_uid: None,
+            notification_rfc3339: None,
             origin: None,
             remote_sync: None,
             push: None,
@@ -683,7 +690,7 @@ fn attachment_filename_and_markdown_paths_are_safe() {
     assert_eq!(
         attachment_markdown_path(
             Some(Path::new("/workspace")),
-            Some(Path::new("/workspace/cases/open/c1")),
+            Some(Path::new("/workspace/cases/support/c1")),
             ".afmail/messages/message_1.files/image.png",
         ),
         "../../../.afmail/messages/message_1.files/image.png"
@@ -735,8 +742,8 @@ fn renders_downloaded_images_as_markdown_previews() {
         observed_recipient_emails: Vec::new(),
         workspace: WorkspaceState {
             status: "triage".to_string(),
-            archive_uid: None,
-            archived_rfc3339: None,
+            notification_uid: None,
+            notification_rfc3339: None,
             origin: None,
             remote_sync: None,
             push: None,
@@ -809,7 +816,7 @@ fn init_and_status_work() {
     assert!(root.join(".afmail/DO_NOT_EDIT.txt").is_file());
     assert!(root.join("templates").is_dir());
     assert!(root.join("archive/cases").is_dir());
-    assert!(root.join("archive/notifications").is_dir());
+    assert!(root.join("notifications").is_dir());
     assert!(root.join(".afmail/logs/events.jsonl").is_file());
     assert!(root.join(".afmail/transactions").is_dir());
     assert!(!root.join("spam").exists());
@@ -1044,17 +1051,22 @@ fn direct_disposition_requires_case_for_related_messages() {
         message.in_reply_to = Some("message_parent@example.com".to_string());
     });
 
-    let archive_uid = ws
-        .create_archive_message_category("notifications", None, None, None)
+    let notification_uid = ws
+        .create_notification("notifications", None, None, None)
         .ok()
         .and_then(|value| {
             value
-                .get("archive_uid")
+                .get("notification_uid")
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    let archive = ws.archive_message("message_parent", &archive_uid, Some("parent"), Some("done"));
+    let archive = ws.notification_add_message(
+        "message_parent",
+        &notification_uid,
+        Some("parent"),
+        Some("done"),
+    );
     let spam = ws.spam_message("message_parent", Some("spam"));
     let trash = ws.trash_message("message_parent", Some("trash"));
     for result in [archive, spam, trash] {
@@ -1094,20 +1106,20 @@ fn direct_disposition_still_allows_unrelated_single_messages() {
     write_sample_message(&root, "message_notice");
     write_sample_message(&root, "message_spam");
 
-    let archive_uid = ws
-        .create_archive_message_category("notifications", None, None, None)
+    let notification_uid = ws
+        .create_notification("notifications", None, None, None)
         .ok()
         .and_then(|value| {
             value
-                .get("archive_uid")
+                .get("notification_uid")
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
         .unwrap_or_default();
     assert_eq!(
-        ws.archive_message(
+        ws.notification_add_message(
             "message_notice",
-            &archive_uid,
+            &notification_uid,
             Some("notice"),
             Some("notice"),
         )
@@ -1115,7 +1127,7 @@ fn direct_disposition_still_allows_unrelated_single_messages() {
         .ok()
         .and_then(|value| value.get("code"))
         .and_then(Value::as_str),
-        Some("message_archived")
+        Some("notification_message_added")
     );
     assert_eq!(
         ws.spam_message("message_spam", Some("spam"))
@@ -1193,7 +1205,7 @@ fn case_add_moves_message_to_case_and_updates_message() {
     assert!(ws.refresh_triage_views().is_ok());
     let result = ws.create_case(
         "case-1",
-        Some("open"),
+        Some("support"),
         Some("message_1"),
         Some("case summary"),
         Some("case work"),
@@ -1214,7 +1226,7 @@ fn case_add_moves_message_to_case_and_updates_message() {
             .and_then(Value::as_str),
         Some("c20260521001")
     );
-    let case_dir = root.join("cases/open/c20260521001-case-1");
+    let case_dir = root.join("cases/support/c20260521001-case-1");
     assert!(case_dir.join("case.md").exists());
     assert!(!root.join("triage/message_1.md").exists());
     let msg = read_message(&root.join("messages/message_1.json"));
@@ -1240,14 +1252,14 @@ fn uid_refs_accept_readable_suffixes_and_sequences_expand() {
         Some("c20260521001")
     );
     assert_eq!(
-        parse_archive_ref("a20260521001-any-readable-suffix")
+        parse_notification_ref("n20260521001-any-readable-suffix")
             .ok()
             .as_deref(),
-        Some("a20260521001")
+        Some("n20260521001")
     );
     assert!(parse_case_ref("应用反馈-肥料登记").is_err());
     assert!(parse_case_ref("c202605211").is_err());
-    assert!(parse_archive_ref("a20260521001-").is_err());
+    assert!(parse_notification_ref("n20260521001-").is_err());
     assert_eq!(
         next_uid_for_date(
             'c',
@@ -1265,18 +1277,18 @@ fn uid_refs_accept_readable_suffixes_and_sequences_expand() {
     );
     assert_eq!(
         next_uid_for_date(
-            'a',
+            'n',
             "20260521",
-            vec!["a20260521999".to_string()].into_iter(),
+            vec!["n20260521999".to_string()].into_iter(),
         )
         .ok()
         .as_deref(),
-        Some("a202605211000")
+        Some("n202605211000")
     );
 }
 
 #[test]
-fn chinese_case_and_archive_uids_are_supported(
+fn chinese_case_and_notification_uids_are_supported(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let root = temp_root("unicode-ids");
     let ws = Workspace::at(&root);
@@ -1327,30 +1339,30 @@ fn chinese_case_and_archive_uids_are_supported(
     assert!(case_md.contains("- Message: [message_case](views/messages/message_case.md)"));
     assert!(case_md.contains("- Time: 2026-05-21 10:00"));
 
-    let archive_name = "服务通知";
+    let notification_name = "服务通知";
     write_sample_message(&root, "message_notice");
-    let result = ws.create_archive_message_category(
-        archive_name,
+    let result = ws.create_notification(
+        notification_name,
         Some("message_notice"),
         Some("服务通知摘要"),
         Some("归档参考通知"),
     );
     assert!(result.is_ok(), "{result:?}");
-    let archive_uid = "a20260521001";
-    assert_eq!(
-        result
-            .as_ref()
-            .ok()
-            .and_then(|v| v.get("archive_uid").cloned()),
-        Some(json!(archive_uid))
-    );
+    let notification_uid = result
+        .as_ref()
+        .ok()
+        .and_then(|v| v.get("notification_uid"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    assert!(notification_uid.starts_with('n'));
 
-    let archive_dir = root
-        .join("archive/notifications")
-        .join(format!("{archive_uid}-{archive_name}"));
-    assert!(archive_dir.join("archive.md").exists());
-    assert!(archive_dir.join("data/notification.json").exists());
-    assert!(archive_dir
+    let notification_dir = root
+        .join("notifications")
+        .join(format!("{}-{notification_name}", notification_uid));
+    assert!(notification_dir.join("notification.md").exists());
+    assert!(notification_dir.join("data/notification.json").exists());
+    assert!(notification_dir
         .join("views/messages/message_notice.md")
         .exists());
     let message = read_message(&root.join("messages/message_notice.json"));
@@ -1358,23 +1370,31 @@ fn chinese_case_and_archive_uids_are_supported(
     assert_eq!(
         message
             .ok()
-            .and_then(|message| message.workspace.archive_uid),
-        Some(archive_uid.to_string())
+            .and_then(|message| message.workspace.notification_uid),
+        Some(notification_uid.clone())
     );
-    let archive_view = fs::read_to_string(archive_dir.join("views/messages/message_notice.md"))
-        .unwrap_or_default();
+    let archive_view =
+        fs::read_to_string(notification_dir.join("views/messages/message_notice.md"))
+            .unwrap_or_default();
     let archive_frontmatter = crate::markdown::split_frontmatter(&archive_view)
         .ok()
         .map(|doc| doc.frontmatter)
         .unwrap_or_default();
-    let archive_yaml: Value = serde_yaml::from_str(&archive_frontmatter).unwrap_or(Value::Null);
-    assert_eq!(archive_yaml["archive_uid"], json!(archive_uid));
-    assert_eq!(archive_yaml["archive_name"], json!(archive_name));
+    let notification_yaml: Value =
+        serde_yaml::from_str(&archive_frontmatter).unwrap_or(Value::Null);
     assert_eq!(
-        ws.archive_message_show(archive_uid)
+        notification_yaml["notification_uid"],
+        json!(notification_uid)
+    );
+    assert_eq!(
+        notification_yaml["notification_name"],
+        json!(notification_name)
+    );
+    assert_eq!(
+        ws.notification_show(&notification_uid)
             .ok()
-            .and_then(|v| v.get("archive_uid").cloned()),
-        Some(json!(archive_uid))
+            .and_then(|v| v.get("notification_uid").cloned()),
+        Some(json!(notification_uid))
     );
 
     let _ = fs::remove_dir_all(root);
@@ -1391,7 +1411,7 @@ fn render_refresh_rebuilds_message_cache_and_preserves_workspace_state(
     write_sample_message(&root, "message_archive");
     write_sample_message(&root, "message_spam");
 
-    let case_dir = root.join("cases/open/c20260521001-case-one");
+    let case_dir = root.join("cases/support/c20260521001-case-one");
     assert!(fs::create_dir_all(case_dir.join("data")).is_ok());
     assert!(write_json_pretty(
         &case_dir.join("data/case.json"),
@@ -1399,12 +1419,12 @@ fn render_refresh_rebuilds_message_cache_and_preserves_workspace_state(
     )
     .is_ok());
 
-    let archive_uid = "a20260521001";
-    let archive_dir = root.join("archive/notifications/a20260521001-notices");
-    assert!(fs::create_dir_all(archive_dir.join("data")).is_ok());
+    let notification_uid = "n20260521001";
+    let notification_dir = root.join("notifications/n20260521001-notices");
+    assert!(fs::create_dir_all(notification_dir.join("data")).is_ok());
     assert!(write_json_pretty(
-        &archive_dir.join("data/notification.json"),
-        &archive_collection(archive_uid, "notices", "message_archive"),
+        &notification_dir.join("data/notification.json"),
+        &notification_collection(notification_uid, "notices", "message_archive"),
     )
     .is_ok());
 
@@ -1433,14 +1453,17 @@ fn render_refresh_rebuilds_message_cache_and_preserves_workspace_state(
         vec!["\\Flagged".to_string(), "\\Seen".to_string()]
     );
     assert!(root
-        .join("cases/open/c20260521001-case-one/views/messages/message_case.md")
+        .join("cases/support/c20260521001-case-one/views/messages/message_case.md")
         .is_file());
 
     let archived = read_message(&root.join("messages/message_archive.json"))?;
-    assert_eq!(archived.workspace.status, "archived");
-    assert_eq!(archived.workspace.archive_uid.as_deref(), Some(archive_uid));
+    assert_eq!(archived.workspace.status, "notification");
+    assert_eq!(
+        archived.workspace.notification_uid.as_deref(),
+        Some(notification_uid)
+    );
     assert!(root
-        .join("archive/notifications/a20260521001-notices/views/messages/message_archive.md")
+        .join("notifications/n20260521001-notices/views/messages/message_archive.md")
         .is_file());
 
     let spam = read_message(&root.join("messages/message_spam.json"))?;
@@ -1542,8 +1565,8 @@ fn relocate_keeps_id_and_updates_locations() {
         observed_recipient_emails: Vec::new(),
         workspace: WorkspaceState {
             status: String::new(),
-            archive_uid: None,
-            archived_rfc3339: None,
+            notification_uid: None,
+            notification_rfc3339: None,
             origin: None,
             remote_sync: None,
             push: None,
@@ -1551,14 +1574,14 @@ fn relocate_keeps_id_and_updates_locations() {
     });
     msg.workspace.status = "case".to_string();
     assert!(write_json_pretty(&message_path, &msg).is_ok());
-    assert!(fs::create_dir_all(root.join("cases/open/c20260521001-case-1/data")).is_ok());
+    assert!(fs::create_dir_all(root.join("cases/support/c20260521001-case-1/data")).is_ok());
     assert!(fs::write(
-        root.join("cases/open/c20260521001-case-1/case.md"),
+        root.join("cases/support/c20260521001-case-1/case.md"),
         "# Case\n\nmessage_1\n"
     )
     .is_ok());
     assert!(write_json_pretty(
-        &root.join("cases/open/c20260521001-case-1/data/case.json"),
+        &root.join("cases/support/c20260521001-case-1/data/case.json"),
         &case_collection("c20260521001", "case-1", "message_1"),
     )
     .is_ok());
@@ -1594,8 +1617,10 @@ fn relocate_keeps_id_and_updates_locations() {
             .map(|location| location.mailbox_name.as_str()),
         Some("Archive")
     );
-    let case_messages =
-        read_case_messages(&root.join("cases/open/c20260521001-case-1"), "c20260521001");
+    let case_messages = read_case_messages(
+        &root.join("cases/support/c20260521001-case-1"),
+        "c20260521001",
+    );
     assert_eq!(
         case_messages
             .as_ref()
@@ -1604,7 +1629,7 @@ fn relocate_keeps_id_and_updates_locations() {
         Some(vec!["message_1".to_string()])
     );
     assert!(
-        fs::read_to_string(root.join("cases/open/c20260521001-case-1/case.md"))
+        fs::read_to_string(root.join("cases/support/c20260521001-case-1/case.md"))
             .map(|text| text.contains("message_1"))
             .unwrap_or(false)
     );
@@ -1615,4 +1640,13 @@ fn relocate_keeps_id_and_updates_locations() {
 fn clean_body_text_removes_controls_but_keeps_long_lines() {
     let input = "a\r\nlong line stays\u{0000}\u{0007}";
     assert_eq!(clean_body_text(input), "a\nlong line stays");
+}
+
+#[test]
+fn clean_body_text_decodes_common_html_entities() {
+    let input = "发件人: &quot;Ningyu Ran&quot;&lt;support@example.com&gt;\r\nSent&nbsp;from&nbsp;iPhone &#62; &#x3c;";
+    assert_eq!(
+        clean_body_text(input),
+        "发件人: \"Ningyu Ran\"<support@example.com>\nSent from iPhone > <"
+    );
 }

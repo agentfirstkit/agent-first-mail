@@ -1,24 +1,24 @@
 mod access;
 mod actions;
-mod archive;
 mod defaults;
 mod identity;
 mod mailbox;
+mod notification;
 mod validation;
 mod workspace;
 
 pub(crate) use actions::default_draft_send_steps;
 pub use actions::{
-    ActionRule, ActionStep, ActionStepOn, ActionsSection, MailDirection, MessageArchiveAction,
+    ActionRule, ActionStep, ActionStepOn, ActionsSection, MailDirection, MessageNotificationAction,
     PullActionSection, PullImportAs, PullMailboxAction,
-};
-pub use archive::{
-    ArchiveMessageIndexField, ArchiveMessageIndexSection, ArchiveMessageIndexSort, ArchiveSection,
 };
 pub use identity::{IdentityConfig, MessageIdentityMatch, ResolvedIdentity};
 pub use mailbox::{
     special_use_kinds, ImapConfig, ImapMailboxConfig, ImapSection, MailboxResolveRule,
     SpecialUseKind, SpecialUseSource, SpecialUseTarget,
+};
+pub use notification::{
+    NotificationIndexField, NotificationIndexSection, NotificationIndexSort, NotificationSection,
 };
 pub use workspace::{
     AuditSection, CaseSection, ContactSection, ReasonMode, SmtpConfig, SmtpSection,
@@ -50,7 +50,7 @@ pub struct MailConfig {
     #[serde(default)]
     pub case: CaseSection,
     #[serde(default)]
-    pub archive: ArchiveSection,
+    pub notification: NotificationSection,
     pub audit: AuditSection,
     pub smtp: SmtpSection,
     #[serde(default)]
@@ -68,7 +68,7 @@ impl Default for MailConfig {
             actions: ActionsSection::default(),
             identities: default_identities(),
             case: CaseSection::default(),
-            archive: ArchiveSection::default(),
+            notification: NotificationSection::default(),
             audit: AuditSection::default(),
             smtp: SmtpSection::default(),
             contact: ContactSection::default(),
@@ -79,7 +79,15 @@ impl Default for MailConfig {
 fn merge_with_defaults(override_value: Value) -> Result<Value> {
     let mut value = MailConfig::default_template_value()?;
     merge_json_value(&mut value, override_value);
+    remove_deprecated_case_default_group(&mut value);
     Ok(value)
+}
+
+fn remove_deprecated_case_default_group(value: &mut Value) {
+    let Some(case) = value.get_mut("case").and_then(Value::as_object_mut) else {
+        return;
+    };
+    case.remove("default_group");
 }
 
 fn merge_json_value(base: &mut Value, override_value: Value) {
@@ -176,7 +184,7 @@ impl MailConfig {
         self.workspace.validate()?;
         self.actions.validate(self)?;
         self.validate_identities()?;
-        self.archive.validate()?;
+        self.notification.validate()?;
         validate_password_secret_source(
             "imap.password_secret",
             self.imap.password_secret.as_deref(),

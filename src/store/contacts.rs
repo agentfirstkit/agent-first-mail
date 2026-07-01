@@ -596,7 +596,7 @@ impl Workspace {
         self.refresh_triage_views()?;
         self.refresh_disposition_views()?;
         self.refresh_all_case_message_views()?;
-        self.refresh_archive_indexes()?;
+        self.refresh_notification_indexes()?;
         Ok(())
     }
 

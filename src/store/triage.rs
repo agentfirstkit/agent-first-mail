@@ -586,7 +586,7 @@ impl Workspace {
         if current.is_terminal_local() {
             return Ok(false);
         }
-        if message.workspace.archive_uid.is_some() || current == MessageStatus::Archived {
+        if message.workspace.notification_uid.is_some() || current == MessageStatus::Archived {
             return Ok(false);
         }
         if message.workspace.origin.is_some() {

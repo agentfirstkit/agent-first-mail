@@ -1,4 +1,4 @@
-# Messages archivés: {{ archive.archive_name }} (`{{ archive.archive_uid }}`)
+# Messages archivés: {{ notification.notification_name }} (`{{ notification.notification_uid }}`)
 
 {% if items | length == 0 %}_Aucun message._
 {% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.action_kind == 'received_reply' %}Réponse reçue{% elif item.view.action_kind == 'received_forward' %}Transfert reçu{% elif item.view.action_kind == 'sent_reply' %}Réponse envoyée{% elif item.view.action_kind == 'sent_forward' %}Transfert envoyé{% elif item.view.action_kind == 'received' %}Reçu{% else %}Envoyé{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}

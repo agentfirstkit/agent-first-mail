@@ -113,8 +113,8 @@ pub struct CaseCreateArgs {
     /// Human-readable case name used in case.md and the directory suffix.
     #[arg(long)]
     pub name: String,
-    /// Destination group. Defaults to the configured default group.
-    #[arg(long)]
+    /// Required case category/group, for example support, invoice, 客服, 发票, 合同, or 退款.
+    #[arg(long, required = true)]
     pub group: Option<String>,
     /// Optional first message to add to the case.
     #[arg(long)]

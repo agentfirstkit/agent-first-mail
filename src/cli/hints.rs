@@ -5,6 +5,7 @@ pub fn error_hint(argv: &[String]) -> String {
     }
     match tokens[0].as_str() {
         "case" => nested_hint("afmail case", tokens.get(1), CASE_ACTIONS),
+        "contact" => nested_hint("afmail contact", tokens.get(1), CONTACT_ACTIONS),
         "message" => {
             if tokens.get(1).is_some_and(|token| token == "attachment") {
                 nested_hint(
@@ -17,16 +18,12 @@ pub fn error_hint(argv: &[String]) -> String {
             }
         }
         "archive" => match tokens.get(1).map(String::as_str) {
-            Some("message") => nested_hint(
-                "afmail archive message",
-                tokens.get(2),
-                ARCHIVE_MESSAGE_ACTIONS,
-            ),
             Some("case") => nested_hint("afmail archive case", tokens.get(2), ARCHIVE_CASE_ACTIONS),
             Some("list") => nested_hint("afmail archive list", tokens.get(2), ARCHIVE_LIST_ACTIONS),
             Some(_) => "try: afmail archive --help".to_string(),
             None => "try: afmail archive --help".to_string(),
         },
+        "notification" => nested_hint("afmail notification", tokens.get(1), NOTIFICATION_ACTIONS),
         "config" => nested_hint("afmail config", tokens.get(1), CONFIG_ACTIONS),
         "remote" => nested_hint("afmail remote", tokens.get(1), REMOTE_ACTIONS),
         "push" => nested_hint("afmail push", tokens.get(1), PUSH_ACTIONS),
@@ -75,23 +72,59 @@ fn command_tokens(argv: &[String]) -> Vec<String> {
 
 #[cfg(feature = "ui")]
 const ROOT_COMMANDS: &[&str] = &[
-    "init", "pull", "config", "remote", "push", "status", "doctor", "purge", "skill", "triage",
-    "message", "case", "archive", "render", "log", "ui",
+    "init",
+    "pull",
+    "config",
+    "remote",
+    "push",
+    "status",
+    "doctor",
+    "purge",
+    "skill",
+    "triage",
+    "message",
+    "case",
+    "contact",
+    "archive",
+    "notification",
+    "render",
+    "log",
+    "ui",
 ];
 #[cfg(not(feature = "ui"))]
 const ROOT_COMMANDS: &[&str] = &[
-    "init", "pull", "config", "remote", "push", "status", "doctor", "purge", "skill", "triage",
-    "message", "case", "archive", "render", "log",
+    "init",
+    "pull",
+    "config",
+    "remote",
+    "push",
+    "status",
+    "doctor",
+    "purge",
+    "skill",
+    "triage",
+    "message",
+    "case",
+    "contact",
+    "archive",
+    "notification",
+    "render",
+    "log",
 ];
 const CASE_ACTIONS: &[&str] = &[
     "create", "list", "show", "add", "move", "rename", "notes", "archive", "reopen", "tag",
     "trash", "untag", "draft", "merge",
 ];
+const CONTACT_ACTIONS: &[&str] = &[
+    "create", "list", "show", "move", "rename", "email", "phone", "tag", "untag", "notes",
+    "archive", "reopen", "extract",
+];
 const MESSAGE_ACTIONS: &[&str] = &["show", "spam", "trash", "restore", "attachment"];
 const MESSAGE_ATTACHMENT_ACTIONS: &[&str] = &["fetch"];
-const ARCHIVE_MESSAGE_ACTIONS: &[&str] = &[
+const NOTIFICATION_ACTIONS: &[&str] = &[
     "add",
     "create",
+    "list",
     "show",
     "restore",
     "move",
@@ -100,7 +133,7 @@ const ARCHIVE_MESSAGE_ACTIONS: &[&str] = &[
     "notes",
 ];
 const ARCHIVE_CASE_ACTIONS: &[&str] = &["show", "restore", "trash", "rename", "notes"];
-const ARCHIVE_LIST_ACTIONS: &[&str] = &["cases", "messages"];
+const ARCHIVE_LIST_ACTIONS: &[&str] = &["cases"];
 const CONFIG_ACTIONS: &[&str] = &["show", "get", "set"];
 const REMOTE_ACTIONS: &[&str] = &["test", "folders"];
 const PUSH_ACTIONS: &[&str] = &["list"];
@@ -108,7 +141,7 @@ const DOCTOR_ACTIONS: &[&str] = &["repair"];
 const SKILL_ACTIONS: &[&str] = &["status", "install", "uninstall"];
 const TRIAGE_ACTIONS: &[&str] = &["list"];
 const RENDER_ACTIONS: &[&str] = &["refresh", "templates"];
-const LOG_ACTIONS: &[&str] = &["list", "tail", "message", "case", "archive"];
+const LOG_ACTIONS: &[&str] = &["list", "tail", "message", "case", "notification"];
 #[cfg(feature = "ui")]
 const UI_ACTIONS: &[&str] = &["snapshot"];
 
@@ -141,11 +174,34 @@ mod tests {
                 "--output",
                 "yaml",
                 "--log=startup",
-                "archive",
-                "message",
+                "notification",
                 "rename",
             ])),
-            "try: afmail archive message rename --help"
+            "try: afmail notification rename --help"
+        );
+    }
+
+    #[test]
+    fn hints_track_renamed_and_added_commands() {
+        // `contact` is a real root command; a typo'd subcommand must point at
+        // its own help, not fall through to the generic top-level hint.
+        assert_eq!(
+            error_hint(&argv(&["contact", "zzz"])),
+            "try: afmail contact --help"
+        );
+        assert_eq!(
+            error_hint(&argv(&["contact", "rename", "--bad"])),
+            "try: afmail contact rename --help"
+        );
+        // `log` and `notification` action tables follow the real subcommands:
+        // log gained `notification` (was `archive`), notification gained `list`.
+        assert_eq!(
+            error_hint(&argv(&["log", "notification", "--bad"])),
+            "try: afmail log notification --help"
+        );
+        assert_eq!(
+            error_hint(&argv(&["notification", "list", "--bad"])),
+            "try: afmail notification list --help"
         );
     }
 }

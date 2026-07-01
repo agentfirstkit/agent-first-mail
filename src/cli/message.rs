@@ -23,7 +23,7 @@ pub enum MessageAction {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Restore a message from spam, trash, or direct archive back to triage.
+    /// Restore a message from spam, trash, or notification back to triage.
     Restore {
         /// Message id, for example message_inbox_607146690_22.
         message_id: String,

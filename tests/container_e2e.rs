@@ -144,7 +144,7 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
             "--message",
             &refund_initial,
             "--group",
-            "open",
+            "support",
             "--reason",
             "customer refund thread needs a reply",
         ],
@@ -205,8 +205,7 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
     let (status, stdout) = run(
         root.path(),
         &[
-            "archive",
-            "message",
+            "notification",
             "create",
             "--name",
             "receipts",
@@ -220,12 +219,12 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
     );
     assert_eq!(status, 0, "{stdout}");
     let archive_created = parse_one(&stdout);
-    assert_eq!(archive_created["code"], "archive_message_created");
-    let archive_uid = archive_created["archive_uid"]
+    assert_eq!(archive_created["code"], "notification_created");
+    let notification_uid = archive_created["notification_uid"]
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(!archive_uid.is_empty(), "{archive_created}");
+    assert!(!notification_uid.is_empty(), "{archive_created}");
 
     let (status, stdout) = run(
         root.path(),
@@ -251,7 +250,7 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(status, 0, "{stdout}");
 
     #[cfg(feature = "ui")]
-    assert_fixture_ui_room_snapshot(root.path(), &attachment_id, &case_uid, &archive_uid);
+    assert_fixture_ui_room_snapshot(root.path(), &attachment_id, &case_uid, &notification_uid);
 
     let (status, stdout) = run(root.path(), &["push", "--dry-run"]);
     assert_eq!(status, 0, "{stdout}");
@@ -402,7 +401,7 @@ fn docker_greenmail_pull_reply_send_e2e() {
             "--message",
             &inbound_message_id,
             "--group",
-            "open",
+            "support",
             "--reason",
             "real inbound message needs a reply",
         ],
@@ -638,7 +637,7 @@ fn test_config(imap_port: u16, smtp_port: u16) -> Value {
                 {"move_to_mailbox_id": "junk"}
             ]},
             "message.trash": {"steps": [{"move_to_mailbox_id": "trash"}]},
-            "message.archive": {"by_source_mailbox_id": {
+            "message.notification": {"by_source_mailbox_id": {
                 "inbox": {"steps": [{"move_to_mailbox_id": "archive"}]},
                 "sent": {"steps": []},
                 "archive": {"steps": []},
@@ -647,7 +646,7 @@ fn test_config(imap_port: u16, smtp_port: u16) -> Value {
                 "drafts": {"steps": []}
             }}
         },
-        "case": {"default_group": "open"},
+        "case": {},
         "identities": [
             {"identity": "me", "name": "Me", "email": "me@localhost", "default": true}
         ],
@@ -755,7 +754,7 @@ fn assert_fixture_ui_room_snapshot(
     root: &Path,
     triage_message_id: &str,
     case_uid: &str,
-    archive_uid: &str,
+    notification_uid: &str,
 ) {
     let (status, stdout) = run(root, &["ui", "snapshot"]);
     assert_eq!(status, 0, "{stdout}");
@@ -785,7 +784,7 @@ fn assert_fixture_ui_room_snapshot(
         "inbox_triage",
         "active_cases",
         "push_queue",
-        "message_archives",
+        "notifications",
         "case_archives",
         "activity_log",
         "mail_terminal",
@@ -866,36 +865,37 @@ fn assert_fixture_ui_room_snapshot(
     assert_eq!(prepared.status, PreparedStatus::Ready);
     assert_eq!(prepared.input["case_ref"], case_uid);
 
-    let archives = find_unit(&space, "afmail", "message_archives");
-    assert!(archives.is_some());
-    let archive_items = afmail["ui"]["archive_message_items"].as_array();
-    assert!(archive_items.is_some(), "{:?}", afmail["ui"]);
-    let Some(archive_items) = archive_items else {
+    let notifications = find_unit(&space, "afmail", "notifications");
+    assert!(notifications.is_some());
+    let notification_items = afmail["ui"]["notification_items"].as_array();
+    assert!(notification_items.is_some(), "{:?}", afmail["ui"]);
+    let Some(notification_items) = notification_items else {
         return;
     };
-    let archive_match = archive_items
-        .iter()
-        .enumerate()
-        .find(|(_, item)| item["archive"]["collection_uid"].as_str() == Some(archive_uid));
+    let notification_match = notification_items.iter().enumerate().find(|(_, item)| {
+        item["notification"]["collection_uid"].as_str() == Some(notification_uid)
+    });
     assert!(
-        archive_match.is_some(),
-        "archive item missing: {archive_items:?}"
+        notification_match.is_some(),
+        "notification item missing: {notification_items:?}"
     );
-    let Some((archive_index, _)) = archive_match else {
+    let Some((notification_index, _)) = notification_match else {
         return;
     };
     let prepared = prepare_request(
         &space,
-        PrepareRequestSpec::new("session_operator", "afmail", "archive_message_show")
-            .with_source_unit_id("message_archives")
-            .with_record_path(format!("/afmail/ui/archive_message_items/{archive_index}")),
+        PrepareRequestSpec::new("session_operator", "afmail", "notification_show")
+            .with_source_unit_id("notifications")
+            .with_record_path(format!(
+                "/afmail/ui/notification_items/{notification_index}"
+            )),
     );
     assert!(prepared.is_ok(), "{prepared:?}");
     let Ok(prepared) = prepared else {
         return;
     };
     assert_eq!(prepared.status, PreparedStatus::Ready);
-    assert_eq!(prepared.input["archive_ref"], archive_uid);
+    assert_eq!(prepared.input["notification_ref"], notification_uid);
 }
 
 fn message_id_by_fixture(
@@ -1395,7 +1395,7 @@ fn minimal_config() -> Value {
             "draft.send": {"steps": []},
             "message.spam": {"steps": []},
             "message.trash": {"steps": []},
-            "message.archive": {"by_source_mailbox_id": {
+            "message.notification": {"by_source_mailbox_id": {
                 "inbox": {"steps": []},
                 "sent": {"steps": []},
                 "archive": {"steps": []},
@@ -1404,7 +1404,7 @@ fn minimal_config() -> Value {
                 "drafts": {"steps": []}
             }}
         },
-        "case": {"default_group": "open"},
+        "case": {},
         "contact": {"default_group": "people"},
         "identities": [
             {"identity": "me", "name": "Me", "email": "me@example.com", "default": true}
@@ -1756,7 +1756,7 @@ fn docker_greenmail_contact_cards_e2e() {
             "--message",
             &alice_msg_id,
             "--group",
-            "open",
+            "support",
         ],
     );
     assert_eq!(status, 0, "case create failed: {stdout}");
@@ -1835,7 +1835,7 @@ fn docker_greenmail_contact_cards_e2e() {
             "--message",
             &bob_msg_id,
             "--group",
-            "open",
+            "support",
         ],
     );
     assert_eq!(status, 0, "case create for bob failed: {stdout}");

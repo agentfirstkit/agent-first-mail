@@ -11,8 +11,8 @@ use crate::error::{AppError, Result};
 use crate::frontmatter::DraftFrontmatter;
 use crate::progress::ProgressCallback;
 use crate::types::{
-    MessageActionPush, MessagePushAction, OutboundAction, OutboundPush, PushItem, PushLocation,
-    PushPayload, PushStepState, PushStepStatus,
+    MessageActionPush, MessagePushAction, OutboundAction, OutboundPush, PushItem, PushLocalStage,
+    PushLocation, PushPayload, PushStepState, PushStepStatus,
 };
 use crate::util::write_string_atomic;
 use serde_json::{json, Value};
@@ -77,6 +77,11 @@ pub fn queue_outbound(
             0
         },
         step_states,
+        local_stage: if same_action {
+            existing.as_ref().and_then(|item| item.local_stage)
+        } else {
+            None
+        },
         last_error: None,
     };
     write_item(root, &item)?;
@@ -134,6 +139,7 @@ pub fn queue_action_steps(
         updated_rfc3339: now,
         attempt_count: 0,
         step_states: Vec::new(),
+        local_stage: None,
         last_error: None,
     };
     write_item(root, &item)?;
@@ -146,8 +152,8 @@ pub struct PushStatus {
     pub drafts: usize,
     /// Case-membership flag operations queued.
     pub case: usize,
-    /// Archive moves queued, not yet applied on the server.
-    pub archive: usize,
+    /// Notification filing moves queued, not yet applied on the server.
+    pub notification: usize,
     /// Spam (junk) moves queued, not yet applied on the server.
     pub spam: usize,
     /// Trash moves queued, not yet applied on the server.
@@ -160,7 +166,7 @@ pub fn push_status(root: &Path) -> Result<PushStatus> {
         match item_summary_label(&item) {
             "drafts" => status.drafts += 1,
             "case" => status.case += 1,
-            "archive" => status.archive += 1,
+            "notification" => status.notification += 1,
             "spam" => status.spam += 1,
             "trash" => status.trash += 1,
             _ => {}
@@ -228,6 +234,7 @@ pub fn push_with_progress(
     let mut stopped_after_failure = false;
     let mut remaining_count = 0usize;
     let mut failures = Vec::new();
+    let mut audit_warnings: Vec<Value> = Vec::new();
     let item_count = items.len();
     crate::progress::emit(
         &mut progress,
@@ -266,20 +273,18 @@ pub fn push_with_progress(
         };
         match result {
             Ok(()) => {
-                let workspace = crate::store::Workspace::at(root);
-                let transaction = workspace.begin_transaction(
-                    "push_commit",
-                    vec![
-                        format!(".afmail/push/{}.json", item.push_id),
-                        "cases".to_string(),
-                        "messages".to_string(),
-                    ],
+                finalize_pushed_item(
+                    root,
+                    &config,
+                    &mut item,
+                    progress_context,
+                    progress.as_deref_mut(),
                 )?;
-                workspace.consume_outbound_draft_after_push(&item, &config)?;
-                delete_item(root, &item)?;
-                workspace.clear_pending_push_item(&item)?;
-                transaction.commit()?;
-                let _ = audit_push(root, "push_succeeded", &item, None);
+                if let Err(audit_err) = audit_push(root, "push_succeeded", &item, None) {
+                    let fields = audit_warning_fields(&item, "push_succeeded", &audit_err);
+                    crate::progress::emit(&mut progress, "push_audit_failed", fields.clone());
+                    audit_warnings.push(fields);
+                }
                 pushed += 1;
                 crate::progress::emit(
                     &mut progress,
@@ -288,7 +293,11 @@ pub fn push_with_progress(
                 );
             }
             Err(err) => {
-                let _ = audit_push(root, "push_failed", &item, Some(&err));
+                if let Err(audit_err) = audit_push(root, "push_failed", &item, Some(&err)) {
+                    let fields = audit_warning_fields(&item, "push_failed", &audit_err);
+                    crate::progress::emit(&mut progress, "push_audit_failed", fields.clone());
+                    audit_warnings.push(fields);
+                }
                 failed += 1;
                 failures.push(json!({
                     "push_id": item.push_id,
@@ -321,6 +330,7 @@ pub fn push_with_progress(
             "failed_count": failed,
             "stopped_after_failure": stopped_after_failure,
             "remaining_count": remaining_count,
+            "audit_warning_count": audit_warnings.len(),
         }),
     );
     Ok(json!({
@@ -330,8 +340,135 @@ pub fn push_with_progress(
         "failed_count": failed,
         "stopped_after_failure": stopped_after_failure,
         "remaining_count": remaining_count,
-        "failures": failures
+        "failures": failures,
+        "audit_warnings": audit_warnings
     }))
+}
+
+fn finalize_pushed_item(
+    root: &Path,
+    config: &MailConfig,
+    item: &mut PushItem,
+    context: PushProgressContext,
+    progress: Option<&mut ProgressCallback<'_>>,
+) -> Result<()> {
+    let mut progress = progress;
+    advance_local_stage(root, item, PushLocalStage::RemoteSucceeded)?;
+    let workspace = crate::store::Workspace::at(root);
+    if item.outbound().is_some() {
+        if !local_stage_at_least(item, PushLocalStage::OutboundRecorded) {
+            workspace.record_outbound_after_push(item, config)?;
+            advance_local_stage(root, item, PushLocalStage::OutboundRecorded)?;
+            emit_local_refresh_start(&mut progress, item, context, "outbound_recorded");
+            workspace.refresh_outbound_push_views(item)?;
+            emit_local_refresh_done(&mut progress, item, context, "outbound_recorded");
+        }
+        if !local_stage_at_least(item, PushLocalStage::DraftRemoved) {
+            workspace.remove_outbound_draft_after_push(item)?;
+            advance_local_stage(root, item, PushLocalStage::DraftRemoved)?;
+            emit_local_refresh_start(&mut progress, item, context, "draft_removed");
+            workspace.refresh_outbound_push_views(item)?;
+            emit_local_refresh_done(&mut progress, item, context, "draft_removed");
+        }
+    }
+    if !local_stage_at_least(item, PushLocalStage::PendingCleared) {
+        workspace.clear_pending_push_item(item)?;
+        advance_local_stage(root, item, PushLocalStage::PendingCleared)?;
+        emit_local_refresh_start(&mut progress, item, context, "pending_cleared");
+        workspace.refresh_message_push_views(item.message_ids())?;
+        emit_local_refresh_done(&mut progress, item, context, "pending_cleared");
+    }
+    delete_item(root, item)
+}
+
+fn advance_local_stage(root: &Path, item: &mut PushItem, stage: PushLocalStage) -> Result<()> {
+    if local_stage_at_least(item, stage) {
+        return Ok(());
+    }
+    item.local_stage = Some(stage);
+    item.updated_rfc3339 = crate::store::now_rfc3339();
+    write_item(root, item)?;
+    fail_after_local_stage(stage)
+}
+
+fn local_stage_at_least(item: &PushItem, stage: PushLocalStage) -> bool {
+    item.local_stage.is_some_and(|current| current >= stage)
+}
+
+fn fail_after_local_stage(stage: PushLocalStage) -> Result<()> {
+    let Ok(value) = std::env::var("AFMAIL_TEST_FAIL_PUSH_LOCAL_STAGE_AFTER") else {
+        return Ok(());
+    };
+    if value != local_stage_name(stage) {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "push_local_stage_test_failure",
+        format!(
+            "test failure after push local stage {}",
+            local_stage_name(stage)
+        ),
+    ))
+}
+
+fn local_stage_name(stage: PushLocalStage) -> &'static str {
+    match stage {
+        PushLocalStage::RemoteSucceeded => "remote_succeeded",
+        PushLocalStage::OutboundRecorded => "outbound_recorded",
+        PushLocalStage::DraftRemoved => "draft_removed",
+        PushLocalStage::PendingCleared => "pending_cleared",
+    }
+}
+
+fn emit_local_refresh_start(
+    progress: &mut Option<&mut ProgressCallback<'_>>,
+    item: &PushItem,
+    context: PushProgressContext,
+    local_stage: &str,
+) {
+    emit_local_refresh(
+        progress,
+        "push_local_refresh_start",
+        item,
+        context,
+        local_stage,
+    );
+}
+
+fn emit_local_refresh_done(
+    progress: &mut Option<&mut ProgressCallback<'_>>,
+    item: &PushItem,
+    context: PushProgressContext,
+    local_stage: &str,
+) {
+    emit_local_refresh(
+        progress,
+        "push_local_refresh_done",
+        item,
+        context,
+        local_stage,
+    );
+}
+
+fn emit_local_refresh(
+    progress: &mut Option<&mut ProgressCallback<'_>>,
+    phase: &str,
+    item: &PushItem,
+    context: PushProgressContext,
+    local_stage: &str,
+) {
+    crate::progress::emit(
+        progress,
+        phase,
+        json!({
+            "push_id": item.push_id.as_str(),
+            "kind": item.kind(),
+            "display_kind": item.display_kind(),
+            "item_index": context.item_index + 1,
+            "item_count": context.item_count,
+            "local_stage": local_stage,
+        }),
+    );
 }
 
 fn push_item_progress_fields(
@@ -355,6 +492,18 @@ fn push_item_progress_fields(
         }
     }
     value
+}
+
+/// Structured warning emitted when a confirmed effect's audit record could not be
+/// written. The remote effect already happened and cannot be undone, so we surface
+/// the lost audit record rather than silently dropping it.
+fn audit_warning_fields(item: &PushItem, audit_kind: &str, err: &AppError) -> Value {
+    json!({
+        "push_id": item.push_id.as_str(),
+        "audit_kind": audit_kind,
+        "error_code": err.error_code,
+        "error": err.message.as_str(),
+    })
 }
 
 fn audit_push(root: &Path, kind: &str, item: &PushItem, err: Option<&AppError>) -> Result<()> {

@@ -11,7 +11,6 @@ fn config_defaults_pull_and_tls() {
     );
     assert!(cfg.imap.tls);
     assert!(cfg.smtp.starttls);
-    assert_eq!(cfg.case.default_group, "open");
     assert_eq!(cfg.audit.reason_mode, ReasonMode::Required);
     assert_eq!(cfg.identities.len(), 1);
     assert_eq!(
@@ -23,7 +22,7 @@ fn config_defaults_pull_and_tls() {
     assert!(cfg.workspace.timezone_utc_offset.is_some());
     assert_eq!(
         cfg.actions
-            .message_archive
+            .message_notification
             .by_source_mailbox_id
             .get("inbox")
             .map(|m| {
@@ -142,6 +141,19 @@ fn sparse_config_merges_with_current_defaults() {
 }
 
 #[test]
+fn deprecated_case_default_group_is_ignored() {
+    let sparse = json!({
+        "case": {
+            "default_group": "open"
+        }
+    });
+    let merged = merge_with_defaults(sparse).unwrap_or(Value::Null);
+    assert_eq!(merged["case"], json!({}));
+    let config: MailConfig = serde_json::from_value(merged).unwrap_or_default();
+    assert_eq!(config.case, CaseSection::default());
+}
+
+#[test]
 fn config_rejects_legacy_schema() {
     let raw = serde_json::json!({"schema_name":"config","schema_version":1,"imap_host":"imap.example.com"});
     let err = reject_legacy_config(&raw);
@@ -210,24 +222,24 @@ fn config_set_and_get_key() {
     );
     assert!(cfg
         .set_key(
-            "actions.message.archive.by_source_mailbox_id.inbox.steps.0.move_to_mailbox_id",
+            "actions.message.notification.by_source_mailbox_id.inbox.steps.0.move_to_mailbox_id",
             &["archive".to_string()]
         )
         .is_ok());
     assert_eq!(
         cfg.get_key(
-            "actions.message.archive.by_source_mailbox_id.inbox.steps.0.move_to_mailbox_id"
+            "actions.message.notification.by_source_mailbox_id.inbox.steps.0.move_to_mailbox_id"
         ),
         Ok(json!("archive"))
     );
     assert!(cfg
         .set_key(
-            "archive.message_index.item_fields",
+            "notification.message_index.item_fields",
             &["summary".to_string(), "link".to_string()]
         )
         .is_ok());
     assert_eq!(
-        cfg.get_key("archive.message_index.item_fields"),
+        cfg.get_key("notification.message_index.item_fields"),
         Ok(json!(["summary", "link"]))
     );
     assert!(cfg
@@ -242,20 +254,20 @@ fn config_set_and_get_key() {
     );
     assert!(cfg
         .set_key(
-            "actions.message.archive.by_source_mailbox_id.inbox.steps",
+            "actions.message.notification.by_source_mailbox_id.inbox.steps",
             &[r#"[{"move_to_mailbox_id":"archive"}]"#.to_string()]
         )
         .is_ok());
     assert_eq!(
-        cfg.get_key("actions.message.archive.by_source_mailbox_id.inbox.steps"),
+        cfg.get_key("actions.message.notification.by_source_mailbox_id.inbox.steps"),
         Ok(json!([{"move_to_mailbox_id": "archive"}]))
     );
     let mailboxes_json = serde_json::to_string(&cfg.mailboxes).unwrap_or_default();
     assert!(cfg.set_key("mailboxes", &[mailboxes_json]).is_ok());
     let actions_json = serde_json::to_string(&cfg.actions).unwrap_or_default();
     assert!(cfg.set_key("actions", &[actions_json]).is_ok());
-    let archive_json = serde_json::to_string(&cfg.archive).unwrap_or_default();
-    assert!(cfg.set_key("archive", &[archive_json]).is_ok());
+    let notification_json = serde_json::to_string(&cfg.notification).unwrap_or_default();
+    assert!(cfg.set_key("notification", &[notification_json]).is_ok());
     assert!(cfg
         .set_key("audit.reason_mode", &["optional".to_string()])
         .is_ok());
@@ -366,7 +378,7 @@ fn invalid_mailbox_config_fails() {
         .is_err());
     if let Some(entry) = cfg
         .actions
-        .message_archive
+        .message_notification
         .by_source_mailbox_id
         .get_mut("inbox")
     {
@@ -562,26 +574,37 @@ fn config_add_and_remove_keyed_identity() {
         )
         .is_err());
 
-    // Removing by slug shrinks the list; removing a missing slug errors.
+    // Removing by slug shrinks the list; removing a missing slug is a no-op so
+    // setup scripts can be idempotent after a clean init.
     cfg.remove_key("identities", "support")
         .expect("remove identity");
     cfg.remove_key("identities", "法律法规速查小客服")
         .expect("remove unicode identity");
     assert_eq!(cfg.identities.len(), 1);
-    assert!(cfg.remove_key("identities", "missing").is_err());
+    cfg.remove_key("identities", "missing")
+        .expect("remove missing identity is no-op");
+    assert_eq!(cfg.identities.len(), 1);
 
-    // A second default violates the one-default invariant (fresh config, since a
-    // failed set leaves the in-memory config mutated — callers reload from disk).
+    // Adding a new default identity makes it the only default, so setup scripts
+    // can replace the initial identity in one config add.
     let mut cfg = MailConfig::default();
+    cfg.add_key(
+        "identities",
+        "support",
+        &[
+            ("name".to_string(), "Support".to_string()),
+            ("email".to_string(), "support@example.com".to_string()),
+            ("default".to_string(), "true".to_string()),
+        ],
+    )
+    .expect("add replacement default identity");
+    assert_eq!(cfg.identities.iter().filter(|i| i.default).count(), 1);
     assert!(cfg
-        .add_key(
-            "identities",
-            "dupe",
-            &[
-                ("name".to_string(), "Dupe".to_string()),
-                ("email".to_string(), "dupe@example.com".to_string()),
-                ("default".to_string(), "true".to_string()),
-            ],
-        )
-        .is_err());
+        .identities
+        .iter()
+        .any(|i| i.identity == "me" && !i.default));
+    assert!(cfg
+        .identities
+        .iter()
+        .any(|i| i.identity == "support" && i.default));
 }

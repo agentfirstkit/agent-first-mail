@@ -32,10 +32,10 @@ cases/<group>/<case_uid>-<name>/data/ canonical case state
 cases/<group>/<case_uid>-<name>/views/ generated case detail views
 contacts/<group>/<contact_uid>-<name>.md canonical contact cards
 archive/contacts/<contact_uid>-<name>.md archived contact cards
-archive/cases/<case_uid>-<name>/ archived case workspaces
-archive/notifications/<archive_uid>-<name>/archive.md generated archive entry view
-archive/notifications/<archive_uid>-<name>/data/ canonical archive state
-archive/notifications/<archive_uid>-<name>/views/ generated archive detail views
+archive/cases/<group>/<case_uid>-<name>/ archived case workspaces; <group> is a case group, not an archive category
+notifications/<notification_uid>-<name>/notification.md generated notification entry view
+notifications/<notification_uid>-<name>/data/ canonical notification state
+notifications/<notification_uid>-<name>/views/ generated notification detail views
 ```
 
 ### Examples
@@ -50,19 +50,19 @@ afmail doctor
 afmail pull
 afmail pull sent archive
 afmail remote folders
-afmail case create --name 应用反馈-肥料登记 --message message_inbox_607146690_21 --group open --reason "new feedback thread"
+afmail case create --name 应用反馈-肥料登记 --group support --message message_inbox_607146690_21 --reason "new feedback thread"
 afmail case show c20260603001
 afmail case add c20260603001 message_inbox_607146690_22 --reason "follow-up belongs to same feedback case"
-afmail archive message create --name 服务通知 --message message_inbox_607146690_23 --summary "billing notification" --reason "billing notification"
-afmail archive message show a20260603001
-afmail archive message restore a20260603001 message_inbox_607146690_23 --reason "needs triage again"
+afmail notification create --name 服务通知 --message message_inbox_607146690_23 --summary "billing notification" --reason "billing notification"
+afmail notification show n20260603001
+afmail notification restore n20260603001 message_inbox_607146690_23 --reason "needs triage again"
 afmail message spam message_inbox_607146690_23 --reason "phishing attempt"
 afmail message trash message_inbox_607146690_24 --reason "duplicate no longer needed"
 afmail render refresh
 afmail doctor repair --confirm
 afmail case move c20260603001 waiting
 afmail case archive c20260603001 --reason "feedback handled"
-afmail archive case restore c20260603001 --group open --reason "customer replied"
+afmail archive case restore c20260603001 --group support --reason "customer replied"
 afmail case tag c20260603001 legal --reason "legal review needed"
 afmail contact create --name "Zhang San" --email zhang@example.com --org Acme --role Buyer
 afmail contact list --group people
@@ -97,23 +97,24 @@ afmail message attachment fetch message_inbox_607146690_21 2
 Usage: afmail [OPTIONS] [COMMAND]
 
 Commands:
-  init     Initialize the current directory or a child path as an afmail workspace
-  pull     Read configured IMAP mailbox ids into local message files without changing remote mail
-  config   Read or update local afmail configuration
-  remote   Inspect remote IMAP state for configuring mailboxes
-  push     Push queued local work or manage the local push queue
-  status   Report workspace health, counts, and latest pull/push progress
-  doctor   Check afmail workspace consistency without inspecting Git
-  purge    Permanently delete old local spam, trash, and remote-deleted records
-  skill    Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
-  triage   Inspect the triage queue
-  message  Operate on any local message id
-  case     Create a case or operate on an existing case ref
-  contact  Create a contact or operate on an existing contact ref
-  archive  Inspect and manage archived cases and direct-message archive categories
-  render   Rebuild generated read views from local workspace state
-  log      Inspect the workspace audit log
-  help     Print this message or the help of the given subcommand(s)
+  init          Initialize the current directory or a child path as an afmail workspace
+  pull          Read configured IMAP mailbox ids into local message files without changing remote mail
+  config        Read or update local afmail configuration
+  remote        Inspect remote IMAP state for configuring mailboxes
+  push          Push queued local work or manage the local push queue
+  status        Report workspace health, counts, and latest pull/push progress
+  doctor        Check afmail workspace consistency without inspecting Git
+  purge         Permanently delete old local spam, trash, and remote-deleted records
+  skill         Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
+  triage        Inspect the triage queue
+  message       Operate on any local message id
+  case          Create a case or operate on an existing case ref
+  contact       Create a contact or operate on an existing contact ref
+  notification  Inspect and manage notification collections
+  archive       Inspect and manage archived cases
+  render        Rebuild generated read views from local workspace state
+  log           Inspect the workspace audit log
+  help          Print this message or the help of the given subcommand(s)
 
 Options:
       --output <OUTPUT>
@@ -575,7 +576,7 @@ Commands:
   show        Show the full local message metadata, body text, and attachment metadata
   spam        Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
   trash       Explicitly discard this message locally, show it under trash/, and queue a Trash move
-  restore     Restore a message from spam, trash, or direct archive back to triage
+  restore     Restore a message from spam, trash, or notification back to triage
   attachment  Fetch an attachment for this message
   help        Print this message or the help of the given subcommand(s)
 
@@ -632,7 +633,7 @@ Options:
           Print help
 ```
 
-### Agent-First Mail message restore - Restore a message from spam, trash, or direct archive back to triage
+### Agent-First Mail message restore - Restore a message from spam, trash, or notification back to triage
 
 ```text
 Usage: restore [OPTIONS] <MESSAGE_ID>
@@ -710,14 +711,14 @@ Options:
 ### Agent-First Mail case create - Create a new case and return its stable UID/ref
 
 ```text
-Usage: create [OPTIONS] --name <NAME>
+Usage: create [OPTIONS] --name <NAME> --group <GROUP>
 
 Options:
       --name <NAME>
           Human-readable case name used in case.md and the directory suffix
 
       --group <GROUP>
-          Destination group. Defaults to the configured default group
+          Required case category/group, for example support, invoice, 客服, 发票, 合同, or 退款
 
       --message <MESSAGE>
           Optional first message to add to the case
@@ -1602,71 +1603,21 @@ Options:
           Print help
 ```
 
-## Agent-First Mail archive - Inspect and manage archived cases and direct-message archive categories
+## Agent-First Mail notification - Inspect and manage notification collections
 
 ```text
-Usage: archive <COMMAND>
+Usage: notification <COMMAND>
 
 Commands:
-  list     List compact archived cases and/or direct-message archive categories
-  message  Operate on a direct-message archive category
-  case     Operate on an archived case
-  help     Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
-```
-
-### Agent-First Mail archive list - List compact archived cases and/or direct-message archive categories
-
-```text
-Usage: list [COMMAND]
-
-Commands:
-  cases     List compact archived cases
-  messages  List compact direct-message archive categories
-  help      Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
-```
-
-#### Agent-First Mail archive list cases - List compact archived cases
-
-```text
-Usage: cases
-
-Options:
-  -h, --help
-          Print help
-```
-
-#### Agent-First Mail archive list messages - List compact direct-message archive categories
-
-```text
-Usage: messages
-
-Options:
-  -h, --help
-          Print help
-```
-
-### Agent-First Mail archive message - Operate on a direct-message archive category
-
-```text
-Usage: message <COMMAND>
-
-Commands:
-  create       Create a direct-message archive category and optionally file one message
-  add          File an existing message into this direct-message archive category
-  show         Show archive category index and entries
-  restore      Restore a direct archived message to triage
-  move         Move a direct archived message to another archive category
-  rename       Rename this archive category's human-readable name without changing its UID
-  set-summary  Set or replace one direct archive entry summary
-  notes        Show or edit archive category notes
+  create       Create a notification collection and optionally file one message
+  add          File an existing message into this notification collection
+  list         List compact notification collections
+  show         Show notification collection index and entries
+  restore      Restore a notification message to triage
+  move         Move a notification message to another notification collection
+  rename       Rename this notification collection's human-readable name without changing its UID
+  set-summary  Set or replace one notification entry summary
+  notes        Show or edit notification collection notes
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -1674,43 +1625,43 @@ Options:
           Print help
 ```
 
-#### Agent-First Mail archive message create - Create a direct-message archive category and optionally file one message
+### Agent-First Mail notification create - Create a notification collection and optionally file one message
 
 ```text
 Usage: create [OPTIONS] --name <NAME>
 
 Options:
       --name <NAME>
-          Human-readable archive category name used in metadata and the directory suffix
+          Human-readable notification name used in metadata and the directory suffix
 
       --message <MESSAGE>
-          Optional message to immediately file into the new archive category
+          Optional message to immediately file into the new notification collection
 
       --summary <SUMMARY>
           Required when --message is supplied
 
       --reason <REASON>
-          Why this archive category is being created
+          Why this notification collection is being created
 
   -h, --help
           Print help
 ```
 
-#### Agent-First Mail archive message add - File an existing message into this direct-message archive category
+### Agent-First Mail notification add - File an existing message into this notification collection
 
 ```text
-Usage: add [OPTIONS] --summary <SUMMARY> <ARCHIVE_REF> <MESSAGE_ID>
+Usage: add [OPTIONS] --summary <SUMMARY> <NOTIFICATION_REF> <MESSAGE_ID>
 
 Arguments:
-  <ARCHIVE_REF>
-          Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix
+  <NOTIFICATION_REF>
+          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
 
   <MESSAGE_ID>
           Message id to file
 
 Options:
       --summary <SUMMARY>
-          Human/agent-authored summary for this archive entry
+          Human/agent-authored summary for this notification entry
 
       --reason <REASON>
           Why this disposition is correct; required by default
@@ -1719,28 +1670,38 @@ Options:
           Print help
 ```
 
-#### Agent-First Mail archive message show - Show archive category index and entries
+### Agent-First Mail notification list - List compact notification collections
 
 ```text
-Usage: show <ARCHIVE_REF>
-
-Arguments:
-  <ARCHIVE_REF>
-          Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix
+Usage: list
 
 Options:
   -h, --help
           Print help
 ```
 
-#### Agent-First Mail archive message restore - Restore a direct archived message to triage
+### Agent-First Mail notification show - Show notification collection index and entries
 
 ```text
-Usage: restore [OPTIONS] <ARCHIVE_REF> <MESSAGE_ID>
+Usage: show <NOTIFICATION_REF>
 
 Arguments:
-  <ARCHIVE_REF>
-          Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix
+  <NOTIFICATION_REF>
+          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
+
+Options:
+  -h, --help
+          Print help
+```
+
+### Agent-First Mail notification restore - Restore a notification message to triage
+
+```text
+Usage: restore [OPTIONS] <NOTIFICATION_REF> <MESSAGE_ID>
+
+Arguments:
+  <NOTIFICATION_REF>
+          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
 
   <MESSAGE_ID>
 
@@ -1753,57 +1714,57 @@ Options:
           Print help
 ```
 
-#### Agent-First Mail archive message move - Move a direct archived message to another archive category
+### Agent-First Mail notification move - Move a notification message to another notification collection
 
 ```text
-Usage: move [OPTIONS] <ARCHIVE_REF> <MESSAGE_ID> <NEW_ARCHIVE_REF>
+Usage: move [OPTIONS] <NOTIFICATION_REF> <MESSAGE_ID> <NEW_NOTIFICATION_REF>
 
 Arguments:
-  <ARCHIVE_REF>
-          Source direct-message archive category ref
+  <NOTIFICATION_REF>
+          Source notification collection ref
 
   <MESSAGE_ID>
 
 
-  <NEW_ARCHIVE_REF>
-          Destination archive category ref
+  <NEW_NOTIFICATION_REF>
+          Destination notification collection ref
 
 Options:
       --reason <REASON>
-          Why this category is better; required by default
+          Why this collection is better; required by default
 
   -h, --help
           Print help
 ```
 
-#### Agent-First Mail archive message rename - Rename this archive category's human-readable name without changing its UID
+### Agent-First Mail notification rename - Rename this notification collection's human-readable name without changing its UID
 
 ```text
-Usage: rename [OPTIONS] --name <NAME> <ARCHIVE_REF>
+Usage: rename [OPTIONS] --name <NAME> <NOTIFICATION_REF>
 
 Arguments:
-  <ARCHIVE_REF>
-          Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix
+  <NOTIFICATION_REF>
+          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
 
 Options:
       --name <NAME>
-          New human-readable archive name
+          New human-readable notification name
 
       --reason <REASON>
-          Why this name better represents the category; required by default
+          Why this name better represents the collection; required by default
 
   -h, --help
           Print help
 ```
 
-#### Agent-First Mail archive message set-summary - Set or replace one direct archive entry summary
+### Agent-First Mail notification set-summary - Set or replace one notification entry summary
 
 ```text
-Usage: set-summary [OPTIONS] --summary <SUMMARY> <ARCHIVE_REF> <MESSAGE_ID>
+Usage: set-summary [OPTIONS] --summary <SUMMARY> <NOTIFICATION_REF> <MESSAGE_ID>
 
 Arguments:
-  <ARCHIVE_REF>
-          Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix
+  <NOTIFICATION_REF>
+          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
 
   <MESSAGE_ID>
 
@@ -1819,7 +1780,7 @@ Options:
           Print help
 ```
 
-#### Agent-First Mail archive message notes - Show or edit archive category notes
+### Agent-First Mail notification notes - Show or edit notification collection notes
 
 ```text
 Usage: notes <COMMAND>
@@ -1835,28 +1796,28 @@ Options:
           Print help
 ```
 
-##### Agent-First Mail archive message notes show - Show notes markdown
+#### Agent-First Mail notification notes show - Show notes markdown
 
 ```text
-Usage: show <ARCHIVE_REF>
+Usage: show <NOTIFICATION_REF>
 
 Arguments:
-  <ARCHIVE_REF>
-          Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix
+  <NOTIFICATION_REF>
+          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
 
 Options:
   -h, --help
           Print help
 ```
 
-##### Agent-First Mail archive message notes append - Append text to notes markdown
+#### Agent-First Mail notification notes append - Append text to notes markdown
 
 ```text
-Usage: append --text <TEXT> <ARCHIVE_REF>
+Usage: append --text <TEXT> <NOTIFICATION_REF>
 
 Arguments:
-  <ARCHIVE_REF>
-          Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix
+  <NOTIFICATION_REF>
+          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
 
 Options:
       --text <TEXT>
@@ -1866,19 +1827,58 @@ Options:
           Print help
 ```
 
-##### Agent-First Mail archive message notes replace - Replace notes markdown with text
+#### Agent-First Mail notification notes replace - Replace notes markdown with text
 
 ```text
-Usage: replace --text <TEXT> <ARCHIVE_REF>
+Usage: replace --text <TEXT> <NOTIFICATION_REF>
 
 Arguments:
-  <ARCHIVE_REF>
-          Direct-message archive category ref: aYYYYMMDDNNN or aYYYYMMDDNNN-any-suffix
+  <NOTIFICATION_REF>
+          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
 
 Options:
       --text <TEXT>
           Markdown text to write
 
+  -h, --help
+          Print help
+```
+
+## Agent-First Mail archive - Inspect and manage archived cases
+
+```text
+Usage: archive <COMMAND>
+
+Commands:
+  list  List compact archived cases
+  case  Operate on an archived case
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help
+```
+
+### Agent-First Mail archive list - List compact archived cases
+
+```text
+Usage: list [COMMAND]
+
+Commands:
+  cases  List compact archived cases
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help
+```
+
+#### Agent-First Mail archive list cases - List compact archived cases
+
+```text
+Usage: cases
+
+Options:
   -h, --help
           Print help
 ```
@@ -2042,7 +2042,7 @@ Options:
 Usage: render <COMMAND>
 
 Commands:
-  refresh    Rebuild generated case and direct-message archive read views
+  refresh    Rebuild generated case and notification read views
   templates  Export built-in language templates, keeping existing files unless forced
   help       Print this message or the help of the given subcommand(s)
 
@@ -2051,7 +2051,7 @@ Options:
           Print help
 ```
 
-### Agent-First Mail render refresh - Rebuild generated case and direct-message archive read views
+### Agent-First Mail render refresh - Rebuild generated case and notification read views
 
 ```text
 Usage: refresh
@@ -2080,12 +2080,12 @@ Options:
 Usage: log <COMMAND>
 
 Commands:
-  list     List recent audit events
-  tail     Tail recent audit events as JSON data
-  message  List events for one message id
-  case     List events for one case id
-  archive  List events for one archive category
-  help     Print this message or the help of the given subcommand(s)
+  list          List recent audit events
+  tail          Tail recent audit events as JSON data
+  message       List events for one message id
+  case          List events for one case id
+  notification  List events for one notification collection
+  help          Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help
@@ -2145,13 +2145,13 @@ Options:
           Print help
 ```
 
-### Agent-First Mail log archive - List events for one archive category
+### Agent-First Mail log notification - List events for one notification collection
 
 ```text
-Usage: archive <ARCHIVE_UID>
+Usage: notification <NOTIFICATION_UID>
 
 Arguments:
-  <ARCHIVE_UID>
+  <NOTIFICATION_UID>
 
 
 Options:
