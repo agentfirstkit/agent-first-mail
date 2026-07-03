@@ -550,6 +550,18 @@ pub(super) fn resolve_location_mailbox_id(
     }
 }
 
+fn mailbox_id_matches_special_use(
+    config: &crate::config::MailConfig,
+    mailbox_id: &str,
+    kind: SpecialUseKind,
+) -> bool {
+    mailbox_id == kind.as_str()
+        || config
+            .mailbox(mailbox_id)
+            .ok()
+            .is_some_and(|mailbox| mailbox.contains_special_use(kind))
+}
+
 pub(super) fn add_queue_fields(value: &mut Value, location_count: usize, item: Option<&PushItem>) {
     if let Value::Object(map) = value {
         map.insert("location_count".to_string(), json!(location_count));
@@ -667,6 +679,30 @@ impl Workspace {
                         });
                     }
                 }
+            }
+        }
+        Ok(locations)
+    }
+
+    pub(super) fn message_remote_locations_for_mailbox_kinds(
+        &self,
+        message_ids: &[String],
+        kinds: &[SpecialUseKind],
+    ) -> Result<Vec<PushLocation>> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let config = crate::config::MailConfig::load(&self.root)?;
+        let mut locations = Vec::new();
+        for location in self.message_remote_locations_with_mailbox_ids(message_ids)? {
+            let Some(source_id) = resolve_location_mailbox_id(&config, &location)? else {
+                continue;
+            };
+            if kinds
+                .iter()
+                .any(|kind| mailbox_id_matches_special_use(&config, &source_id, *kind))
+            {
+                locations.push(location.push);
             }
         }
         Ok(locations)
@@ -874,7 +910,7 @@ impl Workspace {
                 ),
             )
             .with_hint(
-                "Remove or move the listed case/archive/push references before moving the message.",
+                "Remove or move the listed case/archived-case/push references before moving the message.",
             )
             .with_details(json!({
                 "references": references,
@@ -923,7 +959,7 @@ impl Workspace {
         ids: &BTreeSet<String>,
         references: &mut Vec<String>,
     ) -> Result<()> {
-        for (_, case_path) in self.all_case_entries()? {
+        for (_, case_path) in self.case_entries()? {
             let data_path = case_json_path(&case_path);
             if !data_path.exists() {
                 continue;
@@ -931,10 +967,7 @@ impl Workspace {
             let data = read_to_string(&data_path, "read case metadata")?;
             let value = serde_json::from_str::<Value>(&data)
                 .map_err(|e| AppError::json("parse case metadata", &e))?;
-            if !json_contains_any_id(&value, ids) {
-                continue;
-            }
-            if case_status(&case_path)? != "archived" {
+            if json_contains_any_id(&value, ids) {
                 references.push(rel_path(&self.root, &data_path));
             }
         }

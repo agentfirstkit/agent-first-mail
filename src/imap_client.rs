@@ -223,10 +223,23 @@ pub(crate) fn list_mailboxes<T: std::io::Read + std::io::Write>(
 pub(crate) fn capability_move<T: std::io::Read + std::io::Write>(
     session: &mut imap::Session<T>,
 ) -> Result<bool> {
+    capability_has(session, "MOVE")
+}
+
+pub(crate) fn capability_uidplus<T: std::io::Read + std::io::Write>(
+    session: &mut imap::Session<T>,
+) -> Result<bool> {
+    capability_has(session, "UIDPLUS")
+}
+
+pub(crate) fn capability_has<T: std::io::Read + std::io::Write>(
+    session: &mut imap::Session<T>,
+    capability: &str,
+) -> Result<bool> {
     let capabilities = session
         .capabilities()
         .map_err(|e| AppError::new("imap_capability_failed", e.to_string()))?;
-    Ok(capabilities.has_str("MOVE"))
+    Ok(capabilities.has_str(capability))
 }
 
 fn format_name_attribute(attribute: &imap_proto::NameAttribute<'_>) -> String {
@@ -311,13 +324,24 @@ pub(crate) fn uid_move_session<T: std::io::Read + std::io::Write>(
     uid: u64,
     target_folder: &str,
 ) -> Result<()> {
-    require_move(session)?;
+    let moved = source_folder != target_folder;
+    let move_supported = moved && capability_move(session)?;
+    if moved && !move_supported {
+        require_uidplus_for_precise_move_fallback(session)?;
+    }
     session
         .select(source_folder)
         .map_err(|e| AppError::new("imap_select_failed", e.to_string()))?;
-    session
-        .uid_mv(uid.to_string(), target_folder)
-        .map_err(|e| AppError::new("imap_move_failed", e.to_string()))
+    if !moved {
+        return Ok(());
+    }
+    if move_supported {
+        session
+            .uid_mv(uid.to_string(), target_folder)
+            .map_err(|e| AppError::new("imap_move_failed", e.to_string()))
+    } else {
+        uid_copy_delete_expunge_session(session, uid, target_folder)
+    }
 }
 
 pub(crate) fn uid_mark_and_move_session<T: std::io::Read + std::io::Write>(
@@ -329,7 +353,11 @@ pub(crate) fn uid_mark_and_move_session<T: std::io::Read + std::io::Write>(
     mark_seen: bool,
     keyword: Option<&str>,
 ) -> Result<MoveOutcome> {
-    require_move(session)?;
+    let moved = source_folder != target_folder;
+    let move_supported = moved && capability_move(session)?;
+    if moved && !move_supported {
+        require_uidplus_for_precise_move_fallback(session)?;
+    }
     session
         .select(source_folder)
         .map_err(|e| AppError::new("imap_select_failed", e.to_string()))?;
@@ -351,11 +379,14 @@ pub(crate) fn uid_mark_and_move_session<T: std::io::Read + std::io::Write>(
     } else {
         (false, None)
     };
-    let moved = source_folder != target_folder;
     if moved {
-        session
-            .uid_mv(uid.to_string(), target_folder)
-            .map_err(|e| AppError::new("imap_move_failed", e.to_string()))?;
+        if move_supported {
+            session
+                .uid_mv(uid.to_string(), target_folder)
+                .map_err(|e| AppError::new("imap_move_failed", e.to_string()))?;
+        } else {
+            uid_copy_delete_expunge_session(session, uid, target_folder)?;
+        }
     }
     let target_location = match rfc822_message_id {
         Some(message_id) => Some(find_uid_by_message_id_session(
@@ -394,6 +425,45 @@ pub(crate) fn uid_store_flags_session<T: std::io::Read + std::io::Write>(
         )
         .map_err(|e| AppError::new("imap_store_failed", e.to_string()))?;
     Ok(())
+}
+
+pub(crate) fn require_uidplus_for_precise_move_fallback<T: std::io::Read + std::io::Write>(
+    session: &mut imap::Session<T>,
+) -> Result<()> {
+    if capability_uidplus(session)? {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "imap_uidplus_required",
+            "remote IMAP server does not advertise MOVE or UIDPLUS; afmail cannot safely fallback to copy/delete without UID EXPUNGE",
+        )
+        .with_hint(
+            "Manually archive the message in the mail client, or use a server that advertises MOVE or UIDPLUS before retrying this remote move.",
+        ))
+    }
+}
+
+pub(crate) fn uid_copy_delete_expunge_session<T: std::io::Read + std::io::Write>(
+    session: &mut imap::Session<T>,
+    uid: u64,
+    target_folder: &str,
+) -> Result<()> {
+    let uid_set = uid.to_string();
+    session
+        .uid_copy(&uid_set, quote_mailbox_name(target_folder))
+        .map_err(|e| AppError::new("imap_copy_failed", e.to_string()))?;
+    session
+        .uid_store(&uid_set, "+FLAGS.SILENT (\\Deleted)")
+        .map_err(|e| AppError::new("imap_store_failed", e.to_string()))?;
+    session
+        .uid_expunge(&uid_set)
+        .map(|_| ())
+        .map_err(|e| AppError::new("imap_expunge_failed", e.to_string()))
+}
+
+fn quote_mailbox_name(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 pub(crate) fn require_move<T: std::io::Read + std::io::Write>(

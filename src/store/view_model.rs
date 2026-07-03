@@ -4,10 +4,10 @@
 //! the human-authored `notes.md`) into the per-entity facts the AFUI snapshot
 //! references. Each row mirrors the local Markdown render context shape:
 //! canonical JSON records live under their domain namespace (`message`, `case`,
-//! `notification`, `archive`, `push`, or `item`) and AFUI-only/read-model data lives under
+//! `notification`, `push`, or `item`) and AFUI-only/read-model data lives under
 //! `view`.
 //!
-//! Nothing here reads a generated `*.md` view; case/notification/archive summaries come from
+//! Nothing here reads a generated `*.md` view; case/notification summaries come from
 //! `case.json` (`CaseFrontmatter` stores the counts) and `notification.json`
 //! (`NotificationMessages` stores each item's summary). The markdown templates and
 //! this projection share the same canonical sources, so the two never drift.
@@ -50,13 +50,13 @@ pub struct CaseSummaryView {
 
 /// One archived case (closed; kept for lookup).
 #[derive(Clone, Debug, Serialize)]
-pub struct ArchiveCaseSummaryRecord {
+pub struct ArchivedCaseSummaryRecord {
     pub case: Value,
-    pub view: ArchiveCaseSummaryView,
+    pub view: ArchivedCaseSummaryView,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct ArchiveCaseSummaryView {
+pub struct ArchivedCaseSummaryView {
     pub group: String,
     pub case_dir: String,
     pub updated_rfc3339: String,
@@ -143,7 +143,7 @@ impl Workspace {
             ) else {
                 continue;
             };
-            let path = self.root.join("cases").join(group).join(case_dir);
+            let path = self.root.join(layout::CASES).join(group).join(case_dir);
             let case = read_case_file(&path)?;
             let notes_text = read_optional_string(&path.join("notes.md"))?.unwrap_or_default();
             let case_value = read_json_file(&case_json_path(&path), "read case metadata")?;
@@ -162,19 +162,23 @@ impl Workspace {
     }
 
     /// Archived cases as summary rows.
-    pub(crate) fn archive_case_summary_views(
+    pub(crate) fn archived_case_summary_views(
         &self,
-        archive: &Value,
-    ) -> Result<Vec<ArchiveCaseSummaryRecord>> {
+        cases: &Value,
+    ) -> Result<Vec<ArchivedCaseSummaryRecord>> {
         let mut out = Vec::new();
-        for item in value_array(archive, "cases") {
+        for item in value_array(cases, "items") {
             let (Some(group), Some(case_dir)) = (
                 item.get("group").and_then(Value::as_str),
                 item.get("case_dir").and_then(Value::as_str),
             ) else {
                 continue;
             };
-            let path = self.root.join("archive/cases").join(group).join(case_dir);
+            let path = self
+                .root
+                .join(layout::ARCHIVED_CASES)
+                .join(group)
+                .join(case_dir);
             let case = read_case_file(&path)?;
             let notes_text = read_optional_string(&path.join("notes.md"))?.unwrap_or_default();
             let updated_rfc3339 = case
@@ -183,9 +187,9 @@ impl Workspace {
                 .or_else(|| case.archived_rfc3339.clone())
                 .unwrap_or_default();
             let case_value = read_json_file(&case_json_path(&path), "read archived case metadata")?;
-            out.push(ArchiveCaseSummaryRecord {
+            out.push(ArchivedCaseSummaryRecord {
                 case: case_value,
-                view: ArchiveCaseSummaryView {
+                view: ArchivedCaseSummaryView {
                     group: group.to_string(),
                     case_dir: case_dir.to_string(),
                     updated_rfc3339,

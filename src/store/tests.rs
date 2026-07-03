@@ -815,7 +815,7 @@ fn init_and_status_work() {
     assert!(root.join(".gitignore").is_file());
     assert!(root.join(".afmail/DO_NOT_EDIT.txt").is_file());
     assert!(root.join("templates").is_dir());
-    assert!(root.join("archive/cases").is_dir());
+    assert!(root.join("archived-cases").is_dir());
     assert!(root.join("notifications").is_dir());
     assert!(root.join(".afmail/logs/events.jsonl").is_file());
     assert!(root.join(".afmail/transactions").is_dir());
@@ -1331,9 +1331,10 @@ fn chinese_case_and_notification_uids_are_supported(
         serde_json::from_str(&fs::read_to_string(case_dir.join("data/case.json"))?)?;
     assert_eq!(case_data.collection_uid, case_uid);
     assert_eq!(case_data.collection_name, case_name);
+    assert!(case_data.status.is_empty());
     assert!(!case_md.starts_with("---\n"));
     assert!(case_md.starts_with(&format!("# {case_name}\n")));
-    assert!(case_md.contains(&format!("Case: {case_uid} · Status: active · Messages: 1")));
+    assert!(case_md.contains(&format!("Case: {case_uid} · Messages: 1")));
     assert!(case_md.contains("## 1. ← Received: Subject"));
     assert!(case_md.contains("- From: alice@example.com"));
     assert!(case_md.contains("- Message: [message_case](views/messages/message_case.md)"));

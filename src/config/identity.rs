@@ -1,5 +1,6 @@
 use crate::error::{AppError, Result};
 use crate::frontmatter::IdentityFileFrontmatter;
+use crate::layout;
 use crate::markdown::read_doc;
 use crate::types::MessageFile;
 use lettre::address::Address;
@@ -169,7 +170,7 @@ impl super::MailConfig {
     }
 
     fn load_identity_files(&self, workspace_root: &Path) -> Result<BTreeMap<String, IdentityFile>> {
-        let dir = workspace_root.join("identities");
+        let dir = workspace_root.join(layout::IDENTITIES);
         if !dir.exists() {
             return Ok(BTreeMap::new());
         }

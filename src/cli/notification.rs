@@ -24,12 +24,12 @@ pub enum NotificationCommand {
         /// Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix.
         notification_ref: String,
     },
-    /// Restore a notification message to triage.
-    Restore {
+    /// Remove a notification message from this collection and return it to triage.
+    Remove {
         /// Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix.
         notification_ref: String,
         message_id: String,
-        /// Why this message needs active triage again; required by default.
+        /// Why this message does not belong in this notification; required by default.
         #[arg(long)]
         reason: Option<String>,
     },
@@ -52,6 +52,17 @@ pub enum NotificationCommand {
         #[arg(long)]
         name: String,
         /// Why this name better represents the collection; required by default.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Delete an empty notification collection.
+    Delete {
+        /// Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix.
+        notification_ref: String,
+        /// Also delete notes.md when it contains user-authored notes.
+        #[arg(long)]
+        allow_notes: bool,
+        /// Why this notification collection should be deleted; required by default.
         #[arg(long)]
         reason: Option<String>,
     },

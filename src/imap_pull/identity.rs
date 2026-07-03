@@ -1,4 +1,5 @@
 use super::*;
+use crate::layout;
 use agent_first_slug::{AllowedCharacterSet, SlugConfig};
 
 #[derive(Clone, Debug)]
@@ -87,7 +88,9 @@ pub(super) fn save_remote_message(
     let messages_dir = root.join(".afmail/messages");
     create_dir_all(&messages_dir)?;
     let workspace = crate::store::Workspace::at(root);
-    let cache_path = root.join("messages").join(format!("{message_id}.json"));
+    let cache_path = root
+        .join(layout::MESSAGES)
+        .join(format!("{message_id}.json"));
     if messages_dir.join(format!("{message_id}.eml")).exists() || cache_path.exists() {
         let existing = workspace.read_message_by_id(&message_id)?;
         if existing.rfc822_message_id != parsed.message.rfc822_message_id {
@@ -116,9 +119,9 @@ pub(super) fn save_remote_message(
     }
     workspace.write_message_artifacts(&parsed.message)?;
     if target.import_as == PullImportAs::Triage {
-        create_dir_all(&root.join("triage"))?;
+        create_dir_all(&root.join(layout::TRIAGE))?;
         write_string_atomic(
-            &root.join("triage").join(format!("{message_id}.md")),
+            &root.join(layout::TRIAGE).join(format!("{message_id}.md")),
             &crate::store::render_triage_view(
                 root,
                 mail_config.template_language(),
@@ -202,7 +205,7 @@ pub(super) fn load_case_refs_by_message_id(
     root: &Path,
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let cases_dir = root.join("cases");
+    let cases_dir = root.join(layout::CASES);
     if !cases_dir.exists() {
         return Ok(out);
     }
@@ -443,7 +446,7 @@ pub(super) fn create_dir_all(path: &Path) -> Result<()> {
 
 pub(super) fn unique_message_id(root: &Path, base: &str) -> String {
     let durable_dir = root.join(".afmail/messages");
-    let cache_dir = root.join("messages");
+    let cache_dir = root.join(layout::MESSAGES);
     if !durable_dir.join(format!("{base}.eml")).exists()
         && !durable_dir.join(format!("{base}.remote.json")).exists()
         && !cache_dir.join(format!("{base}.json")).exists()

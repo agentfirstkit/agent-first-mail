@@ -42,17 +42,14 @@ account-workspace/
     <group>/
       <contact_uid>-<name>.md
   identities/  # optional persona overrides, one <identity>.md per config identity
-  archive/
-    contacts/  # created when contacts are archived
-      <contact_uid>-<name>.md
-    cases/
-      <group>/
-        <case_uid>-<name>/
-          case.md
-          notes.md
-          data/
-            case.json
-            drafts.json
+  archived-cases/
+    <group>/
+      <case_uid>-<name>/
+        case.md
+        notes.md
+        data/
+          case.json
+          drafts.json
           views/
             messages/
               <message_id>.md
@@ -91,7 +88,7 @@ account-workspace/
 `triage/` and `cases/` are active attention surfaces. `spam/`, `trash/`, and
 `deleted/` are generated review views for local discard states, created only
 after the first matching message appears.
-`archive/cases/` contains archived case workspaces grouped by case group and
+`archived-cases/` contains archived case workspaces grouped by case group and
 addressed by case UID.
 `notifications/<notification_uid>-<name>/` contains notification messages
 in one notification collection.
@@ -158,9 +155,9 @@ generated views.
 ## Cases
 
 Active cases live at `cases/<group>/<case_uid>-<name>/`. Archived cases live at
-`archive/cases/<group>/<case_uid>-<name>/`. The `<group>` segment is the case
+`archived-cases/<group>/<case_uid>-<name>/`. The `<group>` segment is the case
 group carried forward from active work, not an archive category; for example,
-`archive/cases/support/...` is an archived case from the `support` case group.
+`archived-cases/support/...` is an archived case from the `support` case group.
 `case_uid` is globally unique and stable across active and archived cases.
 `rename --name` updates `data/case.json` and the readable directory suffix.
 
@@ -172,11 +169,12 @@ and tag values are local path-segment identifiers. Human names may use Unicode
 such as Chinese, for example `应用反馈-肥料登记` or `服务通知`. Do not use path
 separators (`/` or `\`) or the dot-only segments `.`/`..`.
 
-Case metadata is canonical in `data/case.json`. Active cases use
-`status: "active"`; archived cases use `status: "archived"` plus
-top-level `archived_rfc3339`. Message membership is stored in the same
-`data/case.json` collection under `items[]`, with per-message `summary` and
-`added_rfc3339`. Archived cases do not use notification collections.
+Case metadata is canonical in `data/case.json`. Active/archived lifecycle is
+represented by path (`cases/...` vs `archived-cases/...`), not by a `status`
+field. Archived cases also carry top-level `archived_rfc3339`. Message
+membership is stored in the same `data/case.json` collection under `items[]`,
+with per-message `summary` and `added_rfc3339`. Archived cases do not use
+notification collections.
 
 Case-local `data/drafts.json` files are afmail-managed machine state. They
 record only the last validation hash/time for `drafts/*.md` files. Humans and
@@ -191,21 +189,19 @@ and default flag in `.afmail/config.json`. Contacts are everyone else. Multiple
 identities may share one email address when the same mailbox needs separate
 personas, such as `support` and `sales`.
 
-Contact cards live at `contacts/<group>/<contact_uid>-<name>.md`; archived
-contacts move to `archive/contacts/<contact_uid>-<name>.md`. `contact_uid` is
-globally unique and stable across active and archived contacts and starts with
-`pYYYYMMDDNNN`; a ref may include a readable suffix after one dash. The card is a
-Markdown file with a `kind: contact` frontmatter (display name, `emails`,
-`phones`, organization, role, tags, timestamps) and a free-form notes body. Each
-card is canonical state — edit it with `afmail contact` commands, not by hand.
+Contact cards live at `contacts/<group>/<contact_uid>-<name>.md`. `contact_uid`
+starts with `pYYYYMMDDNNN`; a ref may include a readable suffix after one dash.
+The card is a Markdown file with a `kind: contact` frontmatter (display name,
+`emails`, `phones`, organization, role, tags, timestamps) and a free-form notes
+body. Each card is canonical state — edit it with `afmail contact` commands, not
+by hand.
 
-Email addresses are globally unique across all contacts (active and archived);
-`contact create` and `contact email add` reject an address already held by
-another contact. The sender→contact association is materialized onto each
-message as a `contact` object (`messages/<message_id>.json`) at pull/render time
-and refreshed automatically when a contact's emails or display name change.
-`afmail render refresh` rebuilds it for every message. There is no separate
-contact index file.
+Email addresses are globally unique across active contacts; `contact create` and
+`contact email add` reject an address already held by another contact. The
+sender→contact association is materialized onto each message as a `contact`
+object (`messages/<message_id>.json`) at pull/render time and refreshed
+automatically when a contact's emails or display name change. `afmail render
+refresh` rebuilds it for every message. There is no separate contact index file.
 
 ## Drafts And Case Files
 

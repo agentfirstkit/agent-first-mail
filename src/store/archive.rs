@@ -138,46 +138,23 @@ impl Workspace {
         Ok(result)
     }
 
-    pub fn archive_list(&self) -> Result<Value> {
-        self.require_workspace()?;
-        let cases = self.archive_case_items()?;
-        Ok(json!({
-            "code": "archive_list",
-            "case_count": cases.len(),
-            "case_path_templates": {
-                "case_path": "archive/cases/{group}/{case_dir}",
-                "view_path": "archive/cases/{group}/{case_dir}/case.md",
-                "data_path": "archive/cases/{group}/{case_dir}/data/case.json",
-            },
-            "cases": cases,
-        }))
-    }
-
-    pub fn archive_list_cases(&self) -> Result<Value> {
-        self.require_workspace()?;
-        let cases = self.archive_case_items()?;
-        Ok(json!({
-            "code": "archive_case_list",
-            "count": cases.len(),
-            "path_templates": {
-                "case_path": "archive/cases/{group}/{case_dir}",
-                "view_path": "archive/cases/{group}/{case_dir}/case.md",
-                "data_path": "archive/cases/{group}/{case_dir}/data/case.json",
-            },
-            "items": cases,
-        }))
-    }
-
     pub fn notification_list(&self) -> Result<Value> {
         self.require_workspace()?;
         let messages = self.notification_items()?;
+        let pt_notification_path = [layout::NOTIFICATIONS, "/{notification_dir}"].concat();
+        let pt_view_path = [layout::NOTIFICATIONS, "/{notification_dir}/notification.md"].concat();
+        let pt_data_path = [
+            layout::NOTIFICATIONS,
+            "/{notification_dir}/data/notification.json",
+        ]
+        .concat();
         Ok(json!({
             "code": "notification_list",
             "count": messages.len(),
             "path_templates": {
-                "notification_path": "notifications/{notification_dir}",
-                "view_path": "notifications/{notification_dir}/notification.md",
-                "data_path": "notifications/{notification_dir}/data/notification.json",
+                "notification_path": pt_notification_path,
+                "view_path": pt_view_path,
+                "data_path": pt_data_path,
             },
             "items": messages,
         }))
@@ -203,7 +180,7 @@ impl Workspace {
         }))
     }
 
-    pub fn notification_restore(
+    pub fn notification_remove(
         &self,
         notification_ref: &str,
         message_id: &str,
@@ -212,16 +189,16 @@ impl Workspace {
         self.require_workspace()?;
         let reason = self.checked_reason(reason)?;
         let (notification_uid, _) = self.resolve_notification(notification_ref)?;
-        self.restore_direct_notification(
+        self.remove_direct_notification(
             &notification_uid,
             message_id,
             reason,
-            "message_restored",
-            "message_restored",
+            "notification_message_removed",
+            "notification_message_removed",
         )
     }
 
-    pub(super) fn restore_direct_notification(
+    pub(super) fn remove_direct_notification(
         &self,
         notification_uid: &str,
         message_id: &str,
@@ -271,8 +248,8 @@ impl Workspace {
             json!({
                 "message_id": message_id,
                 "notification_uid": notification_uid,
-                "from_path": format!("notifications/{notification_uid}/views/messages/{message_id}.md"),
-                "to_path": format!("triage/{message_id}.md"),
+                "from_path": format!("{}/{notification_uid}/views/messages/{message_id}.md", layout::NOTIFICATIONS),
+                "to_path": format!("{}/{message_id}.md", layout::TRIAGE),
                 "removed_push_ids": push_ids.clone(),
             }),
         )?;
@@ -280,7 +257,7 @@ impl Workspace {
             "code": result_code,
             "message_id": message_id,
             "notification_uid": notification_uid,
-            "triage_path": format!("triage/{message_id}.md"),
+            "triage_path": format!("{}/{message_id}.md", layout::TRIAGE),
             "removed_push_count": push_ids.len(),
             "push_ids": push_ids,
         }))
@@ -451,6 +428,103 @@ impl Workspace {
         }))
     }
 
+    pub fn notification_delete(
+        &self,
+        notification_ref: &str,
+        allow_notes: bool,
+        reason: Option<&str>,
+    ) -> Result<Value> {
+        self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
+        let (notification_uid, notification_dir) = self.resolve_notification(notification_ref)?;
+        let data = self.read_notifications(&notification_uid)?;
+        let message_ids = data
+            .items
+            .iter()
+            .map(|item| item.message_id.clone())
+            .collect::<Vec<_>>();
+        if !message_ids.is_empty() {
+            return Err(AppError::new(
+                "notification_not_empty",
+                format!(
+                    "notification {notification_uid} still contains {} message(s)",
+                    message_ids.len()
+                ),
+            )
+            .with_hint(
+                "Move or remove all messages from the notification before deleting the collection.",
+            )
+            .with_details(json!({
+                "notification_uid": notification_uid,
+                "message_count": message_ids.len(),
+                "message_ids": message_ids,
+                "suggested_commands": [
+                    format!("afmail notification show {notification_ref}"),
+                    format!("afmail notification remove {notification_ref} MESSAGE_ID --reason TEXT"),
+                    format!("afmail notification move {notification_ref} MESSAGE_ID OTHER_NOTIFICATION_REF --reason TEXT")
+                ]
+            })));
+        }
+
+        let notes_path = notification_dir.join("notes.md");
+        let notes_exists = notes_path.is_file();
+        let notes_text = if notes_exists {
+            read_to_string(&notes_path, "read notification notes")?
+        } else {
+            String::new()
+        };
+        let default_notes = new_notes_md(&self.root, self.template_language()?)?;
+        let notes_modified =
+            !notes_text.trim().is_empty() && notes_text.trim() != default_notes.trim();
+        if notes_modified && !allow_notes {
+            return Err(AppError::new(
+                "notification_notes_present",
+                format!("notification {notification_uid} has notes.md content"),
+            )
+            .with_hint(
+                "Inspect the notes, then rerun with `--allow-notes` if deleting them is intended.",
+            )
+            .with_details(json!({
+                "notification_uid": notification_uid,
+                "notes_path": rel_path(&self.root, &notes_path),
+                "notes_len_bytes": notes_text.len(),
+                "notes_hash": stable_text_hash(&notes_text),
+                "suggested_commands": [
+                    format!("afmail notification notes show {notification_ref}"),
+                    format!("afmail notification delete {notification_ref} --allow-notes --reason TEXT")
+                ]
+            })));
+        }
+
+        let path = rel_path(&self.root, &notification_dir);
+        let transaction = self.begin_transaction("notification_delete", vec![path.clone()])?;
+        remove_dir_all(&notification_dir)?;
+        transaction.commit()?;
+        self.append_audit_event(
+            "notification_deleted",
+            vec![audit_target("notification", &notification_uid)],
+            reason,
+            json!({
+                "notification_uid": notification_uid.clone(),
+                "notification_name": data.collection_name.clone(),
+                "from_path": path.clone(),
+                "notes_deleted": notes_exists,
+                "notes_modified": notes_modified,
+                "notes_len_bytes": notes_text.len(),
+                "notes_hash": stable_text_hash(&notes_text),
+            }),
+        )?;
+        Ok(json!({
+            "code": "notification_deleted",
+            "notification_uid": notification_uid,
+            "notification_name": data.collection_name,
+            "from_path": path,
+            "deleted": true,
+            "notes_deleted": notes_exists,
+            "notes_modified": notes_modified,
+        }))
+    }
+
     pub fn notification_notes_show(&self, notification_ref: &str) -> Result<Value> {
         let (notification_uid, _) = self.resolve_notification(notification_ref)?;
         let path = self.notification_notes_path(&notification_uid);
@@ -516,29 +590,16 @@ impl Workspace {
         Ok(notification_rfc3339)
     }
 
-    pub(super) fn archive_case_path_for_name(
-        &self,
-        group: &str,
-        case_uid: &str,
-        name: &str,
-    ) -> PathBuf {
-        self.root
-            .join("archive")
-            .join("cases")
-            .join(group)
-            .join(case_dir_name(case_uid, name))
-    }
-
     pub(super) fn notification_dir(&self, notification_uid: &str) -> PathBuf {
         self.find_notification_dir_by_uid(notification_uid)
             .ok()
             .flatten()
-            .unwrap_or_else(|| self.root.join("notifications").join(notification_uid))
+            .unwrap_or_else(|| self.root.join(layout::NOTIFICATIONS).join(notification_uid))
     }
 
     pub(super) fn notification_dir_for_name(&self, notification_uid: &str, name: &str) -> PathBuf {
         self.root
-            .join("notifications")
+            .join(layout::NOTIFICATIONS)
             .join(notification_dir_name(notification_uid, name))
     }
 
@@ -695,8 +756,8 @@ impl Workspace {
     }
 
     pub(super) fn refresh_notification_indexes(&self) -> Result<()> {
-        create_dir_all(&self.root.join("archive/cases"))?;
-        create_dir_all(&self.root.join("notifications"))?;
+        create_dir_all(&self.root.join(layout::ARCHIVED_CASES))?;
+        create_dir_all(&self.root.join(layout::NOTIFICATIONS))?;
         let language = self.template_language()?;
         let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
         for notification_uid in self.notification_ids()? {
@@ -709,8 +770,8 @@ impl Workspace {
         &self,
         cache: &mut RenderCache,
     ) -> Result<NotificationViewRefresh> {
-        create_dir_all(&self.root.join("archive/cases"))?;
-        create_dir_all(&self.root.join("notifications"))?;
+        create_dir_all(&self.root.join(layout::ARCHIVED_CASES))?;
+        create_dir_all(&self.root.join(layout::NOTIFICATIONS))?;
         let language = self.template_language()?;
         let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
         let mut totals = NotificationViewRefresh::default();
@@ -1077,7 +1138,7 @@ impl Workspace {
     }
 
     pub(super) fn notification_ids(&self) -> Result<Vec<String>> {
-        let dir = self.root.join("notifications");
+        let dir = self.root.join(layout::NOTIFICATIONS);
         if !dir.exists() {
             return Ok(Vec::new());
         }
@@ -1133,7 +1194,7 @@ impl Workspace {
         notification_uid: &str,
     ) -> Result<Option<PathBuf>> {
         validate_notification_uid(notification_uid)?;
-        let dir = self.root.join("notifications");
+        let dir = self.root.join(layout::NOTIFICATIONS);
         if !dir.exists() {
             return Ok(None);
         }

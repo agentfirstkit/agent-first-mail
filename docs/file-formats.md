@@ -188,7 +188,7 @@ rebuildable and are not a notes surface.
 ## Case Workspace
 
 Active cases live at `cases/<group>/<case_uid>-<name>/`; archived cases live at
-`archive/cases/<group>/<case_uid>-<name>/`. The `<group>` segment is a case
+`archived-cases/<group>/<case_uid>-<name>/`. The `<group>` segment is a case
 group retained for history/lookup, not an archive category.
 
 `case_uid` is a stable `cYYYYMMDDNNN` identity and `notification_uid` is a stable
@@ -206,7 +206,6 @@ Case metadata is canonical in `data/case.json`:
   "schema_version": 1,
   "collection_uid": "c20260521001",
   "collection_name": "应用反馈-肥料登记",
-  "status": "active",
   "tags": [],
   "created_rfc3339": "2026-05-22T09:00:00Z",
   "updated_rfc3339": "2026-05-22T09:00:00Z",
@@ -223,8 +222,9 @@ Case metadata is canonical in `data/case.json`:
 }
 ```
 
-Archived cases set `status: "archived"` and `archived_rfc3339`. Cases do not
-store notification collections.
+Active/archived lifecycle is represented by path, not by a case `status` field.
+Archived cases set `archived_rfc3339`. Cases do not store notification
+collections.
 
 Case membership is canonical in `data/case.json` under `items[]`; each item uses
 the same message collection item shape as notification collections:
@@ -296,9 +296,8 @@ Contacts are other people; identities are our send personas.
 
 ## Contact Card
 
-Contact cards live at `contacts/<group>/<contact_uid>-<name>.md` (archived:
-`archive/contacts/<contact_uid>-<name>.md`). Each card is canonical Markdown with
-a `kind: contact` frontmatter and a free-form notes body:
+Contact cards live at `contacts/<group>/<contact_uid>-<name>.md`. Each card is
+canonical Markdown with a `kind: contact` frontmatter and a free-form notes body:
 
 ```markdown
 ---
@@ -423,7 +422,9 @@ archive-related events include:
 - `notification_message_moved`
 - `notification_renamed`
 - `notification_summary_set`
-- `message_restored`
+- `notification_message_removed`
+- `message_unspammed`
+- `message_untrashed`
 - `case_archived`
-- `case_restored`
-- `archive_case_renamed`
+- `case_unarchived`
+- `case_renamed`

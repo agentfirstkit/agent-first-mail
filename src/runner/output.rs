@@ -151,7 +151,6 @@ pub(super) fn command_name(command: &Command) -> &'static str {
         Command::Case { .. } => "case",
         Command::Contact { .. } => "contact",
         Command::Notification { .. } => "notification",
-        Command::Archive { .. } => "archive",
         Command::Render { .. } => "render",
         Command::Log { .. } => "log",
         #[cfg(feature = "ui")]

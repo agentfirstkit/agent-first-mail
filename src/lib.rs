@@ -4,6 +4,7 @@ pub mod error;
 pub mod frontmatter;
 pub(crate) mod imap_client;
 pub mod imap_pull;
+pub(crate) mod layout;
 pub mod mail;
 pub mod markdown;
 pub(crate) mod progress;

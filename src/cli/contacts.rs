@@ -69,22 +69,14 @@ pub enum ContactCommand {
         #[command(subcommand)]
         action: ContactNotesAction,
     },
-    /// Archive an active contact.
-    Archive {
+    /// Delete a contact.
+    Delete {
         /// Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix.
         contact_ref: String,
-        /// Why this contact is being archived; required by default.
+        /// Also delete the contact body when it contains user-authored notes.
         #[arg(long)]
-        reason: Option<String>,
-    },
-    /// Reopen an archived contact as active.
-    Reopen {
-        /// Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix.
-        contact_ref: String,
-        /// Destination group. Defaults to contact.default_group in config.
-        #[arg(long)]
-        group: Option<String>,
-        /// Why this contact should be reopened; required by default.
+        allow_notes: bool,
+        /// Why this contact should be deleted; required by default.
         #[arg(long)]
         reason: Option<String>,
     },

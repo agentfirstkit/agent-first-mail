@@ -52,9 +52,9 @@ high-level wiring. Sibling modules add focused `impl Workspace` blocks:
 
 - `archive.rs` handles notification collections and archived case IO.
 - `cases.rs` handles active case CRUD, membership, notes, tags, and moves.
-- `contacts.rs` handles contact-card CRUD, emails/phones/tags/notes, archive and
-  reopen, sender extraction, the ephemeral email→contact map, and the view
-  refresh that materializes the contact link onto messages.
+- `contacts.rs` handles contact-card CRUD, emails/phones/tags/notes, deletion,
+  sender extraction, the ephemeral email→contact map, and the view refresh that
+  materializes the contact link onto messages.
 - `messages.rs` handles message cache materialization, reads, local status
   transitions, attachments, related-message discovery, relocation, and stamping
   each message's materialized `contact` link.
@@ -85,7 +85,7 @@ The workspace keeps durable state in a few canonical places:
 - Raw message evidence and remote sidecars live under `.afmail/messages/`.
 - Rebuildable parsed message caches live under `messages/`.
 - Case state lives in `cases/.../data/case.json` or
-  `archive/cases/.../data/case.json`.
+  `archived-cases/.../data/case.json`.
 - Direct archive state lives in
   `notifications/.../data/notification.json`.
 - Local discard state lives in `spam/data/spam.json`,

@@ -17,7 +17,7 @@ pub(super) struct DispositionViewSpec {
 const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
     DispositionViewSpec {
         status: MessageStatus::Spam,
-        dir: "spam",
+        dir: layout::SPAM,
         data_file: "spam.json",
         schema_name: "spam",
         collection_uid: "spam",
@@ -26,7 +26,7 @@ const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
     },
     DispositionViewSpec {
         status: MessageStatus::Trashed,
-        dir: "trash",
+        dir: layout::TRASH,
         data_file: "trash.json",
         schema_name: "trash",
         collection_uid: "trash",
@@ -35,7 +35,7 @@ const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
     },
     DispositionViewSpec {
         status: MessageStatus::DeletedRemote,
-        dir: "deleted",
+        dir: layout::DELETED,
         data_file: "deleted.json",
         schema_name: "deleted_remote",
         collection_uid: "deleted",

@@ -1,6 +1,6 @@
 # {{ case.collection_name }}
 
-事项: {{ case.collection_uid }} · 状态: {{ view.status }} · 消息: {{ view.message_count }}
+事项: {{ case.collection_uid }} · 消息: {{ view.message_count }}
 
 {% if items | length == 0 %}_没有消息。_
 {% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.direction_kind == 'received' %}收到{% else %}发送{% endif %}{% if item.view.action == 'reply' %}回复{% elif item.view.action == 'forward' %}转发{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}

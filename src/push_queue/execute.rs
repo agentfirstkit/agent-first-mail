@@ -165,7 +165,7 @@ pub(super) fn push_action_steps(
             workspace
                 .ensure_message_ids_unreferenced(&payload.message_ids, Some(&current_push_path))?;
         }
-        MessagePushAction::CaseAdd => {}
+        MessagePushAction::CaseAdd | MessagePushAction::Unspam | MessagePushAction::Untrash => {}
     }
     let steps = payload.steps.clone();
     execute_tracked_steps(

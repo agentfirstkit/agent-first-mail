@@ -85,7 +85,7 @@ fn default_hint(error_code: &str) -> Option<&'static str> {
         "config_invalid" => Some("Run `afmail config show`, fix `.afmail/config.json`, or update the key with `afmail config set`."),
         "unknown_mailbox_id" => Some("Run `afmail config show` to inspect configured mailbox ids, then retry with one of those ids."),
         "workspace_locked" => Some("Wait for the running afmail command to finish, then retry."),
-        "case_not_found" => Some("Check the case ref and whether it is active or archived with `afmail status` and `afmail archive list cases`."),
+        "case_not_found" => Some("Check the case ref and whether it is active or archived with `afmail status` and `afmail case list --all`."),
         "archive_not_found" | "archive_entry_not_found" => {
             Some("Check notification refs with `afmail notification list`, then retry with the correct ref and message id.")
         }
@@ -94,8 +94,12 @@ fn default_hint(error_code: &str) -> Option<&'static str> {
         "imap_connect_failed" | "imap_greeting_failed" | "imap_login_failed" | "imap_tls_failed"
         | "imap_select_failed" | "imap_fetch_failed" | "imap_search_failed" | "imap_list_failed"
         | "imap_capability_failed" | "imap_create_failed" | "imap_append_failed"
-        | "imap_move_failed" | "imap_store_failed" | "imap_uid_missing" => {
+        | "imap_copy_failed" | "imap_expunge_failed" | "imap_move_failed"
+        | "imap_store_failed" | "imap_uid_missing" => {
             Some("Check IMAP config with `afmail config show`; use `afmail remote test` and `afmail remote folders` to diagnose.")
+        }
+        "imap_uidplus_required" => {
+            Some("This IMAP server does not support MOVE or UIDPLUS. Manually archive the message or use a server with one of those capabilities before retrying.")
         }
         "smtp_connect_failed" | "smtp_send_failed" => {
             Some("Check SMTP config with `afmail config show`; preview queued mail with `afmail push --dry-run` before retrying.")

@@ -1,9 +1,9 @@
 #[cfg(feature = "ui")]
 use super::UiCommand;
 use super::{
-    ArchiveAction, CaseCommand, ConfigAction, ContactCommand, DoctorAction, LogAction,
-    MessageAction, NotificationCommand, PurgeAction, PushAction, RemoteAction, RenderAction,
-    SkillAction, TriageAction,
+    CaseCommand, ConfigAction, ContactCommand, DoctorAction, LogAction, MessageAction,
+    NotificationCommand, PurgeAction, PushAction, RemoteAction, RenderAction, SkillAction,
+    TriageAction,
 };
 use clap::{Parser, Subcommand};
 
@@ -21,8 +21,7 @@ use clap::{Parser, Subcommand};
 - One workspace represents one mailbox account.
 - Message commands use `afmail message ACTION MESSAGE_ID ...`.
 - Case commands use `afmail case ACTION CASE_REF ...`.
-- Active and archived cases are readable with `afmail case show REF` and
-  `afmail archive case show REF`.
+- Active and archived cases are readable with `afmail case show REF`.
 - stdout carries structured Agent-First Data events; stderr is not a protocol channel.
 
 ### Workspace Shape
@@ -41,9 +40,8 @@ deleted/*.md             generated remote-deleted review views
 cases/<group>/<case_uid>-<name>/case.md generated case entry view
 cases/<group>/<case_uid>-<name>/data/ canonical case state
 cases/<group>/<case_uid>-<name>/views/ generated case detail views
+archived-cases/<group>/<case_uid>-<name>/ archived case workspaces; <group> is a case group
 contacts/<group>/<contact_uid>-<name>.md canonical contact cards
-archive/contacts/<contact_uid>-<name>.md archived contact cards
-archive/cases/<group>/<case_uid>-<name>/ archived case workspaces; <group> is a case group, not an archive category
 notifications/<notification_uid>-<name>/notification.md generated notification entry view
 notifications/<notification_uid>-<name>/data/ canonical notification state
 notifications/<notification_uid>-<name>/views/ generated notification detail views
@@ -66,21 +64,21 @@ afmail case show c20260603001
 afmail case add c20260603001 message_inbox_607146690_22 --reason "follow-up belongs to same feedback case"
 afmail notification create --name 服务通知 --message message_inbox_607146690_23 --summary "billing notification" --reason "billing notification"
 afmail notification show n20260603001
-afmail notification restore n20260603001 message_inbox_607146690_23 --reason "needs triage again"
+afmail notification remove n20260603001 message_inbox_607146690_23 --reason "does not belong in this notification"
 afmail message spam message_inbox_607146690_23 --reason "phishing attempt"
 afmail message trash message_inbox_607146690_24 --reason "duplicate no longer needed"
 afmail render refresh
 afmail doctor repair --confirm
-afmail case move c20260603001 waiting
+afmail case move c20260603001 waiting --reason "better category"
 afmail case archive c20260603001 --reason "feedback handled"
-afmail archive case restore c20260603001 --group support --reason "customer replied"
+afmail case unarchive c20260603001 --group support --reason "customer replied"
 afmail case tag c20260603001 legal --reason "legal review needed"
 afmail contact create --name "Zhang San" --email zhang@example.com --org Acme --role Buyer
 afmail contact list --group people
 afmail contact email add p20260603001 zhang-alt@example.com
 afmail contact rename p20260603001 --name "Zhang Sanfeng"
 afmail contact extract --from-triage
-afmail contact archive p20260603001 --reason "left the company"
+afmail contact delete p20260603001 --reason "duplicate contact"
 afmail case draft reply c20260603001 message_inbox_607146690_22
 afmail case draft attach c20260603001 reply-message_inbox_607146690_22.md ./screenshot.png
 afmail case draft change c20260603001 reply-message_inbox_607146690_22.md --body "Thanks, I will check this."
@@ -116,6 +114,14 @@ pub struct Cli {
     /// Enable all log categories.
     #[arg(long, global = true)]
     pub verbose: bool,
+
+    /// Redirect stdout bytes to this file.
+    #[arg(long = "stdout-file", value_name = "PATH", global = true)]
+    pub stdout_file: Option<String>,
+
+    /// Redirect stderr bytes to this file.
+    #[arg(long = "stderr-file", value_name = "PATH", global = true)]
+    pub stderr_file: Option<String>,
 
     /// Print structured version event.
     #[arg(short = 'V', long, global = true)]
@@ -202,11 +208,6 @@ pub enum Command {
     Notification {
         #[command(subcommand)]
         action: NotificationCommand,
-    },
-    /// Inspect and manage archived cases.
-    Archive {
-        #[command(subcommand)]
-        action: ArchiveAction,
     },
     /// Rebuild generated read views from local workspace state.
     Render {

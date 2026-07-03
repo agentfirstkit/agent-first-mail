@@ -4,9 +4,16 @@ use clap::{Args, Subcommand};
 pub enum CaseCommand {
     /// Create a new case and return its stable UID/ref.
     Create(CaseCreateArgs),
-    /// List compact active case locators.
-    List,
-    /// Show a case's case.md (active or archived) without changing workspace state.
+    /// List compact case locators.
+    List {
+        /// List archived cases instead of active cases.
+        #[arg(long, conflicts_with = "all")]
+        archived: bool,
+        /// List active and archived cases together.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show a case's case.md without changing workspace state.
     Show {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
@@ -24,14 +31,27 @@ pub enum CaseCommand {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Remove one message from this case and return it to triage.
+    Remove {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Message id to remove.
+        message_id: String,
+        /// Why this message does not belong in this case; required by default.
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Move this case to another group.
     Move {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
         /// Destination group.
         group: String,
+        /// Why this group better represents the case; required by default.
+        #[arg(long)]
+        reason: Option<String>,
     },
-    /// Rename this active case's human-readable name without changing its UID.
+    /// Rename this case's human-readable name without changing its UID.
     Rename {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
@@ -42,7 +62,7 @@ pub enum CaseCommand {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Show or edit active case notes.
+    /// Show or edit case notes.
     Notes {
         #[command(subcommand)]
         action: CaseNotesAction,
@@ -55,7 +75,18 @@ pub enum CaseCommand {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Move every message in this active case to local trash and queue Trash moves.
+    /// Move this archived case back to an active case group.
+    Unarchive {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Active case group to unarchive into.
+        #[arg(long)]
+        group: String,
+        /// Why this case needs active attention again; required by default.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Move every message in this case to local trash and queue Trash moves.
     Trash {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
@@ -63,11 +94,14 @@ pub enum CaseCommand {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Reopen this case as active work without changing its tags.
-    Reopen {
+    /// Delete an empty case.
+    Delete {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Why this case should be reopened; required by default.
+        /// Also delete notes.md when it contains user-authored notes.
+        #[arg(long)]
+        allow_notes: bool,
+        /// Why this case should be deleted; required by default.
         #[arg(long)]
         reason: Option<String>,
     },

@@ -785,7 +785,7 @@ fn assert_fixture_ui_room_snapshot(
         "active_cases",
         "push_queue",
         "notifications",
-        "case_archives",
+        "archived_cases",
         "activity_log",
         "mail_terminal",
     ] {
@@ -1631,19 +1631,40 @@ fn contact_crud_local_e2e() {
     let (status, _) = run(root.path(), &["contact", "show", &p001]);
     assert_eq!(status, 0, "show after move failed");
 
-    // Step 18: archive p001
-    let (status, stdout) = run(root.path(), &["contact", "archive", &p001]);
-    assert_eq!(status, 0, "contact archive failed: {stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "contact_archived");
-    assert!(root.path().join("archive").join("contacts").exists());
+    // Step 18: delete p001
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "contact",
+            "delete",
+            &p001,
+            "--allow-notes",
+            "--reason",
+            "duplicate contact fixture",
+        ],
+    );
+    assert_eq!(status, 0, "contact delete failed: {stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "contact_deleted");
     let (_, list_stdout) = run(root.path(), &["contact", "list"]);
     let list = parse_one(&list_stdout);
     assert_eq!(list["count"], 1, "only p002 should be active");
 
-    // Step 19: reopen p001
-    let (status, stdout) = run(root.path(), &["contact", "reopen", &p001]);
-    assert_eq!(status, 0, "contact reopen failed: {stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "contact_reopened");
+    // Step 19: recreate the deleted email as a new active contact
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "contact",
+            "create",
+            "--name",
+            "Zhang Recreated",
+            "--email",
+            "zhang@example.com",
+        ],
+    );
+    assert_eq!(status, 0, "contact recreate failed: {stdout}");
+    let result = parse_one(&stdout);
+    let p003 = result["contact_uid"].as_str().unwrap_or("").to_string();
+    assert!(p003.starts_with('p') && p003 != p001);
     let (_, list_stdout) = run(root.path(), &["contact", "list"]);
     let list = parse_one(&list_stdout);
     assert_eq!(list["count"], 2, "both contacts should be active again");
@@ -1883,10 +1904,19 @@ fn docker_greenmail_contact_cards_e2e() {
     let _ = parse_one(&stdout);
     assert!(root.path().join("contacts").join("vip").exists());
 
-    // Step 13: archive p002 (bob stub)
-    let (status, stdout) = run(root.path(), &["contact", "archive", &p002]);
-    assert_eq!(status, 0, "contact archive p002 failed: {stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "contact_archived");
+    // Step 13: delete p002 (bob stub)
+    let (status, stdout) = run(
+        root.path(),
+        &[
+            "contact",
+            "delete",
+            &p002,
+            "--reason",
+            "not needed for this fixture",
+        ],
+    );
+    assert_eq!(status, 0, "contact delete p002 failed: {stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "contact_deleted");
 
     // Step 14: active contact list shows only p001
     let (status, stdout) = run(root.path(), &["contact", "list"]);

@@ -2,11 +2,10 @@ use super::lock::{command_lock, workspace_progress_command};
 use super::purge::{resolve_purge_action, ResolvedPurgeAction};
 use super::push::push_confirmed;
 use crate::cli::{
-    ArchiveAction, ArchiveCaseAction, ArchiveCaseNotesAction, ArchiveListAction, CaseCommand,
-    CaseDraftAction, CaseNotesAction, Command, ConfigAction, ContactCommand, ContactEmailAction,
-    ContactNotesAction, ContactPhoneAction, DoctorAction, LogAction, MessageAction,
-    MessageAttachmentAction, NotificationCommand, NotificationNotesAction, PushAction,
-    RemoteAction, RenderAction, TriageAction,
+    CaseCommand, CaseDraftAction, CaseNotesAction, Command, ConfigAction, ContactCommand,
+    ContactEmailAction, ContactNotesAction, ContactPhoneAction, DoctorAction, LogAction,
+    MessageAction, MessageAttachmentAction, NotificationCommand, NotificationNotesAction,
+    PushAction, RemoteAction, RenderAction, TriageAction,
 };
 use crate::error::{AppError, Result};
 use crate::progress::{ProgressCallback, WorkspaceProgressSink};
@@ -158,8 +157,11 @@ fn execute_command_unlocked(
                 MessageAction::Trash { message_id, reason } => {
                     ws.trash_message(&message_id, reason.as_deref())
                 }
-                MessageAction::Restore { message_id, reason } => {
-                    ws.restore_message(&message_id, reason.as_deref())
+                MessageAction::Unspam { message_id, reason } => {
+                    ws.unspam_message(&message_id, reason.as_deref())
+                }
+                MessageAction::Untrash { message_id, reason } => {
+                    ws.untrash_message(&message_id, reason.as_deref())
                 }
                 MessageAction::Attachment { action } => match action {
                     MessageAttachmentAction::Fetch {
@@ -179,8 +181,8 @@ fn execute_command_unlocked(
                     args.summary.as_deref(),
                     args.reason.as_deref(),
                 ),
-                CaseCommand::List => ws.case_list(),
-                CaseCommand::Show { case_ref } => ws.active_case_show(&case_ref),
+                CaseCommand::List { archived, all } => ws.case_list(archived, all),
+                CaseCommand::Show { case_ref } => ws.case_show(&case_ref),
                 CaseCommand::Add {
                     case_ref,
                     message_id,
@@ -192,30 +194,46 @@ fn execute_command_unlocked(
                     summary.as_deref(),
                     reason.as_deref(),
                 ),
-                CaseCommand::Move { case_ref, group } => ws.move_case(&case_ref, &group),
+                CaseCommand::Remove {
+                    case_ref,
+                    message_id,
+                    reason,
+                } => ws.remove_message_from_case(&case_ref, &message_id, reason.as_deref()),
+                CaseCommand::Move {
+                    case_ref,
+                    group,
+                    reason,
+                } => ws.move_case(&case_ref, &group, reason.as_deref()),
                 CaseCommand::Rename {
                     case_ref,
                     name,
                     reason,
-                } => ws.rename_active_case(&case_ref, &name, reason.as_deref()),
+                } => ws.rename_case(&case_ref, &name, reason.as_deref()),
                 CaseCommand::Notes { action } => match action {
-                    CaseNotesAction::Show { case_ref } => ws.active_case_notes_show(&case_ref),
+                    CaseNotesAction::Show { case_ref } => ws.case_notes_show(&case_ref),
                     CaseNotesAction::Append { case_ref, text } => {
-                        ws.active_case_notes_append(&case_ref, &text)
+                        ws.case_notes_append(&case_ref, &text)
                     }
                     CaseNotesAction::Replace { case_ref, text } => {
-                        ws.active_case_notes_replace(&case_ref, &text)
+                        ws.case_notes_replace(&case_ref, &text)
                     }
                 },
                 CaseCommand::Archive { case_ref, reason } => {
                     ws.archive_case(&case_ref, reason.as_deref())
                 }
+                CaseCommand::Unarchive {
+                    case_ref,
+                    group,
+                    reason,
+                } => ws.unarchive_case(&case_ref, &group, reason.as_deref()),
                 CaseCommand::Trash { case_ref, reason } => {
                     ws.trash_case(&case_ref, reason.as_deref())
                 }
-                CaseCommand::Reopen { case_ref, reason } => {
-                    ws.reopen_case(&case_ref, reason.as_deref())
-                }
+                CaseCommand::Delete {
+                    case_ref,
+                    allow_notes,
+                    reason,
+                } => ws.delete_case(&case_ref, allow_notes, reason.as_deref()),
                 CaseCommand::Tag {
                     case_ref,
                     tag,
@@ -376,15 +394,11 @@ fn execute_command_unlocked(
                         ws.contact_notes_replace(&contact_ref, &text)
                     }
                 },
-                ContactCommand::Archive {
+                ContactCommand::Delete {
                     contact_ref,
+                    allow_notes,
                     reason,
-                } => ws.contact_archive_contact(&contact_ref, reason.as_deref()),
-                ContactCommand::Reopen {
-                    contact_ref,
-                    group,
-                    reason,
-                } => ws.contact_reopen_contact(&contact_ref, group.as_deref(), reason.as_deref()),
+                } => ws.contact_delete(&contact_ref, allow_notes, reason.as_deref()),
                 ContactCommand::Extract {
                     from_triage,
                     from_case,
@@ -402,42 +416,6 @@ fn execute_command_unlocked(
                     };
                     ws.contact_extract(source, group.as_deref())
                 }
-            }
-        }
-        Command::Archive { action } => {
-            let ws = Workspace::discover(cwd)?;
-            match action {
-                ArchiveAction::List { target: None } => ws.archive_list(),
-                ArchiveAction::List {
-                    target: Some(ArchiveListAction::Cases),
-                } => ws.archive_list_cases(),
-                ArchiveAction::Case { action } => match action {
-                    ArchiveCaseAction::Show { case_ref } => ws.archive_case_show(&case_ref),
-                    ArchiveCaseAction::Restore {
-                        case_ref,
-                        group,
-                        reason,
-                    } => ws.archive_case_restore(&case_ref, &group, reason.as_deref()),
-                    ArchiveCaseAction::Trash { case_ref, reason } => {
-                        ws.archive_case_trash(&case_ref, reason.as_deref())
-                    }
-                    ArchiveCaseAction::Rename {
-                        case_ref,
-                        name,
-                        reason,
-                    } => ws.archive_case_rename(&case_ref, &name, reason.as_deref()),
-                    ArchiveCaseAction::Notes { action } => match action {
-                        ArchiveCaseNotesAction::Show { case_ref } => {
-                            ws.archive_case_notes_show(&case_ref)
-                        }
-                        ArchiveCaseNotesAction::Append { case_ref, text } => {
-                            ws.archive_case_notes_append(&case_ref, &text)
-                        }
-                        ArchiveCaseNotesAction::Replace { case_ref, text } => {
-                            ws.archive_case_notes_replace(&case_ref, &text)
-                        }
-                    },
-                },
             }
         }
         Command::Notification { action } => {
@@ -464,11 +442,11 @@ fn execute_command_unlocked(
                 NotificationCommand::Show { notification_ref } => {
                     ws.notification_show(&notification_ref)
                 }
-                NotificationCommand::Restore {
+                NotificationCommand::Remove {
                     notification_ref,
                     message_id,
                     reason,
-                } => ws.notification_restore(&notification_ref, &message_id, reason.as_deref()),
+                } => ws.notification_remove(&notification_ref, &message_id, reason.as_deref()),
                 NotificationCommand::Move {
                     notification_ref,
                     message_id,
@@ -485,6 +463,11 @@ fn execute_command_unlocked(
                     name,
                     reason,
                 } => ws.notification_rename(&notification_ref, &name, reason.as_deref()),
+                NotificationCommand::Delete {
+                    notification_ref,
+                    allow_notes,
+                    reason,
+                } => ws.notification_delete(&notification_ref, allow_notes, reason.as_deref()),
                 NotificationCommand::SetSummary {
                     notification_ref,
                     message_id,

@@ -97,13 +97,13 @@ pub(super) fn case_archived_error(case_uid: &str) -> AppError {
         format!("case {case_uid} is archived"),
     )
     .with_hint(format!(
-        "Use `afmail archive case show {case_uid}` to inspect it, or `afmail archive case restore {case_uid} --group GROUP --reason TEXT` before editing."
+        "Use `afmail case show {case_uid}` to inspect it, or `afmail case unarchive {case_uid} --group GROUP --reason TEXT` before active-only edits."
     ))
     .with_details(json!({
         "case_uid": case_uid,
         "suggested_commands": [
-            format!("afmail archive case show {case_uid}"),
-            format!("afmail archive case restore {case_uid} --group GROUP --reason TEXT")
+            format!("afmail case show {case_uid}"),
+            format!("afmail case unarchive {case_uid} --group GROUP --reason TEXT")
         ]
     }))
 }
@@ -474,11 +474,8 @@ pub(super) fn write_case_file(case_path: &Path, case: &CaseFrontmatter) -> Resul
     let uid = normalized.collection_uid.clone();
     let name = normalized.collection_name.clone();
     normalized.normalize(CASE_SCHEMA_NAME, &uid, &name);
+    normalized.status.clear();
     write_json_pretty(&case_json_path(case_path), &normalized)
-}
-
-pub(super) fn case_status(case_path: &Path) -> Result<String> {
-    Ok(read_case_file(case_path)?.status)
 }
 
 pub(super) fn merge_flags(existing: &mut Vec<String>, flags: &[String]) -> bool {
@@ -907,7 +904,7 @@ impl Workspace {
 
     pub(super) fn message_path(&self, message_id: &str) -> PathBuf {
         self.root
-            .join("messages")
+            .join(layout::MESSAGES)
             .join(format!("{message_id}.json"))
     }
 }

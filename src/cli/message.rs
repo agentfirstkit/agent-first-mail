@@ -23,11 +23,19 @@ pub enum MessageAction {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Restore a message from spam, trash, or notification back to triage.
-    Restore {
+    /// Mark a spam false positive as triage and queue a move out of Junk when needed.
+    Unspam {
         /// Message id, for example message_inbox_607146690_22.
         message_id: String,
-        /// Why this restore is correct; required by default.
+        /// Why this message is not spam; required by default.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Mark a trash false positive as triage and queue a move out of Trash when needed.
+    Untrash {
+        /// Message id, for example message_inbox_607146690_22.
+        message_id: String,
+        /// Why this message should not be trashed; required by default.
         #[arg(long)]
         reason: Option<String>,
     },

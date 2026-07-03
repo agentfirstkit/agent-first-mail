@@ -33,6 +33,22 @@ fn config_defaults_pull_and_tls() {
         Some(Some("archive"))
     );
     assert_eq!(
+        cfg.actions
+            .message_unspam
+            .steps
+            .first()
+            .and_then(|step| step.move_to_mailbox_id.as_deref()),
+        Some("inbox")
+    );
+    assert_eq!(
+        cfg.actions
+            .message_untrash
+            .steps
+            .first()
+            .and_then(|step| step.move_to_mailbox_id.as_deref()),
+        Some("inbox")
+    );
+    assert_eq!(
         cfg.pull_action("sent").ok().map(|a| a.direction),
         Some(MailDirection::Outbound)
     );
@@ -72,6 +88,14 @@ fn default_config_serializes_explicit_mailboxes_and_actions() {
             {"append_to_mailbox_id": "sent"},
             {"add_flags": ["\\Seen", "\\Answered"], "on": "reply_to_message"}
         ])
+    );
+    assert_eq!(
+        value["actions"]["message.unspam"]["steps"],
+        json!([{"move_to_mailbox_id": "inbox"}])
+    );
+    assert_eq!(
+        value["actions"]["message.untrash"]["steps"],
+        json!([{"move_to_mailbox_id": "inbox"}])
     );
     assert_eq!(
         value["actions"]["pull"]["default_mailbox_ids"],

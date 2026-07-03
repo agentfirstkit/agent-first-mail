@@ -41,6 +41,7 @@ use crate::config::{
 };
 use crate::error::{AppError, Result};
 use crate::frontmatter::{CaseFrontmatter, DraftFrontmatter, TriageFrontmatter};
+use crate::layout;
 use crate::markdown::{parse_frontmatter, read_doc, render_frontmatter};
 use crate::templates::{language_template_path, MarkdownTemplateRenderer, TemplateKey};
 use crate::types::RemoteSyncState;
@@ -70,7 +71,9 @@ const AFMAIL_GITIGNORE_BEGIN: &str = "# BEGIN afmail managed";
 const AFMAIL_GITIGNORE_END: &str = "# END afmail managed";
 const AFMAIL_AGENT_GITIGNORE_HEADER: &str =
     "# Agent-First Mail workspace skill installed by afmail init.";
-const AFMAIL_WORKSPACE_GITIGNORE_BODY: &str = r#"# This workspace is meant to live in a PRIVATE repository: pulled mail bodies,
+fn afmail_workspace_gitignore_body() -> String {
+    format!(
+        r#"# This workspace is meant to live in a PRIVATE repository: pulled mail bodies,
 # attachments, and .afmail/config.json (which may hold an inline imap/smtp
 # password_secret) are intentionally NOT ignored, so they are committed as part
 # of your private mailbox state. If this repo could ever be public or shared, set
@@ -86,28 +89,38 @@ const AFMAIL_WORKSPACE_GITIGNORE_BODY: &str = r#"# This workspace is meant to li
 .afmail/config.example.json
 
 # Generated caches and read views; rebuild with afmail render refresh.
-messages/*.json
-triage/*.md
-spam/*.md
-trash/*.md
-deleted/*.md
-cases/*/*/case.md
-cases/*/*/views/**/*.md
-archive/cases/*/*/case.md
-archive/cases/*/*/views/**/*.md
-notifications/*/notification.md
-notifications/*/views/**/*.md
-"#;
+{messages}/*.json
+{triage}/*.md
+{spam}/*.md
+{trash}/*.md
+{deleted}/*.md
+{cases}/*/*/case.md
+{cases}/*/*/views/**/*.md
+{archived_cases}/*/*/case.md
+{archived_cases}/*/*/views/**/*.md
+{notifications}/*/notification.md
+{notifications}/*/views/**/*.md
+"#,
+        messages = layout::MESSAGES,
+        triage = layout::TRIAGE,
+        spam = layout::SPAM,
+        trash = layout::TRASH,
+        deleted = layout::DELETED,
+        cases = layout::CASES,
+        archived_cases = layout::ARCHIVED_CASES,
+        notifications = layout::NOTIFICATIONS,
+    )
+}
 const AFMAIL_RESERVED_INIT_PATHS: &[&str] = &[
-    "triage",
-    "cases",
-    "notifications",
-    "archive",
-    "messages",
-    "templates",
-    "spam",
-    "trash",
-    "deleted",
+    layout::TRIAGE,
+    layout::CASES,
+    layout::NOTIFICATIONS,
+    layout::ARCHIVED_CASES,
+    layout::MESSAGES,
+    layout::TEMPLATES,
+    layout::SPAM,
+    layout::TRASH,
+    layout::DELETED,
 ];
 const AFMAIL_AGENTS_BEGIN: &str = "<!-- BEGIN afmail managed -->";
 const AFMAIL_AGENTS_END: &str = "<!-- END afmail managed -->";
@@ -227,7 +240,7 @@ fn ensure_agent_gitignore_ignores_skill_dirs_with_workspace_body(
             block_body.push('\n');
         }
         block_body.push_str(trim_surrounding_line_endings(
-            AFMAIL_WORKSPACE_GITIGNORE_BODY,
+            &afmail_workspace_gitignore_body(),
         ));
     }
 
@@ -558,12 +571,12 @@ impl Workspace {
         create_dir_all(&self.root.join(".afmail/push"))?;
         create_dir_all(&self.root.join(".afmail/logs"))?;
         create_dir_all(&self.root.join(".afmail/transactions"))?;
-        create_dir_all(&self.root.join("templates"))?;
-        create_dir_all(&self.root.join("messages"))?;
-        create_dir_all(&self.root.join("triage"))?;
-        create_dir_all(&self.root.join("cases"))?;
-        create_dir_all(&self.root.join("archive/cases"))?;
-        create_dir_all(&self.root.join("notifications"))?;
+        create_dir_all(&self.root.join(layout::TEMPLATES))?;
+        create_dir_all(&self.root.join(layout::MESSAGES))?;
+        create_dir_all(&self.root.join(layout::TRIAGE))?;
+        create_dir_all(&self.root.join(layout::CASES))?;
+        create_dir_all(&self.root.join(layout::ARCHIVED_CASES))?;
+        create_dir_all(&self.root.join(layout::NOTIFICATIONS))?;
         write_json_if_missing(
             &self.root.join(".afmail/config.json"),
             &crate::config::MailConfig::default().sparse_value()?,
@@ -604,7 +617,7 @@ impl Workspace {
                 AFMAIL_GITIGNORE_BEGIN,
                 AFMAIL_GITIGNORE_END,
                 "",
-                AFMAIL_WORKSPACE_GITIGNORE_BODY,
+                &afmail_workspace_gitignore_body(),
             )?
         };
         let agent_gitignore_change = if same_root {
@@ -709,10 +722,10 @@ impl Workspace {
         let push_status = serde_json::to_value(crate::push_queue::push_status(&self.root)?)
             .map_err(|e| AppError::json("serialize push status", &e))?;
         let notifications = self.notification_items()?;
-        let archived_cases = self.archive_case_items()?;
+        let archived_cases = self.archived_case_items()?;
         Ok(json!({
             "code": "status",
-            "triage_count": count_files_with_ext(&self.root.join("triage"), "md")?,
+            "triage_count": count_files_with_ext(&self.root.join(layout::TRIAGE), "md")?,
             "case_count": cases.len(),
             "cases_by_group": cases_by_group,
             "notification_count": notifications.len(),
@@ -828,8 +841,8 @@ impl Workspace {
         self.require_workspace()?;
         let mut progress = progress;
         crate::progress::emit(&mut progress, "render_start", json!({}));
-        create_dir_all(&self.root.join("archive/cases"))?;
-        create_dir_all(&self.root.join("notifications"))?;
+        create_dir_all(&self.root.join(layout::ARCHIVED_CASES))?;
+        create_dir_all(&self.root.join(layout::NOTIFICATIONS))?;
 
         crate::progress::emit(
             &mut progress,
@@ -991,7 +1004,7 @@ impl Workspace {
 
     pub fn render_templates(&self, force: bool) -> Result<Value> {
         self.require_workspace()?;
-        let templates_dir = self.root.join("templates");
+        let templates_dir = self.root.join(layout::TEMPLATES);
         let existed_before = templates_dir.exists();
         if existed_before && !templates_dir.is_dir() {
             return Err(AppError::new(

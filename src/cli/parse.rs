@@ -10,6 +10,7 @@ pub struct ParsedArgs {
 
 pub fn parse_args() -> Result<ParsedArgs, String> {
     let cli = Cli::try_parse().map_err(|e| e.to_string())?;
+    let _stream_redirect_args = (&cli.stdout_file, &cli.stderr_file);
     let output = cli_parse_output(&cli.output)?;
     let log = normalize_log_filters(&cli.log, cli.verbose)?;
     match cli.command {

@@ -2,29 +2,30 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-mail",
   "name": "Agent-First Mail",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.",
   "intent": [
     "Give AI agents a local-first email workspace where pulled messages become editable case files rather than a traditional inbox app",
     "Preserve raw RFC822 mail while exposing mechanically cleaned text, message metadata, active cases, archived cases, contacts, notification collections, send identities, drafts, notes, and files through stable filesystem conventions, with human-readable Markdown rendered in the workspace language",
-    "Keep the CLI focused on side effects such as read-only pull with case suggestions, explicit triage assignment, case moves, archive and restore operations, attachment fetches, contact record management, reply draft scaffolding, draft validation, local push queuing, explicit push operations including read/unread flag work, audit log inspection, and local push queue cleanup"
+    "Keep the CLI focused on side effects such as read-only pull with case suggestions, explicit triage assignment, case moves, case archive/unarchive operations, attachment fetches, contact record management, reply draft scaffolding, draft validation, local push queuing, explicit push operations including read/unread flag work, audit log inspection, and local push queue cleanup"
   ],
   "license": "MIT",
   "mutations": [
-    "Rename the standalone direct-message archive model to notification collections: file reference and notification mail with 'afmail notification create/add' under stable nYYYYMMDDNNN uids and read it via 'afmail notification list/show', leaving the archive command to mean archived cases only",
-    "Require an explicit case category on 'afmail case create --group' with no default and no 'open' catch-all, and nest archived cases under archive/cases/<group>/ so the category survives archival",
-    "Block attachment fetches on spam-classified messages so an agent cannot be lured into pulling hostile payloads from mail it already flagged as spam",
-    "Queue remote trash for every mailbox a case's messages occupy, including Sent, so already-sent replies move to trash with the rest of the conversation when a case is discarded",
-    "Surface a structured audit_warnings entry when a confirmed push effect's audit record cannot be written, instead of silently dropping the lost record",
-    "Add index.md read views to the spam, trash, and deleted folders, and change the notification message-index default fields from sender to from",
-    "Make identity config setup idempotent, fix push incremental refresh, fix restore push cleanup and reply recipients, surface the contact command in CLI error hints, and upgrade dependencies"
+    "Add notification delete command to remove an empty notification collection, with --allow-notes to permit deletion when user-authored notes are present",
+    "Split message restore into message unspam and message untrash with semantics specific to each disposition, queuing the appropriate remote move when needed",
+    "Replace contact archive/reopen lifecycle with a single contact delete command; remove case reopen in favor of case delete for empty active cases; add case remove to extract one message back to triage",
+    "Collapse the archive top-level subcommand into case — archived case list, show, restore, remove, and move are now available directly under case",
+    "Add case move support for archived cases, enabling reordering within the archive without requiring a full restore-and-re-archive cycle",
+    "Fall back to COPY+EXPUNGE when the IMAP server does not advertise the MOVE capability, requiring UIDPLUS for precise single-message targeting",
+    "Centralize all on-disk workspace directory names into a single layout module, eliminating scattered string literals across the codebase",
+    "Integrate afdata stream file redirection, allowing stdout/stderr to be redirected to a file via CLI args before any output is written"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.39kCSa6orKxAaLcSGpisgLo3KXCxzCw2KutvdhgajCV3",
+      "uri": "cmn://agentfirstkit.com/b3.2TyLnsC2qStf6kjYVgcno4fv2hfiVzWuzuX6bCHwez5K",
       "id": "agent-first-data",
       "reason": "All structured output, field suffixes, secret handling, and JSONL events follow Agent-First Data conventions"
     },

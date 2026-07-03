@@ -14,8 +14,8 @@ use crate::config::{
 };
 use crate::error::{AppError, Result};
 use crate::imap_client::{
-    append_draft_and_find_uid_session, append_message_session, capability_move, create_folder,
-    list_mailboxes, login_plain, login_tls, require_move, uid_mark_and_move_session,
+    append_draft_and_find_uid_session, append_message_session, capability_move, capability_uidplus,
+    create_folder, list_mailboxes, login_plain, login_tls, require_move, uid_mark_and_move_session,
     uid_move_session,
 };
 pub use crate::imap_client::{MailboxInfo, MoveOutcome};
@@ -162,20 +162,22 @@ pub fn pull_workspace(
 
 pub fn remote_test(config: &ImapConfig) -> Result<Value> {
     let started = Instant::now();
-    let move_supported = if config.tls {
+    let (move_supported, uidplus_supported) = if config.tls {
         let mut session = login_tls(config)?;
         let move_supported = capability_move(&mut session)?;
+        let uidplus_supported = capability_uidplus(&mut session)?;
         session
             .logout()
             .map_err(|e| AppError::new("imap_logout_failed", e.to_string()))?;
-        move_supported
+        (move_supported, uidplus_supported)
     } else {
         let mut session = login_plain(config)?;
         let move_supported = capability_move(&mut session)?;
+        let uidplus_supported = capability_uidplus(&mut session)?;
         session
             .logout()
             .map_err(|e| AppError::new("imap_logout_failed", e.to_string()))?;
-        move_supported
+        (move_supported, uidplus_supported)
     };
     Ok(json!({
         "code": "remote_test_result",
@@ -184,7 +186,8 @@ pub fn remote_test(config: &ImapConfig) -> Result<Value> {
         "port": config.port,
         "tls": config.tls,
         "capabilities": {
-            "move": move_supported
+            "move": move_supported,
+            "uidplus": uidplus_supported
         },
         "duration_ms": started.elapsed().as_millis() as u64
     }))

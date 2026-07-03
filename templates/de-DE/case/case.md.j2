@@ -1,6 +1,6 @@
 # {{ case.collection_name }}
 
-Fall: {{ case.collection_uid }} · Status: {{ view.status }} · Nachrichten: {{ view.message_count }}
+Fall: {{ case.collection_uid }} · Nachrichten: {{ view.message_count }}
 
 {% if items | length == 0 %}_Keine Nachrichten._
 {% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.action_kind == 'received' %}Empfangen{% elif item.view.action_kind == 'received_reply' %}Empfangene Antwort{% elif item.view.action_kind == 'received_forward' %}Empfangene Weiterleitung{% elif item.view.action_kind == 'sent' %}Gesendet{% elif item.view.action_kind == 'sent_reply' %}Gesendete Antwort{% else %}Gesendete Weiterleitung{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}

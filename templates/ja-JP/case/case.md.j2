@@ -1,6 +1,6 @@
 # {{ case.collection_name }}
 
-ケース: {{ case.collection_uid }} · 状態: {{ view.status }} · メッセージ: {{ view.message_count }}
+ケース: {{ case.collection_uid }} · メッセージ: {{ view.message_count }}
 
 {% if items | length == 0 %}_メッセージはありません。_
 {% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.action_kind == 'received' %}受信{% elif item.view.action_kind == 'received_reply' %}返信を受信{% elif item.view.action_kind == 'received_forward' %}転送を受信{% elif item.view.action_kind == 'sent' %}送信{% elif item.view.action_kind == 'sent_reply' %}返信を送信{% elif item.view.action_kind == 'sent_forward' %}転送を送信{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}

@@ -162,10 +162,10 @@ machine evidence in separate places:
   attention.
 - **`cases/`** — a folder per ongoing issue, holding notes, the messages
   involved, and draft replies.
-- **`notifications/` and `archive/`** — completed notification mail and archived cases, filed and out of the way.
+- **`notifications/` and `archived-cases/`** — completed notification mail and archived cases, filed and out of the way.
 - **Stable refs** — every message, case, and notification collection has a durable id,
   so an agent can point at the same thing across runs.
-- **Locator lists** — `triage list`, `case list`, `notification list`, and `archive list ...` return
+- **Locator lists** — `triage list`, `case list`, `notification list`, and `case list --archived` return
   compact stable ids plus path templates; the agent expands those templates or
   uses the matching `show` command to read detail.
 

@@ -18,8 +18,8 @@ pub fn workspace_snapshot(workspace: &Workspace) -> Result<AgentFirstUiMessage> 
     }
 
     let triage = workspace.triage_list()?;
-    let cases = workspace.case_list()?;
-    let archive = workspace.archive_list()?;
+    let cases = workspace.case_list(false, false)?;
+    let archived_case_list = workspace.case_list(true, false)?;
     let notification_list = workspace.notification_list()?;
     let push = workspace.push_list()?;
     let logs = workspace.log_list(20)?;
@@ -34,7 +34,7 @@ pub fn workspace_snapshot(workspace: &Workspace) -> Result<AgentFirstUiMessage> 
         "ui": {
             "triage_items": to_items(workspace.inbox_message_views(&triage)?)?,
             "case_items": to_items(workspace.case_summary_views(&cases)?)?,
-            "archive_case_items": to_items(workspace.archive_case_summary_views(&archive)?)?,
+            "archived_case_items": to_items(workspace.archived_case_summary_views(&archived_case_list)?)?,
             "notification_items": to_items(workspace.notification_views(&notification_list)?)?,
             "push_items": to_items(workspace.push_summary_views(&push)?)?,
             "log_items": log_items(&logs),
@@ -47,7 +47,7 @@ pub fn workspace_snapshot(workspace: &Workspace) -> Result<AgentFirstUiMessage> 
         active_cases(),
         push_queue(),
         notifications(),
-        case_archives(),
+        archived_cases(),
         activity_log(),
         mail_terminal(),
     ];
@@ -184,24 +184,24 @@ fn mailbox_status() -> Unit {
         Some(Prominence::Subtle),
         SalienceState::Info,
     )
-        .set_field("title", json!("Mailbox Status"))
-        .set_field(
-            "description",
-            json!("Compact workspace counts at a glance."),
-        )
-        .set_field(
-            "items",
-            json!([
-                {"label": "Inbox", "value_binding": "space:afmail.status.triage_count"},
-                {"label": "Active cases", "value_binding": "space:afmail.status.case_count"},
-                {"label": "Push queue", "value_binding": "space:afmail.status.push_count"},
-                {"label": "Notifications", "value_binding": "space:afmail.status.notification_category_count"},
-                {"label": "Case archives", "value_binding": "space:afmail.status.archived_case_count"},
-                {"label": "Activity", "value_binding": "space:afmail.logs.count"}
-            ]),
-        )
-        .set_field("capabilities", json!(["status", "pull"]))
-        .set_field("primary_capability", json!("pull"))
+    .set_field("title", json!("Mailbox Status"))
+    .set_field(
+        "description",
+        json!("Compact workspace counts at a glance."),
+    )
+    .set_field(
+        "items",
+        json!([
+            {"label": "Inbox", "value_binding": "space:afmail.status.triage_count"},
+            {"label": "Active cases", "value_binding": "space:afmail.status.case_count"},
+            {"label": "Push queue", "value_binding": "space:afmail.status.push_count"},
+            {"label": "Notifications", "value_binding": "space:afmail.status.notification_count"},
+            {"label": "Case archives", "value_binding": "space:afmail.status.archived_case_count"},
+            {"label": "Activity", "value_binding": "space:afmail.logs.count"}
+        ]),
+    )
+    .set_field("capabilities", json!(["status", "pull"]))
+    .set_field("primary_capability", json!("pull"))
 }
 
 fn inbox_triage() -> Unit {
@@ -266,7 +266,9 @@ fn inbox_triage() -> Unit {
                 "message_show",
                 "case_create",
                 "notification_add",
-                "message_trash"
+                "message_trash",
+                "message_unspam",
+                "message_untrash"
             ]),
         )
 }
@@ -296,7 +298,7 @@ fn active_cases() -> Unit {
         .set_field("reference_binding", json!("record:case.collection_uid"))
         .set_field("reference_label", json!("Copy case id"))
         .set_field("title_key", json!("case.collection_name"))
-        .set_field("subtitle_key", json!("case.status"))
+        .set_field("subtitle_key", json!("view.group"))
         .set_field("meta_key", json!("view.updated_rfc3339"))
         .set_field("badge_key", json!("case.message_count"))
         .set_field("preview_key", json!("view.notes_text"))
@@ -312,7 +314,6 @@ fn active_cases() -> Unit {
             "fields",
             json!([
                 {"key": "view.group", "label": "Group"},
-                {"key": "case.status", "label": "Status"},
                 {"key": "case.message_count", "label": "Messages"},
                 {"key": "case.tags", "label": "Tags"},
                 {"key": "view.last_message_rfc3339", "label": "Last message", "show_as": "relative_time", "salience": {"state": "info"}},
@@ -336,15 +337,17 @@ fn active_cases() -> Unit {
             "row_capabilities",
             json!([
                 "case_show",
+                "case_remove",
                 "case_notes_append",
-                "case_archive"
+                "case_archive",
+                "case_delete"
             ]),
         )
 }
 
-fn case_archives() -> Unit {
+fn archived_cases() -> Unit {
     with_salience_state(
-        Unit::new("case_archives", "list"),
+        Unit::new("archived_cases", "list"),
         Some(Prominence::Subtle),
         SalienceState::Neutral,
     )
@@ -355,11 +358,11 @@ fn case_archives() -> Unit {
         )
         .set_field(
             "description",
-            json!("Closed cases kept for lookup and restore."),
+            json!("Closed cases kept for lookup and unarchive."),
         )
         .set_field(
             "source_binding",
-            json!("space:afmail.ui.archive_case_items"),
+            json!("space:afmail.ui.archived_case_items"),
         )
         .set_field(
             "count_binding",
@@ -373,7 +376,7 @@ fn case_archives() -> Unit {
         .set_field("reference_binding", json!("record:case.collection_uid"))
         .set_field("reference_label", json!("Copy case id"))
         .set_field("title_key", json!("case.collection_name"))
-        .set_field("subtitle_key", json!("case.status"))
+        .set_field("subtitle_key", json!("view.group"))
         .set_field("meta_key", json!("view.updated_rfc3339"))
         .set_field("badge_key", json!("case.message_count"))
         .set_field("preview_key", json!("view.notes_text"))
@@ -393,8 +396,8 @@ fn case_archives() -> Unit {
                 {"key": "view.updated_rfc3339", "label": "Updated", "show_as": "relative_time", "salience": {"state": "neutral"}}
             ]),
         )
-        .set_field("activate_capability", json!("archive_case_show"))
-        .set_field("primary_capability", json!("archive_case_show"))
+        .set_field("activate_capability", json!("case_show"))
+        .set_field("primary_capability", json!("case_show"))
         .set_field(
             "interactions",
             json!({
@@ -402,13 +405,13 @@ fn case_archives() -> Unit {
                     {"type": "set_actor_state", "path": "selection.case_ref", "value_binding": "record:case.collection_uid"}
                 ],
                 "activate": [
-                    {"type": "request", "capability": "archive_case_show", "input_bindings": {"case_ref": "record:case.collection_uid"}}
+                    {"type": "request", "capability": "case_show", "input_bindings": {"case_ref": "record:case.collection_uid"}}
                 ]
             }),
         )
         .set_field(
             "row_capabilities",
-            json!(["archive_case_show", "archive_case_restore"]),
+            json!(["case_show", "case_unarchive", "case_delete"]),
         )
 }
 
@@ -480,7 +483,8 @@ fn notifications() -> Unit {
             "row_capabilities",
             json!([
                 "notification_show",
-                "notification_restore",
+                "notification_remove",
+                "notification_delete",
                 "notification_rename"
             ]),
         )
@@ -615,8 +619,8 @@ fn layouts() -> Vec<Layout> {
             .role(LayoutRole::Summary)
             .subtle()
             .build(),
-        LayoutBuilder::new("archives", ["notifications", "case_archives"])
-            .description("Lookup and restore surfaces.")
+        LayoutBuilder::new("archives", ["notifications", "archived_cases"])
+            .description("Lookup and unarchive surfaces.")
             .relation(LayoutRelation::Supporting)
             .role(LayoutRole::History)
             .overlay(true)
@@ -752,7 +756,12 @@ fn capabilities() -> Vec<Capability> {
                 field("message_id", "string", true),
                 field("reason", "string", false),
             ])),
-        local_capability("message_restore", "Restore")
+        local_capability("message_unspam", "Unspam")
+            .with_input(input_schema(&[
+                field("message_id", "string", true),
+                field("reason", "string", false),
+            ])),
+        local_capability("message_untrash", "Untrash")
             .with_input(input_schema(&[
                 field("message_id", "string", true),
                 field("reason", "string", false),
@@ -773,6 +782,12 @@ fn capabilities() -> Vec<Capability> {
         read_capability("case_show", "Show Case")
             .with_input(input_schema(&[field("case_ref", "string", true)])),
         local_capability("case_add", "Add Message")
+            .with_input(input_schema(&[
+                field("case_ref", "string", true),
+                field("message_id", "string", true),
+                field("reason", "string", false),
+            ])),
+        local_capability("case_remove", "Remove Message")
             .with_input(input_schema(&[
                 field("case_ref", "string", true),
                 field("message_id", "string", true),
@@ -806,9 +821,16 @@ fn capabilities() -> Vec<Capability> {
                 field("case_ref", "string", true),
                 field("reason", "string", false),
             ])),
-        local_capability("case_reopen", "Reopen Case")
+        local_capability("case_unarchive", "Unarchive Case")
             .with_input(input_schema(&[
                 field("case_ref", "string", true),
+                field("group", "string", true),
+                field("reason", "string", false),
+            ])),
+        local_capability("case_delete", "Delete Case")
+            .with_input(input_schema(&[
+                field("case_ref", "string", true),
+                field("allow_notes", "boolean", false),
                 field("reason", "string", false),
             ])),
         local_capability("case_tag", "Tag Case")
@@ -882,8 +904,6 @@ fn capabilities() -> Vec<Capability> {
                 field("other_case_ref", "string", true),
                 field("reason", "string", false),
             ])),
-        read_capability("archive_list", "Archive List"),
-        read_capability("archive_list_cases", "Archive Case List"),
         read_capability("notification_list", "Notification List"),
         local_capability("notification_create", "Create Notification")
             .with_input(input_schema(&[
@@ -894,7 +914,7 @@ fn capabilities() -> Vec<Capability> {
             ])),
         read_capability("notification_show", "Show Notification")
             .with_input(input_schema(&[field("notification_ref", "string", true)])),
-        local_capability("notification_restore", "Restore Notification Message")
+        local_capability("notification_remove", "Remove Notification Message")
             .with_input(input_schema(&[
                 field("notification_ref", "string", true),
                 field("message_id", "string", true),
@@ -911,6 +931,12 @@ fn capabilities() -> Vec<Capability> {
             .with_input(input_schema(&[
                 field("notification_ref", "string", true),
                 field("name", "string", true),
+                field("reason", "string", false),
+            ])),
+        local_capability("notification_delete", "Delete Notification")
+            .with_input(input_schema(&[
+                field("notification_ref", "string", true),
+                field("allow_notes", "boolean", false),
                 field("reason", "string", false),
             ])),
         local_capability("notification_set_summary", "Set Notification Summary")
@@ -930,32 +956,6 @@ fn capabilities() -> Vec<Capability> {
         local_capability("notification_notes_replace", "Replace Notification Notes")
             .with_input(input_schema(&[
                 field("notification_ref", "string", true),
-                markdown_field("text", true),
-            ])),
-        read_capability("archive_case_show", "Show Archived Case")
-            .with_input(input_schema(&[field("case_ref", "string", true)])),
-        local_capability("archive_case_restore", "Restore Archived Case")
-            .with_input(input_schema(&[
-                field("case_ref", "string", true),
-                field("group", "string", true),
-                field("reason", "string", false),
-            ])),
-        local_capability("archive_case_rename", "Rename Archived Case")
-            .with_input(input_schema(&[
-                field("case_ref", "string", true),
-                field("name", "string", true),
-                field("reason", "string", false),
-            ])),
-        read_capability("archive_case_notes_show", "Show Archived Case Notes")
-            .with_input(input_schema(&[field("case_ref", "string", true)])),
-        local_capability("archive_case_notes_append", "Append Archived Case Notes")
-            .with_input(input_schema(&[
-                field("case_ref", "string", true),
-                markdown_field("text", true),
-            ])),
-        local_capability("archive_case_notes_replace", "Replace Archived Case Notes")
-            .with_input(input_schema(&[
-                field("case_ref", "string", true),
                 markdown_field("text", true),
             ])),
         local_capability("render_refresh", "Render Refresh"),

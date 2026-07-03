@@ -1,4 +1,5 @@
 use super::*;
+use crate::layout;
 
 pub(super) fn find_outbound_item(
     root: &Path,
@@ -61,7 +62,7 @@ pub(super) fn push_path(root: &Path, push_id: &str) -> PathBuf {
 
 pub(super) fn find_case_path(root: &Path, case_uid: &str) -> Result<PathBuf> {
     if let Some(candidate) = find_case_path_any(root, case_uid)? {
-        if candidate.starts_with(root.join("cases")) {
+        if candidate.starts_with(root.join(layout::CASES)) {
             return Ok(candidate);
         }
     }
@@ -85,7 +86,7 @@ pub(super) fn find_case_path_any(root: &Path, case_uid: &str) -> Result<Option<P
 
 pub(super) fn case_search_roots(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    let cases_dir = root.join("cases");
+    let cases_dir = root.join(layout::CASES);
     if cases_dir.is_dir() {
         for group in fs::read_dir(&cases_dir).map_err(|e| AppError::io("read cases", &e))? {
             let group = group.map_err(|e| AppError::io("read cases", &e))?;
@@ -101,7 +102,7 @@ pub(super) fn case_search_roots(root: &Path) -> Result<Vec<PathBuf>> {
             }
         }
     }
-    let archive_dir = root.join("archive/cases");
+    let archive_dir = root.join(layout::ARCHIVED_CASES);
     if archive_dir.is_dir() {
         for group in
             fs::read_dir(&archive_dir).map_err(|e| AppError::io("read archived cases", &e))?

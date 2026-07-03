@@ -37,10 +37,10 @@ decisions, and recovery only.
   every few seconds when the command is still running; use
   `afmail --log progress ...` only when stdout JSONL progress is explicitly
   useful.
-- `afmail triage list`, `afmail case list`, `afmail notification list`, and `afmail archive list ...`
+- `afmail triage list`, `afmail case list`, `afmail notification list`, and `afmail case list --archived`
   return compact locator indexes plus `path_templates`. Expand those templates,
   or use `afmail message show`, `afmail case show`, and
-  `afmail notification show`, or `afmail archive ... show`, to read details.
+  `afmail notification show` to read details.
 - Read generated message views in `triage/`, active case entry views with
   `afmail case show REF` or `cases/*/*/case.md`, notification entry views with
   `afmail notification show REF` or `notifications/*/notification.md`, and
@@ -94,6 +94,10 @@ decisions, and recovery only.
   copy the returned `notification_uid`, then use
   `afmail notification add REF MESSAGE_ID --summary TEXT --reason TEXT` only for
   later messages in an existing notification collection.
+- Delete an empty notification collection with
+  `afmail notification delete REF --reason TEXT`. If the collection has
+  user-authored `notes.md` content, inspect it first and only add
+  `--allow-notes` when the user clearly wants those notes deleted too.
 - Judge sender authenticity by the authenticated domain, not by "pass": a
   passing `authentication` (spf/dkim/dmarc) only proves the mail came from its
   `authenticated_domain` unaltered — a lookalike domain can pass too. Check
@@ -107,12 +111,18 @@ decisions, and recovery only.
   `afmail message trash MESSAGE_ID --reason TEXT`; afmail removes it from
   `triage/` and exposes it under generated `trash/` views for review.
 - Unneeded conversation mail with `related_message_ids`: create/add the full
-  thread as a case, then use `afmail case trash REF --reason TEXT` (or
-  `afmail archive case trash REF --reason TEXT` for an already archived case) so
+  thread as a case, then use `afmail case trash REF --reason TEXT` so
   the whole thread moves to local trash together.
-- If a local disposition (spam/trash/notification) was wrong before remote
-  push, undo it with `afmail message restore MESSAGE_ID --reason TEXT`; afmail
-  detects the current disposition and returns the message to triage.
+- If a spam or trash disposition was wrong, use
+  `afmail message unspam MESSAGE_ID --reason TEXT` or
+  `afmail message untrash MESSAGE_ID --reason TEXT`. These commands return the
+  message to triage and queue an Inbox move only when the active remote location
+  is still Junk/Trash.
+- If a notification membership was wrong, use
+  `afmail notification remove NOTIFICATION_REF MESSAGE_ID --reason TEXT` so the
+  collection is explicit. Delete the collection separately with
+  `afmail notification delete REF --reason TEXT` when it becomes empty and is no
+  longer useful.
 - Use cases, not multiple notification collections, when a message needs more than one
   context.
 
@@ -124,8 +134,8 @@ decisions, and recovery only.
 - `--reason` is audit metadata in `.afmail/logs/events.jsonl`, not long-term
   working memory.
 - Treat active and archived case `notes.md` as user-authored notes. Do not run
-  `afmail case ... notes append|replace` or archive case notes commands unless
-  the user explicitly asks you to write notes/备注/长期记忆.
+  `afmail case notes append|replace` unless the user explicitly asks you to
+  write notes/备注/长期记忆.
 
 ## Push Discipline
 
@@ -144,8 +154,9 @@ decisions, and recovery only.
   says to push/sync/apply remote effects.
 - The push queue is a projection of local state, not a separately editable list.
   To drop something from the next push, undo the local action that queued it
-  (`message restore`, `case reopen`, or `draft remove`); do not try to remove
-  queue items by push id.
+  (`message unspam`, `message untrash`, `notification remove`, `case remove`,
+  `case unarchive`, or `draft remove`); do not try to remove queue items
+  by push id.
 - Run `afmail push --confirm` only when the user explicitly asks to push, sync,
   or apply queued remote effects; review with `afmail push list` first.
 - If the user cancels approval for a push, stop; do not retry with `--confirm`.
@@ -164,10 +175,11 @@ decisions, and recovery only.
 - Run `afmail render templates` when the user wants to create or inspect
   `templates/` workspace overrides; use `--force` only when they ask to reset
   templates to built-in defaults.
-- Add/move/archive/reopen/tag/untag cases and use notification commands for
+- Add/remove/move/archive/tag/untag cases and use notification commands for
   local notification filing.
 - Mark messages notification/spam/trash locally with reasons, and use
-  `message restore` when a local disposition should be undone pre-push.
+  `message unspam`, `message untrash`, or `notification remove` when a local
+  disposition should be undone pre-push.
 - Scaffold drafts, edit generated draft Markdown, validate drafts, and queue
   drafts with `draft save` or `draft send`.
 - Only run `afmail purge`, `afmail purge spam`, `afmail purge trash`, or
@@ -177,11 +189,10 @@ decisions, and recovery only.
 ## Cases, Drafts, And Attachments
 
 - Active cases live under `cases/<group>/<case_uid>-<name>/`; archived cases
-  live under `archive/cases/<group>/<case_uid>-<name>/`. The `<group>` segment is
+  live under `archived-cases/<group>/<case_uid>-<name>/`. The `<group>` segment is
   the explicit case category chosen at creation, carried forward for
   lookup/history; it is not an archive category.
-- `afmail case show REF` reads a case's `case.md` whether the case is active or
-  archived; `afmail archive case show REF` also works for archived cases.
+- `afmail case show REF` reads active and archived case `case.md`.
 - Case `case.md`, notification `notification.md`, and `views/messages/<message_id>.md`
   files are generated Markdown views. Do not store notes there; use `notes.md`
   for user-requested persistent memory.
@@ -218,40 +229,40 @@ decisions, and recovery only.
 - Never fetch attachments from spam messages. `afmail message attachment fetch`
   rejects spam attachments because writing suspicious content to disk is unsafe.
 - Archive completed active cases with `afmail case archive REF --reason TEXT`.
-- Discard test/no-longer-needed cases with `afmail case trash REF --reason TEXT`
-  or `afmail archive case trash REF --reason TEXT`; afmail queues Trash moves
+- Discard test/no-longer-needed cases with `afmail case trash REF --reason TEXT`;
+  afmail queues Trash moves
   for eligible remote messages but does not push them until `afmail push --confirm`.
 
 ## Contacts
 
-- Contacts are local cards under `contacts/<group>/<contact_uid>-<name>.md`;
-  archived contacts move to `archive/contacts/`. Contact UIDs (`pYYYYMMDDNNN`)
-  are stable identities; names are human labels and may use the workspace
-  language. Use the returned UID or `UID-any-readable-suffix` as the ref.
+- Contacts are local cards under `contacts/<group>/<contact_uid>-<name>.md`.
+  Contact UIDs (`pYYYYMMDDNNN`) are stable identities; names are human labels and
+  may use the workspace language. Use the returned UID or
+  `UID-any-readable-suffix` as the ref.
 - Manage contacts with `afmail contact create|list|show|move|rename`,
   `afmail contact email|phone add|remove`, `afmail contact tag|untag`, and
-  `afmail contact extract` to stub contacts from message senders. Email
-  addresses are globally unique across contacts.
+  `afmail contact extract` to stub contacts from message senders. Delete a
+  contact with `afmail contact delete REF --reason TEXT`; add `--allow-notes`
+  only when deleting the contact body is intended. Email addresses are globally
+  unique across active contacts.
 - `afmail message show` and the generated message views show a `contact` link
   resolved from the sender address. afmail materializes that link onto messages
   and refreshes it automatically when a contact's emails or name change; if a
   link ever looks stale, run `afmail render refresh` to rebuild views.
-- `afmail contact archive|reopen REF --reason TEXT` require `--reason` like case
-  transitions. Treat each contact's `notes.md`-style body as user-authored: only
-  run `afmail contact notes append|replace` when the user asks.
+- Treat each contact's Markdown body as user-authored: only run
+  `afmail contact notes append|replace` when the user asks.
 - Contact card `.md` files are canonical state; edit them with `afmail contact`
   commands, not by hand, and never hand-edit the generated `messages/*.json`
   contact link.
 
-## Archive Boundaries
+## Archived Cases
 
-- `archive/` is local filing. It is not a request to create matching IMAP folder
-  trees.
-- Archived cases live under `archive/cases/<group>/...`; do not treat that group
+- Archived cases live under `archived-cases/<group>/...`; do not treat that group
   segment as a notification collection.
 - Notifications live under `notifications/<notification_uid>-<name>/`
   and use category-level notes.
-- Use `afmail notification add|show|restore|move|rename REF ...` and
-  `afmail archive case show|restore|rename REF ...` commands for archived work.
-  `afmail case show REF` and `afmail case notes show REF` read a case whether it
-  is active or archived.
+- Use `afmail notification add|show|remove|move|rename|delete REF ...` and
+  `afmail case show|unarchive|remove|move|delete|rename REF ...` commands for
+  archived work. Active-work commands such as `case add`, `case tag`, and
+  `case draft ...` require `afmail case unarchive REF --group GROUP --reason TEXT`
+  first.

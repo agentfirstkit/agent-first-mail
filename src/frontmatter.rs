@@ -145,6 +145,6 @@ mod tests {
     fn case_collection_uses_shared_schema() {
         let fm = CaseFrontmatter::new_case("c20260530001", "Bare", "2026-05-30T00:00:00Z");
         assert_eq!(fm.schema_name, crate::types::CASE_SCHEMA_NAME);
-        assert_eq!(fm.status, "active");
+        assert!(fm.status.is_empty());
     }
 }

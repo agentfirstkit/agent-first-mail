@@ -52,6 +52,16 @@ pub(crate) fn default_draft_send_steps() -> Vec<ActionStep> {
     ]
 }
 
+fn default_message_unmark_discard_steps() -> Vec<ActionStep> {
+    vec![ActionStep::move_to_mailbox_id("inbox")]
+}
+
+fn default_message_unmark_discard_rule() -> ActionRule {
+    ActionRule {
+        steps: default_message_unmark_discard_steps(),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ActionsSection {
@@ -66,6 +76,16 @@ pub struct ActionsSection {
     pub message_spam: ActionRule,
     #[serde(rename = "message.trash")]
     pub message_trash: ActionRule,
+    #[serde(
+        rename = "message.unspam",
+        default = "default_message_unmark_discard_rule"
+    )]
+    pub message_unspam: ActionRule,
+    #[serde(
+        rename = "message.untrash",
+        default = "default_message_unmark_discard_rule"
+    )]
+    pub message_untrash: ActionRule,
     #[serde(rename = "message.notification")]
     pub message_notification: MessageNotificationAction,
 }
@@ -90,6 +110,8 @@ impl Default for ActionsSection {
             message_trash: ActionRule {
                 steps: vec![ActionStep::move_to_mailbox_id("trash")],
             },
+            message_unspam: default_message_unmark_discard_rule(),
+            message_untrash: default_message_unmark_discard_rule(),
             message_notification: MessageNotificationAction::default(),
         }
     }
@@ -110,6 +132,16 @@ impl ActionsSection {
             config,
             "actions.message.trash.steps",
             &self.message_trash.steps,
+        )?;
+        validate_steps(
+            config,
+            "actions.message.unspam.steps",
+            &self.message_unspam.steps,
+        )?;
+        validate_steps(
+            config,
+            "actions.message.untrash.steps",
+            &self.message_untrash.steps,
         )?;
         for (id, rule) in &self.message_notification.by_source_mailbox_id {
             validate_config_id("actions.message.notification source id", id)?;

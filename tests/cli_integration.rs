@@ -27,6 +27,8 @@ static COMMAND_TEST_LOCK: Mutex<()> = Mutex::new(());
 type ImapCommands = Arc<Mutex<Vec<String>>>;
 type AppendedMessages = Arc<Mutex<Vec<(String, bool, String)>>>;
 type CreatedFolders = Arc<Mutex<Vec<String>>>;
+type CopiedMessages = Arc<Mutex<Vec<(String, u64, String)>>>;
+type ExpungedMessages = Arc<Mutex<Vec<(String, u64)>>>;
 type MovedMessages = Arc<Mutex<Vec<(String, u64, String)>>>;
 type StoredMessages = Arc<Mutex<Vec<(String, u64, String)>>>;
 #[cfg(feature = "ui")]
@@ -373,7 +375,7 @@ fn ui_snapshot_emits_valid_afui_space() {
         "active_cases",
         "push_queue",
         "notifications",
-        "case_archives",
+        "archived_cases",
         "activity_log",
         "mail_terminal",
     ] {
@@ -389,7 +391,7 @@ fn ui_snapshot_emits_valid_afui_space() {
         "cases_panel",
         "push_panel",
         "archive_messages_panel",
-        "archive_cases_panel",
+        "archived_cases_panel",
         "termail_terminal",
     ] {
         assert!(
@@ -422,7 +424,7 @@ fn ui_snapshot_emits_valid_afui_space() {
     let glance = &layouts[1];
     assert_eq!(glance.extra.get("role"), Some(&json!("summary")));
     let archives = &layouts[2];
-    assert_eq!(archives.members, ["notifications", "case_archives"]);
+    assert_eq!(archives.members, ["notifications", "archived_cases"]);
     assert!(archives.overlay);
     assert_eq!(archives.extra.get("relation"), Some(&json!("supporting")));
     assert_eq!(archives.extra.get("role"), Some(&json!("history")));
@@ -558,7 +560,7 @@ fn ui_snapshot_emits_valid_afui_space() {
     assert_eq!(case_item["case"], case_json);
     assert_eq!(case_item["case"]["collection_name"], "refund-order-4471");
     assert_eq!(case_item["case"]["collection_uid"], case_uid);
-    assert!(case_item["case"]["status"].is_string(), "{case_item}");
+    assert_eq!(case_item["view"]["group"], "support");
     assert!(case_item["view"]["notes_text"].is_string(), "{case_item}");
     let prepared = prepare_request(
         &space,
@@ -640,13 +642,16 @@ fn ui_snapshot_emits_valid_afui_space() {
     assert_eq!(prepared.status, PreparedStatus::Ready);
     assert_eq!(prepared.input["notification_ref"], notification_uid);
 
-    let archive_cases = find_unit(&space, "afmail", "case_archives");
-    assert!(archive_cases.is_some());
-    let Some(archive_cases) = archive_cases else {
+    let archived_cases_unit = find_unit(&space, "afmail", "archived_cases");
+    assert!(archived_cases_unit.is_some());
+    let Some(archived_cases_unit) = archived_cases_unit else {
         return;
     };
-    assert_eq!(archive_cases.kind, "list");
-    assert_eq!(archive_cases.field("body_format"), Some(&json!("markdown")));
+    assert_eq!(archived_cases_unit.kind, "list");
+    assert_eq!(
+        archived_cases_unit.field("body_format"),
+        Some(&json!("markdown"))
+    );
 
     let push = find_unit(&space, "afmail", "push_queue");
     assert!(push.is_some());
@@ -805,6 +810,8 @@ fn test_config(imap_port: Option<u16>, smtp_port: Option<u16>) -> Value {
                 {"move_to_mailbox_id": "junk"}
             ]},
             "message.trash": {"steps": [{"move_to_mailbox_id": "trash"}]},
+            "message.unspam": {"steps": [{"move_to_mailbox_id": "inbox"}]},
+            "message.untrash": {"steps": [{"move_to_mailbox_id": "inbox"}]},
             "message.notification": {"by_source_mailbox_id": {
                 "inbox": {"steps": [{"move_to_mailbox_id": "archive"}]},
                 "sent": {"steps": []},
@@ -1150,7 +1157,6 @@ fn write_case_fixture(
             "schema_version": 1,
             "collection_uid": case_uid,
             "collection_name": case_name,
-            "status": "active",
             "tags": [],
             "created_rfc3339": "2026-05-21T10:00:00Z",
             "updated_rfc3339": "2026-05-21T10:00:00Z",
@@ -1189,9 +1195,17 @@ struct ImapTestServer {
     addr: SocketAddr,
     commands: ImapCommands,
     appended: AppendedMessages,
+    copied: CopiedMessages,
+    expunged: ExpungedMessages,
     moved: MovedMessages,
     stored: StoredMessages,
     handle: thread::JoinHandle<()>,
+}
+
+#[derive(Clone, Copy)]
+struct ImapServerCapabilities {
+    move_supported: bool,
+    uidplus_supported: bool,
 }
 
 fn start_imap_server(messages: Vec<(u64, Vec<u8>)>, accept_count: usize) -> Option<ImapTestServer> {
@@ -1203,10 +1217,25 @@ fn start_imap_server_with_move(
     accept_count: usize,
     move_supported: bool,
 ) -> Option<ImapTestServer> {
+    start_imap_server_with_capabilities(
+        messages,
+        accept_count,
+        ImapServerCapabilities {
+            move_supported,
+            uidplus_supported: false,
+        },
+    )
+}
+
+fn start_imap_server_with_capabilities(
+    messages: Vec<(u64, Vec<u8>)>,
+    accept_count: usize,
+    capabilities: ImapServerCapabilities,
+) -> Option<ImapTestServer> {
     start_imap_server_with_messages(
         TestImapMessages::Shared(messages),
         accept_count,
-        move_supported,
+        capabilities,
     )
 }
 
@@ -1215,24 +1244,35 @@ fn start_imap_mailbox_server(
     messages: BTreeMap<String, Vec<(u64, Vec<u8>)>>,
     accept_count: usize,
 ) -> Option<ImapTestServer> {
-    start_imap_server_with_messages(TestImapMessages::ByMailbox(messages), accept_count, true)
+    start_imap_server_with_messages(
+        TestImapMessages::ByMailbox(messages),
+        accept_count,
+        ImapServerCapabilities {
+            move_supported: true,
+            uidplus_supported: false,
+        },
+    )
 }
 
 fn start_imap_server_with_messages(
     messages: TestImapMessages,
     accept_count: usize,
-    move_supported: bool,
+    capabilities: ImapServerCapabilities,
 ) -> Option<ImapTestServer> {
     let listener = bind_loopback_listener()?;
     let addr = listener.local_addr().ok()?;
     let commands = Arc::new(Mutex::new(Vec::new()));
     let appended = Arc::new(Mutex::new(Vec::new()));
     let created = Arc::new(Mutex::new(Vec::new()));
+    let copied = Arc::new(Mutex::new(Vec::new()));
+    let expunged = Arc::new(Mutex::new(Vec::new()));
     let moved = Arc::new(Mutex::new(Vec::new()));
     let stored = Arc::new(Mutex::new(Vec::new()));
     let server_commands = Arc::clone(&commands);
     let server_appended = Arc::clone(&appended);
     let server_created = Arc::clone(&created);
+    let server_copied = Arc::clone(&copied);
+    let server_expunged = Arc::clone(&expunged);
     let server_moved = Arc::clone(&moved);
     let server_stored = Arc::clone(&stored);
     let handle = thread::spawn(move || {
@@ -1252,9 +1292,11 @@ fn start_imap_server_with_messages(
                         &server_commands,
                         &server_appended,
                         &server_created,
+                        &server_copied,
+                        &server_expunged,
                         &server_moved,
                         &server_stored,
-                        move_supported,
+                        capabilities,
                     );
                     served += 1;
                     last = Instant::now();
@@ -1273,6 +1315,8 @@ fn start_imap_server_with_messages(
         addr,
         commands,
         appended,
+        copied,
+        expunged,
         moved,
         stored,
         handle,
@@ -1286,9 +1330,11 @@ fn serve_imap_connection(
     commands: &ImapCommands,
     appended: &AppendedMessages,
     created: &CreatedFolders,
+    copied: &CopiedMessages,
+    expunged: &ExpungedMessages,
     moved: &MovedMessages,
     stored: &StoredMessages,
-    move_supported: bool,
+    capabilities: ImapServerCapabilities,
 ) {
     let reader_stream = match writer.try_clone() {
         Ok(stream) => stream,
@@ -1312,6 +1358,36 @@ fn serve_imap_connection(
         if handle_append_command(&mut writer, &mut reader, &line, commands, appended).is_some() {
             continue;
         }
+        if String::from_utf8_lossy(&line)
+            .to_ascii_uppercase()
+            .contains(" UID EXPUNGE ")
+        {
+            let tag = tag_from_line(&line).unwrap_or_else(|| "bad".to_string());
+            if let Ok(mut locked) = commands.lock() {
+                locked.push("EXPUNGE".to_string());
+            }
+            if !capabilities.uidplus_supported {
+                let _ = write_imap(
+                    &mut writer,
+                    format!("{tag} BAD UID EXPUNGE unsupported\r\n").as_bytes(),
+                );
+                return;
+            }
+            if let Some(uid) = uid_expunge_arg_from_line(&line) {
+                if let Ok(mut locked) = expunged.lock() {
+                    locked.push((selected_mailbox.clone(), uid));
+                }
+            }
+            if write_imap(
+                &mut writer,
+                format!("* 1 EXPUNGE\r\n{tag} OK EXPUNGE completed\r\n").as_bytes(),
+            )
+            .is_err()
+            {
+                return;
+            }
+            continue;
+        }
         let parsed = parse_imap_command(&line);
         let Some((tag, name, is_uid_fetch)) = parsed else {
             let tag = tag_from_line(&line).unwrap_or_else(|| "bad".to_string());
@@ -1331,11 +1407,14 @@ fn serve_imap_connection(
                 }
             }
             "CAPABILITY" => {
-                let caps = if move_supported {
-                    "IMAP4rev1 MOVE"
-                } else {
-                    "IMAP4rev1"
-                };
+                let mut caps = vec!["IMAP4rev1"];
+                if capabilities.move_supported {
+                    caps.push("MOVE");
+                }
+                if capabilities.uidplus_supported {
+                    caps.push("UIDPLUS");
+                }
+                let caps = caps.join(" ");
                 let response = format!("* CAPABILITY {caps}\r\n{tag} OK CAPABILITY completed\r\n");
                 if write_imap(&mut writer, response.as_bytes()).is_err() {
                     return;
@@ -1417,8 +1496,45 @@ fn serve_imap_connection(
                     return;
                 }
             }
+            "COPY" => {
+                if let Some((uid, target)) = uid_copy_args_from_line(&line) {
+                    if let Ok(mut locked) = copied.lock() {
+                        locked.push((selected_mailbox.clone(), uid, target));
+                    }
+                }
+                if write_imap(
+                    &mut writer,
+                    format!("{tag} OK COPY completed\r\n").as_bytes(),
+                )
+                .is_err()
+                {
+                    return;
+                }
+            }
+            "EXPUNGE" => {
+                if !capabilities.uidplus_supported {
+                    let _ = write_imap(
+                        &mut writer,
+                        format!("{tag} BAD UID EXPUNGE unsupported\r\n").as_bytes(),
+                    );
+                    return;
+                }
+                if let Some(uid) = uid_expunge_arg_from_line(&line) {
+                    if let Ok(mut locked) = expunged.lock() {
+                        locked.push((selected_mailbox.clone(), uid));
+                    }
+                }
+                if write_imap(
+                    &mut writer,
+                    format!("* 1 EXPUNGE\r\n{tag} OK EXPUNGE completed\r\n").as_bytes(),
+                )
+                .is_err()
+                {
+                    return;
+                }
+            }
             "MOVE" => {
-                if !move_supported {
+                if !capabilities.move_supported {
                     let _ = write_imap(
                         &mut writer,
                         format!("{tag} BAD MOVE unsupported\r\n").as_bytes(),
@@ -1516,6 +1632,30 @@ fn uid_move_args_from_line(line: &[u8]) -> Option<(u64, String)> {
         parts.next()?.trim().to_string()
     };
     Some((uid, target))
+}
+
+fn uid_copy_args_from_line(line: &[u8]) -> Option<(u64, String)> {
+    let text = String::from_utf8_lossy(line);
+    let upper = text.to_ascii_uppercase();
+    let marker = " UID COPY ";
+    let start = upper.find(marker)? + marker.len();
+    let rest = text.get(start..)?.trim();
+    let mut parts = rest.split_whitespace();
+    let uid = parts.next()?.parse::<u64>().ok()?;
+    let target = if let Some(stripped) = rest.split_once(' ')?.1.trim_start().strip_prefix('"') {
+        stripped.split_once('"')?.0.to_string()
+    } else {
+        parts.next()?.trim().to_string()
+    };
+    Some((uid, target))
+}
+
+fn uid_expunge_arg_from_line(line: &[u8]) -> Option<u64> {
+    let text = String::from_utf8_lossy(line);
+    let upper = text.to_ascii_uppercase();
+    let marker = " UID EXPUNGE ";
+    let start = upper.find(marker)? + marker.len();
+    text.get(start..)?.trim().parse::<u64>().ok()
 }
 
 fn uid_store_args_from_line(line: &[u8]) -> Option<(u64, String)> {
@@ -1764,6 +1904,7 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(stdout.contains("show"));
     assert!(stdout.contains("add"));
     assert!(stdout.contains("archive"));
+    assert!(stdout.contains("unarchive"));
     assert!(stdout.contains("trash"));
     assert!(stdout.contains("draft"));
     assert!(stdout.contains("notes"));
@@ -1783,18 +1924,18 @@ fn init_status_and_afdata_output_formats_work() {
     assert_eq!(status, 0);
     assert!(stdout.contains("create"));
     assert!(stdout.contains("show"));
-    assert!(stdout.contains("restore"));
+    assert!(stdout.contains("remove"));
     assert!(stdout.contains("move"));
     assert!(stdout.contains("rename"));
     assert!(stdout.contains("set-summary"));
     assert!(stdout.contains("notes"));
-    let (status, stdout) = run(&root, &["archive", "case", "--help"]);
+    let (status, stdout) = run(&root, &["case", "unarchive", "--help"]);
     assert_eq!(status, 0);
-    assert!(stdout.contains("show"));
-    assert!(stdout.contains("restore"));
-    assert!(stdout.contains("trash"));
-    assert!(stdout.contains("rename"));
-    assert!(stdout.contains("notes"));
+    assert!(stdout.contains("--group"));
+    assert!(stdout.contains("--reason"));
+    let (status, stdout) = run(&root, &["archive", "case", "show", "c20260603001"]);
+    assert_eq!(status, 2);
+    assert_eq!(parse_one(&stdout)["code"], "error");
     let (status, stdout) = run(&root, &["message", "ignore", "message_001"]);
     assert_eq!(status, 2);
     assert_eq!(parse_one(&stdout)["code"], "error");
@@ -1808,7 +1949,7 @@ fn init_status_and_afdata_output_formats_work() {
     assert_eq!(status, 0);
     assert!(stdout.contains("# Agent-First Mail"));
     assert!(stdout.contains("afmail case show c20260603001"));
-    assert!(stdout.contains("afmail archive case show REF"));
+    assert!(stdout.contains("afmail case show REF"));
     assert!(stdout.contains("afmail notification show n20260603001"));
     assert!(!stdout.contains("afmail message ignore"));
     assert!(!stdout.contains("--mode"));
@@ -2478,6 +2619,11 @@ fn reason_mode_controls_required_reason_and_audit_writes() {
     let log = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
     assert!(log.contains("\"kind\":\"case_message_added\""));
     assert!(log.contains("\"reason\":\"belongs to the case\""));
+
+    let (status, stdout) = run(&root, &["case", "move", &case_uid, "waiting"]);
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["error_code"], "reason_required");
+    assert!(case_path.join("case.md").exists());
 
     write_message(&root, "message_notification_reason", 3, None);
     write_triage(&root, "message_notification_reason", "archive");
@@ -3497,8 +3643,8 @@ fn triage_spam_marks_local_message_and_queues_junk_move() {
 }
 
 #[test]
-fn message_restore_undoes_spam_and_trash_and_removes_pending_push() {
-    let root = temp_root("restore-spam-trash");
+fn message_unspam_untrash_restore_local_state_and_queue_remote_moves() {
+    let root = temp_root("unspam-untrash");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     write_json(&root.join(".afmail/config.json"), &test_config(None, None));
@@ -3526,7 +3672,7 @@ fn message_restore_undoes_spam_and_trash_and_removes_pending_push() {
         &root,
         &[
             "message",
-            "restore",
+            "unspam",
             "message_spam_undo",
             "--reason",
             "not spam",
@@ -3534,9 +3680,11 @@ fn message_restore_undoes_spam_and_trash_and_removes_pending_push() {
     );
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "message_restored");
+    assert_eq!(value["code"], "message_unspammed");
     assert_eq!(value["removed_push_count"], 1);
-    assert_eq!(value["push_ids"], json!([spam_push_id]));
+    assert_eq!(value["removed_push_ids"], json!([spam_push_id]));
+    assert_eq!(value["queued"], false);
+    assert_eq!(value["location_count"], 0);
     assert!(root.join("triage/message_spam_undo.md").exists());
     let message: Value = serde_json::from_str(
         &fs::read_to_string(root.join("messages/message_spam_undo.json")).unwrap_or_default(),
@@ -3567,7 +3715,7 @@ fn message_restore_undoes_spam_and_trash_and_removes_pending_push() {
         &root,
         &[
             "message",
-            "restore",
+            "untrash",
             "message_trash_undo",
             "--reason",
             "keep it",
@@ -3575,14 +3723,81 @@ fn message_restore_undoes_spam_and_trash_and_removes_pending_push() {
     );
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "message_restored");
-    assert_eq!(value["push_ids"], json!([trash_push_id]));
+    assert_eq!(value["code"], "message_untrashed");
+    assert_eq!(value["removed_push_ids"], json!([trash_push_id]));
+    assert_eq!(value["queued"], false);
     assert!(root.join("triage/message_trash_undo.md").exists());
     assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
 
+    write_message(&root, "message_remote_junk", 46, None);
+    write_triage(&root, "message_remote_junk", "false positive");
+    update_message_json(&root, "message_remote_junk", |value| {
+        value["workspace"]["status"] = json!("spam");
+        value["remote"]["locations"][0]["mailbox_name"] = json!("Junk");
+        value["remote"]["locations"][0]["mailbox_id"] = json!("junk");
+        value["remote"]["locations"][0]["uid"] = json!(46);
+    });
+    let (status, stdout) = run(
+        &root,
+        &[
+            "message",
+            "unspam",
+            "message_remote_junk",
+            "--reason",
+            "false positive",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "message_unspammed");
+    assert_eq!(value["removed_push_count"], 0);
+    assert_eq!(value["queued"], true);
+    assert!(value["push_id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(value["location_count"], 1);
+    let push = parse_one(&run(&root, &["push", "list"]).1);
+    assert_eq!(push["count"], 1);
+    assert_eq!(push["items"][0]["action"], "unspam");
+    assert_eq!(
+        push["items"][0]["steps"],
+        json!([{"move_to_mailbox_id": "inbox"}])
+    );
+    assert_eq!(push["items"][0]["locations"][0]["mailbox_name"], "Junk");
+    assert_eq!(push["items"][0]["locations"][0]["uid"], 46);
+
+    write_message(&root, "message_remote_trash", 47, None);
+    write_triage(&root, "message_remote_trash", "keep");
+    update_message_json(&root, "message_remote_trash", |value| {
+        value["workspace"]["status"] = json!("triage");
+        value["remote"]["locations"][0]["mailbox_name"] = json!("Trash");
+        value["remote"]["locations"][0]["mailbox_id"] = json!("trash");
+        value["remote"]["locations"][0]["uid"] = json!(47);
+    });
+    let (status, stdout) = run(
+        &root,
+        &[
+            "message",
+            "untrash",
+            "message_remote_trash",
+            "--reason",
+            "not trash",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "message_untrashed");
+    assert_eq!(value["from_status"], "triage");
+    assert_eq!(value["queued"], true);
+    let push = parse_one(&run(&root, &["push", "list"]).1);
+    assert_eq!(push["count"], 2);
+    assert!(push["items"].as_array().is_some_and(|items| items
+        .iter()
+        .any(|item| item["action"] == "untrash"
+            && item["locations"][0]["mailbox_name"] == "Trash"
+            && item["locations"][0]["uid"] == 47)));
+
     let log = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
-    assert!(log.contains("\"kind\":\"message_restored\""));
-    assert!(log.contains("\"kind\":\"message_restored\""));
+    assert!(log.contains("\"kind\":\"message_unspammed\""));
+    assert!(log.contains("\"kind\":\"message_untrashed\""));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -3643,8 +3858,8 @@ fn triage_archive_files_without_case_and_queues_archive_mapping() {
 }
 
 #[test]
-fn message_restore_undoes_direct_archive_and_removes_pending_push() {
-    let root = temp_root("restore-archive");
+fn notification_remove_undoes_direct_archive_and_removes_pending_push() {
+    let root = temp_root("remove-notification-message");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     write_json(&root.join(".afmail/config.json"), &test_config(None, None));
@@ -3667,8 +3882,9 @@ fn message_restore_undoes_direct_archive_and_removes_pending_push() {
     let (status, stdout) = run(
         &root,
         &[
-            "message",
-            "restore",
+            "notification",
+            "remove",
+            &notification_uid,
             "message_notice",
             "--reason",
             "needs triage",
@@ -3676,7 +3892,7 @@ fn message_restore_undoes_direct_archive_and_removes_pending_push() {
     );
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "message_restored");
+    assert_eq!(value["code"], "notification_message_removed");
     assert_eq!(value["notification_uid"], notification_uid);
     assert_eq!(value["removed_push_count"], 1);
     assert_eq!(value["push_ids"], json!([push_id]));
@@ -3695,8 +3911,8 @@ fn message_restore_undoes_direct_archive_and_removes_pending_push() {
 }
 
 #[test]
-fn notification_move_restore_and_log_filters_work() {
-    let root = temp_root("notification-restore");
+fn notification_move_remove_and_log_filters_work() {
+    let root = temp_root("notification-remove");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     write_json(&root.join(".afmail/config.json"), &test_config(None, None));
@@ -3745,7 +3961,7 @@ fn notification_move_restore_and_log_filters_work() {
         &root,
         &[
             "notification",
-            "restore",
+            "remove",
             &billing_uid,
             "message_notice",
             "--reason",
@@ -3778,7 +3994,7 @@ fn notification_move_restore_and_log_filters_work() {
         &root,
         &[
             "notification",
-            "restore",
+            "remove",
             &receipts_uid,
             "message_notice",
             "--reason",
@@ -3786,7 +4002,7 @@ fn notification_move_restore_and_log_filters_work() {
         ],
     );
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "message_restored");
+    assert_eq!(parse_one(&stdout)["code"], "notification_message_removed");
     assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
     assert!(root.join("triage/message_notice.md").exists());
     assert!(!receipts_path
@@ -3806,6 +4022,348 @@ fn notification_move_restore_and_log_filters_work() {
     let log = parse_one(&stdout);
     assert_eq!(log["code"], "log_filtered");
     assert!(log["count"].as_u64().unwrap_or(0) >= 3);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn notification_delete_requires_empty_collection_and_protects_notes() {
+    let root = temp_root("notification-delete");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    write_message(&root, "message_notice", 42, None);
+    write_triage(&root, "message_notice", "notice");
+
+    let (notification_uid, notification_path, _value) = create_notification(
+        &root,
+        "delete-me",
+        Some("message_notice"),
+        Some("notice"),
+        Some("reference notice"),
+    );
+    let (status, stdout) = run(
+        &root,
+        &[
+            "notification",
+            "delete",
+            &notification_uid,
+            "--reason",
+            "not needed",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["error_code"], "notification_not_empty");
+    assert!(notification_path.exists());
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "notification",
+            "remove",
+            &notification_uid,
+            "message_notice",
+            "--reason",
+            "needs triage",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let (status, stdout) = run(
+        &root,
+        &[
+            "notification",
+            "delete",
+            &notification_uid,
+            "--reason",
+            "empty collection",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "notification_deleted");
+    assert_eq!(value["notification_uid"], notification_uid);
+    assert_eq!(value["notes_deleted"], true);
+    assert_eq!(value["notes_modified"], false);
+    assert!(!notification_path.exists());
+    assert_eq!(
+        parse_one(&run(&root, &["notification", "list"]).1)["count"],
+        0
+    );
+
+    let (notes_uid, notes_path, _value) =
+        create_notification(&root, "notes-delete", None, None, Some("notes category"));
+    let (status, stdout) = run(
+        &root,
+        &[
+            "notification",
+            "notes",
+            "append",
+            &notes_uid,
+            "--text",
+            "keep this context",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let (status, stdout) = run(
+        &root,
+        &[
+            "notification",
+            "delete",
+            &notes_uid,
+            "--reason",
+            "delete notes collection",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(
+        parse_one(&stdout)["error_code"],
+        "notification_notes_present"
+    );
+    assert!(notes_path.exists());
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "notification",
+            "delete",
+            &notes_uid,
+            "--allow-notes",
+            "--reason",
+            "delete notes collection",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "notification_deleted");
+    assert_eq!(value["notes_modified"], true);
+    assert!(!notes_path.exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn case_remove_and_delete_empty_active_case() {
+    let root = temp_root("case-remove-delete");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    write_message(&root, "message_case_remove", 42, None);
+    write_triage(&root, "message_case_remove", "case message");
+
+    let (case_uid, case_path, _value) = create_case(
+        &root,
+        "remove-delete",
+        Some("support"),
+        Some("message_case_remove"),
+        Some("belongs here for now"),
+    );
+
+    let (status, stdout) = run(
+        &root,
+        &["case", "delete", &case_uid, "--reason", "delete empty case"],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["error_code"], "case_not_empty");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "remove",
+            &case_uid,
+            "message_case_remove",
+            "--reason",
+            "does not belong here",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "case_message_removed");
+    assert_eq!(value["message_count"], 0);
+    assert!(root.join("triage/message_case_remove.md").exists());
+    let case_json = read_json(&case_path.join("data/case.json"));
+    assert_eq!(
+        case_json
+            .get("message_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        case_json
+            .get("items")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0),
+        0
+    );
+    assert!(case_json.get("status").is_none());
+
+    let (status, stdout) = run(
+        &root,
+        &["case", "delete", &case_uid, "--reason", "empty case"],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "case_deleted");
+    assert!(!case_path.exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn archived_case_remove_and_delete_empty_case() {
+    let root = temp_root("archive-case-remove-delete");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    write_message(&root, "message_archive_remove", 42, None);
+    write_triage(&root, "message_archive_remove", "archived case message");
+
+    let (case_uid, _case_path, _value) = create_case(
+        &root,
+        "archive-remove-delete",
+        Some("support"),
+        Some("message_archive_remove"),
+        Some("case fixture"),
+    );
+    let (status, stdout) = run(&root, &["case", "archive", &case_uid, "--reason", "done"]);
+    assert_eq!(status, 0, "{stdout}");
+    let archived_path = root.join(format!(
+        "archived-cases/support/{case_uid}-archive-remove-delete"
+    ));
+    assert!(archived_path.exists());
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "delete",
+            &case_uid,
+            "--reason",
+            "delete empty archived case",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["error_code"], "case_not_empty");
+
+    let push_before = parse_one(&run(&root, &["push", "list"]).1);
+    let push_id = push_before["items"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item["push_id"].as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "remove",
+            &case_uid,
+            "message_archive_remove",
+            "--reason",
+            "does not belong here",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "case_message_removed");
+    assert_eq!(value["archived"], true);
+    if !push_id.is_empty() {
+        assert_eq!(value["push_ids"], json!([push_id]));
+    }
+    assert!(root.join("triage/message_archive_remove.md").exists());
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "delete",
+            &case_uid,
+            "--reason",
+            "empty archived case",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "case_deleted");
+    assert!(!archived_path.exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn contact_delete_protects_notes_and_frees_email() {
+    let root = temp_root("contact-delete");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "contact",
+            "create",
+            "--name",
+            "Alice",
+            "--email",
+            "alice@example.com",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let contact_uid = parse_one(&stdout)["contact_uid"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "contact",
+            "notes",
+            "append",
+            &contact_uid,
+            "--text",
+            "keep this note",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "contact",
+            "delete",
+            &contact_uid,
+            "--reason",
+            "remove duplicate",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["error_code"], "contact_notes_present");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "contact",
+            "delete",
+            &contact_uid,
+            "--allow-notes",
+            "--reason",
+            "remove duplicate",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "contact_deleted");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "contact",
+            "create",
+            "--name",
+            "Alice Recreated",
+            "--email",
+            "alice@example.com",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&run(&root, &["contact", "list"]).1)["count"], 1);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -3875,9 +4433,8 @@ fn case_archive_defers_remote_archive_until_all_case_refs_are_archived() {
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
             "case",
-            "restore",
+            "unarchive",
             &case_one_uid,
             "--group",
             "support",
@@ -3887,7 +4444,7 @@ fn case_archive_defers_remote_archive_until_all_case_refs_are_archived() {
     );
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_restored");
+    assert_eq!(value["code"], "case_unarchived");
     assert_eq!(value["removed_push_count"], 1);
     assert_eq!(value["push_ids"], json!([push["items"][0]["push_id"]]));
     assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
@@ -4233,7 +4790,18 @@ fn case_group_dirs_are_cleaned_only_when_empty() {
         .exists());
 
     assert_eq!(
-        run(&root, &["case", "move", &case_beta_uid, "waiting"]).0,
+        run(
+            &root,
+            &[
+                "case",
+                "move",
+                &case_beta_uid,
+                "waiting",
+                "--reason",
+                "better group",
+            ],
+        )
+        .0,
         0
     );
     assert!(!root.join("cases/tests").exists());
@@ -4253,9 +4821,259 @@ fn case_group_dirs_are_cleaned_only_when_empty() {
     assert!(root.join("cases/waiting/keep.txt").exists());
     assert!(root
         .join(format!(
-            "archive/cases/waiting/{case_beta_uid}-case-beta/case.md"
+            "archived-cases/waiting/{case_beta_uid}-case-beta/case.md"
         ))
         .exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn archived_case_move_changes_group_without_unarchiving() {
+    let root = temp_root("archived-case-move");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    write_message(&root, "message_archived_move", 50, None);
+    write_triage(&root, "message_archived_move", "archive move");
+    let (case_uid, case_path, _) = create_case(
+        &root,
+        "case-archived-move",
+        Some("support"),
+        Some("message_archived_move"),
+        Some("archive move"),
+    );
+
+    let (status, stdout) = run(
+        &root,
+        &["case", "archive", &case_uid, "--reason", "complete"],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    assert!(!case_path.exists());
+    let archived_path = root.join(format!(
+        "archived-cases/support/{case_uid}-case-archived-move"
+    ));
+    assert!(archived_path.join("case.md").exists());
+    let archived_before = read_json(&archived_path.join("data/case.json"));
+    let archived_rfc3339 = archived_before["archived_rfc3339"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!archived_rfc3339.is_empty());
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "move",
+            &case_uid,
+            "members",
+            "--reason",
+            "调整事项分组",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "case_moved");
+    assert_eq!(value["case_uid"], case_uid);
+    assert_eq!(value["from_group"], "support");
+    assert_eq!(value["to_group"], "members");
+    assert_eq!(value["archived"], true);
+    assert_eq!(value["changed"], true);
+    assert_eq!(
+        value["case_path"],
+        format!("archived-cases/members/{case_uid}-case-archived-move")
+    );
+    assert!(!archived_path.exists());
+    assert!(!root.join("archived-cases/support").exists());
+    let moved_path = root.join(format!(
+        "archived-cases/members/{case_uid}-case-archived-move"
+    ));
+    assert!(moved_path.join("case.md").exists());
+    let archived_after = read_json(&moved_path.join("data/case.json"));
+    assert_eq!(archived_after["archived_rfc3339"], archived_rfc3339);
+
+    let (status, stdout) = run(&root, &["case", "show", &case_uid]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["group"], "members");
+    assert_eq!(value["archived"], true);
+
+    let (status, stdout) = run(&root, &["case", "list", "--archived"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["count"], 1);
+    assert_eq!(value["items"][0]["group"], "members");
+    assert_eq!(value["items"][0]["archived"], true);
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "move",
+            &case_uid,
+            "members",
+            "--reason",
+            "分组无需变更",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["changed"], false);
+    assert_eq!(
+        value["case_path"],
+        format!("archived-cases/members/{case_uid}-case-archived-move")
+    );
+    assert!(moved_path.join("case.md").exists());
+
+    let log = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
+    assert!(log.contains("\"kind\":\"case_moved\""));
+    assert!(log.contains("\"reason\":\"调整事项分组\""));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn push_archive_falls_back_to_uidplus_copy_delete_when_move_is_unsupported() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("archive-push-copy-fallback");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    write_message(&root, "message_arch", 43, None);
+    write_triage(&root, "message_arch", "done");
+    create_notification(
+        &root,
+        "done",
+        Some("message_arch"),
+        Some("done"),
+        Some("done"),
+    );
+
+    let server = start_imap_server_with_capabilities(
+        Vec::new(),
+        3,
+        ImapServerCapabilities {
+            move_supported: false,
+            uidplus_supported: true,
+        },
+    );
+    assert!(server.is_some());
+    let server = match server {
+        Some(server) => server,
+        None => return,
+    };
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+
+    let (status, stdout) = run(&root, &["push", "--confirm"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["pushed_count"], 1, "{value}");
+    assert_eq!(value["failed_count"], 0, "{value}");
+    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
+
+    assert!(server.handle.join().is_ok());
+    let moved = server
+        .moved
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    assert!(moved.is_empty());
+    let copied = server
+        .copied
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    assert!(copied
+        .iter()
+        .any(|(source, uid, target)| source == "INBOX" && *uid == 43 && target == "Archive"));
+    let stored = server
+        .stored
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    assert!(stored.iter().any(|(source, uid, query)| {
+        source == "INBOX" && *uid == 43 && query.contains("\\Deleted")
+    }));
+    let expunged = server
+        .expunged
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    assert!(expunged
+        .iter()
+        .any(|(source, uid)| source == "INBOX" && *uid == 43));
+    let message = read_json(&root.join("messages/message_arch.json"));
+    assert_eq!(message["remote"]["locations"][0]["mailbox_name"], "Archive");
+    assert_eq!(message["remote"]["locations"][0]["uid"], 900);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn push_archive_without_move_or_uidplus_fails_before_copy_delete_fallback() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("archive-push-no-safe-fallback");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    write_message(&root, "message_arch", 43, None);
+    write_triage(&root, "message_arch", "done");
+    create_notification(
+        &root,
+        "done",
+        Some("message_arch"),
+        Some("done"),
+        Some("done"),
+    );
+
+    let server = start_imap_server_with_capabilities(
+        Vec::new(),
+        3,
+        ImapServerCapabilities {
+            move_supported: false,
+            uidplus_supported: false,
+        },
+    );
+    assert!(server.is_some());
+    let server = match server {
+        Some(server) => server,
+        None => return,
+    };
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+
+    let (status, stdout) = run(&root, &["push", "--confirm"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["pushed_count"], 0, "{value}");
+    assert_eq!(value["failed_count"], 1, "{value}");
+    let push = parse_one(&run(&root, &["push", "list"]).1);
+    assert_eq!(push["count"], 1);
+    assert_eq!(
+        push["items"][0]["step_states"][0]["error_code"],
+        "imap_uidplus_required"
+    );
+
+    assert!(server.handle.join().is_ok());
+    let copied = server
+        .copied
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    let stored = server
+        .stored
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    assert!(copied.is_empty());
+    assert!(stored.is_empty());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -4277,7 +5095,7 @@ fn removed_flag_and_seen_commands_are_cli_errors() {
 }
 
 #[test]
-fn archive_case_notes_rename_restore_and_active_hint_work() {
+fn archived_case_notes_rename_unarchive_and_active_hint_work() {
     let root = temp_root("archive-case-restore");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
@@ -4329,26 +5147,36 @@ fn archive_case_notes_rename_restore_and_active_hint_work() {
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["code"], "case_archived");
     assert!(!case_path.exists());
-    let archived_path = root.join(format!("archive/cases/support/{case_uid}-case-archive"));
+    let archived_path = root.join(format!("archived-cases/support/{case_uid}-case-archive"));
     assert!(archived_path.exists());
 
-    // Reads ignore lifecycle: `case show` now resolves an archived case too.
+    // Read-only and collection maintenance commands work for archived cases.
     let (status, stdout) = run(&root, &["case", "show", &case_uid]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "archive_case");
-    assert_eq!(value["case_uid"], case_uid);
-
-    let (status, stdout) = run(&root, &["archive", "case", "show", &case_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "archive_case");
+    assert_eq!(value["code"], "case");
     assert_eq!(value["case_uid"], case_uid);
     assert_eq!(value["case_name"], "case-archive");
+    assert_eq!(value["archived"], true);
     assert!(value["text"]
         .as_str()
         .unwrap_or_default()
         .contains("# case-archive"));
+
+    // Active-work commands still require unarchiving first.
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "add",
+            &case_uid,
+            "message_case",
+            "--reason",
+            "active edit",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["error_code"], "case_archived");
 
     let (status, stdout) = run(&root, &["case", "notes", "show", &case_uid]);
     assert_eq!(status, 0, "{stdout}");
@@ -4357,7 +5185,6 @@ fn archive_case_notes_rename_restore_and_active_hint_work() {
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
             "case",
             "notes",
             "append",
@@ -4373,7 +5200,6 @@ fn archive_case_notes_rename_restore_and_active_hint_work() {
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
             "case",
             "rename",
             &case_uid,
@@ -4386,15 +5212,14 @@ fn archive_case_notes_rename_restore_and_active_hint_work() {
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["case_uid"], case_uid);
     assert!(!archived_path.exists());
-    let renamed_archive_path = root.join(format!("archive/cases/support/{case_uid}-case-renamed"));
+    let renamed_archive_path = root.join(format!("archived-cases/support/{case_uid}-case-renamed"));
     assert!(renamed_archive_path.exists());
 
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
             "case",
-            "restore",
+            "unarchive",
             &case_uid,
             "--group",
             "support",
@@ -4403,7 +5228,7 @@ fn archive_case_notes_rename_restore_and_active_hint_work() {
         ],
     );
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "case_restored");
+    assert_eq!(parse_one(&stdout)["code"], "case_unarchived");
     let restored_path = root.join(format!("cases/support/{case_uid}-case-renamed"));
     assert!(restored_path.join("case.md").exists());
     assert!(!renamed_archive_path.exists());
@@ -4455,13 +5280,13 @@ fn notes_show_and_notification_refresh_preserve_plain_markdown_bytes() {
 
     let (status, stdout) = run(&root, &["case", "archive", &case_uid, "--reason", "done"]);
     assert_eq!(status, 0, "{stdout}");
-    let archived_path = root.join(format!("archive/cases/support/{case_uid}-notes-case"));
+    let archived_path = root.join(format!("archived-cases/support/{case_uid}-notes-case"));
     assert_eq!(
         fs::read_to_string(archived_path.join("notes.md")).unwrap_or_default(),
         active_notes
     );
 
-    let (status, stdout) = run(&root, &["archive", "case", "notes", "show", &case_uid]);
+    let (status, stdout) = run(&root, &["case", "notes", "show", &case_uid]);
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(
         parse_one(&stdout)["text"].as_str().unwrap_or_default(),
@@ -5274,7 +6099,7 @@ fn active_case_generates_localized_message_index_and_views() {
     assert!(!index.starts_with("---\n"));
     assert!(!index.contains("kind: case_index"));
     assert!(index.starts_with("# case-messages\n"));
-    assert!(index.contains(&format!("事项: {case_uid} · 状态: active · 消息: 1")));
+    assert!(index.contains(&format!("事项: {case_uid} · 消息: 1")));
     assert!(index.contains("## 1. ← 收到: Contract renewal"));
     assert!(index.contains("- 发件人: alice@example.com"));
     assert!(index.contains("- 消息: [message_case1](views/messages/message_case1.md)"));
@@ -5481,7 +6306,7 @@ fn render_refresh_rebuilds_generated_views_and_removes_obsolete_case_indexes() {
         run(&root, &["case", "archive", &done_uid, "--reason", "done"],).0,
         0
     );
-    let archived_done_path = root.join(format!("archive/cases/support/{done_uid}-done-case"));
+    let archived_done_path = root.join(format!("archived-cases/support/{done_uid}-done-case"));
 
     write_message(&root, "message_notice", 83, None);
     write_triage(&root, "message_notice", "notice");
@@ -5525,9 +6350,7 @@ fn render_refresh_rebuilds_generated_views_and_removes_obsolete_case_indexes() {
     assert!(!active_index.starts_with("---\n"));
     assert!(!active_index.contains("kind: case_index"));
     assert!(active_index.starts_with("# active-case\n"));
-    assert!(active_index.contains(&format!(
-        "Case: {active_uid} · Status: active · Messages: 1"
-    )));
+    assert!(active_index.contains(&format!("Case: {active_uid} · Messages: 1")));
     assert!(active_index.contains("## 1. ← Received: Contract renewal"));
     assert!(active_index.contains("- From: alice@example.com"));
     assert!(active_index.contains("- Message: [message_active](views/messages/message_active.md)"));
@@ -5734,9 +6557,7 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
     assert!(
         fs::read_to_string(root.join("templates/en-US/case/case.md.j2"))
             .unwrap_or_default()
-            .contains(
-                "Case: {{ case.collection_uid }} · Status: {{ view.status }} · Messages: {{ view.message_count }}"
-            )
+            .contains("Case: {{ case.collection_uid }} · Messages: {{ view.message_count }}")
     );
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(other);
@@ -5826,7 +6647,21 @@ fn draft_save_send_validate_current_content_without_freshness_gate() {
     assert!(push["items"][0].get("eml_path").is_none());
     assert!(push["items"][0].get("message_id").is_none());
 
-    assert_eq!(run(&root, &["case", "move", &case_uid, "waiting"]).0, 0);
+    assert_eq!(
+        run(
+            &root,
+            &[
+                "case",
+                "move",
+                &case_uid,
+                "waiting",
+                "--reason",
+                "better group",
+            ],
+        )
+        .0,
+        0
+    );
     let moved_path = root.join(format!("cases/waiting/{case_uid}-fresh-thread"));
     let moved_state_path = moved_path.join("data/drafts.json");
     assert!(moved_state_path.is_file());
@@ -5982,42 +6817,47 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
 
     let (status, stdout) = run(&root, &["case", "archive", &case_uid, "--reason", "done"]);
     assert_eq!(status, 0, "{stdout}");
-    let (status, stdout) = run(&root, &["archive", "list", "cases"]);
+    let (status, stdout) = run(&root, &["case", "list", "--archived"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "archive_case_list");
+    assert_eq!(value["code"], "case_list");
+    assert_eq!(value["scope"], "archived");
     assert_eq!(value["count"], 1);
+    assert_eq!(value["archived_count"], 1);
     let item = value["items"][0].clone();
     assert_eq!(item["case_uid"], case_uid);
     assert_eq!(item["case_name"], "active-locator");
     assert_eq!(item["group"], "waiting");
+    assert_eq!(item["archived"], true);
     assert!(item["case_dir"]
         .as_str()
         .is_some_and(|path| path.starts_with(&case_uid)));
     assert_eq!(
         value["path_templates"]["view_path"],
-        "archive/cases/{group}/{case_dir}/case.md"
+        "archived-cases/{group}/{case_dir}/case.md"
     );
     assert_eq!(
         value["path_templates"]["data_path"],
-        "archive/cases/{group}/{case_dir}/data/case.json"
+        "archived-cases/{group}/{case_dir}/data/case.json"
     );
     assert!(item.get("view_path").is_none());
     assert!(item.get("data_path").is_none());
     assert!(item.get("path").is_none());
 
-    let (status, stdout) = run(&root, &["archive", "list"]);
+    let (status, stdout) = run(&root, &["case", "list", "--all"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "archive_list");
-    assert_eq!(value["case_count"], 1);
-    assert_eq!(value["cases"][0]["case_uid"], case_uid);
-    assert_eq!(value["cases"][0]["group"], "waiting");
+    assert_eq!(value["code"], "case_list");
+    assert_eq!(value["scope"], "all");
+    assert_eq!(value["count"], 1);
+    assert_eq!(value["items"][0]["case_uid"], case_uid);
+    assert_eq!(value["items"][0]["group"], "waiting");
+    assert_eq!(value["items"][0]["archived"], true);
     assert!(value.get("message_count").is_none());
     assert!(value.get("messages").is_none());
     assert_eq!(
-        value["case_path_templates"]["view_path"],
-        "archive/cases/{group}/{case_dir}/case.md"
+        value["path_templates"]["archived_view_path"],
+        "archived-cases/{group}/{case_dir}/case.md"
     );
     assert!(value.get("message_path_templates").is_none());
 
@@ -6198,11 +7038,11 @@ fn header_related_messages_require_case_for_direct_disposition() {
     assert_eq!(value["code"], "case_archived");
     assert_eq!(
         value["case_path"],
-        format!("archive/cases/support/{case_uid}-health-conversation")
+        format!("archived-cases/support/{case_uid}-health-conversation")
     );
     assert!(root
         .join(format!(
-            "archive/cases/support/{case_uid}-health-conversation/case.md"
+            "archived-cases/support/{case_uid}-health-conversation/case.md"
         ))
         .exists());
     let _ = fs::remove_dir_all(root);
@@ -6302,7 +7142,7 @@ fn case_trash_discards_entire_related_conversation() {
 }
 
 #[test]
-fn archive_case_trash_discards_archived_case_without_restore() {
+fn archived_case_trash_discards_case_without_unarchive() {
     let root = temp_root("archive-case-trash");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
@@ -6338,7 +7178,6 @@ fn archive_case_trash_discards_archived_case_without_restore() {
     let (status, stdout) = run(
         &root,
         &[
-            "archive",
             "case",
             "trash",
             &case_uid,
@@ -7751,7 +8590,17 @@ fn workspace_lock_blocks_writers_but_allows_shared_readers() {
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["code"], "case_notes");
 
-    let (status, stdout) = run(&root, &["case", "move", &case_uid, "waiting"]);
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "move",
+            &case_uid,
+            "waiting",
+            "--reason",
+            "locked writer check",
+        ],
+    );
     assert_eq!(status, 1);
     let value = parse_one(&stdout);
     assert_eq!(value["error_code"], "workspace_locked");
@@ -7868,7 +8717,17 @@ fn triage_assign_move_draft_and_send_contract_work() {
     .unwrap_or(Value::Null);
     assert_eq!(case_messages["items"][0]["message_id"], "message_001");
 
-    let (status, _) = run(&root, &["case", "move", &case_uid, "waiting"]);
+    let (status, _) = run(
+        &root,
+        &[
+            "case",
+            "move",
+            &case_uid,
+            "waiting",
+            "--reason",
+            "better group",
+        ],
+    );
     assert_eq!(status, 0);
     let waiting_path = root.join(format!("cases/waiting/{case_uid}-acme-contract"));
     assert!(waiting_path.join("case.md").is_file());

@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn message_json_paths(root: &Path) -> Result<Vec<PathBuf>> {
-    let dir = root.join("messages");
+    let dir = root.join(layout::MESSAGES);
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -49,6 +49,16 @@ struct MessageNotificationResult {
     queued: bool,
     push_ids: Vec<String>,
     push_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UnmarkDiscardedMessageContext<'a> {
+    expected_status: MessageStatus,
+    undo_push_kind: &'a str,
+    queue_push_kind: &'a str,
+    source_kind: SpecialUseKind,
+    steps: &'a [crate::config::ActionStep],
+    result_code: &'static str,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -139,7 +149,8 @@ pub(super) fn purge_message_artifacts(root: &Path, message_id: &str) -> Result<(
     validate_id("message_id", message_id)?;
     let message_dir = root.join(".afmail/messages");
     for path in [
-        root.join("messages").join(format!("{message_id}.json")),
+        root.join(layout::MESSAGES)
+            .join(format!("{message_id}.json")),
         message_dir.join(format!("{message_id}.json")),
         message_dir.join(format!("{message_id}.eml")),
         message_dir.join(format!("{message_id}.state.json")),
@@ -782,49 +793,38 @@ impl Workspace {
         .map_err(|e| AppError::json("serialize message disposition result", &e))
     }
 
-    pub fn restore_message(&self, message_id: &str, reason: Option<&str>) -> Result<Value> {
+    pub fn unspam_message(&self, message_id: &str, reason: Option<&str>) -> Result<Value> {
         self.require_workspace()?;
-        let reason = self.checked_reason(reason)?;
-        validate_id("message_id", message_id)?;
-        let message = self.read_message_by_id(message_id)?;
-        match message.workspace.status.as_str() {
-            "spam" => self.restore_local_message_disposition(
-                message_id,
-                "spam",
-                "message.spam",
-                "message_restored",
-                "message_restored",
-                reason,
-            ),
-            "trashed" => self.restore_local_message_disposition(
-                message_id,
-                "trashed",
-                "message.trash",
-                "message_restored",
-                "message_restored",
-                reason,
-            ),
-            "notification" => {
-                let notification_uid =
-                    message.workspace.notification_uid.clone().ok_or_else(|| {
-                        AppError::new(
-                            "invalid_request",
-                            format!("message {message_id} is not in a notification"),
-                        )
-                    })?;
-                self.restore_direct_notification(
-                    &notification_uid,
-                    message_id,
-                    reason,
-                    "message_restored",
-                    "message_restored",
-                )
-            }
-            other => Err(AppError::new(
-                "invalid_request",
-                format!("message {message_id} has no disposition to restore (status: {other})"),
-            )),
-        }
+        let config = crate::config::MailConfig::load(&self.root)?;
+        self.unmark_discarded_message(
+            message_id,
+            UnmarkDiscardedMessageContext {
+                expected_status: MessageStatus::Spam,
+                undo_push_kind: "message.spam",
+                queue_push_kind: "message.unspam",
+                source_kind: SpecialUseKind::Junk,
+                steps: &config.actions.message_unspam.steps,
+                result_code: "message_unspammed",
+            },
+            reason,
+        )
+    }
+
+    pub fn untrash_message(&self, message_id: &str, reason: Option<&str>) -> Result<Value> {
+        self.require_workspace()?;
+        let config = crate::config::MailConfig::load(&self.root)?;
+        self.unmark_discarded_message(
+            message_id,
+            UnmarkDiscardedMessageContext {
+                expected_status: MessageStatus::Trashed,
+                undo_push_kind: "message.trash",
+                queue_push_kind: "message.untrash",
+                source_kind: SpecialUseKind::Trash,
+                steps: &config.actions.message_untrash.steps,
+                result_code: "message_untrashed",
+            },
+            reason,
+        )
     }
 
     pub fn notification_add_message(
@@ -843,7 +843,7 @@ impl Workspace {
             "notification_message_add",
             vec![
                 format!("messages/{message_id}.json"),
-                format!("notifications/{notification_uid}"),
+                format!("{}/{notification_uid}", layout::NOTIFICATIONS),
                 ".afmail/push".to_string(),
             ],
         )?;
@@ -946,7 +946,10 @@ impl Workspace {
         message: &MessageFile,
     ) -> Result<Option<String>> {
         let message_id = message.message_id.as_str();
-        let triage_path = self.root.join("triage").join(format!("{message_id}.md"));
+        let triage_path = self
+            .root
+            .join(layout::TRIAGE)
+            .join(format!("{message_id}.md"));
         if triage_path.is_file() {
             return Ok(Some(rel_path(&self.root, &triage_path)));
         }
@@ -1126,62 +1129,103 @@ impl Workspace {
         Ok(())
     }
 
-    pub(super) fn restore_local_message_disposition(
+    fn unmark_discarded_message(
         &self,
         message_id: &str,
-        expected_status: &str,
-        push_kind: &str,
-        event_kind: &str,
-        result_code: &str,
+        context: UnmarkDiscardedMessageContext<'_>,
         reason: Option<&str>,
     ) -> Result<Value> {
         self.require_workspace()?;
         let reason = self.checked_reason(reason)?;
         validate_id("message_id", message_id)?;
+        let expected_status_name = context.expected_status.as_str();
+        let message_ids = vec![message_id.to_string()];
+        let source_locations =
+            self.message_remote_locations_for_mailbox_kinds(&message_ids, &[context.source_kind])?;
         let mut message = self.read_message_by_id(message_id)?;
-        if message.workspace.status != expected_status {
+        let from_status = message.workspace.status.clone();
+        let is_local_disposition = from_status == expected_status_name;
+        let has_source_location = !source_locations.is_empty();
+        let can_restore_from_remote = from_status == "triage" && has_source_location;
+        if !(is_local_disposition || can_restore_from_remote) {
             return Err(AppError::new(
                 "invalid_request",
-                format!("message {message_id} is not {expected_status}"),
+                format!(
+                    "message {message_id} is not {expected_status_name} and has no active {} remote location",
+                    context.source_kind.as_str()
+                ),
             ));
         }
-        let removed_push =
-            crate::push_queue::remove_pending_message_pushes(&self.root, message_id, push_kind)?;
+        let transaction = self.begin_transaction(
+            context.result_code,
+            vec![
+                format!("messages/{message_id}.json"),
+                ".afmail/push".to_string(),
+            ],
+        )?;
+        let removed_push = crate::push_queue::remove_pending_message_pushes(
+            &self.root,
+            message_id,
+            context.undo_push_kind,
+        )?;
         let push_ids = removed_push
             .iter()
             .map(|item| item.push_id.clone())
             .collect::<Vec<_>>();
-        self.clear_message_disposition(MessageStatus::parse(expected_status)?, message_id)?;
+        let item = crate::push_queue::queue_action_steps(
+            &self.root,
+            context.queue_push_kind,
+            &message_ids,
+            &source_locations,
+            context.steps,
+            None,
+        )?;
+        if is_local_disposition {
+            self.clear_message_disposition(context.expected_status, message_id)?;
+        }
         message.workspace.status = "triage".to_string();
         message.workspace.remote_sync = None;
         self.write_message_materialized_cache(&message)?;
         self.refresh_message_after_ref_change(message_id)?;
         self.clear_message_pending_pushes(message_id, &push_ids, false)?;
+        if let Some(item) = &item {
+            self.record_pending_push_item(item)?;
+        }
         self.refresh_disposition_views()?;
+        transaction.commit()?;
         self.append_audit_event(
-            event_kind,
+            context.result_code,
             vec![audit_target("message", message_id)],
             reason,
             json!({
                 "message_id": message_id,
-                "from_status": expected_status,
+                "from_status": from_status,
                 "to_status": "triage",
                 "removed_push_ids": push_ids.clone(),
+                "queued_push_id": item.as_ref().map(|item| item.push_id.clone()),
+                "source_special_use": context.source_kind.as_str(),
             }),
         )?;
         Ok(json!({
-            "code": result_code,
+            "code": context.result_code,
             "message_id": message_id,
-            "from_status": expected_status,
+            "from_status": from_status,
             "status": "triage",
-            "triage_path": format!("triage/{message_id}.md"),
+            "triage_path": format!("{}/{message_id}.md", layout::TRIAGE),
             "removed_push_count": push_ids.len(),
-            "push_ids": push_ids,
+            "removed_push_ids": push_ids,
+            "location_count": source_locations.len(),
+            "queued_location_count": source_locations.len(),
+            "queued": item.is_some(),
+            "push_id": item.as_ref().map(|item| item.push_id.clone()),
         }))
     }
 
     pub(super) fn remove_triage_view_for_message(&self, message_id: &str) -> Result<()> {
-        let path = self.root.join("triage").join(format!("{message_id}.md"));
+        let path = self
+            .root
+            .join(layout::TRIAGE)
+            .join(format!("{message_id}.md"));
         if path.exists() {
             remove_file(&path)?;
         }

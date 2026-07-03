@@ -10,8 +10,7 @@
 - One workspace represents one mailbox account.
 - Message commands use `afmail message ACTION MESSAGE_ID ...`.
 - Case commands use `afmail case ACTION CASE_REF ...`.
-- Active and archived cases are readable with `afmail case show REF` and
- `afmail archive case show REF`.
+- Active and archived cases are readable with `afmail case show REF`.
 - stdout carries structured Agent-First Data events; stderr is not a protocol channel.
 
 ### Workspace Shape
@@ -30,9 +29,8 @@ deleted/*.md             generated remote-deleted review views
 cases/<group>/<case_uid>-<name>/case.md generated case entry view
 cases/<group>/<case_uid>-<name>/data/ canonical case state
 cases/<group>/<case_uid>-<name>/views/ generated case detail views
+archived-cases/<group>/<case_uid>-<name>/ archived case workspaces; <group> is a case group
 contacts/<group>/<contact_uid>-<name>.md canonical contact cards
-archive/contacts/<contact_uid>-<name>.md archived contact cards
-archive/cases/<group>/<case_uid>-<name>/ archived case workspaces; <group> is a case group, not an archive category
 notifications/<notification_uid>-<name>/notification.md generated notification entry view
 notifications/<notification_uid>-<name>/data/ canonical notification state
 notifications/<notification_uid>-<name>/views/ generated notification detail views
@@ -55,21 +53,21 @@ afmail case show c20260603001
 afmail case add c20260603001 message_inbox_607146690_22 --reason "follow-up belongs to same feedback case"
 afmail notification create --name 服务通知 --message message_inbox_607146690_23 --summary "billing notification" --reason "billing notification"
 afmail notification show n20260603001
-afmail notification restore n20260603001 message_inbox_607146690_23 --reason "needs triage again"
+afmail notification remove n20260603001 message_inbox_607146690_23 --reason "does not belong in this notification"
 afmail message spam message_inbox_607146690_23 --reason "phishing attempt"
 afmail message trash message_inbox_607146690_24 --reason "duplicate no longer needed"
 afmail render refresh
 afmail doctor repair --confirm
-afmail case move c20260603001 waiting
+afmail case move c20260603001 waiting --reason "better category"
 afmail case archive c20260603001 --reason "feedback handled"
-afmail archive case restore c20260603001 --group support --reason "customer replied"
+afmail case unarchive c20260603001 --group support --reason "customer replied"
 afmail case tag c20260603001 legal --reason "legal review needed"
 afmail contact create --name "Zhang San" --email zhang@example.com --org Acme --role Buyer
 afmail contact list --group people
 afmail contact email add p20260603001 zhang-alt@example.com
 afmail contact rename p20260603001 --name "Zhang Sanfeng"
 afmail contact extract --from-triage
-afmail contact archive p20260603001 --reason "left the company"
+afmail contact delete p20260603001 --reason "duplicate contact"
 afmail case draft reply c20260603001 message_inbox_607146690_22
 afmail case draft attach c20260603001 reply-message_inbox_607146690_22.md ./screenshot.png
 afmail case draft change c20260603001 reply-message_inbox_607146690_22.md --body "Thanks, I will check this."
@@ -111,7 +109,6 @@ Commands:
   case          Create a case or operate on an existing case ref
   contact       Create a contact or operate on an existing contact ref
   notification  Inspect and manage notification collections
-  archive       Inspect and manage archived cases
   render        Rebuild generated read views from local workspace state
   log           Inspect the workspace audit log
   help          Print this message or the help of the given subcommand(s)
@@ -127,6 +124,12 @@ Options:
 
       --verbose
           Enable all log categories
+
+      --stdout-file <PATH>
+          Redirect stdout bytes to this file
+
+      --stderr-file <PATH>
+          Redirect stderr bytes to this file
 
   -V, --version
           Print structured version event
@@ -576,7 +579,8 @@ Commands:
   show        Show the full local message metadata, body text, and attachment metadata
   spam        Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
   trash       Explicitly discard this message locally, show it under trash/, and queue a Trash move
-  restore     Restore a message from spam, trash, or notification back to triage
+  unspam      Mark a spam false positive as triage and queue a move out of Junk when needed
+  untrash     Mark a trash false positive as triage and queue a move out of Trash when needed
   attachment  Fetch an attachment for this message
   help        Print this message or the help of the given subcommand(s)
 
@@ -633,10 +637,10 @@ Options:
           Print help
 ```
 
-### Agent-First Mail message restore - Restore a message from spam, trash, or notification back to triage
+### Agent-First Mail message unspam - Mark a spam false positive as triage and queue a move out of Junk when needed
 
 ```text
-Usage: restore [OPTIONS] <MESSAGE_ID>
+Usage: unspam [OPTIONS] <MESSAGE_ID>
 
 Arguments:
   <MESSAGE_ID>
@@ -644,7 +648,24 @@ Arguments:
 
 Options:
       --reason <REASON>
-          Why this restore is correct; required by default
+          Why this message is not spam; required by default
+
+  -h, --help
+          Print help
+```
+
+### Agent-First Mail message untrash - Mark a trash false positive as triage and queue a move out of Trash when needed
+
+```text
+Usage: untrash [OPTIONS] <MESSAGE_ID>
+
+Arguments:
+  <MESSAGE_ID>
+          Message id, for example message_inbox_607146690_22
+
+Options:
+      --reason <REASON>
+          Why this message should not be trashed; required by default
 
   -h, --help
           Print help
@@ -687,21 +708,23 @@ Options:
 Usage: case <COMMAND>
 
 Commands:
-  create   Create a new case and return its stable UID/ref
-  list     List compact active case locators
-  show     Show a case's case.md (active or archived) without changing workspace state
-  add      Add a message to this existing case
-  move     Move this case to another group
-  rename   Rename this active case's human-readable name without changing its UID
-  notes    Show or edit active case notes
-  archive  Archive this active case
-  trash    Move every message in this active case to local trash and queue Trash moves
-  reopen   Reopen this case as active work without changing its tags
-  tag      Add a case organization tag
-  untag    Remove a case organization tag
-  draft    Create, edit, validate, queue, or remove local case drafts
-  merge    Merge another case into this case
-  help     Print this message or the help of the given subcommand(s)
+  create     Create a new case and return its stable UID/ref
+  list       List compact case locators
+  show       Show a case's case.md without changing workspace state
+  add        Add a message to this existing case
+  remove     Remove one message from this case and return it to triage
+  move       Move this case to another group
+  rename     Rename this case's human-readable name without changing its UID
+  notes      Show or edit case notes
+  archive    Archive this active case
+  unarchive  Move this archived case back to an active case group
+  trash      Move every message in this case to local trash and queue Trash moves
+  delete     Delete an empty case
+  tag        Add a case organization tag
+  untag      Remove a case organization tag
+  draft      Create, edit, validate, queue, or remove local case drafts
+  merge      Merge another case into this case
+  help       Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help
@@ -733,17 +756,23 @@ Options:
           Print help
 ```
 
-### Agent-First Mail case list - List compact active case locators
+### Agent-First Mail case list - List compact case locators
 
 ```text
-Usage: list
+Usage: list [OPTIONS]
 
 Options:
+      --archived
+          List archived cases instead of active cases
+
+      --all
+          List active and archived cases together
+
   -h, --help
           Print help
 ```
 
-### Agent-First Mail case show - Show a case's case.md (active or archived) without changing workspace state
+### Agent-First Mail case show - Show a case's case.md without changing workspace state
 
 ```text
 Usage: show <CASE_REF>
@@ -780,10 +809,30 @@ Options:
           Print help
 ```
 
+### Agent-First Mail case remove - Remove one message from this case and return it to triage
+
+```text
+Usage: remove [OPTIONS] <CASE_REF> <MESSAGE_ID>
+
+Arguments:
+  <CASE_REF>
+          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+
+  <MESSAGE_ID>
+          Message id to remove
+
+Options:
+      --reason <REASON>
+          Why this message does not belong in this case; required by default
+
+  -h, --help
+          Print help
+```
+
 ### Agent-First Mail case move - Move this case to another group
 
 ```text
-Usage: move <CASE_REF> <GROUP>
+Usage: move [OPTIONS] <CASE_REF> <GROUP>
 
 Arguments:
   <CASE_REF>
@@ -793,11 +842,14 @@ Arguments:
           Destination group
 
 Options:
+      --reason <REASON>
+          Why this group better represents the case; required by default
+
   -h, --help
           Print help
 ```
 
-### Agent-First Mail case rename - Rename this active case's human-readable name without changing its UID
+### Agent-First Mail case rename - Rename this case's human-readable name without changing its UID
 
 ```text
 Usage: rename [OPTIONS] --name <NAME> <CASE_REF>
@@ -817,7 +869,7 @@ Options:
           Print help
 ```
 
-### Agent-First Mail case notes - Show or edit active case notes
+### Agent-First Mail case notes - Show or edit case notes
 
 ```text
 Usage: notes <COMMAND>
@@ -898,7 +950,27 @@ Options:
           Print help
 ```
 
-### Agent-First Mail case trash - Move every message in this active case to local trash and queue Trash moves
+### Agent-First Mail case unarchive - Move this archived case back to an active case group
+
+```text
+Usage: unarchive [OPTIONS] --group <GROUP> <CASE_REF>
+
+Arguments:
+  <CASE_REF>
+          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+
+Options:
+      --group <GROUP>
+          Active case group to unarchive into
+
+      --reason <REASON>
+          Why this case needs active attention again; required by default
+
+  -h, --help
+          Print help
+```
+
+### Agent-First Mail case trash - Move every message in this case to local trash and queue Trash moves
 
 ```text
 Usage: trash [OPTIONS] <CASE_REF>
@@ -915,18 +987,21 @@ Options:
           Print help
 ```
 
-### Agent-First Mail case reopen - Reopen this case as active work without changing its tags
+### Agent-First Mail case delete - Delete an empty case
 
 ```text
-Usage: reopen [OPTIONS] <CASE_REF>
+Usage: delete [OPTIONS] <CASE_REF>
 
 Arguments:
   <CASE_REF>
           Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
 
 Options:
+      --allow-notes
+          Also delete notes.md when it contains user-authored notes
+
       --reason <REASON>
-          Why this case should be reopened; required by default
+          Why this case should be deleted; required by default
 
   -h, --help
           Print help
@@ -1237,8 +1312,7 @@ Commands:
   tag      Add a tag to a contact
   untag    Remove a tag from a contact
   notes    Show or edit contact notes
-  archive  Archive an active contact
-  reopen   Reopen an archived contact as active
+  delete   Delete a contact
   extract  Extract stub contacts from message senders not yet in the contact list
   help     Print this message or the help of the given subcommand(s)
 
@@ -1544,38 +1618,21 @@ Options:
           Print help
 ```
 
-### Agent-First Mail contact archive - Archive an active contact
+### Agent-First Mail contact delete - Delete a contact
 
 ```text
-Usage: archive [OPTIONS] <CONTACT_REF>
+Usage: delete [OPTIONS] <CONTACT_REF>
 
 Arguments:
   <CONTACT_REF>
           Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
 
 Options:
-      --reason <REASON>
-          Why this contact is being archived; required by default
-
-  -h, --help
-          Print help
-```
-
-### Agent-First Mail contact reopen - Reopen an archived contact as active
-
-```text
-Usage: reopen [OPTIONS] <CONTACT_REF>
-
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
-
-Options:
-      --group <GROUP>
-          Destination group. Defaults to contact.default_group in config
+      --allow-notes
+          Also delete the contact body when it contains user-authored notes
 
       --reason <REASON>
-          Why this contact should be reopened; required by default
+          Why this contact should be deleted; required by default
 
   -h, --help
           Print help
@@ -1613,9 +1670,10 @@ Commands:
   add          File an existing message into this notification collection
   list         List compact notification collections
   show         Show notification collection index and entries
-  restore      Restore a notification message to triage
+  remove       Remove a notification message from this collection and return it to triage
   move         Move a notification message to another notification collection
   rename       Rename this notification collection's human-readable name without changing its UID
+  delete       Delete an empty notification collection
   set-summary  Set or replace one notification entry summary
   notes        Show or edit notification collection notes
   help         Print this message or the help of the given subcommand(s)
@@ -1694,10 +1752,10 @@ Options:
           Print help
 ```
 
-### Agent-First Mail notification restore - Restore a notification message to triage
+### Agent-First Mail notification remove - Remove a notification message from this collection and return it to triage
 
 ```text
-Usage: restore [OPTIONS] <NOTIFICATION_REF> <MESSAGE_ID>
+Usage: remove [OPTIONS] <NOTIFICATION_REF> <MESSAGE_ID>
 
 Arguments:
   <NOTIFICATION_REF>
@@ -1708,7 +1766,7 @@ Arguments:
 
 Options:
       --reason <REASON>
-          Why this message needs active triage again; required by default
+          Why this message does not belong in this notification; required by default
 
   -h, --help
           Print help
@@ -1752,6 +1810,26 @@ Options:
 
       --reason <REASON>
           Why this name better represents the collection; required by default
+
+  -h, --help
+          Print help
+```
+
+### Agent-First Mail notification delete - Delete an empty notification collection
+
+```text
+Usage: delete [OPTIONS] <NOTIFICATION_REF>
+
+Arguments:
+  <NOTIFICATION_REF>
+          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
+
+Options:
+      --allow-notes
+          Also delete notes.md when it contains user-authored notes
+
+      --reason <REASON>
+          Why this notification collection should be deleted; required by default
 
   -h, --help
           Print help
@@ -1835,198 +1913,6 @@ Usage: replace --text <TEXT> <NOTIFICATION_REF>
 Arguments:
   <NOTIFICATION_REF>
           Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
-
-Options:
-      --text <TEXT>
-          Markdown text to write
-
-  -h, --help
-          Print help
-```
-
-## Agent-First Mail archive - Inspect and manage archived cases
-
-```text
-Usage: archive <COMMAND>
-
-Commands:
-  list  List compact archived cases
-  case  Operate on an archived case
-  help  Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
-```
-
-### Agent-First Mail archive list - List compact archived cases
-
-```text
-Usage: list [COMMAND]
-
-Commands:
-  cases  List compact archived cases
-  help   Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
-```
-
-#### Agent-First Mail archive list cases - List compact archived cases
-
-```text
-Usage: cases
-
-Options:
-  -h, --help
-          Print help
-```
-
-### Agent-First Mail archive case - Operate on an archived case
-
-```text
-Usage: case <COMMAND>
-
-Commands:
-  show     Show the archived case
-  restore  Restore an archived case to an active case group
-  trash    Move every message in this archived case to local trash and queue Trash moves
-  rename   Rename this archived case's human-readable name without changing its UID
-  notes    Show or edit archived case notes
-  help     Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
-```
-
-#### Agent-First Mail archive case show - Show the archived case
-
-```text
-Usage: show <CASE_REF>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-Options:
-  -h, --help
-          Print help
-```
-
-#### Agent-First Mail archive case restore - Restore an archived case to an active case group
-
-```text
-Usage: restore [OPTIONS] --group <GROUP> <CASE_REF>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-Options:
-      --group <GROUP>
-          Active case group to restore into
-
-      --reason <REASON>
-          Why this case needs active attention again; required by default
-
-  -h, --help
-          Print help
-```
-
-#### Agent-First Mail archive case trash - Move every message in this archived case to local trash and queue Trash moves
-
-```text
-Usage: trash [OPTIONS] <CASE_REF>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-Options:
-      --reason <REASON>
-          Why this whole archived case should be discarded; required by default
-
-  -h, --help
-          Print help
-```
-
-#### Agent-First Mail archive case rename - Rename this archived case's human-readable name without changing its UID
-
-```text
-Usage: rename [OPTIONS] --name <NAME> <CASE_REF>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-Options:
-      --name <NAME>
-          New human-readable case name
-
-      --reason <REASON>
-          Why this name better represents the case; required by default
-
-  -h, --help
-          Print help
-```
-
-#### Agent-First Mail archive case notes - Show or edit archived case notes
-
-```text
-Usage: notes <COMMAND>
-
-Commands:
-  show     Show notes markdown
-  append   Append text to notes markdown
-  replace  Replace notes markdown with text
-  help     Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
-```
-
-##### Agent-First Mail archive case notes show - Show notes markdown
-
-```text
-Usage: show <CASE_REF>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-Options:
-  -h, --help
-          Print help
-```
-
-##### Agent-First Mail archive case notes append - Append text to notes markdown
-
-```text
-Usage: append --text <TEXT> <CASE_REF>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-Options:
-      --text <TEXT>
-          Markdown text to append
-
-  -h, --help
-          Print help
-```
-
-##### Agent-First Mail archive case notes replace - Replace notes markdown with text
-
-```text
-Usage: replace --text <TEXT> <CASE_REF>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
 
 Options:
       --text <TEXT>

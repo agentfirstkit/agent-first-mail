@@ -297,6 +297,8 @@ pub enum MessagePushAction {
     Notification,
     Spam,
     Trash,
+    Unspam,
+    Untrash,
 }
 
 impl MessagePushAction {
@@ -306,6 +308,8 @@ impl MessagePushAction {
             "message.notification" | "notification" => Some(Self::Notification),
             "message.spam" | "spam" => Some(Self::Spam),
             "message.trash" | "trash" => Some(Self::Trash),
+            "message.unspam" | "unspam" => Some(Self::Unspam),
+            "message.untrash" | "untrash" => Some(Self::Untrash),
             _ => None,
         }
     }
@@ -316,6 +320,8 @@ impl MessagePushAction {
             Self::Notification => "message.notification",
             Self::Spam => "message.spam",
             Self::Trash => "message.trash",
+            Self::Unspam => "message.unspam",
+            Self::Untrash => "message.untrash",
         }
     }
 
@@ -325,6 +331,8 @@ impl MessagePushAction {
             Self::Notification => "notification",
             Self::Spam => "spam",
             Self::Trash => "trash",
+            Self::Unspam => "unspam",
+            Self::Untrash => "untrash",
         }
     }
 }

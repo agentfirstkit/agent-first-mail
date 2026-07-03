@@ -6,19 +6,22 @@ Agents and humans should read Markdown and JSON files directly. The CLI exists
 for effects: moving local attention state, queueing remote work, composing mail,
 fetching attachments, and writing audit events.
 
-## 2. Active Attention Is Separate From Archive
+## 2. Active Attention Is Separate From Archived Cases
 
 `triage/` is for unprocessed message views. `cases/` is for active case work.
-`archive/` is for completed classified items:
+`archived-cases/` is for completed cases:
 
-- `archive/cases/<group>/<case_uid>-<name>/` is an archived case workspace; its
+- `archived-cases/<group>/<case_uid>-<name>/` is an archived case workspace; its
   `<group>` segment is the case group carried forward from active work, not an
   archive category.
 - `notifications/<notification_uid>-<name>/` is a notification collection.
 
-Active commands operate on active surfaces. Archived items are addressed through
-`afmail archive ...` commands. Reads are exempt: `afmail case show` and
-`afmail case notes show` resolve a case whether it is active or archived.
+Case identity is stable across both directories. `afmail case show`,
+`afmail case notes`, `afmail case remove`, `afmail case move`, `afmail case trash`,
+`afmail case delete`, and `afmail case rename` operate on active or archived
+cases by ref. Active-work commands such as `case add`, `case tag`, and
+`case draft ...` require `afmail case unarchive REF --group GROUP --reason TEXT`
+first.
 
 ## 3. Identity Is Stable
 
@@ -101,11 +104,11 @@ audit log.
 ## Lifecycle Summary
 
 ```text
-message imported as triage -> triage/ -> active case -> archive/cases/<group>/<case_uid>-<name>/
+message imported as triage -> triage/ -> active case -> archived-cases/<group>/<case_uid>-<name>/
 message imported as triage -> triage/ -> notification collection
 unreferenced remote-missing message -> deleted/
-notification message -> notification restore -> triage/
-archived case -> archive case restore -> cases/<group>/<case_uid>-<name>/
+notification message -> notification remove -> triage/
+archived case -> case unarchive -> cases/<group>/<case_uid>-<name>/
 ```
 
 `spam`, `trash`, and `deleted_remote` are negative/discard dispositions.

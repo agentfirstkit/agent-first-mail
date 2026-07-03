@@ -19,6 +19,20 @@ pub struct NewContact<'a> {
     pub tags: &'a [String],
 }
 
+fn contact_default_body(name: &str) -> String {
+    format!("## {name}\n\n")
+}
+
+fn contact_body_has_user_notes(body: &str) -> bool {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let mut lines = trimmed.lines();
+    let first = lines.next().unwrap_or_default().trim();
+    !(first.starts_with("## ") && lines.all(|line| line.trim().is_empty()))
+}
+
 impl Workspace {
     pub fn contact_create(&self, params: NewContact<'_>) -> Result<Value> {
         let NewContact {
@@ -48,7 +62,7 @@ impl Workspace {
 
         let date = workspace_local_date(&config.resolved_timezone_offset());
         let uid = self.next_contact_uid_for_date(&date)?;
-        let contact_dir = self.root.join("contacts").join(group);
+        let contact_dir = self.root.join(layout::CONTACTS).join(group);
         create_dir_all(&contact_dir)?;
 
         let file_name = format!("{}.md", contact_file_name(&uid, name));
@@ -62,7 +76,7 @@ impl Workspace {
         fm.role = role.unwrap_or("").to_string();
         fm.tags = tags.to_vec();
 
-        let default_notes = format!("## {name}\n\n");
+        let default_notes = contact_default_body(name);
         write_contact_md(&path, &fm, &default_notes)?;
 
         let contact_path = rel_path(&self.root, &path);
@@ -146,17 +160,11 @@ impl Workspace {
     pub fn contact_show(&self, contact_ref: &str) -> Result<Value> {
         self.require_workspace()?;
         let uid = parse_contact_ref(contact_ref)?;
-        let (is_archived, path) = self.find_contact_path(&uid)?;
+        let (group, path) = self.find_active_contact_path(&uid)?;
         let content = read_to_string(&path, "read contact file")?;
-        let group = if is_archived {
-            None
-        } else {
-            Some(contact_group_from_path(&self.root, &path))
-        };
         Ok(json!({
             "code": "contact_show",
             "contact_uid": uid,
-            "is_archived": is_archived,
             "group": group,
             "contact_path": rel_path(&self.root, &path),
             "content": content,
@@ -177,13 +185,13 @@ impl Workspace {
                 "changed": false,
             }));
         }
-        let dest_dir = self.root.join("contacts").join(new_group);
+        let dest_dir = self.root.join(layout::CONTACTS).join(new_group);
         create_dir_all(&dest_dir)?;
         let file_name = path_file_name(&src_path);
         let dest_path = dest_dir.join(&file_name);
         fs::rename(&src_path, &dest_path).map_err(|e| AppError::io("move contact", &e))?;
         // Remove the now-empty source group dir if nothing is left.
-        let src_group_dir = self.root.join("contacts").join(&group);
+        let src_group_dir = self.root.join(layout::CONTACTS).join(&group);
         let _ = fs::remove_dir(&src_group_dir);
         self.append_audit_event(
             "contact_moved",
@@ -366,7 +374,7 @@ impl Workspace {
     pub fn contact_notes_show(&self, contact_ref: &str) -> Result<Value> {
         self.require_workspace()?;
         let uid = parse_contact_ref(contact_ref)?;
-        let (_, path) = self.find_contact_path(&uid)?;
+        let (_, path) = self.find_active_contact_path(&uid)?;
         let content = read_to_string(&path, "read contact")?;
         let (_, body) = read_contact_md_content(&content)?;
         Ok(json!({
@@ -410,68 +418,67 @@ impl Workspace {
         }))
     }
 
-    pub fn contact_archive_contact(
+    pub fn contact_delete(
         &self,
         contact_ref: &str,
+        allow_notes: bool,
         reason: Option<&str>,
     ) -> Result<Value> {
         self.require_workspace()?;
         let uid = parse_contact_ref(contact_ref)?;
         let reason = self.checked_reason(reason)?;
-        let (group, src_path) = self.find_active_contact_path(&uid)?;
-        let archive_dir = self.root.join("archive").join("contacts");
-        create_dir_all(&archive_dir)?;
-        let file_name = path_file_name(&src_path);
-        let dest_path = unique_dest_path(&archive_dir, &file_name);
-        fs::rename(&src_path, &dest_path).map_err(|e| AppError::io("archive contact", &e))?;
-        // Remove empty group dir if nothing left
-        let group_dir = self.root.join("contacts").join(&group);
+        let (group, path) = self.find_active_contact_path(&uid)?;
+        let content = read_to_string(&path, "read contact")?;
+        let (fm, body) = read_contact_md_content(&content)?;
+        let notes_modified = contact_body_has_user_notes(&body);
+        if notes_modified && !allow_notes {
+            return Err(AppError::new(
+                "contact_notes_present",
+                format!("contact {uid} has body content"),
+            )
+            .with_hint(
+                "Inspect the contact notes, then rerun with `--allow-notes` if deleting them is intended.",
+            )
+            .with_details(json!({
+                "contact_uid": uid,
+                "contact_path": rel_path(&self.root, &path),
+                "notes_len_bytes": body.len(),
+                "notes_hash": stable_text_hash(&body),
+                "suggested_commands": [
+                    format!("afmail contact notes show {uid}"),
+                    format!("afmail contact delete {uid} --allow-notes --reason TEXT")
+                ],
+            })));
+        }
+        let contact_path = rel_path(&self.root, &path);
+        remove_file(&path)?;
+        let group_dir = self.root.join(layout::CONTACTS).join(&group);
         let _ = fs::remove_dir(&group_dir);
         self.append_audit_event(
-            "contact_archived",
+            "contact_deleted",
             vec![audit_target("contact", &uid)],
             reason,
-            json!({"contact_uid": uid, "from_group": group}),
+            json!({
+                "contact_uid": uid,
+                "display_name": fm.display_name,
+                "group": group,
+                "contact_path": contact_path,
+                "notes_modified": notes_modified,
+                "notes_len_bytes": body.len(),
+                "notes_hash": stable_text_hash(&body),
+            }),
         )?;
+        if !fm.emails.is_empty() {
+            self.refresh_views_after_contact_change()?;
+        }
         Ok(json!({
-            "code": "contact_archived",
+            "code": "contact_deleted",
             "contact_uid": uid,
-            "contact_path": rel_path(&self.root, &dest_path),
-        }))
-    }
-
-    pub fn contact_reopen_contact(
-        &self,
-        contact_ref: &str,
-        group: Option<&str>,
-        reason: Option<&str>,
-    ) -> Result<Value> {
-        self.require_workspace()?;
-        let uid = parse_contact_ref(contact_ref)?;
-        let reason = self.checked_reason(reason)?;
-        let src_path = self.find_archived_contact_path(&uid)?;
-        let config = MailConfig::load(&self.root)?;
-        let target_group = group.unwrap_or(config.contact.default_group.as_str());
-        validate_id("group", target_group)?;
-        let dest_dir = self.root.join("contacts").join(target_group);
-        create_dir_all(&dest_dir)?;
-        let file_name = path_file_name(&src_path);
-        let dest_path = unique_dest_path(&dest_dir, &file_name);
-        fs::rename(&src_path, &dest_path).map_err(|e| AppError::io("reopen contact", &e))?;
-        // Remove empty archive/contacts dir (ok to fail)
-        let archive_dir = self.root.join("archive").join("contacts");
-        let _ = fs::remove_dir(&archive_dir);
-        self.append_audit_event(
-            "contact_reopened",
-            vec![audit_target("contact", &uid)],
-            reason,
-            json!({"contact_uid": uid, "group": target_group}),
-        )?;
-        Ok(json!({
-            "code": "contact_reopened",
-            "contact_uid": uid,
-            "group": target_group,
-            "contact_path": rel_path(&self.root, &dest_path),
+            "display_name": fm.display_name,
+            "group": group,
+            "contact_path": contact_path,
+            "deleted": true,
+            "notes_modified": notes_modified,
         }))
     }
 
@@ -512,7 +519,7 @@ impl Workspace {
             }
             let date = workspace_local_date(&offset);
             let uid = self.next_contact_uid_for_date(&date)?;
-            let contact_dir = self.root.join("contacts").join(target_group);
+            let contact_dir = self.root.join(layout::CONTACTS).join(target_group);
             create_dir_all(&contact_dir)?;
             let file_name = format!(
                 "{}.md",
@@ -557,9 +564,8 @@ impl Workspace {
         }))
     }
 
-    /// Build an ephemeral email→contact map from contact files. Active contacts
-    /// take priority; archived contacts fill in only addresses not already held
-    /// by an active contact. Replaces the former persisted email index.
+    /// Build an ephemeral email→contact map from active contact files. Replaces
+    /// the former persisted email index.
     pub(super) fn contact_email_map(&self) -> Result<BTreeMap<String, MessageContact>> {
         let mut map: BTreeMap<String, MessageContact> = BTreeMap::new();
         for (_, _, path) in self.all_active_contact_entries()? {
@@ -569,18 +575,6 @@ impl Workspace {
                     let normalized = email.trim().to_ascii_lowercase();
                     if !normalized.is_empty() {
                         map.insert(normalized, message_contact_from(&fm));
-                    }
-                }
-            }
-        }
-        for (_, path) in self.all_archived_contact_entries()? {
-            let content = read_to_string(&path, "read archived contact for index")?;
-            if let Ok((fm, _)) = read_contact_md_content(&content) {
-                for email in &fm.emails {
-                    let normalized = email.trim().to_ascii_lowercase();
-                    if !normalized.is_empty() {
-                        map.entry(normalized)
-                            .or_insert_with(|| message_contact_from(&fm));
                     }
                 }
             }
@@ -620,7 +614,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// True if any active or archived contact already holds this email. Unlike
+    /// True if any active contact already holds this email. Unlike
     /// `assert_email_unique`, IO errors propagate instead of reading as "taken".
     fn contact_email_conflict(&self, email: &str) -> Result<bool> {
         let normalized = email.trim().to_ascii_lowercase();
@@ -636,17 +630,12 @@ impl Workspace {
             date,
             self.all_active_contact_entries()?
                 .into_iter()
-                .map(|(_, uid, _)| uid)
-                .chain(
-                    self.all_archived_contact_entries()?
-                        .into_iter()
-                        .map(|(uid, _)| uid),
-                ),
+                .map(|(_, uid, _)| uid),
         )
     }
 
     fn all_active_contact_entries(&self) -> Result<Vec<(String, String, PathBuf)>> {
-        let contacts_dir = self.root.join("contacts");
+        let contacts_dir = self.root.join(layout::CONTACTS);
         if !contacts_dir.exists() {
             return Ok(Vec::new());
         }
@@ -675,78 +664,21 @@ impl Workspace {
         Ok(entries)
     }
 
-    fn all_archived_contact_entries(&self) -> Result<Vec<(String, PathBuf)>> {
-        let archive_dir = self.root.join("archive").join("contacts");
-        if !archive_dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut entries = Vec::new();
-        for entry in read_dir(&archive_dir, "list archived contacts")? {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("md") {
-                continue;
-            }
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            if let Some(uid) = contact_uid_from_file_name(&stem) {
-                entries.push((uid, path));
-            }
-        }
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(entries)
-    }
-
     fn find_active_contact_path(&self, uid: &str) -> Result<(String, PathBuf)> {
         for (group, entry_uid, path) in self.all_active_contact_entries()? {
             if entry_uid == uid {
                 return Ok((group, path));
             }
         }
-        Err(AppError::new(
-            "not_found",
-            format!("active contact {uid} not found"),
-        )
-        .with_hint(format!(
-            "Use `afmail contact list` to see available contacts, or `afmail contact reopen {uid}` if it was archived."
-        ))
-        .with_details(json!({"contact_uid": uid})))
-    }
-
-    fn find_archived_contact_path(&self, uid: &str) -> Result<PathBuf> {
-        for (entry_uid, path) in self.all_archived_contact_entries()? {
-            if entry_uid == uid {
-                return Ok(path);
-            }
-        }
         Err(
-            AppError::new("not_found", format!("archived contact {uid} not found"))
+            AppError::new("not_found", format!("active contact {uid} not found"))
+                .with_hint("Use `afmail contact list` to see available contacts.")
                 .with_details(json!({"contact_uid": uid})),
         )
     }
 
-    fn find_contact_path(&self, uid: &str) -> Result<(bool, PathBuf)> {
-        for (_, entry_uid, path) in self.all_active_contact_entries()? {
-            if entry_uid == uid {
-                return Ok((false, path));
-            }
-        }
-        for (entry_uid, path) in self.all_archived_contact_entries()? {
-            if entry_uid == uid {
-                return Ok((true, path));
-            }
-        }
-        Err(AppError::new(
-            "not_found",
-            format!("contact {uid} not found (active or archived)"),
-        )
-        .with_details(json!({"contact_uid": uid})))
-    }
-
     fn collect_from_headers_triage(&self) -> Result<Vec<(String, String)>> {
-        let triage_dir = self.root.join("triage");
+        let triage_dir = self.root.join(layout::TRIAGE);
         if !triage_dir.exists() {
             return Ok(Vec::new());
         }
@@ -795,7 +727,7 @@ impl Workspace {
     fn message_sender_pair(&self, message_id: &str) -> Option<(String, String)> {
         let msg_path = self
             .root
-            .join("messages")
+            .join(layout::MESSAGES)
             .join(format!("{message_id}.json"));
         let content = fs::read_to_string(&msg_path).ok()?;
         let msg: Value = serde_json::from_str(&content).ok()?;
@@ -852,20 +784,4 @@ fn write_contact_md(path: &Path, fm: &ContactFrontmatter, body: &str) -> Result<
 fn read_contact_md_content(content: &str) -> Result<(ContactFrontmatter, String)> {
     crate::markdown::read_doc::<ContactFrontmatter>(content)
         .map_err(|e| AppError::new("invalid_contact", format!("parse contact file: {e}")))
-}
-
-fn contact_group_from_path(_root: &Path, path: &Path) -> String {
-    path.parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .map(|s| {
-            // Skip if parent is "contacts" (shouldn't happen but guard)
-            if s == "contacts" {
-                "people"
-            } else {
-                s
-            }
-        })
-        .unwrap_or("people")
-        .to_string()
 }

@@ -72,7 +72,6 @@ impl MessageCollection {
 
     pub fn new_case(case_uid: &str, case_name: &str, now_rfc3339: &str) -> Self {
         let mut collection = Self::new(CASE_SCHEMA_NAME, case_uid, case_name);
-        collection.status = "active".to_string();
         collection.created_rfc3339 = Some(now_rfc3339.to_string());
         collection.updated_rfc3339 = Some(now_rfc3339.to_string());
         collection

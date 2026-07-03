@@ -19,6 +19,7 @@ use std::io::Write;
 use std::time::Instant;
 
 fn main() {
+    let _stream_redirect = install_stream_redirect_or_exit();
     let started = Instant::now();
     handle_help_and_version(&started);
     let argv = std::env::args().collect::<Vec<_>>();
@@ -38,6 +39,19 @@ fn main() {
         log,
     } = parsed;
     std::process::exit(run_command(command, output, &log, &argv));
+}
+
+fn install_stream_redirect_or_exit(
+) -> Option<agent_first_data::stream_redirect::InstalledStreamRedirect> {
+    match agent_first_data::stream_redirect::install_from_raw_args(std::env::args()) {
+        Ok(redirect) => redirect,
+        Err(err) => {
+            let value = build_cli_error(&err.to_string(), None);
+            let rendered = cli_output(&value, OutputFormat::Json);
+            let _ = writeln!(std::io::stdout(), "{rendered}");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn handle_help_and_version(started: &Instant) {

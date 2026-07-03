@@ -5,7 +5,7 @@ impl Workspace {
     /// path_templates or `afmail message show`.
     pub fn triage_list(&self) -> Result<Value> {
         self.require_workspace()?;
-        let triage_dir = self.root.join("triage");
+        let triage_dir = self.root.join(layout::TRIAGE);
         let mut items = Vec::new();
         if triage_dir.exists() {
             let mut paths: Vec<PathBuf> = read_dir(&triage_dir, "read triage directory")?
@@ -24,12 +24,13 @@ impl Workspace {
         }
         let push_status = serde_json::to_value(crate::push_queue::push_status(&self.root)?)
             .map_err(|e| AppError::json("serialize push status", &e))?;
+        let pt_view_path = [layout::TRIAGE, "/{message_id}.md"].concat();
         Ok(json!({
             "code": "triage_list",
             "count": items.len(),
             "push_status": push_status,
             "path_templates": {
-                "view_path": "triage/{message_id}.md",
+                "view_path": pt_view_path,
                 "json_path": "messages/{message_id}.json",
             },
             "items": items,
@@ -56,7 +57,7 @@ impl Workspace {
         progress_phase: Option<&'static str>,
     ) -> Result<Value> {
         self.require_workspace()?;
-        create_dir_all(&self.root.join("triage"))?;
+        create_dir_all(&self.root.join(layout::TRIAGE))?;
         let contact_map = self.contact_email_map()?;
         let config = MailConfig::load(&self.root)?;
         let mut renderer = MarkdownTemplateRenderer::new(&self.root, config.template_language());
@@ -75,7 +76,10 @@ impl Workspace {
                 .and_then(|stem| stem.to_str())
                 .unwrap_or_default()
                 .to_string();
-            let view_path = self.root.join("triage").join(format!("{message_id}.md"));
+            let view_path = self
+                .root
+                .join(layout::TRIAGE)
+                .join(format!("{message_id}.md"));
             if let Some(cache) = cache.as_deref_mut() {
                 if view_path.is_file() {
                     let (suggested_case_uids, suggested_reason) =
@@ -549,7 +553,6 @@ impl Workspace {
             "view": {
                 "language": config.resolved_language_bcp47(),
                 "title": case_fm.collection_name.as_str(),
-                "status": case_fm.status.as_str(),
                 "message_count": items.len(),
                 "conversation": conversation.trim(),
             },
@@ -613,7 +616,7 @@ impl Workspace {
     ) -> Result<FileWriteOutcome> {
         let path = self
             .root
-            .join("triage")
+            .join(layout::TRIAGE)
             .join(format!("{}.md", message.message_id));
         let (suggested_case_uids, suggested_reason) = existing_triage_suggestion(&path)?;
         let related_message_ids = match relation_index {
@@ -698,7 +701,7 @@ impl Workspace {
     }
 
     pub(super) fn remove_stale_triage_views(&self, desired: &BTreeSet<String>) -> Result<usize> {
-        let triage_dir = self.root.join("triage");
+        let triage_dir = self.root.join(layout::TRIAGE);
         if !triage_dir.exists() {
             return Ok(0);
         }

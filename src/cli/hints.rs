@@ -17,12 +17,6 @@ pub fn error_hint(argv: &[String]) -> String {
                 nested_hint("afmail message", tokens.get(1), MESSAGE_ACTIONS)
             }
         }
-        "archive" => match tokens.get(1).map(String::as_str) {
-            Some("case") => nested_hint("afmail archive case", tokens.get(2), ARCHIVE_CASE_ACTIONS),
-            Some("list") => nested_hint("afmail archive list", tokens.get(2), ARCHIVE_LIST_ACTIONS),
-            Some(_) => "try: afmail archive --help".to_string(),
-            None => "try: afmail archive --help".to_string(),
-        },
         "notification" => nested_hint("afmail notification", tokens.get(1), NOTIFICATION_ACTIONS),
         "config" => nested_hint("afmail config", tokens.get(1), CONFIG_ACTIONS),
         "remote" => nested_hint("afmail remote", tokens.get(1), REMOTE_ACTIONS),
@@ -55,11 +49,16 @@ fn command_tokens(argv: &[String]) -> Vec<String> {
         if arg == "--" {
             break;
         }
-        if arg == "--output" || arg == "--log" {
+        if arg == "--output" || arg == "--log" || arg == "--stdout-file" || arg == "--stderr-file" {
             let _ = iter.next();
             continue;
         }
-        if arg == "--verbose" || arg.starts_with("--output=") || arg.starts_with("--log=") {
+        if arg == "--verbose"
+            || arg.starts_with("--output=")
+            || arg.starts_with("--log=")
+            || arg.starts_with("--stdout-file=")
+            || arg.starts_with("--stderr-file=")
+        {
             continue;
         }
         if arg.starts_with('-') {
@@ -85,7 +84,6 @@ const ROOT_COMMANDS: &[&str] = &[
     "message",
     "case",
     "contact",
-    "archive",
     "notification",
     "render",
     "log",
@@ -106,35 +104,47 @@ const ROOT_COMMANDS: &[&str] = &[
     "message",
     "case",
     "contact",
-    "archive",
     "notification",
     "render",
     "log",
 ];
 const CASE_ACTIONS: &[&str] = &[
-    "create", "list", "show", "add", "move", "rename", "notes", "archive", "reopen", "tag",
-    "trash", "untag", "draft", "merge",
+    "create",
+    "list",
+    "show",
+    "add",
+    "remove",
+    "move",
+    "rename",
+    "notes",
+    "archive",
+    "unarchive",
+    "tag",
+    "trash",
+    "delete",
+    "untag",
+    "draft",
+    "merge",
 ];
 const CONTACT_ACTIONS: &[&str] = &[
     "create", "list", "show", "move", "rename", "email", "phone", "tag", "untag", "notes",
-    "archive", "reopen", "extract",
+    "delete", "extract",
 ];
-const MESSAGE_ACTIONS: &[&str] = &["show", "spam", "trash", "restore", "attachment"];
+const MESSAGE_ACTIONS: &[&str] = &["show", "spam", "trash", "unspam", "untrash", "attachment"];
 const MESSAGE_ATTACHMENT_ACTIONS: &[&str] = &["fetch"];
 const NOTIFICATION_ACTIONS: &[&str] = &[
     "add",
     "create",
+    "delete",
     "list",
     "show",
-    "restore",
+    "remove",
     "move",
     "rename",
     "set-summary",
     "notes",
 ];
-const ARCHIVE_CASE_ACTIONS: &[&str] = &["show", "restore", "trash", "rename", "notes"];
-const ARCHIVE_LIST_ACTIONS: &[&str] = &["cases"];
-const CONFIG_ACTIONS: &[&str] = &["show", "get", "set"];
+const CONFIG_ACTIONS: &[&str] = &["show", "get", "set", "add", "remove"];
 const REMOTE_ACTIONS: &[&str] = &["test", "folders"];
 const PUSH_ACTIONS: &[&str] = &["list"];
 const DOCTOR_ACTIONS: &[&str] = &["repair"];

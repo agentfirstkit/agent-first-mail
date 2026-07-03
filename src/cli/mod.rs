@@ -1,4 +1,3 @@
-mod archive;
 mod cases;
 mod common;
 mod contacts;
@@ -11,7 +10,6 @@ mod skill;
 #[cfg(feature = "ui")]
 mod ui;
 
-pub use archive::{ArchiveAction, ArchiveCaseAction, ArchiveCaseNotesAction, ArchiveListAction};
 pub use cases::{CaseCommand, CaseCreateArgs, CaseDraftAction, CaseNotesAction};
 pub use common::{
     ConfigAction, DoctorAction, LogAction, PurgeAction, PushAction, RemoteAction, RenderAction,
