@@ -14,6 +14,8 @@ dependencies = [
 [[package]]
 name = "agent-first-config"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bedd8dcd9467b9fd8b3fdbc062e2818413d05f1d6a13ab0c52e78019e367e25a"
 dependencies = [
  "serde",
  "serde_json",
