@@ -23,9 +23,9 @@ dependencies = [
 
 [[package]]
 name = "agent-first-data"
-version = "0.16.0"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4dcf6445c48087e8f6f490e5799db57d7b1e256304bde8c2fa3398358f01ef4"
+checksum = "22820703fc8794a06f57b8dd370b80acaf70cfbf6af1586c84c8b196fc81317d"
 dependencies = [
  "chrono",
  "clap",
@@ -403,7 +403,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1126,7 +1126,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
