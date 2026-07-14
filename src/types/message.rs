@@ -11,9 +11,6 @@ pub enum MessageStatus {
     Spam,
     Trashed,
     DeletedRemote,
-    Sent,
-    Draft,
-    Flagged,
     PushQueued,
 }
 
@@ -27,9 +24,6 @@ impl MessageStatus {
             "spam" => Ok(Self::Spam),
             "trashed" => Ok(Self::Trashed),
             "deleted_remote" => Ok(Self::DeletedRemote),
-            "sent" => Ok(Self::Sent),
-            "draft" => Ok(Self::Draft),
-            "flagged" => Ok(Self::Flagged),
             "push_queued" => Ok(Self::PushQueued),
             other => Err(AppError::new(
                 "message_status_invalid",
@@ -47,9 +41,6 @@ impl MessageStatus {
             Self::Spam => "spam",
             Self::Trashed => "trashed",
             Self::DeletedRemote => "deleted_remote",
-            Self::Sent => "sent",
-            Self::Draft => "draft",
-            Self::Flagged => "flagged",
             Self::PushQueued => "push_queued",
         }
     }
@@ -57,13 +48,7 @@ impl MessageStatus {
     pub fn is_terminal_local(self) -> bool {
         matches!(
             self,
-            Self::Spam
-                | Self::Trashed
-                | Self::DeletedRemote
-                | Self::Sent
-                | Self::Draft
-                | Self::Flagged
-                | Self::PushQueued
+            Self::Spam | Self::Trashed | Self::DeletedRemote | Self::PushQueued
         )
     }
 }

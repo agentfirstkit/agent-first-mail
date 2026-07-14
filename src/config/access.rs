@@ -1,6 +1,6 @@
 use super::*;
 use agent_first_config::{
-    add_keyed, get_path, remove_keyed, set_path, ConfigError, KeyedList, Value as AfValue,
+    ConfigError, KeyedList, Value as AfValue, add_keyed, get_path, remove_keyed, set_path,
 };
 use agent_first_data::normalize_utc_offset;
 

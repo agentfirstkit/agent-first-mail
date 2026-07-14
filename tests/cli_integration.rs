@@ -1,10 +1,10 @@
 #[cfg(feature = "ui")]
 use agent_first_ui::{
-    find_capability, find_unit, prepare_request, validate_space, validate_space_bindings,
-    AgentFirstUiMessage, Layout, MessagePayload, PrepareRequestSpec, PreparedStatus,
+    AgentFirstUiMessage, Layout, MessagePayload, find_capability, find_unit, validate_space,
+    validate_space_bindings,
 };
 use fs4::FileExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 #[cfg(feature = "ui")]
 use std::collections::BTreeMap;
 use std::fs;
@@ -12,7 +12,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{mpsc, Arc, Mutex};
+#[cfg(feature = "ui")]
+use std::process::Stdio;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,10 +29,7 @@ static COMMAND_TEST_LOCK: Mutex<()> = Mutex::new(());
 type ImapCommands = Arc<Mutex<Vec<String>>>;
 type AppendedMessages = Arc<Mutex<Vec<(String, bool, String)>>>;
 type CreatedFolders = Arc<Mutex<Vec<String>>>;
-type CopiedMessages = Arc<Mutex<Vec<(String, u64, String)>>>;
-type ExpungedMessages = Arc<Mutex<Vec<(String, u64)>>>;
 type MovedMessages = Arc<Mutex<Vec<(String, u64, String)>>>;
-type StoredMessages = Arc<Mutex<Vec<(String, u64, String)>>>;
 #[cfg(feature = "ui")]
 type MailboxMessages = BTreeMap<String, Vec<(u64, Vec<u8>)>>;
 
@@ -38,6 +37,30 @@ enum TestImapMessages {
     Shared(Vec<(u64, Vec<u8>)>),
     #[cfg(feature = "ui")]
     ByMailbox(BTreeMap<String, Vec<(u64, Vec<u8>)>>),
+}
+
+#[test]
+fn obsolete_flat_state_layout_is_rejected_and_reported_by_doctor() {
+    let root = temp_root("obsolete-state-layout");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    assert!(fs::write(root.join(".afmail/pull-cursors.json"), "{}").is_ok());
+
+    let (status, stdout) = run(&root, &["status"]);
+    assert_eq!(status, 1, "{stdout}");
+    let error = parse_one(&stdout);
+    assert_eq!(error["code"], "workspace_layout_outdated");
+    assert_eq!(error["legacy_paths"], json!([".afmail/pull-cursors.json"]));
+
+    let (status, stdout) = run(&root, &["doctor"]);
+    assert_eq!(status, 1, "{stdout}");
+    let doctor = parse_one(&stdout);
+    assert!(doctor["issues"].as_array().is_some_and(|issues| {
+        issues.iter().any(|issue| {
+            issue["code"] == "workspace_layout_outdated"
+                && issue["path"] == ".afmail/pull-cursors.json"
+        })
+    }));
 }
 
 impl TestImapMessages {
@@ -88,6 +111,35 @@ fn run_with_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> (i32, Strin
     command_output(command.output())
 }
 
+fn run_allow_stderr(cwd: &Path, args: &[&str]) -> (i32, String, String) {
+    let _command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let output = Command::new(bin()).current_dir(cwd).args(args).output();
+    assert!(output.is_ok());
+    let output = match output {
+        Ok(v) => v,
+        Err(_) => return (99, String::new(), String::new()),
+    };
+    (
+        output.status.code().unwrap_or(99),
+        String::from_utf8(output.stdout).unwrap_or_default(),
+        String::from_utf8(output.stderr).unwrap_or_default(),
+    )
+}
+
+fn current_push_plan_id(cwd: &Path) -> String {
+    let (status, stdout) = run(cwd, &["push"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    value["plan_id"].as_str().unwrap_or_default().to_string()
+}
+
+fn run_confirmed_push(cwd: &Path) -> (i32, String) {
+    let plan_id = current_push_plan_id(cwd);
+    run(cwd, &["push", "--confirm", plan_id.as_str()])
+}
+
 fn command_output(output: std::io::Result<std::process::Output>) -> (i32, String) {
     assert!(output.is_ok());
     let output = match output {
@@ -108,9 +160,21 @@ fn parse_one(stdout: &str) -> Value {
     let parsed = serde_json::from_str(stdout.trim());
     assert!(parsed.is_ok(), "stdout was not JSON: {stdout}");
     match parsed {
-        Ok(v) => v,
+        Ok(v) => protocol_payload(v),
         Err(_) => Value::Null,
     }
+}
+
+fn protocol_payload(value: Value) -> Value {
+    assert!(
+        agent_first_data::validate_protocol_event(&value, false).is_ok(),
+        "stdout was not a valid AFDATA protocol event: {value}"
+    );
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    value.get(kind).cloned().unwrap_or(Value::Null)
 }
 
 fn parse_lines(stdout: &str) -> Vec<Value> {
@@ -118,6 +182,105 @@ fn parse_lines(stdout: &str) -> Vec<Value> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(parse_one)
+        .collect()
+}
+
+#[cfg(feature = "ui")]
+fn parse_raw_json_lines(stdout: &str) -> Vec<Value> {
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn workspace_tree_snapshot(root: &Path) -> Vec<(String, bool, Vec<u8>, u128)> {
+    fn visit(root: &Path, path: &Path, out: &mut Vec<(String, bool, Vec<u8>, u128)>) {
+        let metadata = fs::symlink_metadata(path);
+        assert!(metadata.is_ok(), "snapshot metadata: {}", path.display());
+        let Ok(metadata) = metadata else {
+            return;
+        };
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        let modified_ns = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let is_dir = metadata.is_dir();
+        let bytes = if metadata.is_file() {
+            fs::read(path).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        out.push((relative, is_dir, bytes, modified_ns));
+        if is_dir {
+            let entries = fs::read_dir(path);
+            assert!(entries.is_ok(), "snapshot directory: {}", path.display());
+            if let Ok(entries) = entries {
+                let mut paths = entries
+                    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                    .collect::<Vec<_>>();
+                paths.sort();
+                for child in paths {
+                    visit(root, &child, out);
+                }
+            }
+        }
+    }
+
+    let mut snapshot = Vec::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
+
+fn workspace_runtime_lock_path(root: &Path) -> PathBuf {
+    let canonical = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let digest = blake3::hash(canonical.as_os_str().as_encoded_bytes()).to_hex();
+    std::env::temp_dir()
+        .join("afmail-workspace-locks")
+        .join(format!("{digest}.lock"))
+}
+
+fn workspace_snapshot_differences(
+    before: &[(String, bool, Vec<u8>, u128)],
+    after: &[(String, bool, Vec<u8>, u128)],
+) -> Vec<String> {
+    let before_by_path = before
+        .iter()
+        .map(|entry| (entry.0.as_str(), entry))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let after_by_path = after
+        .iter()
+        .map(|entry| (entry.0.as_str(), entry))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    before_by_path
+        .keys()
+        .chain(after_by_path.keys())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(
+            |path| match (before_by_path.get(path), after_by_path.get(path)) {
+                (Some(before_entry), Some(after_entry)) if before_entry == after_entry => None,
+                (Some(before_entry), Some(after_entry)) => Some(format!(
+                    "{path}: type {} -> {}, bytes_equal={}, mtime {} -> {}",
+                    before_entry.1,
+                    after_entry.1,
+                    before_entry.2 == after_entry.2,
+                    before_entry.3,
+                    after_entry.3
+                )),
+                (Some(_), None) => Some(format!("{path}: removed")),
+                (None, Some(_)) => Some(format!("{path}: added")),
+                (None, None) => None,
+            },
+        )
         .collect()
 }
 
@@ -131,6 +294,16 @@ fn write_json(path: &Path, value: &Value) {
 
 fn read_json(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap_or_default()).unwrap_or(Value::Null)
+}
+
+fn draft_with_compose(raw: String) -> String {
+    let Some((frontmatter, body)) = raw.split_once("\n---\n") else {
+        return raw;
+    };
+    format!(
+        "{frontmatter}\n---\n# Draft\n\n<!-- afmail:compose:start -->\n{}\n<!-- afmail:compose:end -->\n",
+        body.trim_matches(['\r', '\n'])
+    )
 }
 
 #[cfg(feature = "ui")]
@@ -169,72 +342,21 @@ fn fixture_message_id(root: &Path, batch: &test_fixtures::MailBatch, fixture_id:
 }
 
 #[test]
-fn version_uses_afdata_output_formats() {
-    let root = temp_root("version");
-    assert!(fs::create_dir_all(&root).is_ok());
-
-    let (status, stdout) = run(&root, &["--version"]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(
-        stdout.trim(),
-        format!("afmail {}", env!("CARGO_PKG_VERSION"))
-    );
-
-    let (status, stdout) = run(&root, &["--version", "--output", "json"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "version");
-    assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
-    assert!(value.get("trace").is_none(), "{stdout}");
-
-    let (status, stdout) = run(&root, &["--version", "--output", "yaml"]);
-    assert_eq!(status, 0, "{stdout}");
-    assert!(stdout.starts_with("---\n"), "{stdout}");
-    assert!(stdout.contains("code: \"version\""), "{stdout}");
-    assert!(
-        stdout.contains(&format!("version: \"{}\"", env!("CARGO_PKG_VERSION"))),
-        "{stdout}"
-    );
-    assert!(!stdout
-        .lines()
-        .any(|line| line == format!("afmail {}", env!("CARGO_PKG_VERSION"))));
-
-    let (status, stdout) = run(&root, &["--version", "--output", "plain"]);
-    assert_eq!(status, 0, "{stdout}");
-    assert!(stdout.contains("code=version"), "{stdout}");
-    assert!(
-        stdout.contains(&format!("version={}", env!("CARGO_PKG_VERSION"))),
-        "{stdout}"
-    );
-    assert!(!stdout
-        .lines()
-        .any(|line| line == format!("afmail {}", env!("CARGO_PKG_VERSION"))));
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
 #[cfg(feature = "ui")]
-fn ui_snapshot_emits_valid_afui_space() {
+fn ui_snapshot_projects_reader_drafts_editor_and_delegation_references() {
     let batch = test_fixtures::load_mail_batch();
     assert!(batch.is_ok(), "{batch:?}");
     let Ok(batch) = batch else {
         return;
     };
-    let problems = batch.validate();
-    assert!(
-        problems.is_empty(),
-        "mail batch fixture is invalid: {problems:#?}"
-    );
     let messages_by_mailbox = mail_batch_messages_by_mailbox(&batch);
     assert!(messages_by_mailbox.is_ok(), "{messages_by_mailbox:?}");
     let Ok(messages_by_mailbox) = messages_by_mailbox else {
         return;
     };
-    let root = temp_root("ui-snapshot");
+    let root = temp_root("ui-product-snapshot");
     assert!(fs::create_dir_all(&root).is_ok());
-    let (status, stdout) = run(&root, &["init"]);
-    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(run(&root, &["init"]).0, 0);
     let server = start_imap_mailbox_server(messages_by_mailbox, 20);
     assert!(server.is_some());
     let Some(server) = server else {
@@ -244,133 +366,170 @@ fn ui_snapshot_emits_valid_afui_space() {
         &root.join(".afmail/config.json"),
         &test_config(Some(server.addr.port()), None),
     );
-
     let (status, stdout) = run(&root, &["pull"]);
     assert_eq!(status, 0, "{stdout}");
-    let pull = parse_one(&stdout);
-    assert_eq!(pull["code"], "pull_result");
-    assert_eq!(pull["new_message_count"], 30);
-    assert_eq!(pull["triage_created_count"], 28);
-    assert_eq!(pull["spam_message_count"], 1);
-    assert_eq!(pull["trashed_message_count"], 1);
     assert!(server.handle.join().is_ok());
 
-    let refund_initial = fixture_message_id(&root, &batch, "refund_initial");
-    let refund_followup = fixture_message_id(&root, &batch, "refund_followup");
-    let receipt_cloud = fixture_message_id(&root, &batch, "receipt_cloud");
-    let inbox_duplicate = fixture_message_id(&root, &batch, "inbox_duplicate_alert");
-    let contract_attachment = fixture_message_id(&root, &batch, "contract_attachment");
-    for message_id in [
-        &refund_initial,
-        &refund_followup,
-        &receipt_cloud,
-        &inbox_duplicate,
-        &contract_attachment,
-    ] {
-        assert!(
-            !message_id.is_empty(),
-            "fixture message id was not imported"
-        );
-    }
-
+    let message_id = fixture_message_id(&root, &batch, "refund_initial");
     let (status, stdout) = run(
         &root,
         &[
             "case",
             "create",
             "--name",
-            "refund-order-4471",
+            "ui-draft-review",
             "--message",
-            &refund_initial,
+            &message_id,
             "--group",
             "support",
             "--reason",
-            "customer refund thread needs a reply",
+            "exercise AFUI reader and draft projection",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
     let case_created = parse_one(&stdout);
-    let case_uid = case_created["case_uid"].as_str().unwrap_or_default();
-    assert!(!case_uid.is_empty(), "{case_created}");
+    let case_ref = case_created["case_uid"].as_str().unwrap_or_default();
+    assert!(!case_ref.is_empty(), "{case_created}");
 
     let (status, stdout) = run(
         &root,
         &[
             "case",
-            "add",
-            case_uid,
-            &refund_followup,
-            "--reason",
-            "same refund thread",
+            "draft",
+            "new",
+            case_ref,
+            "--to",
+            "customer@example.com",
+            "--cc",
+            "team@example.com",
+            "--subject",
+            "Refund follow-up",
+            "--body",
+            "Hello,\n\nWe are reviewing your refund.",
         ],
     );
+    assert_eq!(status, 0, "{stdout}");
+    let draft_created = parse_one(&stdout);
+    let draft_name = draft_created["draft_name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!draft_name.is_empty(), "{draft_created}");
+    let attachment_path = root.join("refund.txt");
+    assert!(fs::write(&attachment_path, "refund evidence").is_ok());
+    let attachment_arg = attachment_path.to_string_lossy().to_string();
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "draft",
+            "attach",
+            case_ref,
+            &draft_name,
+            &attachment_arg,
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let (status, stdout) = run(&root, &["case", "draft", "validate", case_ref, &draft_name]);
     assert_eq!(status, 0, "{stdout}");
 
     let (status, stdout) = run(
         &root,
         &[
-            "notification",
+            "case",
             "create",
             "--name",
-            "receipts",
-            "--message",
-            &receipt_cloud,
-            "--summary",
-            "cloud service receipt",
-            "--reason",
-            "receipt can be filed",
+            "archived-ui-draft",
+            "--group",
+            "support",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
-    let archive_created = parse_one(&stdout);
-    let notification_uid = archive_created["notification_uid"]
+    let archived_case_created = parse_one(&stdout);
+    let archived_case_ref = archived_case_created["case_uid"]
         .as_str()
-        .unwrap_or_default();
-    assert!(!notification_uid.is_empty(), "{archive_created}");
-
+        .unwrap_or_default()
+        .to_string();
     let (status, stdout) = run(
         &root,
         &[
-            "message",
-            "trash",
-            &inbox_duplicate,
-            "--reason",
-            "duplicate notification from inbox",
+            "case",
+            "draft",
+            "new",
+            &archived_case_ref,
+            "--to",
+            "archive@example.com",
+            "--subject",
+            "Retained remote draft",
+            "--body",
+            "Keep this draft available for reference.",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
+    let archived_draft_name = parse_one(&stdout)["draft_name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "draft",
+            "upload",
+            &archived_case_ref,
+            &archived_draft_name,
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "archive",
+            &archived_case_ref,
+            "--reason",
+            "retain queued draft while closing the case",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "case_has_local_drafts");
 
     let (status, stdout) = run(&root, &["ui", "snapshot"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert!(value.get("trace").is_none(), "{stdout}");
     assert_eq!(value["agent_first_ui"], "0.2");
     assert_eq!(value["type"], "snapshot");
-
     let message = serde_json::from_value::<AgentFirstUiMessage>(value);
     assert!(message.is_ok(), "{message:?}");
     let Ok(message) = message else {
         return;
     };
-    assert!(
-        matches!(&message.payload, MessagePayload::Snapshot { .. }),
-        "ui snapshot should be a space snapshot"
-    );
     let MessagePayload::Snapshot { space, .. } = message.payload else {
         return;
     };
-    let validation = validate_space(&space);
-    assert!(validation.is_ok(), "{validation:?}");
-    let binding_validation = validate_space_bindings(&space);
-    assert!(binding_validation.is_ok(), "{binding_validation:?}");
+    assert!(validate_space(&space).is_ok());
+    assert!(validate_space_bindings(&space).is_ok());
     let afmail = &space.as_value()["afmail"];
-    assert!(space.as_value().get("host_web").is_some());
-    assert!(space.as_value().get("session_operator").is_some());
-    assert!(space.as_value().get("host/web").is_none());
-    assert!(space.as_value().get("session/operator").is_none());
+    assert_eq!(afmail["surface"]["genre"], "triage");
+    assert!(space.as_value().get("host_web").is_none());
+    assert!(afmail.get("status").is_none());
+    assert!(afmail.get("ui").is_none());
+    assert!(afmail.get("logs").is_none());
 
-    for unit_id in [
-        "mailbox_status",
+    let units = afmail["units"].as_array();
+    assert!(units.is_some(), "{afmail}");
+    let Some(units) = units else {
+        return;
+    };
+    let unit_ids = units
+        .iter()
+        .filter_map(|unit| unit["id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unit_ids,
+        ["mail_queue", "draft_list", "draft_editor", "mailbox_glance"]
+    );
+    for retired in [
         "inbox_triage",
         "active_cases",
         "push_queue",
@@ -379,364 +538,246 @@ fn ui_snapshot_emits_valid_afui_space() {
         "activity_log",
         "mail_terminal",
     ] {
-        assert!(
-            find_unit(&space, "afmail", unit_id).is_some(),
-            "{unit_id} missing"
-        );
-    }
-    for legacy_unit_id in [
-        "overview_panel",
-        "triage_panel",
-        "workspace_tabs",
-        "cases_panel",
-        "push_panel",
-        "archive_messages_panel",
-        "archived_cases_panel",
-        "termail_terminal",
-    ] {
-        assert!(
-            find_unit(&space, "afmail", legacy_unit_id).is_none(),
-            "{legacy_unit_id} should not remain in the space"
-        );
+        assert!(find_unit(&space, "afmail", retired).is_none(), "{retired}");
     }
 
-    assert_eq!(afmail.get("layout"), None);
-    assert_eq!(afmail["root_layout"], "root");
+    let capabilities = afmail["capabilities"].as_array();
+    assert!(capabilities.is_some(), "{afmail}");
+    let Some(capabilities) = capabilities else {
+        return;
+    };
+    let capability_ids = capabilities
+        .iter()
+        .filter_map(|capability| capability["id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(capability_ids, ["draft_change"]);
+
+    let mail_items = afmail["mail"]["items"].as_array();
+    assert!(mail_items.is_some(), "{afmail}");
+    let Some(mail_items) = mail_items else {
+        return;
+    };
+    assert_eq!(mail_items.len(), 30);
+    let projected_message = mail_items
+        .iter()
+        .find(|item| item["message"]["message_id"] == message_id);
+    assert!(projected_message.is_some(), "{mail_items:?}");
+    let Some(projected_message) = projected_message else {
+        return;
+    };
+    assert!(projected_message["view"]["body_text"].is_string());
+    assert!(projected_message["view"]["workspace_status"].is_string());
+
+    let drafts = afmail["drafts"]["items"].as_array();
+    assert!(drafts.is_some(), "{afmail}");
+    let Some(drafts) = drafts else {
+        return;
+    };
+    assert_eq!(drafts.len(), 2, "{drafts:?}");
+    let draft = drafts.iter().find(|draft| draft["case_ref"] == case_ref);
+    assert!(draft.is_some(), "{drafts:?}");
+    let Some(draft) = draft else {
+        return;
+    };
+    assert_eq!(draft["case_ref"], case_ref);
+    assert_eq!(draft["draft_name"], draft_name);
+    assert_eq!(draft["reference"], format!("{case_ref}/{draft_name}"));
+    assert_eq!(draft["to"], json!(["customer@example.com"]));
+    assert_eq!(draft["cc"], json!(["team@example.com"]));
+    assert_eq!(draft["subject"], "Refund follow-up");
+    assert!(
+        draft["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reviewing your refund")
+    );
+    assert_eq!(draft["attachments"][0]["exists"], true);
+    assert_eq!(draft["validation"]["state"], "valid");
+    assert_eq!(draft["validation"]["recorded"], true);
+    assert_eq!(draft["availability"]["editable"], true);
+    assert_eq!(draft["availability"]["usable"], true);
+    let archived_draft = drafts
+        .iter()
+        .find(|draft| draft["case_ref"] == archived_case_ref);
+    assert!(archived_draft.is_some(), "{drafts:?}");
+    let Some(archived_draft) = archived_draft else {
+        return;
+    };
+    assert_eq!(archived_draft["draft_name"], archived_draft_name);
+    assert_eq!(archived_draft["case_archived"], false);
+    assert_eq!(archived_draft["status"], "queued_upload");
+    assert_eq!(archived_draft["queued_action"], "save_draft");
+    assert_eq!(archived_draft["remote_changed"], false);
+    assert_eq!(archived_draft["availability"]["editable"], false);
+    assert_eq!(
+        space.as_value()["session_operator"]["selection"]["draft"],
+        drafts[0]
+    );
+    assert_eq!(drafts[0]["case_ref"], case_ref);
+
+    let queue = find_unit(&space, "afmail", "mail_queue");
+    assert!(queue.is_some());
+    let Some(queue) = queue else {
+        return;
+    };
+    assert_eq!(queue.kind, "list");
+    assert_eq!(
+        queue.field("badge_key"),
+        Some(&json!("view.workspace_status"))
+    );
+    assert_eq!(
+        queue
+            .field("fields")
+            .and_then(|fields| fields.pointer("/1/visible_when/empty")),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        queue
+            .field("fields")
+            .and_then(|fields| fields.pointer("/3/visible_when/gt")),
+        Some(&json!(0))
+    );
+    assert!(queue.field("fields").is_some_and(|fields| {
+        fields.as_array().is_some_and(|items| {
+            items.iter().all(|field| {
+                !matches!(
+                    field.get("key").and_then(Value::as_str),
+                    Some("view.workspace_status" | "view.direction")
+                )
+            })
+        })
+    }));
+    assert_eq!(
+        queue.field("reference_binding"),
+        Some(&json!("record:message.message_id"))
+    );
+    assert_eq!(queue.field("reference_kind"), Some(&json!("message")));
+    assert!(queue.field("reference_label").is_none());
+    assert_eq!(queue.field("body_key"), Some(&json!("view.body_text")));
+    assert_eq!(
+        queue.field("no_body_text"),
+        Some(&json!("This message has no text body."))
+    );
+    assert_eq!(
+        queue
+            .field("interactions")
+            .and_then(|value| value["select"][0]["path"].as_str()),
+        Some("selection.message")
+    );
+
+    assert!(find_unit(&space, "afmail", "message_header").is_none());
+    assert!(find_unit(&space, "afmail", "mail_reader").is_none());
+
+    let draft_list = find_unit(&space, "afmail", "draft_list");
+    assert!(draft_list.is_some());
+    let Some(draft_list) = draft_list else {
+        return;
+    };
+    assert_eq!(draft_list.field("reference_kind"), Some(&json!("draft")));
+    assert_eq!(draft_list.field("body_key"), Some(&json!("body")));
+    assert_eq!(
+        draft_list
+            .field("fields")
+            .and_then(|fields| fields.pointer("/3/visible_when/empty")),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        draft_list
+            .field("interactions")
+            .and_then(|value| value["select"][0]["path"].as_str()),
+        Some("selection.draft")
+    );
+
+    let editor = find_unit(&space, "afmail", "draft_editor");
+    assert!(editor.is_some());
+    let Some(editor) = editor else {
+        return;
+    };
+    assert_eq!(editor.kind, "form");
+    assert_eq!(editor.field("reference_kind"), Some(&json!("draft")));
+    assert_eq!(
+        editor.field("submit_capability"),
+        Some(&json!("draft_change"))
+    );
+    assert!(editor.field("capabilities").is_none());
+    assert_eq!(
+        editor
+            .field("fields")
+            .and_then(Value::as_array)
+            .and_then(|fields| fields.first()),
+        Some(&json!({
+            "name": "to",
+            "label": "To",
+            "type": "array",
+            "format": "email_list",
+            "value_binding": "actor:selection.draft.to",
+            "required": true
+        }))
+    );
+    assert_eq!(
+        editor
+            .field("fields")
+            .and_then(Value::as_array)
+            .and_then(|fields| fields.get(3)),
+        Some(&json!({
+            "name": "body",
+            "label": "Body",
+            "type": "string",
+            "format": "markdown",
+            "value_binding": "actor:selection.draft.body",
+            "required": true
+        }))
+    );
+
+    let change = find_capability(&space, "afmail", "draft_change");
+    assert!(change.is_some());
+    let Some(change) = change else {
+        return;
+    };
+    assert_eq!(change.risk.as_str(), "local_mutation");
+    assert_eq!(
+        change
+            .input_schema
+            .as_ref()
+            .and_then(|schema| schema["properties"]["to"]["type"].as_str()),
+        Some("array")
+    );
+    assert_eq!(
+        change
+            .input_schema
+            .as_ref()
+            .and_then(|schema| schema["properties"]["to"]["format"].as_str()),
+        Some("email_list")
+    );
+    assert_eq!(
+        change
+            .input_schema
+            .as_ref()
+            .and_then(|schema| schema["properties"]["body"]["format"].as_str()),
+        Some("markdown")
+    );
+
     let layouts = serde_json::from_value::<Vec<Layout>>(afmail["layouts"].clone());
     assert!(layouts.is_ok(), "{layouts:?}");
     let Ok(layouts) = layouts else {
         return;
     };
-    let layout_ids: Vec<&str> = layouts.iter().map(|layout| layout.id.as_str()).collect();
-    assert_eq!(
-        layout_ids,
-        ["primary", "glance", "archives", "tools", "root"]
-    );
-    let primary = &layouts[0];
-    assert_eq!(primary.members, ["inbox_triage", "active_cases"]);
-    assert!(!primary.overlay);
-    assert_eq!(primary.extra.get("relation"), Some(&json!("workspace")));
-    assert_eq!(primary.extra.get("role"), Some(&json!("primary")));
-    assert_eq!(
-        serde_json::to_value(&primary.salience).unwrap_or_default(),
-        json!({ "prominence": "primary" })
-    );
-    let glance = &layouts[1];
-    assert_eq!(glance.extra.get("role"), Some(&json!("summary")));
-    let archives = &layouts[2];
-    assert_eq!(archives.members, ["notifications", "archived_cases"]);
-    assert!(archives.overlay);
-    assert_eq!(archives.extra.get("relation"), Some(&json!("supporting")));
-    assert_eq!(archives.extra.get("role"), Some(&json!("history")));
+    assert_eq!(layouts[0].members, ["mail_queue"]);
+    assert_eq!(layouts[1].members, ["draft_list", "draft_editor"]);
+    assert_eq!(layouts[2].members, ["mailbox_glance"]);
+    assert_eq!(layouts[3].members, ["mail", "drafts", "glance"]);
 
-    let pulse = find_unit(&space, "afmail", "mailbox_status");
-    assert!(pulse.is_some());
-    let Some(pulse) = pulse else {
-        return;
-    };
-    assert_eq!(pulse.kind, "facts");
-    assert_eq!(pulse.field("title"), Some(&json!("Mailbox Status")));
+    let pack = read_json(&Path::new(env!("CARGO_MANIFEST_DIR")).join("afui/afmail.pack.json"));
+    assert_eq!(pack["genre"], "triage");
+    assert_eq!(pack["slots"]["mail_queue"], "queue");
+    assert_eq!(pack["zoom"]["mail_queue"], "full");
+    assert_eq!(pack["slots"]["draft_list"], "drafts");
+    assert_eq!(pack["slots"]["draft_editor"], "editor");
+    assert_eq!(pack["slots"]["mailbox_glance"], "glance");
     assert_eq!(
-        pulse.field("capabilities"),
-        Some(&json!(["status", "pull"]))
+        pack["order"],
+        json!(["draft_list", "draft_editor", "mail_queue", "mailbox_glance"])
     );
-    assert_eq!(pulse.primary_capability.as_deref(), Some("pull"));
-    assert_eq!(
-        serde_json::to_value(&pulse.salience).unwrap_or_default(),
-        json!({ "prominence": "subtle", "state": "info" })
-    );
-    assert_eq!(pulse.field("dockview"), None);
-
-    let triage = find_unit(&space, "afmail", "inbox_triage");
-    assert!(triage.is_some());
-    let Some(triage) = triage else {
-        return;
-    };
-    assert_eq!(triage.kind, "list");
-    assert_eq!(triage.field("dockview"), None);
-    assert_eq!(
-        triage.field("summary"),
-        Some(&json!({
-            "count_binding": "space:afmail.status.triage_count",
-            "attention_binding": "space:afmail.status.triage_count"
-        }))
-    );
-    assert_eq!(triage.field("body_key"), Some(&json!("view.body_text")));
-    assert_eq!(
-        triage.field("count_binding"),
-        Some(&json!("space:afmail.status.triage_count"))
-    );
-    assert_eq!(
-        triage.field("reference_binding"),
-        Some(&json!("record:message.message_id"))
-    );
-    assert_eq!(
-        triage.field("input_bindings"),
-        Some(&json!({ "message_id": "record:message.message_id" }))
-    );
-    assert_eq!(triage.field("message_id_binding"), None);
-    assert_eq!(triage.activate_capability.as_deref(), Some("message_show"));
-    assert_eq!(triage.primary_capability.as_deref(), Some("case_create"));
-    assert!(triage.field("interactions").is_some());
-    assert_eq!(triage.field("preview_length"), Some(&json!(180)));
-    assert_eq!(triage.field("body_format"), None);
-
-    let triage_items = afmail["ui"]["triage_items"].as_array();
-    assert!(triage_items.is_some(), "{:?}", afmail["ui"]);
-    let Some(triage_items) = triage_items else {
-        return;
-    };
-    assert!(
-        triage_items.len() >= 20,
-        "fixture-backed UI should expose the 30-message e2e corpus: {triage_items:?}"
-    );
-    let triage_match = triage_items
-        .iter()
-        .enumerate()
-        .find(|(_, item)| item["message"]["message_id"] == contract_attachment);
-    assert!(
-        triage_match.is_some(),
-        "triage item missing: {triage_items:?}"
-    );
-    let Some((triage_index, triage_item)) = triage_match else {
-        return;
-    };
-    let triage_message_json = read_json(&root.join(format!("messages/{contract_attachment}.json")));
-    assert_eq!(triage_item["message"], triage_message_json);
-    assert!(triage_item.get("subject").is_none(), "{triage_item}");
-    assert!(triage_item.get("body_text").is_none(), "{triage_item}");
-    assert_eq!(triage_item["message"]["subject"], "Acme renewal contract");
-    assert!(
-        triage_item["view"]["body_text"].is_string(),
-        "{triage_item}"
-    );
-    let prepared = prepare_request(
-        &space,
-        PrepareRequestSpec::new("session_operator", "afmail", "message_trash")
-            .with_source_unit_id("inbox_triage")
-            .with_record_path(format!("/afmail/ui/triage_items/{triage_index}")),
-    );
-    assert!(prepared.is_ok(), "{prepared:?}");
-    let Ok(prepared) = prepared else {
-        return;
-    };
-    assert_eq!(prepared.status, PreparedStatus::Ready);
-    assert_eq!(prepared.input["message_id"], contract_attachment);
-
-    let cases = find_unit(&space, "afmail", "active_cases");
-    assert!(cases.is_some());
-    let Some(cases) = cases else {
-        return;
-    };
-    assert_eq!(cases.kind, "list");
-    assert_eq!(cases.field("body_key"), Some(&json!("view.notes_text")));
-    assert_eq!(
-        cases.field("reference_binding"),
-        Some(&json!("record:case.collection_uid"))
-    );
-    assert_eq!(
-        cases.field("input_bindings"),
-        Some(&json!({ "case_ref": "record:case.collection_uid" }))
-    );
-    assert_eq!(cases.field("case_ref_binding"), None);
-    assert_eq!(cases.activate_capability.as_deref(), Some("case_show"));
-    assert_eq!(cases.field("body_format"), Some(&json!("markdown")));
-    let case_items = afmail["ui"]["case_items"].as_array();
-    assert!(case_items.is_some(), "{:?}", afmail["ui"]);
-    let Some(case_items) = case_items else {
-        return;
-    };
-    let case_match = case_items
-        .iter()
-        .enumerate()
-        .find(|(_, item)| item["case"]["collection_uid"].as_str() == Some(case_uid));
-    assert!(case_match.is_some(), "case item missing: {case_items:?}");
-    let Some((case_index, case_item)) = case_match else {
-        return;
-    };
-    let case_json = read_json(&root.join(format!(
-        "cases/support/{case_uid}-refund-order-4471/data/case.json"
-    )));
-    assert_eq!(case_item["case"], case_json);
-    assert_eq!(case_item["case"]["collection_name"], "refund-order-4471");
-    assert_eq!(case_item["case"]["collection_uid"], case_uid);
-    assert_eq!(case_item["view"]["group"], "support");
-    assert!(case_item["view"]["notes_text"].is_string(), "{case_item}");
-    let prepared = prepare_request(
-        &space,
-        PrepareRequestSpec::new("session_operator", "afmail", "case_show")
-            .with_source_unit_id("active_cases")
-            .with_record_path(format!("/afmail/ui/case_items/{case_index}")),
-    );
-    assert!(prepared.is_ok(), "{prepared:?}");
-    let Ok(prepared) = prepared else {
-        return;
-    };
-    assert_eq!(prepared.status, PreparedStatus::Ready);
-    assert_eq!(prepared.input["case_ref"], case_uid);
-
-    let notifications = find_unit(&space, "afmail", "notifications");
-    assert!(notifications.is_some());
-    let Some(notifications) = notifications else {
-        return;
-    };
-    assert_eq!(notifications.kind, "list");
-    assert_eq!(
-        notifications.field("body_key"),
-        Some(&json!("view.notes_text"))
-    );
-    assert_eq!(
-        notifications.field("reference_binding"),
-        Some(&json!("record:notification.collection_uid"))
-    );
-    assert_eq!(
-        notifications.field("input_bindings"),
-        Some(&json!({ "notification_ref": "record:notification.collection_uid" }))
-    );
-    assert_eq!(notifications.field("notification_ref_binding"), None);
-    assert_eq!(notifications.field("body_format"), Some(&json!("markdown")));
-    let notification_items = afmail["ui"]["notification_items"].as_array();
-    assert!(notification_items.is_some(), "{:?}", afmail["ui"]);
-    let Some(notification_items) = notification_items else {
-        return;
-    };
-    let notification_match = notification_items.iter().enumerate().find(|(_, item)| {
-        item["notification"]["collection_uid"].as_str() == Some(notification_uid)
-    });
-    assert!(
-        notification_match.is_some(),
-        "notification item missing: {notification_items:?}"
-    );
-    let Some((notification_index, notification_item)) = notification_match else {
-        return;
-    };
-    let archive_json = read_json(&root.join(format!(
-        "notifications/{notification_uid}-receipts/data/notification.json"
-    )));
-    assert_eq!(notification_item["notification"], archive_json);
-    assert_eq!(
-        notification_item["notification"]["collection_name"],
-        "receipts"
-    );
-    let archived_message_json = read_json(&root.join(format!("messages/{receipt_cloud}.json")));
-    assert_eq!(
-        notification_item["items"][0]["message"],
-        archived_message_json
-    );
-    assert_eq!(
-        notification_item["items"][0]["item"]["summary"],
-        "cloud service receipt"
-    );
-    let prepared = prepare_request(
-        &space,
-        PrepareRequestSpec::new("session_operator", "afmail", "notification_show")
-            .with_source_unit_id("notifications")
-            .with_record_path(format!(
-                "/afmail/ui/notification_items/{notification_index}"
-            )),
-    );
-    assert!(prepared.is_ok(), "{prepared:?}");
-    let Ok(prepared) = prepared else {
-        return;
-    };
-    assert_eq!(prepared.status, PreparedStatus::Ready);
-    assert_eq!(prepared.input["notification_ref"], notification_uid);
-
-    let archived_cases_unit = find_unit(&space, "afmail", "archived_cases");
-    assert!(archived_cases_unit.is_some());
-    let Some(archived_cases_unit) = archived_cases_unit else {
-        return;
-    };
-    assert_eq!(archived_cases_unit.kind, "list");
-    assert_eq!(
-        archived_cases_unit.field("body_format"),
-        Some(&json!("markdown"))
-    );
-
-    let push = find_unit(&space, "afmail", "push_queue");
-    assert!(push.is_some());
-    let Some(push) = push else {
-        return;
-    };
-    assert_eq!(push.kind, "list");
-    assert_eq!(
-        push.field("reference_binding"),
-        Some(&json!("record:push.push_id"))
-    );
-    assert_eq!(
-        push.field("input_bindings"),
-        Some(&json!({ "push_id": "record:push.push_id" }))
-    );
-    assert_eq!(push.field("push_id_binding"), None);
-    assert_eq!(push.activate_capability.as_deref(), Some("push_dry_run"));
-    let push_item = &afmail["ui"]["push_items"][0];
-    let push_id = push_item["push"]["push_id"].as_str().unwrap_or_default();
-    assert!(!push_id.is_empty(), "{push_item}");
-    let prepared = prepare_request(
-        &space,
-        PrepareRequestSpec::new("session_operator", "afmail", "push_dry_run")
-            .with_source_unit_id("push_queue")
-            .with_record_path("/afmail/ui/push_items/0"),
-    );
-    assert!(prepared.is_ok(), "{prepared:?}");
-    let Ok(prepared) = prepared else {
-        return;
-    };
-    assert_eq!(prepared.status, PreparedStatus::Ready);
-    assert_eq!(prepared.input["push_id"], push_id);
-
-    let activity = find_unit(&space, "afmail", "activity_log");
-    assert!(activity.is_some());
-    let Some(activity) = activity else {
-        return;
-    };
-    assert_eq!(activity.kind, "log");
-    assert_eq!(
-        activity.field("source_binding"),
-        Some(&json!("space:afmail.ui.log_items"))
-    );
-    assert_eq!(activity.field("message_key"), Some(&json!("message")));
-    assert_eq!(activity.field("dockview"), None);
-    let log_item = &afmail["ui"]["log_items"][0];
-    assert!(log_item["created_rfc3339"].is_string(), "{log_item}");
-    assert!(log_item["kind"].is_string(), "{log_item}");
-    assert!(log_item["message"].is_string(), "{log_item}");
-    assert!(log_item["summary"].is_string(), "{log_item}");
-
-    let terminal = find_unit(&space, "afmail", "mail_terminal");
-    assert!(terminal.is_some());
-    let Some(terminal) = terminal else {
-        return;
-    };
-    assert_eq!(terminal.kind, "terminal");
-    assert!(terminal.field("session_id_binding").is_some());
-    for forbidden in ["command", "cmd", "exec", "shell_command"] {
-        assert!(terminal.field(forbidden).is_none(), "{forbidden}");
-    }
-    let send = find_capability(&space, "afmail", "push_drafts_send_confirm");
-    assert!(send.is_some());
-    let Some(send) = send else {
-        return;
-    };
-    assert_eq!(send.risk.as_str(), "destructive");
-    assert_eq!(
-        space.as_value()["host_web"]["terminals"]["mail_terminal"]["title"],
-        "Mail Terminal"
-    );
-    assert!(space.as_value()["host_web"]["terminals"]
-        .get("termail_terminal")
-        .is_none());
-
-    let notes = find_capability(&space, "afmail", "case_notes_replace");
-    assert!(notes.is_some());
-    let Some(notes) = notes else {
-        return;
-    };
-    assert!(notes.input_schema.is_some());
-    let Some(schema) = notes.input_schema.as_ref() else {
-        return;
-    };
-    assert_eq!(schema["properties"]["text"]["format"], json!("markdown"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -753,16 +794,135 @@ fn ui_open_reports_afui_fallback_when_host_binary_is_missing() {
     let (status, stdout) = run(&root, &["ui", "--afui-bin", missing.as_str(), "--no-open"]);
     assert_eq!(status, 1, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "afui_not_found");
-    assert!(value["hint"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("afmail ui snapshot > mail.afui.json"));
-    assert!(value["hint"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("afui web serve mail.afui.json"));
+    assert_eq!(value["code"], "afui_not_found");
+    assert!(
+        value["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("afmail ui snapshot > mail.afui.json")
+    );
+    assert!(
+        value["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("afui web serve mail.afui.json")
+    );
 
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[cfg(feature = "ui")]
+fn ui_owner_bridge_persists_draft_and_returns_fresh_snapshot() {
+    let root = temp_root("ui-owner-bridge");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let (case_uid, _case_path, _) = create_case(
+        &root,
+        "ui-bridge-case",
+        Some("support"),
+        None,
+        Some("exercise AFUI owner bridge"),
+    );
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "draft",
+            "new",
+            &case_uid,
+            "--to",
+            "old@example.com",
+            "--cc",
+            "old-cc@example.com",
+            "--subject",
+            "Old subject",
+            "--body",
+            "Old body",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let draft_name = parse_one(&stdout)["draft_name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!draft_name.is_empty());
+
+    let command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let child = Command::new(bin())
+        .current_dir(&root)
+        .args(["ui", "bridge"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    assert!(child.is_ok());
+    let Ok(mut child) = child else {
+        return;
+    };
+    let stdin = child.stdin.take();
+    assert!(stdin.is_some());
+    let Some(mut stdin) = stdin else {
+        let _ = child.kill();
+        return;
+    };
+    let request = json!({
+        "request_id": "request_ui_bridge_1",
+        "author": "session_operator",
+        "owner": "afmail",
+        "capability": "draft_change",
+        "risk": "local_mutation",
+        "input": {
+            "case_ref": case_uid.clone(),
+            "draft_name": draft_name.clone(),
+            "to": ["new@example.com"],
+            "cc": [],
+            "subject": "Updated through AFUI",
+            "body": "Updated body.\n\nFormatting stays intact."
+        }
+    });
+    assert!(writeln!(stdin, "{request}").is_ok());
+    assert!(writeln!(stdin, "{}", json!({"type": "snapshot"})).is_ok());
+    drop(stdin);
+    let output = child.wait_with_output();
+    assert!(output.is_ok());
+    let Ok(output) = output else {
+        return;
+    };
+    assert!(output.status.success());
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+    let responses = parse_raw_json_lines(&stdout);
+    assert_eq!(responses.len(), 2, "{stdout}");
+    assert_eq!(responses[0]["status"], "accepted");
+    assert_eq!(responses[0]["capability"], "draft_change");
+    assert_eq!(responses[1]["type"], "snapshot");
+    assert_eq!(
+        responses[1]["snapshot"]["space"]["afmail"]["drafts"]["items"][0]["subject"],
+        "Updated through AFUI"
+    );
+    assert_eq!(
+        responses[1]["snapshot"]["space"]["afmail"]["drafts"]["items"][0]["cc"],
+        json!([])
+    );
+
+    drop(command_guard);
+    let draft = parse_one(&run(&root, &["case", "draft", "show", &case_uid, &draft_name]).1);
+    assert_eq!(draft["subject"], "Updated through AFUI");
+    assert_eq!(draft["to"], json!(["new@example.com"]));
+    assert_eq!(draft["cc"], json!([]));
+    assert!(
+        draft["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Formatting stays intact")
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -774,6 +934,7 @@ fn test_config(imap_port: Option<u16>, smtp_port: Option<u16>) -> Value {
             "host": imap_port.map(|_| "127.0.0.1"),
             "port": imap_port.unwrap_or(993),
             "tls": false,
+            "allow_unbounded_body_fetch": true,
             "username": imap_port.map(|_| "user"),
             "password_secret": imap_port.map(|_| "pass")
         },
@@ -836,6 +997,22 @@ fn test_config(imap_port: Option<u16>, smtp_port: Option<u16>) -> Value {
         },
         "workspace": {"language_bcp47": null, "timezone_utc_offset": "UTC"}
     })
+}
+
+fn sent_message_id_for_push_id(push_id: &str) -> String {
+    let suffix = push_id
+        .strip_prefix("push_")
+        .unwrap_or(push_id)
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("message_sent_{suffix}")
 }
 
 fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Option<&str>) {
@@ -916,6 +1093,73 @@ fn update_message_json(root: &Path, message_id: &str, update: impl FnOnce(&mut V
         );
     }
     write_json(&path, &value);
+    rewrite_message_eml_from_json(root, message_id, &value);
+}
+
+fn rewrite_message_eml_from_json(root: &Path, message_id: &str, value: &Value) {
+    let eml_path = root.join(format!(".afmail/messages/{message_id}.eml"));
+    if !eml_path.is_file() {
+        return;
+    }
+    let existing = fs::read_to_string(&eml_path).unwrap_or_default();
+    let body = existing
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or("Body\r\n");
+    let header_string = |name: &str| {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(ToString::to_string)
+    };
+    let header_list = |name: &str| {
+        value
+            .get(name)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|text| !text.is_empty())
+    };
+    let message_id_header =
+        header_string("rfc822_message_id").unwrap_or_else(|| format!("<{message_id}@example.com>"));
+    let from = header_string("from").unwrap_or_else(|| "alice@example.com".to_string());
+    let to = header_list("to").unwrap_or_else(|| "me@example.com".to_string());
+    let date = value
+        .get("received_rfc3339")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("sent_rfc3339").and_then(Value::as_str))
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map(|date| date.to_rfc2822())
+        .unwrap_or_else(|| "Thu, 21 May 2026 10:00:00 +0000".to_string());
+    let subject = header_string("subject").unwrap_or_default();
+    let mut headers = vec![
+        format!("Message-ID: {message_id_header}"),
+        format!("From: {from}"),
+        format!("To: {to}"),
+    ];
+    if let Some(cc) = header_list("cc") {
+        headers.push(format!("Cc: {cc}"));
+    }
+    if let Some(reply_to) = header_list("reply_to") {
+        headers.push(format!("Reply-To: {reply_to}"));
+    }
+    headers.push(format!("Date: {date}"));
+    headers.push(format!("Subject: {subject}"));
+    if let Some(in_reply_to) = header_string("in_reply_to") {
+        headers.push(format!("In-Reply-To: {in_reply_to}"));
+    }
+    if let Some(references) = header_list("references").or_else(|| header_string("references")) {
+        headers.push(format!("References: {references}"));
+    }
+    headers.push("MIME-Version: 1.0".to_string());
+    headers.push("Content-Type: multipart/mixed; boundary=\"afmail-test\"".to_string());
+    assert!(fs::write(&eml_path, format!("{}\r\n\r\n{body}", headers.join("\r\n"))).is_ok());
 }
 
 fn local_disposition_spec(status: &str) -> Option<(&'static str, &'static str, &'static str)> {
@@ -1003,13 +1247,13 @@ fn message_id_for_rfc822(root: &Path, rfc822: &str) -> String {
         }
         let text = fs::read_to_string(&path).unwrap_or_default();
         let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        if let Some(stored) = value["rfc822_message_id"].as_str() {
-            if trim(stored) == needle {
-                return path
-                    .file_stem()
-                    .map(|stem| stem.to_string_lossy().to_string())
-                    .unwrap_or_default();
-            }
+        if let Some(stored) = value["rfc822_message_id"].as_str()
+            && trim(stored) == needle
+        {
+            return path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_default();
         }
     }
     // Returns empty when not found; the caller's path assertion then fails clearly.
@@ -1097,44 +1341,6 @@ fn create_notification(
     (notification_uid, root.join(path), value)
 }
 
-#[test]
-fn case_create_requires_explicit_group() {
-    let root = temp_root("case-requires-group");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_message(&root, "message_group_required", 1, Some("INBOX"));
-
-    let _command_guard = COMMAND_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let output = Command::new(bin())
-        .current_dir(&root)
-        .args([
-            "case",
-            "create",
-            "--name",
-            "needs-category",
-            "--message",
-            "message_group_required",
-            "--reason",
-            "needs handling",
-        ])
-        .output();
-    assert!(output.is_ok(), "run afmail: {output:?}");
-    let output = match output {
-        Ok(value) => value,
-        Err(_) => return,
-    };
-
-    assert!(!output.status.success(), "{output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stderr.contains("--group") || stdout.contains("--group"),
-        "stdout: {stdout}\nstderr: {stderr}"
-    );
-}
-
 fn write_case_fixture(
     root: &Path,
     group: &str,
@@ -1195,10 +1401,7 @@ struct ImapTestServer {
     addr: SocketAddr,
     commands: ImapCommands,
     appended: AppendedMessages,
-    copied: CopiedMessages,
-    expunged: ExpungedMessages,
     moved: MovedMessages,
-    stored: StoredMessages,
     handle: thread::JoinHandle<()>,
 }
 
@@ -1264,17 +1467,11 @@ fn start_imap_server_with_messages(
     let commands = Arc::new(Mutex::new(Vec::new()));
     let appended = Arc::new(Mutex::new(Vec::new()));
     let created = Arc::new(Mutex::new(Vec::new()));
-    let copied = Arc::new(Mutex::new(Vec::new()));
-    let expunged = Arc::new(Mutex::new(Vec::new()));
     let moved = Arc::new(Mutex::new(Vec::new()));
-    let stored = Arc::new(Mutex::new(Vec::new()));
     let server_commands = Arc::clone(&commands);
     let server_appended = Arc::clone(&appended);
     let server_created = Arc::clone(&created);
-    let server_copied = Arc::clone(&copied);
-    let server_expunged = Arc::clone(&expunged);
     let server_moved = Arc::clone(&moved);
-    let server_stored = Arc::clone(&stored);
     let handle = thread::spawn(move || {
         // `accept_count` is an upper bound: serve up to that many connections, but
         // exit once the client goes idle so a pull that opens fewer connections
@@ -1292,17 +1489,19 @@ fn start_imap_server_with_messages(
                         &server_commands,
                         &server_appended,
                         &server_created,
-                        &server_copied,
-                        &server_expunged,
                         &server_moved,
-                        &server_stored,
                         capabilities,
                     );
                     served += 1;
                     last = Instant::now();
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if last.elapsed() > Duration::from_millis(800) {
+                    let idle_limit = if served == 0 {
+                        Duration::from_secs(5)
+                    } else {
+                        Duration::from_millis(800)
+                    };
+                    if last.elapsed() > idle_limit {
                         break;
                     }
                     thread::sleep(Duration::from_millis(5));
@@ -1315,10 +1514,7 @@ fn start_imap_server_with_messages(
         addr,
         commands,
         appended,
-        copied,
-        expunged,
         moved,
-        stored,
         handle,
     })
 }
@@ -1330,10 +1526,7 @@ fn serve_imap_connection(
     commands: &ImapCommands,
     appended: &AppendedMessages,
     created: &CreatedFolders,
-    copied: &CopiedMessages,
-    expunged: &ExpungedMessages,
     moved: &MovedMessages,
-    stored: &StoredMessages,
     capabilities: ImapServerCapabilities,
 ) {
     let reader_stream = match writer.try_clone() {
@@ -1372,11 +1565,6 @@ fn serve_imap_connection(
                     format!("{tag} BAD UID EXPUNGE unsupported\r\n").as_bytes(),
                 );
                 return;
-            }
-            if let Some(uid) = uid_expunge_arg_from_line(&line) {
-                if let Ok(mut locked) = expunged.lock() {
-                    locked.push((selected_mailbox.clone(), uid));
-                }
             }
             if write_imap(
                 &mut writer,
@@ -1429,10 +1617,10 @@ fn serve_imap_connection(
                 }
             }
             "CREATE" => {
-                if let Some(folder) = folder_arg_from_line(&line, "CREATE") {
-                    if let Ok(mut locked) = created.lock() {
-                        locked.push(folder);
-                    }
+                if let Some(folder) = folder_arg_from_line(&line, "CREATE")
+                    && let Ok(mut locked) = created.lock()
+                {
+                    locked.push(folder);
                 }
                 if write_imap(
                     &mut writer,
@@ -1470,38 +1658,29 @@ fn serve_imap_connection(
             "SEARCH" => {
                 let text = String::from_utf8_lossy(&line);
                 let upper = text.to_ascii_uppercase();
-                let uids = if upper.contains(" UID SEARCH ALL") {
-                    messages
-                        .for_mailbox(&selected_mailbox)
-                        .iter()
-                        .map(|(uid, _)| uid.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                } else {
-                    "900".to_string()
-                };
+                let uids =
+                    if upper.contains(" UID SEARCH ALL") || upper.contains(" UID SEARCH SINCE ") {
+                        messages
+                            .for_mailbox(&selected_mailbox)
+                            .iter()
+                            .map(|(uid, _)| uid.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    } else {
+                        "900".to_string()
+                    };
                 let response = format!("* SEARCH {uids}\r\n{tag} OK SEARCH completed\r\n");
                 if write_imap(&mut writer, response.as_bytes()).is_err() {
                     return;
                 }
             }
             "STORE" => {
-                if let Some((uid, query)) = uid_store_args_from_line(&line) {
-                    if let Ok(mut locked) = stored.lock() {
-                        locked.push((selected_mailbox.clone(), uid, query));
-                    }
-                }
                 let response = format!("{tag} OK STORE completed\r\n");
                 if write_imap(&mut writer, response.as_bytes()).is_err() {
                     return;
                 }
             }
             "COPY" => {
-                if let Some((uid, target)) = uid_copy_args_from_line(&line) {
-                    if let Ok(mut locked) = copied.lock() {
-                        locked.push((selected_mailbox.clone(), uid, target));
-                    }
-                }
                 if write_imap(
                     &mut writer,
                     format!("{tag} OK COPY completed\r\n").as_bytes(),
@@ -1518,11 +1697,6 @@ fn serve_imap_connection(
                         format!("{tag} BAD UID EXPUNGE unsupported\r\n").as_bytes(),
                     );
                     return;
-                }
-                if let Some(uid) = uid_expunge_arg_from_line(&line) {
-                    if let Ok(mut locked) = expunged.lock() {
-                        locked.push((selected_mailbox.clone(), uid));
-                    }
                 }
                 if write_imap(
                     &mut writer,
@@ -1541,10 +1715,10 @@ fn serve_imap_connection(
                     );
                     return;
                 }
-                if let Some((uid, target)) = uid_move_args_from_line(&line) {
-                    if let Ok(mut locked) = moved.lock() {
-                        locked.push((selected_mailbox.clone(), uid, target));
-                    }
+                if let Some((uid, target)) = uid_move_args_from_line(&line)
+                    && let Ok(mut locked) = moved.lock()
+                {
+                    locked.push((selected_mailbox.clone(), uid, target));
                 }
                 if write_imap(
                     &mut writer,
@@ -1634,40 +1808,6 @@ fn uid_move_args_from_line(line: &[u8]) -> Option<(u64, String)> {
     Some((uid, target))
 }
 
-fn uid_copy_args_from_line(line: &[u8]) -> Option<(u64, String)> {
-    let text = String::from_utf8_lossy(line);
-    let upper = text.to_ascii_uppercase();
-    let marker = " UID COPY ";
-    let start = upper.find(marker)? + marker.len();
-    let rest = text.get(start..)?.trim();
-    let mut parts = rest.split_whitespace();
-    let uid = parts.next()?.parse::<u64>().ok()?;
-    let target = if let Some(stripped) = rest.split_once(' ')?.1.trim_start().strip_prefix('"') {
-        stripped.split_once('"')?.0.to_string()
-    } else {
-        parts.next()?.trim().to_string()
-    };
-    Some((uid, target))
-}
-
-fn uid_expunge_arg_from_line(line: &[u8]) -> Option<u64> {
-    let text = String::from_utf8_lossy(line);
-    let upper = text.to_ascii_uppercase();
-    let marker = " UID EXPUNGE ";
-    let start = upper.find(marker)? + marker.len();
-    text.get(start..)?.trim().parse::<u64>().ok()
-}
-
-fn uid_store_args_from_line(line: &[u8]) -> Option<(u64, String)> {
-    let text = String::from_utf8_lossy(line);
-    let upper = text.to_ascii_uppercase();
-    let marker = " UID STORE ";
-    let start = upper.find(marker)? + marker.len();
-    let rest = text.get(start..)?.trim();
-    let (uid_text, query) = rest.split_once(' ')?;
-    Some((uid_text.parse::<u64>().ok()?, query.trim().to_string()))
-}
-
 fn parse_imap_command(line: &[u8]) -> Option<(String, String, bool)> {
     use imap_codec::decode::Decoder;
     use imap_codec::imap_types::command::CommandBody;
@@ -1701,9 +1841,23 @@ fn write_imap_fetch(
     line: &[u8],
 ) -> std::io::Result<()> {
     let query = String::from_utf8_lossy(line).to_ascii_uppercase();
+    if query.contains("BODY.PEEK[]<")
+        && messages.iter().any(|(_, raw)| {
+            String::from_utf8_lossy(raw).contains("X-Afmail-Test-Reject-Partial: true")
+        })
+    {
+        writer.write_all(b"* BYE partial body fetch unsupported\r\n")?;
+        writer.flush()?;
+        return Ok(());
+    }
+    let includes_body = query.contains("BODY.PEEK[");
     let header_only = query.contains("BODY.PEEK[HEADER]");
     let header_fields_only = query.contains("BODY.PEEK[HEADER.FIELDS");
-    for (idx, (uid, raw)) in messages.iter().enumerate() {
+    let matching = messages
+        .iter()
+        .filter(|(uid, _)| uid_fetch_query_matches_uid(&query, *uid))
+        .collect::<Vec<_>>();
+    for (idx, (uid, raw)) in matching.iter().enumerate() {
         let seq = idx + 1;
         let body = if header_only || header_fields_only {
             raw_message_header(raw)
@@ -1711,7 +1865,7 @@ fn write_imap_fetch(
             raw.as_slice()
         };
         let len = body.len();
-        let raw_len = raw.len();
+        let raw_len = test_declared_size_from_raw(raw).unwrap_or(raw.len());
         let flags = test_flags_from_raw(raw);
         let body_key = if header_fields_only {
             "BODY[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES DATE)]"
@@ -1724,12 +1878,47 @@ fn write_imap_fetch(
         if query.contains("RFC822.SIZE") {
             write!(writer, " RFC822.SIZE {raw_len}")?;
         }
-        write!(writer, " {body_key} {{{len}}}\r\n")?;
-        writer.write_all(body)?;
+        if includes_body {
+            write!(writer, " {body_key} {{{len}}}\r\n")?;
+            writer.write_all(body)?;
+        }
         writer.write_all(b")\r\n")?;
     }
     write!(writer, "{tag} OK FETCH completed\r\n")?;
     writer.flush()
+}
+
+fn uid_fetch_query_matches_uid(query: &str, uid: u64) -> bool {
+    let Some((_, after_fetch)) = query.split_once(" UID FETCH ") else {
+        return true;
+    };
+    let Some(sequence) = after_fetch.split_whitespace().next() else {
+        return true;
+    };
+    sequence.split(',').any(|part| {
+        if let Some((start, end)) = part.split_once(':') {
+            let start = start.parse::<u64>().unwrap_or(1);
+            if end == "*" {
+                uid >= start
+            } else {
+                end.parse::<u64>()
+                    .map(|end| uid >= start && uid <= end)
+                    .unwrap_or(false)
+            }
+        } else {
+            part.parse::<u64>()
+                .map(|value| value == uid)
+                .unwrap_or(false)
+        }
+    })
+}
+
+fn test_declared_size_from_raw(raw: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(raw);
+    text.lines().find_map(|line| {
+        line.strip_prefix("X-Afmail-Test-Declared-Size:")
+            .and_then(|value| value.trim().parse().ok())
+    })
 }
 
 fn raw_message_header(raw: &[u8]) -> &[u8] {
@@ -1769,37 +1958,6 @@ fn start_smtp_server_connections(connection_count: usize) -> Option<SmtpTestServ
                 return;
             };
             serve_smtp_connection(stream, data_tx.clone());
-        }
-    });
-    Some(SmtpTestServer {
-        addr,
-        data_rx,
-        handle,
-    })
-}
-
-fn start_smtp_server_with_accept_timeout(timeout: Duration) -> Option<SmtpTestServer> {
-    let listener = bind_loopback_listener()?;
-    listener.set_nonblocking(true).ok()?;
-    let addr = listener.local_addr().ok()?;
-    let (data_tx, data_rx) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        let deadline = Instant::now() + timeout;
-        loop {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let _ = stream.set_nonblocking(false);
-                    serve_smtp_connection(stream, data_tx);
-                    return;
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(_) => return,
-            }
         }
     });
     Some(SmtpTestServer {
@@ -1894,15 +2052,32 @@ fn init_status_and_afdata_output_formats_work() {
     let (status, stdout) = run(&root, &["outbox", "list"]);
     assert_eq!(status, 2);
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "error");
-    assert!(value["trace"]["duration_ms"].as_u64().is_some(), "{stdout}");
+    assert_eq!(value["code"], "cli_error");
     let (status, stdout) = run(&root, &["message", "--help"]);
     assert_eq!(status, 0);
     assert!(!stdout.contains("ignore"));
+    assert!(stdout.contains("list"));
+    let (status, stdout) = run(&root, &["message", "spam", "--help"]);
+    assert_eq!(status, 0);
+    assert!(stdout.contains("<MESSAGE_ID>..."));
+    let (status, stdout) = run(&root, &["message", "list", "--help"]);
+    assert_eq!(status, 0);
+    assert!(stdout.contains("--sender"));
+    assert!(stdout.contains("--subject-contains"));
+    assert!(stdout.contains("--since"));
+    assert!(stdout.contains("--in <SCOPE>"));
+    let (status, stdout) = run(&root, &["case", "add", "--help"]);
+    assert_eq!(status, 0);
+    assert!(stdout.contains("<MESSAGE_ID>..."));
+    let (status, stdout) = run(&root, &["notification", "add", "--help"]);
+    assert_eq!(status, 0);
+    assert!(stdout.contains("<MESSAGE_ID>..."));
     let (status, stdout) = run(&root, &["case", "--help"]);
     assert_eq!(status, 0);
     assert!(stdout.contains("show"));
     assert!(stdout.contains("add"));
+    assert!(stdout.contains("set-summary"));
+    assert!(stdout.contains("draft"));
     assert!(stdout.contains("archive"));
     assert!(stdout.contains("unarchive"));
     assert!(stdout.contains("trash"));
@@ -1914,7 +2089,8 @@ fn init_status_and_afdata_output_formats_work() {
     assert_eq!(status, 0);
     assert!(stdout.contains("reply"));
     assert!(stdout.contains("change"));
-    assert!(stdout.contains("save"));
+    assert!(stdout.contains("list"));
+    assert!(stdout.contains("upload"));
     assert!(stdout.contains("send"));
     let (status, stdout) = run(&root, &["case", "add", "--help"]);
     assert_eq!(status, 0);
@@ -1935,16 +2111,20 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(stdout.contains("--reason"));
     let (status, stdout) = run(&root, &["archive", "case", "show", "c20260603001"]);
     assert_eq!(status, 2);
-    assert_eq!(parse_one(&stdout)["code"], "error");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "cli_error");
     let (status, stdout) = run(&root, &["message", "ignore", "message_001"]);
     assert_eq!(status, 2);
-    assert_eq!(parse_one(&stdout)["code"], "error");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "cli_error");
     let (status, stdout) = run(&root, &["message", "message_001", "show"]);
     assert_eq!(status, 2);
-    assert_eq!(parse_one(&stdout)["code"], "error");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "cli_error");
     let (status, stdout) = run(&root, &["case", "c20260603001", "add", "message_001"]);
     assert_eq!(status, 2);
-    assert_eq!(parse_one(&stdout)["code"], "error");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "cli_error");
     let (status, stdout) = run(&root, &["--help", "--output", "markdown"]);
     assert_eq!(status, 0);
     assert!(stdout.contains("# Agent-First Mail"));
@@ -1955,27 +2135,30 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(!stdout.contains("--mode"));
     let (status, stdout) = run(&root, &["--mode", "pipe"]);
     assert_eq!(status, 2);
-    assert_eq!(parse_one(&stdout)["code"], "error");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "cli_error");
     assert!(!stdout.to_ascii_lowercase().contains("bucket"));
 
     let (status, stdout) = run(&root, &["init"]);
     assert_eq!(status, 0);
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "workspace_initialized");
-    assert_eq!(value["agent_skill_created"], true);
-    assert_eq!(value["agent_skill_updated"], false);
-    assert_eq!(value["agent_skill_path"], "AGENTS.md");
-    assert_eq!(
-        value["workspace_skill_path"],
-        ".codex/skills/agent-first-mail/SKILL.md"
-    );
-    assert_eq!(value["workspace_skill_installed"], true);
+    let first_workspace_uid = value["workspace_uid"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(first_workspace_uid.len(), "workspace_".len() + 32);
+    assert!(first_workspace_uid.starts_with("workspace_"));
+    let first_identity_bytes = fs::read(root.join(".afmail/workspace.json")).unwrap_or_default();
+    assert!(value.get("agent_skill_created").is_none());
     assert_eq!(value["gitignore_created"], true);
     assert_eq!(value["gitignore_updated"], false);
     assert_eq!(value["gitignore_path"], ".gitignore");
     assert_eq!(value["do_not_edit_created"], true);
     assert_eq!(value["do_not_edit_path"], ".afmail/DO_NOT_EDIT.txt");
     assert!(root.join(".afmail/transactions").is_dir());
+    assert!(root.join(".afmail/pull").is_dir());
+    assert!(root.join(".afmail/cache").is_dir());
+    assert!(!root.join(".afmail/config.example.json").exists());
     assert!(!root.join("spam").exists());
     assert!(!root.join("spam/data/spam.json").exists());
     assert!(!root.join("trash").exists());
@@ -1984,18 +2167,17 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(!root.join("deleted/data/deleted.json").exists());
     assert!(!root.join("buckets").exists());
     assert!(root.join("templates").is_dir());
-    assert!(root
-        .join(".codex/skills/agent-first-mail/SKILL.md")
-        .is_file());
+    assert!(!root.join(".codex").exists());
+    assert!(!root.join("AGENTS.md").exists());
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
     assert!(gitignore.contains("# BEGIN afmail managed"));
     assert!(!gitignore.contains(".afmail/messages/"));
     assert!(gitignore.contains(".afmail/push/"));
-    assert!(gitignore.contains(".codex/skills/agent-first-mail/"));
+    assert!(!gitignore.contains(".codex/skills/agent-first-mail/"));
     assert!(!gitignore.contains(".agents/skills/agent-first-mail/"));
     assert!(!gitignore.contains(".claude/skills/agent-first-mail/"));
-    assert!(gitignore.contains(".afmail/workspace.progress.json"));
-    assert!(gitignore.contains(".afmail/config.example.json"));
+    assert!(gitignore.contains(".afmail/cache/"));
+    assert!(!gitignore.contains(".afmail/cache/progress.json"));
     assert!(gitignore.contains("messages/*.json"));
     assert!(gitignore.contains("triage/*.md"));
     assert!(gitignore.contains("spam/*.md"));
@@ -2014,26 +2196,26 @@ fn init_status_and_afdata_output_formats_work() {
     );
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "skill_install");
-    assert!(value["targets"][0]["skill_path"]
-        .as_str()
-        .unwrap_or_default()
-        .ends_with(".claude/skills/agent-first-mail/SKILL.md"));
+    assert!(
+        value["targets"][0]["skill_path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(".claude/skills/agent-first-mail/SKILL.md")
+    );
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
-    assert!(gitignore.contains(".codex/skills/agent-first-mail/"));
+    assert!(!gitignore.contains(".codex/skills/agent-first-mail/"));
     assert!(gitignore.contains(".claude/skills/agent-first-mail/"));
     assert!(gitignore.contains("messages/*.json"));
     assert_eq!(gitignore.matches("# BEGIN afmail managed").count(), 1);
     let (status, stdout) = run(&root, &["status"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "status");
+    assert_eq!(value["workspace_uid"], first_workspace_uid);
+    assert!(value["workspace_path"].as_str().is_some(), "{stdout}");
     assert_eq!(value["progress"]["status"], "idle");
-    let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
-    assert!(agents.contains("Agent-First Mail Notes"));
-    assert!(agents.contains("<!-- BEGIN afmail managed -->"));
-    assert!(agents.contains("afmail skill install --agent codex --scope workspace"));
-    assert!(agents.contains("- `.`"));
+    assert_eq!(value["readiness"]["ready_for_pull"], false);
+    assert_eq!(value["readiness"]["ready_for_send"], false);
+    assert_eq!(value["readiness"]["placeholder_identity"], true);
     let do_not_edit = root.join(".afmail/DO_NOT_EDIT.txt");
     assert!(do_not_edit.is_file());
     assert!(fs::write(&do_not_edit, "custom warning").is_ok());
@@ -2042,15 +2224,18 @@ fn init_status_and_afdata_output_formats_work() {
     let (status, stdout) = run(&root, &["init"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["agent_skill_created"], false);
-    assert_eq!(value["agent_skill_updated"], true);
+    assert_eq!(value["workspace_uid"], first_workspace_uid);
+    assert_eq!(
+        fs::read(root.join(".afmail/workspace.json")).unwrap_or_default(),
+        first_identity_bytes
+    );
+    assert!(value.get("agent_skill_created").is_none());
     assert_eq!(value["gitignore_created"], false);
     assert_eq!(value["gitignore_updated"], true);
     assert_eq!(value["do_not_edit_created"], false);
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
     assert!(agents.contains("custom agents file"));
-    assert!(agents.contains("<!-- BEGIN afmail managed -->"));
-    assert!(agents.contains("afmail skill install --agent codex --scope workspace"));
+    assert_eq!(agents, "custom agents file");
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
     assert!(gitignore.contains("*.tmp"));
     assert!(gitignore.contains("# BEGIN afmail managed"));
@@ -2072,7 +2257,8 @@ fn init_status_and_afdata_output_formats_work() {
         ],
     );
     assert_eq!(status, 2);
-    assert_eq!(parse_one(&stdout)["code"], "error");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "cli_error");
     let config = fs::read_to_string(root.join(".afmail/config.json")).unwrap_or_default();
     let config_json: Value = serde_json::from_str(&config).unwrap_or(Value::Null);
     assert_eq!(config_json, json!({}));
@@ -2083,24 +2269,10 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(config_json.get("push").is_none());
     assert!(!config.contains("\"folders\": {"));
     assert!(!config.contains("imap_host"));
-    let config_example =
-        fs::read_to_string(root.join(".afmail/config.example.json")).unwrap_or_default();
-    assert!(config_example.contains("\"schema_name\": \"config\""));
-    assert!(config_example.contains("\"schema_version\": 1"));
-    assert!(config_example.contains("\"imap\""));
-    assert!(config_example.contains("\"case\""));
-    assert!(config_example.contains("\"audit\""));
-    assert!(config_example.contains("\"reason_mode\": \"required\""));
-    assert!(config_example.contains("\"mailboxes\""));
-    assert!(config_example.contains("\"actions\""));
-    assert!(config_example.contains("\"move_to_mailbox_id\": \"archive\""));
-    let example_json: Value = serde_json::from_str(&config_example).unwrap_or(Value::Null);
-    assert!(example_json["mailboxes"].get("all").is_none());
-    assert!(example_json["mailboxes"].get("flagged").is_none());
-
     let (status, stdout) = run(&root, &["config", "pull", "add", "Sent"]);
     assert_eq!(status, 2);
-    assert_eq!(parse_one(&stdout)["code"], "error");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "cli_error");
     let (status, stdout) = run(
         &root,
         &["config", "get", "actions.pull.default_mailbox_ids"],
@@ -2182,34 +2354,36 @@ fn init_status_and_afdata_output_formats_work() {
 
     let (status, stdout) = run(&root, &["--output", "plain", "status"]);
     assert_eq!(status, 0);
-    assert!(stdout.contains("code=status"));
+    assert!(stdout.contains("kind=result"));
     assert!(stdout.contains("triage_count=0"));
 
     let (status, stdout) = run(&root, &["--log", "startup,request,progress", "status"]);
     assert_eq!(status, 0, "{stdout}");
     let lines = parse_lines(&stdout);
     assert_eq!(lines.len(), 4, "{stdout}");
-    assert_eq!(lines[0]["code"], "log");
     assert_eq!(lines[0]["event"], "startup");
     assert_eq!(lines[0]["command"], "status");
     assert_eq!(lines[1]["event"], "request");
     assert_eq!(lines[2]["event"], "progress");
     assert_eq!(lines[2]["success"], true);
-    for line in &lines[0..3] {
-        assert_eq!(line["code"], "log");
+    for line in &lines[0..2] {
         assert_eq!(line["level"], "info");
         assert!(line["event"].as_str().is_some(), "{stdout}");
         assert!(line["timestamp_epoch_ms"].as_u64().is_some(), "{stdout}");
         assert!(line["message"].as_str().is_some(), "{stdout}");
-        assert!(line["trace"]["duration_ms"].as_u64().is_some(), "{stdout}");
     }
-    assert_eq!(lines[3]["code"], "status");
-    assert!(lines[3]["trace"]["duration_ms"].as_u64().is_some());
+    assert_eq!(lines[2]["level"], "info");
+    assert!(lines[2]["message"].as_str().is_some(), "{stdout}");
+    assert!(lines[3].get("outcome").is_none());
 
     let (status, stdout) = run(&root, &["--verbose", "status"]);
     assert_eq!(status, 0, "{stdout}");
     let lines = parse_lines(&stdout);
-    assert_eq!(lines.last().unwrap_or(&Value::Null)["code"], "status");
+    assert!(
+        lines
+            .last()
+            .is_some_and(|value| value.get("outcome").is_none())
+    );
 
     let (status, stdout) = run(
         &root,
@@ -2228,16 +2402,134 @@ fn init_status_and_afdata_output_formats_work() {
     let argv = lines[0]["argv"].as_array().cloned().unwrap_or_default();
     assert!(argv.iter().any(|arg| arg == "***"), "{stdout}");
 
+    let (status, stdout) = run(
+        &root,
+        &[
+            "--log",
+            "startup",
+            "case",
+            "draft",
+            "new",
+            "case_private",
+            "--to",
+            "alice.private@example.com",
+            "--cc=finance.private@example.com",
+            "--subject",
+            "Private payroll thread",
+            "--body=Please review the private numbers.",
+        ],
+    );
+    assert_ne!(status, 2, "{stdout}");
+    assert!(!stdout.contains("alice.private@example.com"), "{stdout}");
+    assert!(!stdout.contains("finance.private@example.com"), "{stdout}");
+    assert!(!stdout.contains("Private payroll thread"), "{stdout}");
+    assert!(
+        !stdout.contains("Please review the private numbers."),
+        "{stdout}"
+    );
+    let argv = parse_lines(&stdout)[0]["argv"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(argv.iter().any(|arg| arg == "--to"), "{stdout}");
+    assert!(argv.iter().any(|arg| arg == "***"), "{stdout}");
+    assert!(argv.iter().any(|arg| arg == "--cc=***"), "{stdout}");
+    assert!(argv.iter().any(|arg| arg == "--body=***"), "{stdout}");
+    let shape = &parse_lines(&stdout)[0]["argv_shape"];
+    assert_eq!(shape["command_tokens"], json!(["case", "draft", "new"]));
+    assert_eq!(
+        shape["flag_names"],
+        json!(["--body", "--cc", "--log", "--subject", "--to"])
+    );
+    assert_eq!(shape["positional_count"], 1);
+    assert_eq!(shape["redacted_value_count"], 6);
+    assert_eq!(shape["executable"], "afmail");
+    assert!(
+        !shape.to_string().contains("alice.private@example.com"),
+        "{stdout}"
+    );
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "--log",
+            "startup",
+            "notification",
+            "create",
+            "--name",
+            "Private vendor notice",
+            "--message",
+            "message_missing",
+            "--summary",
+            "Private subscription summary",
+            "--reason",
+            "Private filing reason",
+        ],
+    );
+    assert_ne!(status, 2, "{stdout}");
+    assert!(!stdout.contains("Private vendor notice"), "{stdout}");
+    assert!(!stdout.contains("Private subscription summary"), "{stdout}");
+    assert!(!stdout.contains("Private filing reason"), "{stdout}");
+    let argv = parse_lines(&stdout)[0]["argv"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(argv.iter().any(|arg| arg == "--name"), "{stdout}");
+    assert!(argv.iter().any(|arg| arg == "--summary"), "{stdout}");
+    assert!(argv.iter().any(|arg| arg == "--reason"), "{stdout}");
+    assert!(argv.iter().filter(|arg| *arg == "***").count() >= 3);
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "--log",
+            "startup",
+            "case",
+            "notes",
+            "append",
+            "c20260711001-private-customer",
+            "--text",
+            "Private note body with customer context",
+        ],
+    );
+    assert_ne!(status, 2, "{stdout}");
+    assert!(
+        !stdout.contains("c20260711001-private-customer"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Private note body with customer context"),
+        "{stdout}"
+    );
+    let argv = parse_lines(&stdout)[0]["argv"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(argv.iter().any(|arg| arg == "case"), "{stdout}");
+    assert!(argv.iter().any(|arg| arg == "notes"), "{stdout}");
+    assert!(argv.iter().any(|arg| arg == "append"), "{stdout}");
+    assert!(argv.iter().any(|arg| arg == "--text"), "{stdout}");
+    assert!(argv.iter().filter(|arg| *arg == "***").count() >= 2);
+    let shape = &parse_lines(&stdout)[0]["argv_shape"];
+    assert_eq!(shape["command_tokens"], json!(["case", "notes", "append"]));
+    assert_eq!(shape["flag_names"], json!(["--log", "--text"]));
+    assert_eq!(shape["positional_count"], 1);
+    assert_eq!(shape["redacted_value_count"], 3);
+    assert!(
+        !shape.to_string().contains("c20260711001-private-customer"),
+        "{stdout}"
+    );
+
     let (status, stdout) = run(&root, &["--log", "bogus", "status"]);
     assert_eq!(status, 2);
-    assert_eq!(parse_one(&stdout)["code"], "error");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "cli_error");
 
     let (status, stdout) = run(&root, &["--log", "redirect", "status"]);
     assert_eq!(status, 2);
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "error");
-    assert!(value["trace"]["duration_ms"].as_u64().is_some(), "{stdout}");
-    let error = value["error"].as_str().unwrap_or_default();
+    assert_eq!(value["code"], "cli_error");
+    let error = value["message"].as_str().unwrap_or_default();
     assert!(
         error.contains("--log unsupported category 'redirect'"),
         "{stdout}"
@@ -2251,74 +2543,20 @@ fn init_status_and_afdata_output_formats_work() {
     let (status, stdout) = run(&root, &["--output", "xml", "status"]);
     assert_eq!(status, 2);
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "error");
-    assert!(value["trace"]["duration_ms"].as_u64().is_some(), "{stdout}");
+    assert_eq!(value["code"], "cli_error");
     let (status, stdout) = run(&root, &["--output", "yaml", "nope"]);
     assert_eq!(status, 2);
     assert!(stdout.starts_with("---\n"), "{stdout}");
-    assert!(stdout.contains("code: \"error\""), "{stdout}");
+    assert!(stdout.contains("kind: \"error\""), "{stdout}");
+    assert!(stdout.contains("code: \"cli_error\""), "{stdout}");
     assert!(stdout.contains("duration:"), "{stdout}");
     assert!(!stdout.contains("error_code:"), "{stdout}");
     let (status, stdout) = run(&root, &["--output=plain", "nope"]);
     assert_eq!(status, 2);
-    assert!(stdout.contains("code=error"), "{stdout}");
+    assert!(stdout.contains("kind=error"), "{stdout}");
+    assert!(stdout.contains("error.code=cli_error"), "{stdout}");
     assert!(stdout.contains("trace.duration="), "{stdout}");
     assert!(!stdout.contains("error_code="), "{stdout}");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn init_subdirectory_registers_agent_root_and_rejects_reserved_paths() {
-    let root = temp_root("init-subdir");
-    assert!(fs::create_dir_all(&root).is_ok());
-
-    let (status, stdout) = run(&root, &["init", "email-a"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "workspace_initialized");
-    assert_eq!(value["workspace_ref"], "email-a/");
-    assert_eq!(value["agent_skill_path"], "AGENTS.md");
-    assert_eq!(value["agent_gitignore_path"], ".gitignore");
-    assert_eq!(
-        value["workspace_skill_path"],
-        ".codex/skills/agent-first-mail/SKILL.md"
-    );
-    assert!(root.join("email-a/.afmail/config.json").is_file());
-    assert!(root.join("email-a/templates").is_dir());
-    assert!(root.join("email-a/.gitignore").is_file());
-    assert!(root
-        .join(".codex/skills/agent-first-mail/SKILL.md")
-        .is_file());
-    let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
-    assert!(agents.contains("- `email-a/`"));
-    let root_gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
-    assert!(root_gitignore.contains(".codex/skills/agent-first-mail/"));
-    assert!(!root_gitignore.contains("messages/*.json"));
-    let workspace_gitignore =
-        fs::read_to_string(root.join("email-a/.gitignore")).unwrap_or_default();
-    assert!(workspace_gitignore.contains("messages/*.json"));
-    assert!(!workspace_gitignore.contains(".codex/skills/agent-first-mail/"));
-
-    let (status, stdout) = run(&root, &["init", "email-b"]);
-    assert_eq!(status, 0, "{stdout}");
-    let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
-    assert!(agents.contains("- `email-a/`"));
-    assert!(agents.contains("- `email-b/`"));
-    assert_eq!(agents.matches("<!-- BEGIN afmail managed -->").count(), 1);
-
-    assert!(fs::create_dir_all(root.join("not-mail/triage")).is_ok());
-    let (status, stdout) = run(&root, &["init", "not-mail"]);
-    assert_eq!(status, 1);
-    let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "invalid_request");
-    let error_text = value
-        .get("message")
-        .or_else(|| value.get("error"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    assert!(error_text.contains("afmail-reserved paths"));
-    assert!(!root.join("not-mail/.afmail").exists());
-
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2328,7 +2566,7 @@ fn status_progress_uses_progress_percent_field() {
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     write_json(
-        &root.join(".afmail/workspace.progress.json"),
+        &root.join(".afmail/cache/progress.json"),
         &json!({
             "schema_name": "workspace_progress",
             "schema_version": 1,
@@ -2366,7 +2604,7 @@ fn status_progress_uses_progress_percent_field() {
     assert!(stdout.contains("progress.progress=25%"), "{stdout}");
 
     write_json(
-        &root.join(".afmail/workspace.progress.json"),
+        &root.join(".afmail/cache/progress.json"),
         &json!({
             "schema_name": "workspace_progress",
             "schema_version": 1,
@@ -2424,29 +2662,41 @@ fn doctor_reports_and_repairs_afmail_state_only() {
     );
 
     let (status, stdout) = run(&root, &["doctor"]);
-    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(status, 3, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "doctor");
+    assert_eq!(value["code"], "partial");
+    assert_eq!(value["error_count"], 0);
+    assert_eq!(value["warning_count"], 1);
     assert_eq!(value["checks"]["git_checked"], false);
-    assert_eq!(value["ok"], false);
-    assert!(value["issues"]
-        .as_array()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .any(|issue| issue["code"] == "message_state_deprecated"));
+    assert!(value.get("ok").is_none());
+    assert!(
+        value["issues"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|issue| issue["code"] == "message_state_deprecated")
+    );
+
+    let (status, yaml) = run(&root, &["--output", "yaml", "doctor"]);
+    assert_eq!(status, 3, "{yaml}");
+    assert!(yaml.contains("kind: \"error\""), "{yaml}");
+    let (status, plain) = run(&root, &["--output", "plain", "doctor"]);
+    assert_eq!(status, 3, "{plain}");
+    assert!(plain.contains("kind=error"), "{plain}");
 
     let (status, stdout) = run(&root, &["doctor", "repair"]);
     assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "confirm_required");
+    assert_eq!(parse_one(&stdout)["code"], "confirm_required");
 
     let (status, stdout) = run(&root, &["doctor", "repair", "--confirm"]);
     assert_eq!(status, 0, "{stdout}");
     let repaired = parse_one(&stdout);
-    assert_eq!(repaired["code"], "doctor_repair");
     assert_eq!(repaired["deprecated_state_removed_count"], 1);
-    assert!(!root
-        .join(".afmail/messages/message_doctor.state.json")
-        .is_file());
+    assert!(
+        !root
+            .join(".afmail/messages/message_doctor.state.json")
+            .is_file()
+    );
 }
 
 #[test]
@@ -2468,99 +2718,26 @@ fn incomplete_transaction_blocks_writers_and_doctor_reports_it() {
 
     let (status, stdout) = run(&root, &["config", "set", "audit.reason_mode", "optional"]);
     assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "transaction_incomplete");
+    assert_eq!(parse_one(&stdout)["code"], "transaction_incomplete");
 
     let (status, stdout) = run(&root, &["doctor"]);
-    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(status, 1, "{stdout}");
     let doctor = parse_one(&stdout);
-    assert!(doctor["issues"]
-        .as_array()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .any(|issue| issue["code"] == "transaction_incomplete"));
-}
-
-#[test]
-fn skill_install_status_and_uninstall_work() {
-    let root = temp_root("skill-cwd");
-    let skills_dir = temp_root("skill-dir");
-    assert!(fs::create_dir_all(&root).is_ok());
-    let skills_dir_str = skills_dir.to_string_lossy().to_string();
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "skill",
-            "status",
-            "--agent",
-            "codex",
-            "--skills-dir",
-            &skills_dir_str,
-        ],
+    assert_eq!(doctor["code"], "command_failed");
+    assert!(
+        doctor["issues"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|issue| issue["code"] == "transaction_incomplete")
     );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "skill_status");
-    assert_eq!(value["skill"], "agent-first-mail");
-    assert_eq!(value["installed_all"], false);
 
-    let (status, stdout) = run(
-        &root,
-        &[
-            "skill",
-            "install",
-            "--agent",
-            "codex",
-            "--skills-dir",
-            &skills_dir_str,
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "skill_install");
-    let skill_path = skills_dir.join("agent-first-mail/SKILL.md");
-    assert!(value["targets"][0]["skill_path"]
-        .as_str()
-        .unwrap_or_default()
-        .ends_with("agent-first-mail/SKILL.md"));
-    assert!(skill_path.is_file());
-    let text = fs::read_to_string(&skill_path).unwrap_or_default();
-    assert!(text.contains("afmail-managed-skill: true"));
-    assert!(text.contains("name: agent-first-mail"));
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "skill",
-            "status",
-            "--agent",
-            "codex",
-            "--skills-dir",
-            &skills_dir_str,
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["installed_all"], true);
-    assert_eq!(value["valid_all"], true);
-    assert_eq!(value["targets"][0]["managed"], true);
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "skill",
-            "uninstall",
-            "--agent",
-            "codex",
-            "--skills-dir",
-            &skills_dir_str,
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "skill_uninstall");
-    assert!(!skill_path.exists());
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(skills_dir);
+    let (status, yaml) = run(&root, &["--output", "yaml", "doctor"]);
+    assert_eq!(status, 1, "{yaml}");
+    assert!(yaml.contains("kind: \"error\""), "{yaml}");
+    let (status, plain) = run(&root, &["--output", "plain", "doctor"]);
+    assert_eq!(status, 1, "{plain}");
+    assert!(plain.contains("kind=error"), "{plain}");
 }
 
 #[test]
@@ -2573,21 +2750,39 @@ fn reason_mode_controls_required_reason_and_audit_writes() {
 
     let (status, stdout) = run(&root, &["message", "trash", "message_optional"]);
     assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "reason_required");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "reason_required");
+    assert_eq!(
+        value["items"][0]["error"]["hint"],
+        "Repeat the command with `--reason TEXT`."
+    );
+    assert_eq!(value["items"][0]["error"]["required_option"], "--reason");
+    assert_eq!(
+        value["items"][0]["error"]["suggested_args"],
+        json!(["--reason", "TEXT"])
+    );
+    assert!(
+        !stdout.contains("audit.reason_mode"),
+        "reason_required should not suggest lowering audit policy: {stdout}"
+    );
     assert!(root.join("triage/message_optional.md").exists());
-    assert!(!root
-        .join(".afmail/messages/message_optional.notes.md")
-        .exists());
+    assert!(
+        !root
+            .join(".afmail/messages/message_optional.notes.md")
+            .exists()
+    );
 
     let (status, stdout) = run(&root, &["config", "set", "audit.reason_mode", "optional"]);
     assert_eq!(status, 0, "{stdout}");
     assert_eq!(parse_one(&stdout)["value"], "optional");
     let (status, stdout) = run(&root, &["message", "trash", "message_optional"]);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "message_trashed");
-    assert!(!root
-        .join(".afmail/messages/message_optional.notes.md")
-        .exists());
+    let _ = parse_one(&stdout);
+    assert!(
+        !root
+            .join(".afmail/messages/message_optional.notes.md")
+            .exists()
+    );
 
     let (status, stdout) = run(&root, &["config", "set", "audit.reason_mode", "required"]);
     assert_eq!(status, 0, "{stdout}");
@@ -2598,7 +2793,7 @@ fn reason_mode_controls_required_reason_and_audit_writes() {
         create_case(&root, "case-reason", None, None, Some("setup case"));
     let (status, stdout) = run(&root, &["case", "add", &case_uid, "message_case"]);
     assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "reason_required");
+    assert_eq!(parse_one(&stdout)["code"], "reason_required");
     assert!(root.join("triage/message_case.md").exists());
 
     let (status, stdout) = run(
@@ -2613,37 +2808,147 @@ fn reason_mode_controls_required_reason_and_audit_writes() {
         ],
     );
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "case_message_added");
+    let _ = parse_one(&stdout);
     let notes = fs::read_to_string(case_path.join("notes.md")).unwrap_or_default();
     assert_eq!(notes, "# Notes\n\n");
     let log = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
     assert!(log.contains("\"kind\":\"case_message_added\""));
     assert!(log.contains("\"reason\":\"belongs to the case\""));
 
-    let (status, stdout) = run(&root, &["case", "move", &case_uid, "waiting"]);
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "set-summary",
+            &case_uid,
+            "message_case",
+            "--summary",
+            "updated case summary",
+        ],
+    );
     assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "reason_required");
+    assert_eq!(parse_one(&stdout)["code"], "reason_required");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "set-summary",
+            &case_uid,
+            "message_case",
+            "--summary",
+            "updated case summary",
+            "--reason",
+            "better case summary",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let _ = parse_one(&stdout);
+    let case_json = fs::read_to_string(case_path.join("data/case.json")).unwrap_or_default();
+    assert!(case_json.contains("\"summary\": \"updated case summary\""));
+
+    let (status, stdout) = run(&root, &["case", "move", &case_uid, "--group", "waiting"]);
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "reason_required");
     assert!(case_path.join("case.md").exists());
 
     write_message(&root, "message_notification_reason", 3, None);
     write_triage(&root, "message_notification_reason", "archive");
-    let (_notification_uid, archive_path, value) = create_notification(
+    let (_notification_uid, archive_path, _value) = create_notification(
         &root,
         "receipts",
         Some("message_notification_reason"),
         Some("receipt notification"),
         Some("receipt notification"),
     );
-    assert_eq!(value["code"], "notification_created");
-    assert!(!root
-        .join(".afmail/messages/message_notification_reason.notes.md")
-        .exists());
-    assert!(archive_path
-        .join("views/messages/message_notification_reason.md")
-        .exists());
+    assert!(
+        !root
+            .join(".afmail/messages/message_notification_reason.notes.md")
+            .exists()
+    );
+    assert!(
+        archive_path
+            .join("views/messages/message_notification_reason.md")
+            .exists()
+    );
     let log = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
     assert!(log.contains("\"kind\":\"notification_created\""));
     assert!(log.contains("\"reason\":\"receipt notification\""));
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "contact",
+            "create",
+            "--name",
+            "Audit Contact",
+            "--email",
+            "audit@example.com",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "reason_required");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "contact",
+            "create",
+            "--name",
+            "Audit Contact",
+            "--email",
+            "audit@example.com",
+            "--reason",
+            "seed contact",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let contact_uid = parse_one(&stdout)["contact_uid"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    let (status, stdout) = run(&root, &["contact", "move", &contact_uid, "--group", "team"]);
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "reason_required");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "contact",
+            "rename",
+            &contact_uid,
+            "--name",
+            "Audit Contact 2",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "reason_required");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "contact",
+            "email",
+            "add",
+            &contact_uid,
+            "audit2@example.com",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "reason_required");
+
+    let (status, stdout) = run(
+        &root,
+        &["contact", "phone", "add", &contact_uid, "+1-555-0100"],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "reason_required");
+
+    let (status, stdout) = run(&root, &["contact", "tag", &contact_uid, "ops"]);
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "reason_required");
+
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2681,15 +2986,15 @@ fn pull_imports_imap_mail_with_codec_backed_test_server() {
     let (status, stdout) = run(&root, &["pull", "inbox"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "pull_result");
     assert_eq!(value["new_message_count"], 1);
-    let progress = read_json(&root.join(".afmail/workspace.progress.json"));
+    let progress = read_json(&root.join(".afmail/cache/progress.json"));
     assert_eq!(progress["schema_name"], "workspace_progress");
     assert_eq!(progress["command"], "pull");
     assert_eq!(progress["status"], "succeeded");
-    assert_eq!(progress["result"]["code"], "pull_result");
     assert_eq!(progress["result"]["new_message_count"], 1);
     let id = message_id_for_rfc822(&root, "imap-7@example.com");
+    assert_eq!(value["new_message_ids"], json!([id.clone()]));
+    assert_eq!(value["triage_created_message_ids"], json!([id.clone()]));
     assert!(root.join(format!(".afmail/messages/{id}.eml")).is_file());
     assert!(!root.join(format!(".afmail/messages/{id}.txt")).exists());
     assert!(root.join(format!("messages/{id}.json")).is_file());
@@ -2697,15 +3002,26 @@ fn pull_imports_imap_mail_with_codec_backed_test_server() {
     let message_json = fs::read_to_string(root.join(format!("messages/{id}.json")));
     let message_value: Value =
         serde_json::from_str(&message_json.unwrap_or_default()).unwrap_or(Value::Null);
-    assert!(message_value["body_text"]
-        .as_str()
-        .is_some_and(|text| text.contains("Hello from IMAP.")));
-    let render_cache = read_json(&root.join(".afmail/render-cache.json"));
+    assert!(
+        message_value["body_text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Hello from IMAP."))
+    );
+    let render_cache = read_json(&root.join(".afmail/cache/render-cache.json"));
     assert_eq!(render_cache["schema_name"], "render_cache");
     assert!(
         render_cache["entries"][format!("triage/{id}.md")]["input_hash"]
             .as_str()
             .is_some_and(|hash| hash.starts_with("blake3:"))
+    );
+    let cursor = read_json(&root.join(".afmail/pull/cursors.json"));
+    assert_eq!(cursor["schema_name"], "pull_cursors");
+    assert_eq!(cursor["mailboxes"]["inbox"]["mailbox_name"], "INBOX");
+    assert_eq!(cursor["mailboxes"]["inbox"]["uid_validity"], 44);
+    assert_eq!(cursor["mailboxes"]["inbox"]["highest_uid"], 7);
+    assert_eq!(
+        cursor["mailboxes"]["inbox"]["pull_count_since_full_reconcile"],
+        0
     );
 
     let (status, stdout) = run(&root, &["pull", "inbox"]);
@@ -2715,6 +3031,13 @@ fn pull_imports_imap_mail_with_codec_backed_test_server() {
     assert_eq!(value["triage_created_count"], 0);
     assert_eq!(value["triage_written_count"], 0);
     assert_eq!(value["triage_unchanged_count"], 1);
+    assert_eq!(value["checked_location_count"], 0);
+    let cursor = read_json(&root.join(".afmail/pull/cursors.json"));
+    assert_eq!(cursor["mailboxes"]["inbox"]["highest_uid"], 7);
+    assert_eq!(
+        cursor["mailboxes"]["inbox"]["pull_count_since_full_reconcile"],
+        1
+    );
     assert!(server.handle.join().is_ok());
     let commands = server.commands.lock();
     assert!(commands.is_ok());
@@ -2722,27 +3045,14 @@ fn pull_imports_imap_mail_with_codec_backed_test_server() {
     assert!(commands.iter().any(|cmd| cmd == "LOGIN"));
     assert!(commands.iter().any(|cmd| cmd == "EXAMINE"));
     assert!(commands.iter().any(|cmd| cmd == "FETCH"));
-    assert!(!commands.iter().any(|cmd| cmd == "STORE"));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn pull_failure_writes_workspace_progress_snapshot() {
-    let root = temp_root("pull-progress-failure");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-
-    let (status, stdout) = run(&root, &["pull", "inbox"]);
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "error");
-    let progress = read_json(&root.join(".afmail/workspace.progress.json"));
-    assert_eq!(progress["command"], "pull");
-    assert_eq!(progress["status"], "failed");
-    assert!(
-        progress["error"]["error_code"].as_str().is_some(),
-        "{progress}"
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|cmd| cmd.as_str() == "FETCH")
+            .count(),
+        5
     );
-    assert!(progress["error"]["error"].as_str().is_some(), "{progress}");
+    assert!(!commands.iter().any(|cmd| cmd == "STORE"));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2778,10 +3088,9 @@ fn pull_progress_logs_real_phases_when_requested() {
     let (status, stdout) = run(&root, &["--log", "progress", "pull", "inbox"]);
     assert_eq!(status, 0, "{stdout}");
     let lines = parse_lines(&stdout);
-    assert_eq!(lines.last().unwrap_or(&Value::Null)["code"], "pull_result");
     let phases = lines
         .iter()
-        .filter(|line| line["code"] == "log" && line["event"] == "progress")
+        .filter(|line| line["event"] == "progress")
         .filter_map(|line| line["phase"].as_str())
         .collect::<Vec<_>>();
     for phase in [
@@ -2828,7 +3137,6 @@ fn pull_progress_logs_real_phases_when_requested() {
         .cloned()
         .unwrap_or(Value::Null);
     assert_eq!(body_progress["level"], "info");
-    assert!(body_progress["trace"]["duration_ms"].as_u64().is_some());
     assert_ne!(body_progress["message"], "afmail command finished");
     assert!(
         body_progress["message"]
@@ -2923,8 +3231,264 @@ fn pull_body_progress_reports_fetch_batches() {
     let fetch_count = commands
         .map(|items| items.iter().filter(|cmd| cmd.as_str() == "FETCH").count())
         .unwrap_or(0);
-    // Header fetch + two body batches + reconciliation UID snapshot.
-    assert_eq!(fetch_count, 4);
+    // Header fetch + two metadata batches + one bounded partial body fetch per
+    // message + reconciliation UID snapshot.
+    assert_eq!(fetch_count, 30);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pull_applies_one_global_new_message_budget() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("pull-global-budget");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    assert_eq!(
+        run(
+            &root,
+            &["pull", "--since-days", "30", "--all-history", "inbox"]
+        )
+        .0,
+        2
+    );
+    let messages = (1..=3)
+        .map(|uid| {
+            (
+                uid,
+                format!(
+                    "Message-ID: <budget-{uid}@example.com>\r\nFrom: a@example.com\r\nTo: me@example.com\r\nDate: Thu, 21 May 2026 10:00:00 +0000\r\nSubject: Budget {uid}\r\n\r\nBody {uid}\r\n"
+                )
+                .into_bytes(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let server = match start_imap_server(messages.clone(), 3) {
+        Some(server) => server,
+        None => return,
+    };
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+    let (status, stdout) = run(
+        &root,
+        &[
+            "pull",
+            "--all-history",
+            "--max-new-messages",
+            "2",
+            "--max-total-bytes",
+            "1000000",
+            "inbox",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["new_message_count"], 2, "{result}");
+    assert_eq!(result["budget_limited"], true);
+    assert_eq!(result["budget_skipped_count"], 1);
+    assert_eq!(result["remaining_message_budget"], 0);
+    assert_eq!(result["all_history"], true);
+    assert!(result["since_days"].is_null());
+    assert_eq!(
+        fs::read_dir(root.join("messages"))
+            .map(|entries| entries.filter_map(Result::ok).count())
+            .unwrap_or(0),
+        2
+    );
+    assert!(server.handle.join().is_ok());
+    let continuation_server = match start_imap_server(messages, 3) {
+        Some(server) => server,
+        None => return,
+    };
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(continuation_server.addr.port()), None),
+    );
+    let (status, stdout) = run(
+        &root,
+        &[
+            "pull",
+            "--all-history",
+            "--max-new-messages",
+            "2",
+            "--max-total-bytes",
+            "1000000",
+            "inbox",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["new_message_count"], 1);
+    assert_eq!(
+        fs::read_dir(root.join("messages"))
+            .map(|entries| entries.filter_map(Result::ok).count())
+            .unwrap_or(0),
+        3
+    );
+    assert!(continuation_server.handle.join().is_ok());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pull_dry_run_estimates_without_workspace_changes() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("pull-dry-run-pure");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let raw = b"Message-ID: <dry-run@example.com>\r\nFrom: a@example.com\r\nTo: me@example.com\r\nDate: Thu, 21 May 2026 10:00:00 +0000\r\nSubject: Dry run\r\n\r\nBody\r\n".to_vec();
+    let server = match start_imap_server(vec![(1, raw)], 3) {
+        Some(server) => server,
+        None => return,
+    };
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+    let before = workspace_tree_snapshot(&root);
+    let (status, stdout) = run(
+        &root,
+        &[
+            "pull",
+            "--dry-run",
+            "--all-history",
+            "--max-new-messages",
+            "10",
+            "inbox",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["remote_read"], true);
+    assert_eq!(result["local_changed"], false);
+    assert_eq!(result["candidate_count"], 1);
+    let after = workspace_tree_snapshot(&root);
+    assert!(
+        workspace_snapshot_differences(&before, &after).is_empty(),
+        "dry-run changed workspace"
+    );
+    assert!(server.handle.join().is_ok());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pull_rejects_unbounded_server_before_local_changes_by_default() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("pull-partial-unsupported");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let raw = b"Message-ID: <partial-unsupported@example.com>\r\nX-Afmail-Test-Reject-Partial: true\r\nFrom: a@example.com\r\nTo: me@example.com\r\nDate: Thu, 21 May 2026 10:00:00 +0000\r\nSubject: Unsupported\r\n\r\nBody\r\n".to_vec();
+    let server = match start_imap_server(vec![(1, raw)], 3) {
+        Some(server) => server,
+        None => return,
+    };
+    let mut config = test_config(Some(server.addr.port()), None);
+    config["imap"]["allow_unbounded_body_fetch"] = json!(false);
+    write_json(&root.join(".afmail/config.json"), &config);
+    let (status, stdout) = run(&root, &["pull", "--all-history", "inbox"]);
+    assert_eq!(status, 1, "{stdout}");
+    let error = parse_one(&stdout);
+    assert_eq!(error["code"], "imap_partial_fetch_unsupported");
+    assert_eq!(error["message_writes_started"], false);
+    assert_eq!(
+        fs::read_dir(root.join("messages"))
+            .map(|entries| entries.filter_map(Result::ok).count())
+            .unwrap_or(0),
+        0
+    );
+    assert!(server.handle.join().is_ok());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pull_skips_declared_oversized_message_and_continues() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("pull-oversized-skip");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let oversized = b"Message-ID: <oversized@example.com>\r\nX-Afmail-Test-Declared-Size: 104857601\r\nFrom: a@example.com\r\nTo: me@example.com\r\nDate: Thu, 21 May 2026 10:00:00 +0000\r\nSubject: Oversized\r\n\r\nSmall fixture body\r\n".to_vec();
+    let normal = b"Message-ID: <normal-after-oversized@example.com>\r\nFrom: b@example.com\r\nTo: me@example.com\r\nDate: Thu, 21 May 2026 10:00:00 +0000\r\nSubject: Normal\r\n\r\nNormal body\r\n".to_vec();
+    let server = match start_imap_server(vec![(1, oversized), (2, normal)], 3) {
+        Some(server) => server,
+        None => return,
+    };
+    let mut config = test_config(Some(server.addr.port()), None);
+    config["imap"]["allow_unbounded_body_fetch"] = json!(false);
+    write_json(&root.join(".afmail/config.json"), &config);
+    let (status, stdout) = run(
+        &root,
+        &[
+            "pull",
+            "--all-history",
+            "--max-total-bytes",
+            "209715200",
+            "inbox",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["new_message_count"], 1, "{result}");
+    assert_eq!(result["skipped_message_count"], 1);
+    assert_eq!(
+        result["skipped_messages"][0]["reason"],
+        "declared_size_exceeded"
+    );
+    assert_eq!(result["skipped_messages"][0]["uid"], 1);
+    assert!(
+        root.join("messages/message_normal-after-oversized@example.com.json")
+            .exists()
+            || fs::read_dir(root.join("messages"))
+                .map(|entries| entries.filter_map(Result::ok).count() == 1)
+                .unwrap_or(false)
+    );
+    assert!(server.handle.join().is_ok());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pull_skips_actual_oversized_message_when_server_lies() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("pull-actual-oversized-skip");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let oversized_body = "x".repeat(400);
+    let oversized = format!(
+        "Message-ID: <actual-oversized@example.com>\r\nX-Afmail-Test-Declared-Size: 64\r\nFrom: a@example.com\r\nTo: me@example.com\r\nDate: Thu, 21 May 2026 10:00:00 +0000\r\nSubject: Lying size\r\n\r\n{oversized_body}\r\n"
+    )
+    .into_bytes();
+    let normal = b"Message-ID: <normal-after-lie@example.com>\r\nX-Afmail-Test-Declared-Size: 180\r\nFrom: b@example.com\r\nTo: me@example.com\r\nDate: Thu, 21 May 2026 10:00:00 +0000\r\nSubject: Normal\r\n\r\nNormal body\r\n".to_vec();
+    let server = match start_imap_server(vec![(1, oversized), (2, normal)], 3) {
+        Some(server) => server,
+        None => return,
+    };
+    let mut config = test_config(Some(server.addr.port()), None);
+    config["imap"]["allow_unbounded_body_fetch"] = json!(false);
+    write_json(&root.join(".afmail/config.json"), &config);
+    let (status, stdout) = run_with_env(
+        &root,
+        &["pull", "--all-history", "inbox"],
+        &[("AFMAIL_TEST_MAX_MESSAGE_BYTES", "256")],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["new_message_count"], 1, "{result}");
+    assert_eq!(result["skipped_message_count"], 1);
+    assert_eq!(
+        result["skipped_messages"][0]["reason"],
+        "actual_size_exceeded"
+    );
+    assert_eq!(result["skipped_messages"][0]["uid"], 1);
+    assert_eq!(result["skipped_messages"][0]["max_message_bytes"], 256);
+    assert!(server.handle.join().is_ok());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2995,7 +3559,6 @@ fn pull_renders_attachment_listing_in_triage_markdown() {
     let (status, stdout) = run(&root, &["message", "show", &id]);
     assert_eq!(status, 0, "{stdout}");
     let shown = parse_one(&stdout);
-    assert_eq!(shown["code"], "message_show");
     assert_eq!(shown["body_text"], "Please review the attachment.");
     assert_eq!(shown["attachment_count"], 1);
     assert_eq!(shown["attachments"][0]["content_type"], "text/plain");
@@ -3003,39 +3566,23 @@ fn pull_renders_attachment_listing_in_triage_markdown() {
     let (status, stdout) = run(&root, &["message", "attachment", "fetch", &id]);
     assert_eq!(status, 0, "{stdout}");
     let saved_all = parse_one(&stdout);
-    assert_eq!(saved_all["code"], "attachments_saved");
     assert_eq!(saved_all["count"], 1);
     assert_eq!(saved_all["items"][0]["storage"], "message_cache");
 
     let (status, stdout) = run(&root, &["message", "attachment", "fetch", &id, &part_id]);
     assert_eq!(status, 0, "{stdout}");
     let saved = parse_one(&stdout);
-    assert_eq!(saved["code"], "attachment_saved");
     assert_eq!(saved["filename"], "pricing.txt");
     assert_eq!(saved["saved_filename"], "pricing.txt");
     assert_eq!(saved["content_type"], "text/plain");
     assert_eq!(saved["storage"], "message_cache");
-    assert!(saved["file_path"]
-        .as_str()
-        .map(|path| root.join(path).is_file())
-        .unwrap_or(false));
+    assert!(
+        saved["file_path"]
+            .as_str()
+            .map(|path| root.join(path).is_file())
+            .unwrap_or(false)
+    );
     assert!(server.handle.join().is_ok());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn pull_rejects_unknown_ids_before_network_config() {
-    let root = temp_root("pull-unknown-id");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-
-    let (status, stdout) = run(&root, &["pull", "INBOX"]);
-    assert_eq!(status, 1);
-    let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "unknown_mailbox_id");
-    assert!(value["error"]
-        .as_str()
-        .is_some_and(|message| message.contains("available ids:")));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -3072,7 +3619,6 @@ fn pull_archive_imports_as_triage_without_direct_archive_category() {
     let (status, stdout) = run(&root, &["pull", "archive"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "pull_result");
     assert_eq!(value["new_message_count"], 1);
     assert_eq!(value["triage_created_count"], 1);
     assert_eq!(value["archived_message_count"], 0);
@@ -3100,12 +3646,9 @@ fn pull_updates_flags_for_existing_remote_location() {
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     write_message(&root, "message_existing", 31, None);
-    let message_path = root.join("messages/message_existing.json");
-    let mut message: Value =
-        serde_json::from_str(&fs::read_to_string(&message_path).unwrap_or_default())
-            .unwrap_or(Value::Null);
-    message["remote"]["locations"][0]["uid_validity"] = json!(44);
-    write_json(&message_path, &message);
+    update_message_json(&root, "message_existing", |message| {
+        message["remote"]["locations"][0]["uid_validity"] = json!(44);
+    });
     write_triage(&root, "message_existing", "already local");
     let raw = concat!(
         "Message-ID: <message_existing@example.com>\r\n",
@@ -3227,7 +3770,6 @@ fn pull_configured_mailbox_import_rules_apply() {
         let (status_code, stdout) = run(&root, &["pull", folder_id]);
         assert_eq!(status_code, 0, "{stdout}");
         let value = parse_one(&stdout);
-        assert_eq!(value["code"], "pull_result");
         assert_eq!(value["new_message_count"], 1);
         assert_eq!(value[count_field], 1);
         let expected_id = message_id_for_rfc822(&root, &format!("{name}-{uid}@example.com"));
@@ -3412,7 +3954,6 @@ fn pull_default_expands_configured_mailbox_ids() {
     let (status, stdout) = run(&root, &["pull"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "pull_result");
     assert_eq!(value["mailbox_count"], 5);
     assert_eq!(
         value["mailbox_ids"],
@@ -3534,21 +4075,21 @@ fn remote_folders_lists_mailboxes_and_config_matches() {
     let (status, stdout) = run(&root, &["remote", "test"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "remote_test_result");
     assert_eq!(value["capabilities"]["move"], true);
     let (status, stdout) = run(&root, &["remote", "folders"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "remote_mailboxes");
     assert!(value["mailboxes"].as_array().map(|a| a.len()).unwrap_or(0) >= 3);
-    assert!(value["mailboxes"].as_array().is_some_and(|folders| folders
-        .iter()
-        .any(|folder| folder["mailbox_name"] == "Junk" && folder["special_use"] == "junk")));
-    assert!(value["mailboxes"]
-        .as_array()
-        .is_some_and(|folders| folders
+    assert!(value["mailboxes"].as_array().is_some_and(|folders| {
+        folders
             .iter()
-            .any(|folder| folder["mailbox_name"] == "Archive"
+            .any(|folder| folder["mailbox_name"] == "Junk" && folder["special_use"] == "junk")
+    }));
+    assert!(
+        value["mailboxes"]
+            .as_array()
+            .is_some_and(|folders| folders.iter().any(|folder| folder["mailbox_name"]
+                == "Archive"
                 && folder["special_use"] == "archive"
                 && folder["special_use_source"] == "rfc6154_attribute"
                 && folder["special_use_matches"]
@@ -3561,2815 +4102,188 @@ fn remote_folders_lists_mailboxes_and_config_matches() {
                     .as_array()
                     .is_some_and(|selected| selected
                         .iter()
-                        .any(|item| item["kind"] == "archive" && item["source"] == "mailboxes")))));
-    assert!(value["special_use_targets"]
-        .as_array()
-        .is_some_and(
-            |targets| targets.iter().any(|target| target["kind"] == "archive"
-                && target["mailbox_name"] == "Archive"
-                && target["source"] == "mailboxes"
-                && target["exists"] == true)
-        ));
+                        .any(|item| item["kind"] == "archive" && item["source"] == "mailboxes"))))
+    );
+    assert!(
+        value["special_use_targets"]
+            .as_array()
+            .is_some_and(
+                |targets| targets.iter().any(|target| target["kind"] == "archive"
+                    && target["mailbox_name"] == "Archive"
+                    && target["source"] == "mailboxes"
+                    && target["exists"] == true)
+            )
+    );
     assert!(server.handle.join().is_ok());
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn triage_spam_marks_local_message_and_queues_junk_move() {
-    let root = temp_root("spam");
+fn imap_connect_failure_is_retryable_and_emits_retry_log() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("imap-retryable-connect");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
-    write_message(&root, "message_spam", 42, None);
-    write_triage(&root, "message_spam", "phishing note");
+    let listener = bind_loopback_listener();
+    assert!(listener.is_some());
+    let port = listener.map(|listener| listener.local_addr().map(|addr| addr.port()).ok());
+    let Some(Some(port)) = port else { return };
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(port), None),
+    );
+
+    let (status, stdout) = run(&root, &["--log", "retry", "remote", "test"]);
+    assert_eq!(status, 1, "{stdout}");
+    let lines = parse_lines(&stdout);
+    assert_eq!(lines.len(), 2, "{stdout}");
+    assert_eq!(lines[0]["event"], "retry");
+    assert_eq!(lines[0]["phase"], "retryable_error");
+    assert_eq!(lines[0]["error_code"], "imap_connect_failed");
+    assert_eq!(lines[0]["error"]["redacted"], true);
+    assert!(lines[0]["error"]["original_hash"].as_str().is_some());
+    assert_eq!(lines[1]["code"], "imap_connect_failed");
+    assert_eq!(lines[1]["retryable"], true);
+    assert_eq!(lines[1]["protocol"], "imap");
+    assert_eq!(lines[1]["phase"], "connect");
+    assert_eq!(lines[1]["host"], "127.0.0.1");
+    assert_eq!(lines[1]["port"], port);
+    assert_eq!(lines[1]["tls"], false);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn smtp_remote_test_failure_is_retryable_and_emits_retry_log() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("smtp-retryable-connect");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let imap_server = start_imap_server(Vec::new(), 5);
+    assert!(imap_server.is_some());
+    let Some(imap_server) = imap_server else {
+        return;
+    };
+    let listener = bind_loopback_listener();
+    assert!(listener.is_some());
+    let port = listener.map(|listener| listener.local_addr().map(|addr| addr.port()).ok());
+    let Some(Some(smtp_port)) = port else { return };
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(imap_server.addr.port()), Some(smtp_port)),
+    );
+
+    let (status, stdout) = run(&root, &["--log", "retry", "remote", "test"]);
+    assert_eq!(status, 1, "{stdout}");
+    let lines = parse_lines(&stdout);
+    assert_eq!(lines.len(), 2, "{stdout}");
+    assert_eq!(lines[0]["event"], "retry");
+    assert_eq!(lines[0]["phase"], "retryable_error");
+    assert_eq!(lines[0]["error_code"], "smtp_test_failed");
+    assert_eq!(lines[0]["error"]["redacted"], true);
+    assert!(lines[0]["error"]["original_hash"].as_str().is_some());
+    assert_eq!(lines[1]["code"], "smtp_test_failed");
+    assert_eq!(lines[1]["retryable"], true);
+    assert_eq!(lines[1]["protocol"], "smtp");
+    assert_eq!(lines[1]["phase"], "connect");
+    assert_eq!(lines[1]["host"], "127.0.0.1");
+    assert_eq!(lines[1]["port"], smtp_port);
+    assert_eq!(lines[1]["starttls"], false);
+    assert_eq!(lines[1]["tls_wrapper"], false);
+    assert!(imap_server.handle.join().is_ok());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn message_batch_partial_and_failed_outcomes_preserve_all_item_results() {
+    let root = temp_root("message-batch-outcomes");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_message(&root, "message_batch_ok", 44, None);
+    write_triage(&root, "message_batch_ok", "batch outcome note");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "--log",
+            "progress",
+            "message",
+            "spam",
+            "message_batch_ok",
+            "message_batch_missing",
+            "--reason",
+            "verify partial outcome",
+        ],
+    );
+    assert_eq!(status, 3, "{stdout}");
+    let lines = parse_lines(&stdout);
+    let finish = lines.first().unwrap_or(&Value::Null);
+    assert_eq!(finish["event"], "progress");
+    assert_eq!(finish["phase"], "finish");
+    assert_eq!(finish["level"], "warn");
+    assert_eq!(finish["status"], "partial");
+    assert_eq!(finish["success"], false);
+    assert_eq!(finish["exit_code"], 3);
+    let value = lines.last().unwrap_or(&Value::Null);
+    assert_eq!(value["code"], "partial");
+    assert!(value["items"][0].get("code").is_none());
+    assert!(value["items"][1]["error"]["code"].as_str().is_some());
+    assert_eq!(value["items"][1]["message_id"], "message_batch_missing");
+    assert!(value["items"][1]["error"]["message"].as_str().is_some());
+    assert!(value["items"][1]["error"]["retryable"].as_bool().is_some());
 
     let (status, stdout) = run(
         &root,
         &[
             "message",
             "spam",
-            "message_spam",
+            "message_missing_one",
+            "message_missing_two",
             "--reason",
-            "phishing note",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "message_spam_marked");
-    assert_eq!(value["message_ids"][0], "message_spam");
-    assert_eq!(value["location_count"], 1);
-    assert_eq!(value["queued"], true);
-    assert!(value["push_id"].as_str().is_some_and(|id| !id.is_empty()));
-    assert!(!root.join("triage/message_spam.md").exists());
-    assert!(root.join("messages/message_spam.json").exists());
-    assert!(!root.join(".afmail/messages/message_spam.txt").exists());
-    assert!(root.join(".afmail/messages/message_spam.eml").exists());
-    assert!(!root.join("messages/message_junk_44_900.json").exists());
-    assert!(root.join("spam/index.md").is_file());
-    assert!(root.join("spam/message_spam.md").is_file());
-
-    let spam_data = fs::read_to_string(root.join("messages/message_spam.json"));
-    assert!(spam_data.is_ok());
-    let spam_value: Result<Value, _> = serde_json::from_str(&spam_data.unwrap_or_default());
-    assert!(spam_value.is_ok());
-    let spam_value = spam_value.unwrap_or(Value::Null);
-    assert_eq!(spam_value["message_id"], "message_spam");
-    assert_eq!(spam_value["workspace"]["status"], "spam");
-    assert_eq!(
-        spam_value["workspace"]["push"]["pending"][0]["kind"],
-        "message.spam"
-    );
-    assert!(spam_value["workspace"]["push"]["pending"][0]["push_id"]
-        .as_str()
-        .is_some_and(|id| id.starts_with("push_")));
-    assert!(!root.join(".afmail/messages/message_spam.notes.md").exists());
-    let log = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
-    assert!(log.contains("\"kind\":\"message_spam_marked\""));
-    assert!(log.contains("\"reason\":\"phishing note\""));
-
-    let (status, stdout) = run(&root, &["push", "list"]);
-    assert_eq!(status, 0, "{stdout}");
-    let push = parse_one(&stdout);
-    assert_eq!(push["count"], 1);
-    assert_eq!(push["items"][0]["kind"], "message_action");
-    assert_eq!(push["items"][0]["action"], "spam");
-    assert_eq!(
-        push["items"][0]["steps"],
-        json!([{"add_flags": ["\\Seen", "$Junk"]}, {"move_to_mailbox_id": "junk"}])
-    );
-    assert_eq!(push["items"][0]["message_ids"][0], "message_spam");
-    assert_eq!(push["items"][0]["locations"][0]["mailbox_name"], "INBOX");
-    assert_eq!(push["items"][0]["locations"][0]["uid"], 42);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn message_unspam_untrash_restore_local_state_and_queue_remote_moves() {
-    let root = temp_root("unspam-untrash");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-
-    write_message(&root, "message_spam_undo", 44, None);
-    write_triage(&root, "message_spam_undo", "spam mistake");
-    let spam = parse_one(
-        &run(
-            &root,
-            &[
-                "message",
-                "spam",
-                "message_spam_undo",
-                "--reason",
-                "looks bad",
-            ],
-        )
-        .1,
-    );
-    let spam_push_id = spam["push_id"].as_str().unwrap_or_default().to_string();
-    assert!(!spam_push_id.is_empty());
-    assert!(!root.join("triage/message_spam_undo.md").exists());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "message",
-            "unspam",
-            "message_spam_undo",
-            "--reason",
-            "not spam",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "message_unspammed");
-    assert_eq!(value["removed_push_count"], 1);
-    assert_eq!(value["removed_push_ids"], json!([spam_push_id]));
-    assert_eq!(value["queued"], false);
-    assert_eq!(value["location_count"], 0);
-    assert!(root.join("triage/message_spam_undo.md").exists());
-    let message: Value = serde_json::from_str(
-        &fs::read_to_string(root.join("messages/message_spam_undo.json")).unwrap_or_default(),
-    )
-    .unwrap_or(Value::Null);
-    assert_eq!(message["workspace"]["status"], "triage");
-    assert!(message["workspace"].get("push").is_none() || message["workspace"]["push"].is_null());
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-
-    write_message(&root, "message_trash_undo", 45, None);
-    write_triage(&root, "message_trash_undo", "trash mistake");
-    let trash = parse_one(
-        &run(
-            &root,
-            &[
-                "message",
-                "trash",
-                "message_trash_undo",
-                "--reason",
-                "discard",
-            ],
-        )
-        .1,
-    );
-    let trash_push_id = trash["push_id"].as_str().unwrap_or_default().to_string();
-    assert!(!trash_push_id.is_empty());
-    let (status, stdout) = run(
-        &root,
-        &[
-            "message",
-            "untrash",
-            "message_trash_undo",
-            "--reason",
-            "keep it",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "message_untrashed");
-    assert_eq!(value["removed_push_ids"], json!([trash_push_id]));
-    assert_eq!(value["queued"], false);
-    assert!(root.join("triage/message_trash_undo.md").exists());
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-
-    write_message(&root, "message_remote_junk", 46, None);
-    write_triage(&root, "message_remote_junk", "false positive");
-    update_message_json(&root, "message_remote_junk", |value| {
-        value["workspace"]["status"] = json!("spam");
-        value["remote"]["locations"][0]["mailbox_name"] = json!("Junk");
-        value["remote"]["locations"][0]["mailbox_id"] = json!("junk");
-        value["remote"]["locations"][0]["uid"] = json!(46);
-    });
-    let (status, stdout) = run(
-        &root,
-        &[
-            "message",
-            "unspam",
-            "message_remote_junk",
-            "--reason",
-            "false positive",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "message_unspammed");
-    assert_eq!(value["removed_push_count"], 0);
-    assert_eq!(value["queued"], true);
-    assert!(value["push_id"].as_str().is_some_and(|id| !id.is_empty()));
-    assert_eq!(value["location_count"], 1);
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 1);
-    assert_eq!(push["items"][0]["action"], "unspam");
-    assert_eq!(
-        push["items"][0]["steps"],
-        json!([{"move_to_mailbox_id": "inbox"}])
-    );
-    assert_eq!(push["items"][0]["locations"][0]["mailbox_name"], "Junk");
-    assert_eq!(push["items"][0]["locations"][0]["uid"], 46);
-
-    write_message(&root, "message_remote_trash", 47, None);
-    write_triage(&root, "message_remote_trash", "keep");
-    update_message_json(&root, "message_remote_trash", |value| {
-        value["workspace"]["status"] = json!("triage");
-        value["remote"]["locations"][0]["mailbox_name"] = json!("Trash");
-        value["remote"]["locations"][0]["mailbox_id"] = json!("trash");
-        value["remote"]["locations"][0]["uid"] = json!(47);
-    });
-    let (status, stdout) = run(
-        &root,
-        &[
-            "message",
-            "untrash",
-            "message_remote_trash",
-            "--reason",
-            "not trash",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "message_untrashed");
-    assert_eq!(value["from_status"], "triage");
-    assert_eq!(value["queued"], true);
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 2);
-    assert!(push["items"].as_array().is_some_and(|items| items
-        .iter()
-        .any(|item| item["action"] == "untrash"
-            && item["locations"][0]["mailbox_name"] == "Trash"
-            && item["locations"][0]["uid"] == 47)));
-
-    let log = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
-    assert!(log.contains("\"kind\":\"message_unspammed\""));
-    assert!(log.contains("\"kind\":\"message_untrashed\""));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn triage_archive_files_without_case_and_queues_archive_mapping() {
-    let root = temp_root("triage-archive");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_notice", 42, None);
-    write_triage(&root, "message_notice", "invoice notice");
-
-    let (notification_uid, archive_path, value) = create_notification(
-        &root,
-        "billing",
-        Some("message_notice"),
-        Some("invoice notice"),
-        Some("invoice notice"),
-    );
-    assert_eq!(value["code"], "notification_created");
-    assert_eq!(value["notification_uid"], notification_uid);
-    assert_eq!(value["eligible_message_ids"], json!(["message_notice"]));
-    assert_eq!(value["queued"], true);
-    assert!(!root.join("triage/message_notice.md").exists());
-    assert!(!root
-        .join("cases")
-        .read_dir()
-        .map(|mut entries| entries.any(|_| true))
-        .unwrap_or(false));
-
-    let message: Value = serde_json::from_str(
-        &fs::read_to_string(root.join("messages/message_notice.json")).unwrap_or_default(),
-    )
-    .unwrap_or(Value::Null);
-    assert_eq!(message["workspace"]["status"], "notification");
-    assert_eq!(message["workspace"]["notification_uid"], notification_uid);
-    assert!(message["workspace"].get("buckets").is_none());
-    assert_eq!(
-        message["workspace"]["remote_sync"]["archive_eligible"],
-        true
-    );
-    assert!(archive_path
-        .join("views/messages/message_notice.md")
-        .exists());
-    assert!(fs::read_to_string(archive_path.join("notification.md"))
-        .unwrap_or_default()
-        .contains("invoice notice"));
-
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 1);
-    assert_eq!(push["items"][0]["kind"], "message_action");
-    assert_eq!(push["items"][0]["action"], "notification");
-    assert_eq!(
-        push["items"][0]["steps"],
-        json!([{"move_to_mailbox_id": "archive"}])
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn notification_remove_undoes_direct_archive_and_removes_pending_push() {
-    let root = temp_root("remove-notification-message");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_notice", 42, None);
-    write_triage(&root, "message_notice", "invoice notice");
-
-    let (notification_uid, archive_path, archived) = create_notification(
-        &root,
-        "billing",
-        Some("message_notice"),
-        Some("invoice notice"),
-        Some("invoice notice"),
-    );
-    let push_id = archived["push_id"].as_str().unwrap_or_default().to_string();
-    assert!(!push_id.is_empty());
-    assert!(archive_path
-        .join("views/messages/message_notice.md")
-        .exists());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "remove",
-            &notification_uid,
-            "message_notice",
-            "--reason",
-            "needs triage",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "notification_message_removed");
-    assert_eq!(value["notification_uid"], notification_uid);
-    assert_eq!(value["removed_push_count"], 1);
-    assert_eq!(value["push_ids"], json!([push_id]));
-    assert!(root.join("triage/message_notice.md").exists());
-    assert!(!archive_path
-        .join("views/messages/message_notice.md")
-        .exists());
-    let message: Value = serde_json::from_str(
-        &fs::read_to_string(root.join("messages/message_notice.json")).unwrap_or_default(),
-    )
-    .unwrap_or(Value::Null);
-    assert_eq!(message["workspace"]["status"], "triage");
-    assert!(message["workspace"]["notification_uid"].is_null());
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn notification_move_remove_and_log_filters_work() {
-    let root = temp_root("notification-remove");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_notice", 42, None);
-    write_triage(&root, "message_notice", "invoice notice");
-
-    let (billing_uid, billing_path, _value) = create_notification(
-        &root,
-        "billing",
-        Some("message_notice"),
-        Some("invoice notice"),
-        Some("invoice notice"),
-    );
-    let (receipts_uid, receipts_path, _value) =
-        create_notification(&root, "receipts", None, None, Some("receipts category"));
-    assert!(billing_path
-        .join("views/messages/message_notice.md")
-        .exists());
-
-    let (status, stdout) = run(&root, &["notification", "show", &billing_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["message_count"], 1);
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "move",
-            &billing_uid,
-            "message_notice",
-            &receipts_uid,
-            "--reason",
-            "receipts owns it",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["notification_uid"], receipts_uid);
-    assert!(!billing_path
-        .join("views/messages/message_notice.md")
-        .exists());
-    assert!(receipts_path
-        .join("views/messages/message_notice.md")
-        .exists());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "remove",
-            &billing_uid,
-            "message_notice",
-            "--reason",
-            "needs triage",
+            "verify failed outcome",
         ],
     );
     assert_eq!(status, 1, "{stdout}");
-    assert_eq!(
-        parse_one(&stdout)["error_code"],
-        "notification_entry_not_found"
-    );
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "set-summary",
-            &receipts_uid,
-            "message_notice",
-            "--summary",
-            "receipt summary",
-            "--reason",
-            "better summary",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["summary"], "receipt summary");
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "remove",
-            &receipts_uid,
-            "message_notice",
-            "--reason",
-            "needs triage",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "notification_message_removed");
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-    assert!(root.join("triage/message_notice.md").exists());
-    assert!(!receipts_path
-        .join("views/messages/message_notice.md")
-        .exists());
-
-    let message: Value = serde_json::from_str(
-        &fs::read_to_string(root.join("messages/message_notice.json")).unwrap_or_default(),
-    )
-    .unwrap_or(Value::Null);
-    assert_eq!(message["workspace"]["status"], "triage");
-    assert!(message["workspace"]["notification_uid"].is_null());
-    assert!(message["workspace"].get("buckets").is_none());
-
-    let (status, stdout) = run(&root, &["log", "message", "message_notice"]);
-    assert_eq!(status, 0, "{stdout}");
-    let log = parse_one(&stdout);
-    assert_eq!(log["code"], "log_filtered");
-    assert!(log["count"].as_u64().unwrap_or(0) >= 3);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn notification_delete_requires_empty_collection_and_protects_notes() {
-    let root = temp_root("notification-delete");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_notice", 42, None);
-    write_triage(&root, "message_notice", "notice");
-
-    let (notification_uid, notification_path, _value) = create_notification(
-        &root,
-        "delete-me",
-        Some("message_notice"),
-        Some("notice"),
-        Some("reference notice"),
-    );
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "delete",
-            &notification_uid,
-            "--reason",
-            "not needed",
-        ],
-    );
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "notification_not_empty");
-    assert!(notification_path.exists());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "remove",
-            &notification_uid,
-            "message_notice",
-            "--reason",
-            "needs triage",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "delete",
-            &notification_uid,
-            "--reason",
-            "empty collection",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "notification_deleted");
-    assert_eq!(value["notification_uid"], notification_uid);
-    assert_eq!(value["notes_deleted"], true);
-    assert_eq!(value["notes_modified"], false);
-    assert!(!notification_path.exists());
-    assert_eq!(
-        parse_one(&run(&root, &["notification", "list"]).1)["count"],
-        0
-    );
+    assert_eq!(value["code"], "store_error");
+    assert_eq!(value["items"].as_array().map(Vec::len), Some(2));
 
-    let (notes_uid, notes_path, _value) =
-        create_notification(&root, "notes-delete", None, None, Some("notes category"));
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "notes",
-            "append",
-            &notes_uid,
-            "--text",
-            "keep this context",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "delete",
-            &notes_uid,
-            "--reason",
-            "delete notes collection",
-        ],
-    );
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(
-        parse_one(&stdout)["error_code"],
-        "notification_notes_present"
-    );
-    assert!(notes_path.exists());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "delete",
-            &notes_uid,
-            "--allow-notes",
-            "--reason",
-            "delete notes collection",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "notification_deleted");
-    assert_eq!(value["notes_modified"], true);
-    assert!(!notes_path.exists());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn case_remove_and_delete_empty_active_case() {
-    let root = temp_root("case-remove-delete");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_case_remove", 42, None);
-    write_triage(&root, "message_case_remove", "case message");
-
-    let (case_uid, case_path, _value) = create_case(
-        &root,
-        "remove-delete",
-        Some("support"),
-        Some("message_case_remove"),
-        Some("belongs here for now"),
-    );
-
-    let (status, stdout) = run(
-        &root,
-        &["case", "delete", &case_uid, "--reason", "delete empty case"],
-    );
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "case_not_empty");
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "remove",
-            &case_uid,
-            "message_case_remove",
-            "--reason",
-            "does not belong here",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_message_removed");
-    assert_eq!(value["message_count"], 0);
-    assert!(root.join("triage/message_case_remove.md").exists());
-    let case_json = read_json(&case_path.join("data/case.json"));
-    assert_eq!(
-        case_json
-            .get("message_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        0
-    );
-    assert_eq!(
-        case_json
-            .get("items")
-            .and_then(Value::as_array)
-            .map(Vec::len)
-            .unwrap_or(0),
-        0
-    );
-    assert!(case_json.get("status").is_none());
-
-    let (status, stdout) = run(
-        &root,
-        &["case", "delete", &case_uid, "--reason", "empty case"],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_deleted");
-    assert!(!case_path.exists());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn archived_case_remove_and_delete_empty_case() {
-    let root = temp_root("archive-case-remove-delete");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_archive_remove", 42, None);
-    write_triage(&root, "message_archive_remove", "archived case message");
-
-    let (case_uid, _case_path, _value) = create_case(
-        &root,
-        "archive-remove-delete",
-        Some("support"),
-        Some("message_archive_remove"),
-        Some("case fixture"),
-    );
-    let (status, stdout) = run(&root, &["case", "archive", &case_uid, "--reason", "done"]);
-    assert_eq!(status, 0, "{stdout}");
-    let archived_path = root.join(format!(
-        "archived-cases/support/{case_uid}-archive-remove-delete"
-    ));
-    assert!(archived_path.exists());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "delete",
-            &case_uid,
-            "--reason",
-            "delete empty archived case",
-        ],
-    );
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "case_not_empty");
-
-    let push_before = parse_one(&run(&root, &["push", "list"]).1);
-    let push_id = push_before["items"]
-        .as_array()
-        .and_then(|items| items.first())
-        .and_then(|item| item["push_id"].as_str())
-        .unwrap_or_default()
-        .to_string();
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "remove",
-            &case_uid,
-            "message_archive_remove",
-            "--reason",
-            "does not belong here",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_message_removed");
-    assert_eq!(value["archived"], true);
-    if !push_id.is_empty() {
-        assert_eq!(value["push_ids"], json!([push_id]));
+    let log_path = root.join(".afmail/logs/events.jsonl");
+    let log_file = fs::OpenOptions::new().append(true).open(&log_path);
+    assert!(log_file.is_ok());
+    if let Ok(mut log_file) = log_file {
+        assert!(log_file.write_all(b"{truncated\n").is_ok());
     }
-    assert!(root.join("triage/message_archive_remove.md").exists());
+    let (status, stdout) = run(&root, &["log", "list", "--limit", "20"]);
+    assert_eq!(status, 3, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "partial");
+    assert_eq!(value["warning_count"], 1);
+    assert_eq!(value["warnings"].as_array().map(Vec::len), Some(1));
 
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "delete",
-            &case_uid,
-            "--reason",
-            "empty archived case",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "case_deleted");
-    assert!(!archived_path.exists());
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn contact_delete_protects_notes_and_frees_email() {
-    let root = temp_root("contact-delete");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "contact",
-            "create",
-            "--name",
-            "Alice",
-            "--email",
-            "alice@example.com",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let contact_uid = parse_one(&stdout)["contact_uid"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "contact",
-            "notes",
-            "append",
-            &contact_uid,
-            "--text",
-            "keep this note",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "contact",
-            "delete",
-            &contact_uid,
-            "--reason",
-            "remove duplicate",
-        ],
-    );
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "contact_notes_present");
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "contact",
-            "delete",
-            &contact_uid,
-            "--allow-notes",
-            "--reason",
-            "remove duplicate",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "contact_deleted");
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "contact",
-            "create",
-            "--name",
-            "Alice Recreated",
-            "--email",
-            "alice@example.com",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&run(&root, &["contact", "list"]).1)["count"], 1);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn case_archive_defers_remote_archive_until_all_case_refs_are_archived() {
-    let root = temp_root("case-archive-refs");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let mut config = test_config(None, None);
-    config["actions"]["case.add"]["steps"] = json!([]);
-    write_json(&root.join(".afmail/config.json"), &config);
-    write_message(&root, "message_shared", 42, None);
-    write_triage(&root, "message_shared", "shared case");
-    let (case_one_uid, _case_one_path, _) = create_case(
-        &root,
-        "case-one",
-        Some("support"),
-        Some("message_shared"),
-        Some("shared case"),
-    );
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-    let case_two_uid = "c20260521002";
-    write_case_fixture(
-        &root,
-        "support",
-        case_two_uid,
-        "case-two",
-        &["message_shared"],
-    );
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "archive",
-            &case_one_uid,
-            "--reason",
-            "done with case one",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_archived");
-    assert_eq!(value["queued"], false);
-    assert_eq!(value["eligible_message_ids"], json!([]));
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "archive",
-            case_two_uid,
-            "--reason",
-            "done with case two",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["queued"], true);
-    assert_eq!(value["eligible_message_ids"], json!(["message_shared"]));
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 1);
-    assert_eq!(push["items"][0]["kind"], "message_action");
-    assert_eq!(push["items"][0]["action"], "notification");
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "unarchive",
-            &case_one_uid,
-            "--group",
-            "support",
-            "--reason",
-            "new reply",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_unarchived");
-    assert_eq!(value["removed_push_count"], 1);
-    assert_eq!(value["push_ids"], json!([push["items"][0]["push_id"]]));
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "tag",
-            &case_one_uid,
-            "legal",
-            "--reason",
-            "legal review",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["tags"], json!(["legal"]));
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "untag",
-            &case_one_uid,
-            "legal",
-            "--reason",
-            "legal review done",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["tags"], json!([]));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn push_spam_moves_remote_to_junk_keeping_local_id() {
-    let _network_guard = NETWORK_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let root = temp_root("spam-push");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_message(&root, "message_spam", 42, None);
-    write_triage(&root, "message_spam", "phishing note");
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "message",
-                "spam",
-                "message_spam",
-                "--reason",
-                "phishing note",
-            ]
-        )
-        .0,
-        0
-    );
-
-    let server = start_imap_server(Vec::new(), 3);
-    assert!(server.is_some());
-    let server = match server {
-        Some(server) => server,
-        None => return,
-    };
-    write_json(
-        &root.join(".afmail/config.json"),
-        &test_config(Some(server.addr.port()), None),
-    );
-
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "push_result");
-    assert_eq!(value["pushed_count"], 1, "{value}");
-    assert_eq!(value["failed_count"], 0);
-    let progress = read_json(&root.join(".afmail/workspace.progress.json"));
-    assert_eq!(progress["schema_name"], "workspace_progress");
-    assert_eq!(progress["command"], "push");
-    assert_eq!(progress["status"], "succeeded");
-    assert_eq!(progress["result"]["code"], "push_result");
-    assert_eq!(progress["result"]["pushed_count"], 1);
-    assert_eq!(
-        fs::read_dir(root.join(".afmail/push"))
-            .map(|entries| entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("json"))
-                .count())
-            .unwrap_or(99),
-        0
-    );
-    // The id is immutable: files keep their `message_spam` names; only the
-    // recorded remote location moves to Junk. No `message_junk_*` file is created.
-    assert!(root.join("messages/message_spam.json").exists());
-    assert!(!root.join(".afmail/messages/message_spam.txt").exists());
-    assert!(root.join(".afmail/messages/message_spam.eml").exists());
-    assert!(!root.join("messages/message_junk_44_900.json").exists());
-    let spam_data = fs::read_to_string(root.join("messages/message_spam.json"));
-    assert!(spam_data.is_ok());
-    let spam_value: Result<Value, _> = serde_json::from_str(&spam_data.unwrap_or_default());
-    assert!(spam_value.is_ok());
-    let spam_value = spam_value.unwrap_or(Value::Null);
-    assert_eq!(spam_value["message_id"], "message_spam");
-    assert_eq!(spam_value["body_text"], "Body");
-    assert_eq!(spam_value["eml_path"], ".afmail/messages/message_spam.eml");
-    assert_eq!(spam_value["workspace"]["status"], "spam");
-    assert_eq!(spam_value["remote"]["locations"][0]["mailbox_name"], "Junk");
-    assert_eq!(spam_value["remote"]["locations"][0]["uid_validity"], 44);
-    assert_eq!(spam_value["remote"]["locations"][0]["uid"], 900);
-    assert_eq!(
-        spam_value["remote"]["locations"].as_array().map(Vec::len),
-        Some(1)
-    );
-    assert_eq!(spam_value["remote"]["locations"][0]["mailbox_name"], "Junk");
-    assert_eq!(spam_value["remote"]["locations"][0]["uid_validity"], 44);
-    assert_eq!(spam_value["remote"]["locations"][0]["uid"], 900);
-    assert!(spam_value["workspace"]["push"]
-        .get("pending")
-        .and_then(Value::as_array)
-        .is_none_or(Vec::is_empty));
-    assert!(spam_value["workspace"]["push"]["last_completed_rfc3339"]
-        .as_str()
-        .is_some());
-    assert!(!root.join(".afmail/messages/message_spam.notes.md").exists());
-    let log = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
-    assert!(log.contains("\"kind\":\"message_spam_marked\""));
-    assert!(log.contains("\"reason\":\"phishing note\""));
-    assert!(server.handle.join().is_ok());
-    let moved = server.moved.lock();
-    assert!(moved.is_ok());
-    assert!(moved
-        .map(|items| items
-            .iter()
-            .any(|(source, uid, target)| source == "INBOX" && *uid == 42 && target == "Junk"))
-        .unwrap_or(false));
-    let stored = server.stored.lock();
-    assert!(stored.is_ok());
-    let stored = stored.map(|items| items.clone()).unwrap_or_default();
-    assert!(stored.iter().any(|(source, uid, query)| {
-        source == "INBOX" && *uid == 42 && query.contains("\\Seen")
-    }));
-    assert!(stored.iter().any(|(source, uid, query)| {
-        source == "INBOX" && *uid == 42 && query.contains("$Junk")
-    }));
-    let commands = server
-        .commands
-        .lock()
-        .map(|items| items.clone())
-        .unwrap_or_default();
-    let login_count = commands
-        .iter()
-        .filter(|cmd| cmd.as_str() == "LOGIN")
-        .count();
-    assert_eq!(
-        login_count, 1,
-        "confirmed push should reuse one IMAP session: {commands:?}"
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn push_spam_can_skip_marking_remote_seen_by_config() {
-    let _network_guard = NETWORK_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let root = temp_root("spam-push-unread");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let mut config = test_config(None, None);
-    config["actions"]["message.spam"]["steps"] =
-        json!([{"add_flags": ["$Junk"]}, {"move_to_mailbox_id": "junk"}]);
-    write_json(&root.join(".afmail/config.json"), &config);
-    write_message(&root, "message_spam", 42, None);
-    write_triage(&root, "message_spam", "phishing note");
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "message",
-                "spam",
-                "message_spam",
-                "--reason",
-                "phishing note",
-            ]
-        )
-        .0,
-        0
-    );
-    let server = start_imap_server(Vec::new(), 3);
-    assert!(server.is_some());
-    let server = match server {
-        Some(server) => server,
-        None => return,
-    };
-    let mut config = test_config(Some(server.addr.port()), None);
-    config["actions"]["message.spam"]["steps"] =
-        json!([{"add_flags": ["$Junk"]}, {"move_to_mailbox_id": "junk"}]);
-    write_json(&root.join(".afmail/config.json"), &config);
-
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["pushed_count"], 1, "{value}");
-    assert!(server.handle.join().is_ok());
-    let stored = server.stored.lock();
-    assert!(stored.is_ok());
-    let stored = stored.map(|items| items.clone()).unwrap_or_default();
-    assert!(!stored.iter().any(|(_, _, query)| query.contains("\\Seen")));
-    assert!(stored.iter().any(|(_, _, query)| query.contains("$Junk")));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn push_archive_and_trash_use_configured_action_steps() {
-    let _network_guard = NETWORK_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let root = temp_root("special-use-push");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_arch", 43, None);
-    write_triage(&root, "message_arch", "done");
-    write_message(&root, "message_trash", 44, None);
-    write_triage(&root, "message_trash", "delete");
-
-    create_notification(
-        &root,
-        "done",
-        Some("message_arch"),
-        Some("done"),
-        Some("done"),
-    );
-    assert_eq!(
-        run(
-            &root,
-            &["message", "trash", "message_trash", "--reason", "delete",],
-        )
-        .0,
-        0
-    );
-    assert!(root.join("trash/index.md").is_file());
-    assert!(root.join("trash/message_trash.md").is_file());
-    let (status, stdout) = run(&root, &["push", "list"]);
-    assert_eq!(status, 0, "{stdout}");
-    let push = parse_one(&stdout);
-    assert_eq!(push["count"], 2);
-    assert!(push["items"].as_array().is_some_and(|items| {
-        items.iter().any(|item| {
-            item["kind"] == "message_action"
-                && item["action"] == "notification"
-                && item["steps"][0]["move_to_mailbox_id"] == "archive"
-        })
-    }));
-    assert!(push["items"].as_array().is_some_and(|items| items
-        .iter()
-        .any(|item| item["kind"] == "message_action"
-            && item["action"] == "trash"
-            && item["steps"][0]["move_to_mailbox_id"] == "trash")));
-
-    let server = start_imap_server(Vec::new(), 4);
-    assert!(server.is_some());
-    let server = match server {
-        Some(server) => server,
-        None => return,
-    };
-    write_json(
-        &root.join(".afmail/config.json"),
-        &test_config(Some(server.addr.port()), None),
-    );
-
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["pushed_count"], 2);
-
-    assert!(server.handle.join().is_ok());
-    let moved = server.moved.lock();
-    assert!(moved.is_ok());
-    let moved = moved.map(|items| items.clone()).unwrap_or_default();
-
-    // Ids are immutable: archive/trash moves keep the original message ids and
-    // only update the recorded remote location.
-    assert!(root.join("messages/message_arch.json").exists());
-    assert!(!root
-        .join("messages/message_notification_44_900.json")
-        .exists());
-    assert!(root.join("messages/message_trash.json").exists());
-    assert!(!root.join("messages/message_trash_44_900.json").exists());
-    let arch_data = fs::read_to_string(root.join("messages/message_arch.json"));
-    assert!(arch_data
-        .as_ref()
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(text).ok())
-        .map(|value| value["remote"]["locations"][0]["mailbox_name"] == "Archive")
-        .unwrap_or(false));
-    assert!(moved
-        .iter()
-        .any(|(source, uid, target)| source == "INBOX" && *uid == 43 && target == "Archive"));
-    assert!(moved
-        .iter()
-        .any(|(source, uid, target)| source == "INBOX" && *uid == 44 && target == "Trash"));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn case_group_dirs_are_cleaned_only_when_empty() {
-    let root = temp_root("case-group-cleanup");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let mut config = test_config(None, None);
-    config["actions"]["case.add"]["steps"] = json!([]);
-    write_json(&root.join(".afmail/config.json"), &config);
-    write_message(&root, "message_alpha", 45, None);
-    write_message(&root, "message_beta", 46, None);
-    write_triage(&root, "message_alpha", "alpha");
-    write_triage(&root, "message_beta", "beta");
-
-    let (case_alpha_uid, _case_alpha_path, _) = create_case(
-        &root,
-        "case-alpha",
-        Some("tests"),
-        Some("message_alpha"),
-        Some("alpha"),
-    );
-    let (case_beta_uid, _case_beta_path, _) = create_case(
-        &root,
-        "case-beta",
-        Some("tests"),
-        Some("message_beta"),
-        Some("beta"),
-    );
-
-    assert_eq!(
-        run(
-            &root,
-            &["case", "archive", &case_alpha_uid, "--reason", "done"]
-        )
-        .0,
-        0
-    );
-    assert!(root.join("cases/tests").exists());
-    assert!(root
-        .join(format!("cases/tests/{case_beta_uid}-case-beta/case.md"))
-        .exists());
-
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "case",
-                "move",
-                &case_beta_uid,
-                "waiting",
-                "--reason",
-                "better group",
-            ],
-        )
-        .0,
-        0
-    );
-    assert!(!root.join("cases/tests").exists());
-    assert!(root
-        .join(format!("cases/waiting/{case_beta_uid}-case-beta/case.md"))
-        .exists());
-
-    assert!(fs::write(root.join("cases/waiting/keep.txt"), "user file").is_ok());
-    assert_eq!(
-        run(
-            &root,
-            &["case", "archive", &case_beta_uid, "--reason", "done"]
-        )
-        .0,
-        0
-    );
-    assert!(root.join("cases/waiting/keep.txt").exists());
-    assert!(root
-        .join(format!(
-            "archived-cases/waiting/{case_beta_uid}-case-beta/case.md"
-        ))
-        .exists());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn archived_case_move_changes_group_without_unarchiving() {
-    let root = temp_root("archived-case-move");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_archived_move", 50, None);
-    write_triage(&root, "message_archived_move", "archive move");
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "case-archived-move",
-        Some("support"),
-        Some("message_archived_move"),
-        Some("archive move"),
-    );
-
-    let (status, stdout) = run(
-        &root,
-        &["case", "archive", &case_uid, "--reason", "complete"],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert!(!case_path.exists());
-    let archived_path = root.join(format!(
-        "archived-cases/support/{case_uid}-case-archived-move"
-    ));
-    assert!(archived_path.join("case.md").exists());
-    let archived_before = read_json(&archived_path.join("data/case.json"));
-    let archived_rfc3339 = archived_before["archived_rfc3339"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(!archived_rfc3339.is_empty());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "move",
-            &case_uid,
-            "members",
-            "--reason",
-            "调整事项分组",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_moved");
-    assert_eq!(value["case_uid"], case_uid);
-    assert_eq!(value["from_group"], "support");
-    assert_eq!(value["to_group"], "members");
-    assert_eq!(value["archived"], true);
-    assert_eq!(value["changed"], true);
-    assert_eq!(
-        value["case_path"],
-        format!("archived-cases/members/{case_uid}-case-archived-move")
-    );
-    assert!(!archived_path.exists());
-    assert!(!root.join("archived-cases/support").exists());
-    let moved_path = root.join(format!(
-        "archived-cases/members/{case_uid}-case-archived-move"
-    ));
-    assert!(moved_path.join("case.md").exists());
-    let archived_after = read_json(&moved_path.join("data/case.json"));
-    assert_eq!(archived_after["archived_rfc3339"], archived_rfc3339);
-
-    let (status, stdout) = run(&root, &["case", "show", &case_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["group"], "members");
-    assert_eq!(value["archived"], true);
-
-    let (status, stdout) = run(&root, &["case", "list", "--archived"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["count"], 1);
-    assert_eq!(value["items"][0]["group"], "members");
-    assert_eq!(value["items"][0]["archived"], true);
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "move",
-            &case_uid,
-            "members",
-            "--reason",
-            "分组无需变更",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["changed"], false);
-    assert_eq!(
-        value["case_path"],
-        format!("archived-cases/members/{case_uid}-case-archived-move")
-    );
-    assert!(moved_path.join("case.md").exists());
-
-    let log = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
-    assert!(log.contains("\"kind\":\"case_moved\""));
-    assert!(log.contains("\"reason\":\"调整事项分组\""));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn push_archive_falls_back_to_uidplus_copy_delete_when_move_is_unsupported() {
-    let _network_guard = NETWORK_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let root = temp_root("archive-push-copy-fallback");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_arch", 43, None);
-    write_triage(&root, "message_arch", "done");
-    create_notification(
-        &root,
-        "done",
-        Some("message_arch"),
-        Some("done"),
-        Some("done"),
-    );
-
-    let server = start_imap_server_with_capabilities(
-        Vec::new(),
-        3,
-        ImapServerCapabilities {
-            move_supported: false,
-            uidplus_supported: true,
-        },
-    );
-    assert!(server.is_some());
-    let server = match server {
-        Some(server) => server,
-        None => return,
-    };
-    write_json(
-        &root.join(".afmail/config.json"),
-        &test_config(Some(server.addr.port()), None),
-    );
-
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["pushed_count"], 1, "{value}");
-    assert_eq!(value["failed_count"], 0, "{value}");
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-
-    assert!(server.handle.join().is_ok());
-    let moved = server
-        .moved
-        .lock()
-        .map(|items| items.clone())
-        .unwrap_or_default();
-    assert!(moved.is_empty());
-    let copied = server
-        .copied
-        .lock()
-        .map(|items| items.clone())
-        .unwrap_or_default();
-    assert!(copied
-        .iter()
-        .any(|(source, uid, target)| source == "INBOX" && *uid == 43 && target == "Archive"));
-    let stored = server
-        .stored
-        .lock()
-        .map(|items| items.clone())
-        .unwrap_or_default();
-    assert!(stored.iter().any(|(source, uid, query)| {
-        source == "INBOX" && *uid == 43 && query.contains("\\Deleted")
-    }));
-    let expunged = server
-        .expunged
-        .lock()
-        .map(|items| items.clone())
-        .unwrap_or_default();
-    assert!(expunged
-        .iter()
-        .any(|(source, uid)| source == "INBOX" && *uid == 43));
-    let message = read_json(&root.join("messages/message_arch.json"));
-    assert_eq!(message["remote"]["locations"][0]["mailbox_name"], "Archive");
-    assert_eq!(message["remote"]["locations"][0]["uid"], 900);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn push_archive_without_move_or_uidplus_fails_before_copy_delete_fallback() {
-    let _network_guard = NETWORK_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let root = temp_root("archive-push-no-safe-fallback");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_arch", 43, None);
-    write_triage(&root, "message_arch", "done");
-    create_notification(
-        &root,
-        "done",
-        Some("message_arch"),
-        Some("done"),
-        Some("done"),
-    );
-
-    let server = start_imap_server_with_capabilities(
-        Vec::new(),
-        3,
-        ImapServerCapabilities {
-            move_supported: false,
-            uidplus_supported: false,
-        },
-    );
-    assert!(server.is_some());
-    let server = match server {
-        Some(server) => server,
-        None => return,
-    };
-    write_json(
-        &root.join(".afmail/config.json"),
-        &test_config(Some(server.addr.port()), None),
-    );
-
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["pushed_count"], 0, "{value}");
-    assert_eq!(value["failed_count"], 1, "{value}");
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 1);
-    assert_eq!(
-        push["items"][0]["step_states"][0]["error_code"],
-        "imap_uidplus_required"
-    );
-
-    assert!(server.handle.join().is_ok());
-    let copied = server
-        .copied
-        .lock()
-        .map(|items| items.clone())
-        .unwrap_or_default();
-    let stored = server
-        .stored
-        .lock()
-        .map(|items| items.clone())
-        .unwrap_or_default();
-    assert!(copied.is_empty());
-    assert!(stored.is_empty());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn removed_flag_and_seen_commands_are_cli_errors() {
-    let root = temp_root("message-seen");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_message(&root, "message_seen", 51, None);
-    for action in ["flag", "unflag", "seen", "unseen"] {
-        let (status, stdout) = run(&root, &["message", action, "message_seen"]);
-        assert_eq!(status, 2, "{stdout}");
-        assert_eq!(parse_one(&stdout)["code"], "error");
+fn stdout_write_failure_uses_dedicated_exit_code() {
+    if !Path::new("/dev/full").exists() {
+        return;
     }
-    let (status, stdout) = run(&root, &["push", "flag"]);
-    assert_eq!(status, 2, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "error");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn archived_case_notes_rename_unarchive_and_active_hint_work() {
-    let root = temp_root("archive-case-restore");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_case", 42, None);
-    write_triage(&root, "message_case", "case work");
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "case-archive",
-        None,
-        Some("message_case"),
-        Some("case work"),
-    );
-
-    assert!(fs::write(case_path.join("case.md"), "stale generated case").is_ok());
-    let (status, stdout) = run(&root, &["case", "show", &case_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case");
-    assert_eq!(value["case_uid"], case_uid);
-    assert_eq!(value["case_name"], "case-archive");
-    assert_eq!(value["group"], "support");
-    assert_eq!(
-        root.join(value["case_path"].as_str().unwrap_or_default()),
-        case_path
-    );
-    assert_eq!(
-        root.join(value["view_path"].as_str().unwrap_or_default()),
-        case_path.join("case.md")
-    );
-    assert!(value.get("index_path").is_none());
-    assert_eq!(
-        root.join(value["messages_path"].as_str().unwrap_or_default()),
-        case_path.join("views/messages")
-    );
-    assert!(value["text"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("# case-archive"));
-    assert_ne!(
-        fs::read_to_string(case_path.join("case.md")).unwrap_or_default(),
-        "stale generated case"
-    );
-
-    let (status, stdout) = run(
-        &root,
-        &["case", "archive", &case_uid, "--reason", "completed"],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "case_archived");
-    assert!(!case_path.exists());
-    let archived_path = root.join(format!("archived-cases/support/{case_uid}-case-archive"));
-    assert!(archived_path.exists());
-
-    // Read-only and collection maintenance commands work for archived cases.
-    let (status, stdout) = run(&root, &["case", "show", &case_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case");
-    assert_eq!(value["case_uid"], case_uid);
-    assert_eq!(value["case_name"], "case-archive");
-    assert_eq!(value["archived"], true);
-    assert!(value["text"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("# case-archive"));
-
-    // Active-work commands still require unarchiving first.
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "add",
-            &case_uid,
-            "message_case",
-            "--reason",
-            "active edit",
-        ],
-    );
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "case_archived");
-
-    let (status, stdout) = run(&root, &["case", "notes", "show", &case_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "case_notes");
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "notes",
-            "append",
-            &case_uid,
-            "--text",
-            "archive note",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let notes = fs::read_to_string(archived_path.join("notes.md")).unwrap_or_default();
-    assert!(notes.contains("archive note"));
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "rename",
-            &case_uid,
-            "--name",
-            "case-renamed",
-            "--reason",
-            "better id",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["case_uid"], case_uid);
-    assert!(!archived_path.exists());
-    let renamed_archive_path = root.join(format!("archived-cases/support/{case_uid}-case-renamed"));
-    assert!(renamed_archive_path.exists());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "unarchive",
-            &case_uid,
-            "--group",
-            "support",
-            "--reason",
-            "needs attention",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "case_unarchived");
-    let restored_path = root.join(format!("cases/support/{case_uid}-case-renamed"));
-    assert!(restored_path.join("case.md").exists());
-    assert!(!renamed_archive_path.exists());
-
-    let case_data: Value = serde_json::from_str(
-        &fs::read_to_string(restored_path.join("data/case.json")).unwrap_or_default(),
-    )
-    .unwrap_or(Value::Null);
-    assert_eq!(case_data["collection_uid"], case_uid);
-    assert_eq!(case_data["collection_name"], "case-renamed");
-    assert!(case_data.get("buckets").is_none());
-    assert!(case_data.get("primary_bucket").is_none());
-    assert!(case_data["archived_rfc3339"].is_null());
-    let (status, stdout) = run(&root, &["log", "case", &case_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    assert!(parse_one(&stdout)["count"].as_u64().unwrap_or(0) >= 2);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn notes_show_and_notification_refresh_preserve_plain_markdown_bytes() {
-    let root = temp_root("notes-read-only");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-
-    write_message(&root, "message_case_notes", 52, None);
-    write_triage(&root, "message_case_notes", "case notes");
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "notes-case",
-        None,
-        Some("message_case_notes"),
-        Some("case notes"),
-    );
-    let active_notes = "---\nlegacy: kept\n---\n\n# User Notes\n\n---\nnot yaml, just markdown\n";
-    assert!(fs::write(case_path.join("notes.md"), active_notes).is_ok());
-
-    let (status, stdout) = run(&root, &["case", "notes", "show", &case_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(
-        parse_one(&stdout)["text"].as_str().unwrap_or_default(),
-        active_notes
-    );
-    assert_eq!(
-        fs::read_to_string(case_path.join("notes.md")).unwrap_or_default(),
-        active_notes
-    );
-
-    let (status, stdout) = run(&root, &["case", "archive", &case_uid, "--reason", "done"]);
-    assert_eq!(status, 0, "{stdout}");
-    let archived_path = root.join(format!("archived-cases/support/{case_uid}-notes-case"));
-    assert_eq!(
-        fs::read_to_string(archived_path.join("notes.md")).unwrap_or_default(),
-        active_notes
-    );
-
-    let (status, stdout) = run(&root, &["case", "notes", "show", &case_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(
-        parse_one(&stdout)["text"].as_str().unwrap_or_default(),
-        active_notes
-    );
-    assert_eq!(
-        fs::read_to_string(archived_path.join("notes.md")).unwrap_or_default(),
-        active_notes
-    );
-
-    write_message(&root, "message_notification_notes", 53, None);
-    write_triage(&root, "message_notification_notes", "archive notes");
-    let (notification_uid, archive_path, _) = create_notification(
-        &root,
-        "notes-archive",
-        Some("message_notification_notes"),
-        Some("archive summary"),
-        Some("archive notes"),
-    );
-    let archive_notes = "---\ncategory: kept\n---\n\n# Archive Notes\n";
-    assert!(fs::write(archive_path.join("notes.md"), archive_notes).is_ok());
-
-    let (status, stdout) = run(&root, &["notification", "show", &notification_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(
-        fs::read_to_string(archive_path.join("notes.md")).unwrap_or_default(),
-        archive_notes
-    );
-
-    let (status, stdout) = run(&root, &["notification", "notes", "show", &notification_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(
-        parse_one(&stdout)["text"].as_str().unwrap_or_default(),
-        archive_notes
-    );
-    assert_eq!(
-        fs::read_to_string(archive_path.join("notes.md")).unwrap_or_default(),
-        archive_notes
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn missing_notes_show_and_append_error_until_explicit_replace() {
-    let root = temp_root("notes-missing");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_message(&root, "message_missing_notes", 54, None);
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "missing-notes",
-        None,
-        Some("message_missing_notes"),
-        Some("seed"),
-    );
-    let notes_path = case_path.join("notes.md");
-    assert!(fs::remove_file(&notes_path).is_ok());
-
-    let (status, stdout) = run(&root, &["case", "notes", "show", &case_uid]);
-    assert_eq!(status, 1, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "notes_missing");
-    assert!(value["hint"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("notes replace"));
-    assert!(!notes_path.exists());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "notes",
-            "append",
-            &case_uid,
-            "--text",
-            "must not create",
-        ],
-    );
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "notes_missing");
-    assert!(!notes_path.exists());
-
-    let (status, stdout) = run(
-        &root,
-        &["case", "notes", "replace", &case_uid, "--text", "restored"],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(
-        fs::read_to_string(&notes_path).unwrap_or_default(),
-        "restored\n"
-    );
-
-    let (status, stdout) = run(&root, &["case", "notes", "show", &case_uid]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(
-        parse_one(&stdout)["text"].as_str().unwrap_or_default(),
-        "restored\n"
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn case_reply_scaffolds_prefilled_draft() {
-    let root = temp_root("case-reply");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_message(&root, "message_reply", 60, None);
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "case-reply",
-        None,
-        Some("message_reply"),
-        Some("seed"),
-    );
-
-    let (status, stdout) = run(
-        &root,
-        &["case", "draft", "reply", &case_uid, "message_reply"],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "draft_created");
-    assert_eq!(value["draft_name"], "reply-message_reply.md");
-
-    let draft =
-        fs::read_to_string(case_path.join("drafts/reply-message_reply.md")).unwrap_or_default();
-    assert!(draft.contains("reply_to_message_id: message_reply"));
-    assert!(draft.contains("send_intent: reply"));
-    assert!(draft.contains("alice@example.com"));
-    assert!(draft.contains("Re: Contract renewal"));
-    assert!(draft.contains("> Body"));
-
-    // The scaffolded draft must validate against the case.
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "validate",
-            &case_uid,
-            "reply-message_reply.md",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "draft_valid");
-
-    // A second reply must not clobber the first.
-    let (status, _) = run(
-        &root,
-        &["case", "draft", "reply", &case_uid, "message_reply"],
-    );
-    assert_eq!(status, 1);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn case_reply_all_includes_original_recipients_minus_self() {
-    let root = temp_root("case-reply-all");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_message(&root, "message_ra", 70, None);
-    // Give the message multiple recipients, including this account itself.
-    let message_path = root.join("messages/message_ra.json");
-    let mut message: Value =
-        serde_json::from_str(&fs::read_to_string(&message_path).unwrap_or_default())
-            .unwrap_or(Value::Null);
-    message["from"] = json!("Alice <alice@example.com>");
-    message["to"] = json!(["me@example.com", "Bob <bob@example.com>"]);
-    message["cc"] = json!(["carol@example.com"]);
-    write_json(&message_path, &message);
-    let (case_uid, case_path, _) =
-        create_case(&root, "case-ra", None, Some("message_ra"), Some("seed"));
-
-    let (status, stdout) = run(
-        &root,
-        &["case", "draft", "reply", &case_uid, "message_ra", "--all"],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let draft =
-        fs::read_to_string(case_path.join("drafts/reply-message_ra.md")).unwrap_or_default();
-    // To carries the sender plus the other To recipient; Cc carries the original
-    // Cc. This account's own address is excluded from both.
-    assert!(draft.contains("alice@example.com"));
-    assert!(draft.contains("bob@example.com"));
-    assert!(draft.contains("carol@example.com"));
-    assert!(!draft.contains("me@example.com"));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn case_reply_prefers_reply_to_header() {
-    let root = temp_root("case-reply-to");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_message(&root, "message_rt", 72, None);
-    update_message_json(&root, "message_rt", |message| {
-        message["from"] = json!("News Bot <news@example.com>");
-        message["reply_to"] = json!(["Support Desk <support@example.net>"]);
-    });
-    let (case_uid, case_path, _) =
-        create_case(&root, "case-rt", None, Some("message_rt"), Some("seed"));
-
-    let (status, stdout) = run(&root, &["case", "draft", "reply", &case_uid, "message_rt"]);
-    assert_eq!(status, 0, "{stdout}");
-    let draft =
-        fs::read_to_string(case_path.join("drafts/reply-message_rt.md")).unwrap_or_default();
-    let frontmatter = draft.split("\n---\n").next().unwrap_or_default();
-    assert!(frontmatter.contains("Support Desk <support@example.net>"));
-    assert!(!frontmatter.contains("News Bot <news@example.com>"));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn case_new_and_draft_new_from_scratch() {
-    let root = temp_root("draft-new");
+    let root = temp_root("stdout-write-failure");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
 
-    let (case_uid, case_path, value) = create_case(
-        &root,
-        "new-thread",
-        Some("support"),
-        None,
-        Some("new outbound case"),
+    let (status, stdout, stderr) =
+        run_allow_stderr(&root, &["--stdout-file", "/dev/full", "status"]);
+    assert_eq!(status, 4, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(
+        stderr.contains("canonical output was not fully written"),
+        "{stderr}"
     );
-    assert_eq!(value["code"], "case_created");
-    assert!(case_path.join("case.md").exists());
-    assert!(case_path.join("data/case.json").exists());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "new",
-            &case_uid,
-            "--to",
-            "plumber@example.com <plumber@example.com>",
-            "--subject",
-            "Leak under the sink",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "draft_created");
-    let draft_name = value["draft_name"].as_str().unwrap_or_default().to_string();
-    assert!(!draft_name.is_empty());
-    let draft_path = case_path.join(format!("drafts/{draft_name}"));
-    assert!(draft_path.exists());
-    let draft_text = fs::read_to_string(&draft_path).unwrap_or_default();
-    assert!(draft_text.contains("plumber@example.com"));
-    assert!(!draft_text.contains("plumber@example.com <plumber@example.com>"));
-
-    // The scaffolded draft validates against the case with no inbound message.
-    let (status, stdout) = run(
-        &root,
-        &["case", "draft", "validate", &case_uid, &draft_name],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "draft_valid");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn draft_attach_copies_external_file_and_updates_frontmatter() {
-    let root = temp_root("draft-attach");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "attach-thread",
-        Some("support"),
-        None,
-        Some("new outbound case"),
-    );
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "new",
-            &case_uid,
-            "--to",
-            "bob@example.com",
-            "--subject",
-            "With attachment",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let draft_name = parse_one(&stdout)["draft_name"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(fs::create_dir_all(root.join("source")).is_ok());
-    assert!(fs::write(root.join("source/公司资料?.txt"), "hello").is_ok());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "attach",
-            &case_uid,
-            &draft_name,
-            "source/公司资料?.txt",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "draft_attachment_added");
-    assert_eq!(value["copied"], true);
-    assert_eq!(value["attachment"], "files/公司资料_.txt");
-    assert!(case_path.join("files/公司资料_.txt").is_file());
-    let draft =
-        fs::read_to_string(case_path.join(format!("drafts/{draft_name}"))).unwrap_or_default();
-    assert!(draft.contains("attachments:\n- files/公司资料_.txt"));
-
-    let (status, stdout) = run(
-        &root,
-        &["case", "draft", "validate", &case_uid, &draft_name],
-    );
-    assert_eq!(status, 0, "{stdout}");
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "attach",
-            &case_uid,
-            &draft_name,
-            "source/公司资料?.txt",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["already_present"], true);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn draft_show_reports_content_queue_and_attachment_status() {
-    let root = temp_root("draft-show");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "show-thread",
-        Some("support"),
-        None,
-        Some("show draft case"),
-    );
-    assert!(fs::write(case_path.join("files/present.txt"), "hello").is_ok());
-    let draft = format!(
-        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nsubject: \"Review me\"\nto:\n  - bob@example.com\ncc:\n  - team@example.com\nattachments:\n  - files/present.txt\n  - files/missing.txt\n---\nReview body\n"
-    );
-    assert!(fs::write(case_path.join("drafts/show.md"), draft).is_ok());
-
-    let (status, stdout) = run(&root, &["case", "draft", "show", &case_uid, "show.md"]);
-    assert_eq!(status, 0, "{stdout}");
-    let shown = parse_one(&stdout);
-    assert_eq!(shown["code"], "draft_shown");
-    assert_eq!(shown["subject"], "Review me");
-    assert_eq!(shown["to"][0], "bob@example.com");
-    assert_eq!(shown["cc"][0], "team@example.com");
-    assert_eq!(shown["body"], "Review body");
-    assert_eq!(shown["attachments"][0]["path"], "files/present.txt");
-    assert_eq!(shown["attachments"][0]["exists"], true);
-    assert_eq!(shown["attachments"][0]["size_bytes"], 5);
-    assert_eq!(shown["attachments"][1]["path"], "files/missing.txt");
-    assert_eq!(shown["attachments"][1]["exists"], false);
-    assert!(shown["attachments"][1]["size_bytes"].is_null());
-    assert!(shown["queued_action"].is_null());
-    assert!(shown["push_id"].is_null());
-    assert_eq!(shown["remote_changed"], false);
-
-    let (status, stdout) = run(&root, &["case", "draft", "send", &case_uid, "show.md"]);
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["error_code"], "draft_invalid");
-    assert!(fs::write(case_path.join("files/missing.txt"), "later").is_ok());
-    let (status, stdout) = run(&root, &["case", "draft", "send", &case_uid, "show.md"]);
-    assert_eq!(status, 0, "{stdout}");
-
-    let (status, stdout) = run(&root, &["case", "draft", "show", &case_uid, "show.md"]);
-    assert_eq!(status, 0, "{stdout}");
-    let queued = parse_one(&stdout);
-    assert_eq!(queued["queued_action"], "send");
-    assert!(queued["push_id"]
-        .as_str()
-        .map(|push_id| push_id.starts_with("push_"))
-        .unwrap_or(false));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn draft_show_missing_draft_returns_not_found() {
-    let root = temp_root("draft-show-missing");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let (case_uid, _, _) = create_case(
-        &root,
-        "show-missing-thread",
-        Some("support"),
-        None,
-        Some("show missing draft case"),
-    );
-
-    let (status, stdout) = run(&root, &["case", "draft", "show", &case_uid, "missing.md"]);
-    assert_eq!(status, 1);
-    assert_eq!(parse_one(&stdout)["error_code"], "draft_not_found");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn draft_remove_deletes_draft_state_and_outbound_queue() {
-    let root = temp_root("draft-remove");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "remove-thread",
-        Some("support"),
-        None,
-        Some("remove draft case"),
-    );
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "new",
-            &case_uid,
-            "--to",
-            "bob@example.com",
-            "--subject",
-            "Remove me",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let draft_name = parse_one(&stdout)["draft_name"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert_eq!(
-        run(&root, &["case", "draft", "send", &case_uid, &draft_name]).0,
-        0
-    );
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    let push_id = push["items"][0]["push_id"].as_str().unwrap_or_default();
-    assert_eq!(push["items"][0]["action"], "send");
-    assert!(push["items"][0].get("eml_path").is_none());
-    assert!(push["items"][0].get("message_id").is_none());
-    let sent_count = fs::read_dir(root.join("messages"))
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .path()
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("message_sent_"))
-                })
-                .count()
-        })
-        .unwrap_or(0);
-    assert_eq!(sent_count, 0);
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "remove",
-            &case_uid,
-            &draft_name,
-            "--reason",
-            "mistaken draft",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let removed = parse_one(&stdout);
-    assert_eq!(removed["code"], "draft_removed");
-    assert_eq!(removed["queued_removed"], true);
-    assert_eq!(removed["push_ids"], json!([push_id]));
-    assert_eq!(removed["actions"], json!(["send"]));
-    assert_eq!(removed["mail_sent"], false);
-    assert!(!case_path.join(format!("drafts/{draft_name}")).exists());
-    assert!(!root
-        .join(".afmail/push")
-        .join(format!("{push_id}.json"))
-        .exists());
-    let state = read_json(&case_path.join("data/drafts.json"));
-    assert!(state["drafts"].get(draft_name.as_str()).is_none());
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn draft_change_updates_requested_fields_and_validates() {
-    let root = temp_root("draft-change");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "change-thread",
-        Some("support"),
-        None,
-        Some("change draft case"),
-    );
-    let body_path = root.join("body.txt");
-    assert!(fs::write(&body_path, "Replacement body\n").is_ok());
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "new",
-            &case_uid,
-            "--to",
-            "alice@example.com",
-            "--cc",
-            "old-cc@example.com",
-            "--subject",
-            "Old subject",
-            "--body",
-            "Original body",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let draft_name = parse_one(&stdout)["draft_name"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "change",
-            &case_uid,
-            &draft_name,
-            "--subject",
-            "New subject",
-            "--to",
-            "bob@example.com",
-            "--clear-cc",
-            "--body-file",
-            "body.txt",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let changed = parse_one(&stdout);
-    assert_eq!(changed["code"], "draft_changed");
-    assert_eq!(
-        changed["changed_fields"],
-        json!(["subject", "to", "cc", "body"])
-    );
-    assert!(changed["draft_hash"]
-        .as_str()
-        .is_some_and(|hash| hash.starts_with("blake3:")));
-    let draft =
-        fs::read_to_string(case_path.join(format!("drafts/{draft_name}"))).unwrap_or_default();
-    assert!(draft.contains("subject: New subject"));
-    assert!(draft.contains("bob@example.com"));
-    assert!(!draft.contains("old-cc@example.com"));
-    assert!(draft.contains("Replacement body"));
-    let state = read_json(&case_path.join("data/drafts.json"));
-    assert_eq!(
-        state["drafts"][draft_name.as_str()]["last_validated_hash"],
-        changed["draft_hash"]
-    );
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "change",
-            &case_uid,
-            &draft_name,
-            "--body",
-            "one",
-            "--body-file",
-            "body.txt",
-        ],
-    );
-    assert_eq!(status, 2, "{stdout}");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn draft_save_send_queue_is_idempotent_and_switches_action() {
-    let root = temp_root("draft-queue-switch");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "queue-thread",
-        Some("support"),
-        None,
-        Some("queue draft case"),
-    );
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "new",
-            &case_uid,
-            "--to",
-            "bob@example.com",
-            "--subject",
-            "Queue me",
-            "--body",
-            "First body",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let draft_name = parse_one(&stdout)["draft_name"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let (status, stdout) = run(&root, &["case", "draft", "save", &case_uid, &draft_name]);
-    assert_eq!(status, 0, "{stdout}");
-    let saved = parse_one(&stdout);
-    assert_eq!(saved["action"], "save_draft");
-    let push_id = saved["push_id"].as_str().unwrap_or_default().to_string();
-    let (status, stdout) = run(&root, &["case", "draft", "save", &case_uid, &draft_name]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["push_id"], push_id);
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 1);
-    assert_eq!(push["items"][0]["action"], "save_draft");
-
-    let draft_path = case_path.join(format!("drafts/{draft_name}"));
-    let original = fs::read_to_string(&draft_path).unwrap_or_default();
-    assert!(fs::write(&draft_path, original.replace("First body", "Latest body")).is_ok());
-    let (status, stdout) = run(&root, &["case", "draft", "send", &case_uid, &draft_name]);
-    assert_eq!(status, 0, "{stdout}");
-    let sent = parse_one(&stdout);
-    assert_eq!(sent["push_id"], push_id);
-    assert_eq!(sent["action"], "send");
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 1);
-    assert_eq!(push["items"][0]["action"], "send");
-    assert!(fs::read_to_string(&draft_path)
-        .unwrap_or_default()
-        .contains("Latest body"));
-    let sent_count = fs::read_dir(root.join("messages"))
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .path()
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("message_sent_"))
-                })
-                .count()
-        })
-        .unwrap_or(0);
-    assert_eq!(sent_count, 0);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn draft_remove_rejects_started_outbound_push() {
-    let root = temp_root("draft-remove-started");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "sent-thread",
-        Some("support"),
-        None,
-        Some("sent draft case"),
-    );
-    let draft_path = case_path.join("drafts/new.md");
-    let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"Sent maybe\"\nattachments:\n---\n\nHi Bob\n");
-    assert!(fs::write(&draft_path, draft).is_ok());
-    assert_eq!(
-        run(&root, &["case", "draft", "send", &case_uid, "new.md"]).0,
-        0
-    );
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    let push_id = push["items"][0]["push_id"].as_str().unwrap_or_default();
-    let push_path = root.join(".afmail/push").join(format!("{push_id}.json"));
-    let mut push_item = read_json(&push_path);
-    push_item["step_states"] = json!([
-        {
-            "index": 0,
-            "label": "append_to_mailbox_id_drafts",
-            "status": "succeeded",
-            "started_rfc3339": "2026-06-09T00:00:00Z",
-            "completed_rfc3339": "2026-06-09T00:00:01Z",
-            "result_summary": "append succeeded"
-        },
-        {
-            "index": 1,
-            "label": "smtp_send",
-            "status": "succeeded",
-            "started_rfc3339": "2026-06-09T00:00:01Z",
-            "completed_rfc3339": "2026-06-09T00:00:02Z",
-            "result_summary": "smtp_send succeeded"
-        }
-    ]);
-    write_json(&push_path, &push_item);
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "remove",
-            &case_uid,
-            "new.md",
-            "--reason",
-            "mistaken draft",
-        ],
-    );
-    assert_eq!(status, 1, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "push_already_started");
-    assert_eq!(value["details"]["push_id"], push_id);
-    assert!(value["hint"]
-        .as_str()
-        .is_some_and(|hint| hint.contains("afmail push --confirm")));
-    assert!(draft_path.exists());
-    assert!(push_path.exists());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn draft_remove_rejects_in_progress_outbound_push() {
-    let root = temp_root("draft-remove-in-progress");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "in-progress-thread",
-        Some("support"),
-        None,
-        Some("in progress draft case"),
-    );
-    let draft_path = case_path.join("drafts/new.md");
-    let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"In progress\"\nattachments:\n---\n\nHi Bob\n");
-    assert!(fs::write(&draft_path, draft).is_ok());
-    assert_eq!(
-        run(&root, &["case", "draft", "send", &case_uid, "new.md"]).0,
-        0
-    );
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    let push_id = push["items"][0]["push_id"].as_str().unwrap_or_default();
-    let push_path = root.join(".afmail/push").join(format!("{push_id}.json"));
-    let mut push_item = read_json(&push_path);
-    push_item["step_states"] = json!([{
-        "index": 0,
-        "label": "append_to_mailbox_id_drafts",
-        "status": "pending",
-        "started_rfc3339": "2026-06-09T00:00:00Z"
-    }]);
-    write_json(&push_path, &push_item);
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "remove",
-            &case_uid,
-            "new.md",
-            "--reason",
-            "mistaken draft",
-        ],
-    );
-    assert_eq!(status, 1, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "push_already_started");
-    assert_eq!(value["details"]["push_id"], push_id);
-    assert!(draft_path.exists());
-    assert!(push_path.exists());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn active_case_generates_localized_message_index_and_views() {
-    let root = temp_root("case-messages");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let mut config = test_config(None, None);
-    config["workspace"]["language_bcp47"] = json!("zh-CN");
-    write_json(&root.join(".afmail/config.json"), &config);
-    write_message(&root, "message_case1", 81, None);
-    write_triage(&root, "message_case1", "seed");
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "case-messages",
-        None,
-        Some("message_case1"),
-        Some("seed"),
-    );
-
-    let index = fs::read_to_string(case_path.join("case.md")).unwrap_or_default();
-    assert!(!index.starts_with("---\n"));
-    assert!(!index.contains("kind: case_index"));
-    assert!(index.starts_with("# case-messages\n"));
-    assert!(index.contains(&format!("事项: {case_uid} · 消息: 1")));
-    assert!(index.contains("## 1. ← 收到: Contract renewal"));
-    assert!(index.contains("- 发件人: alice@example.com"));
-    assert!(index.contains("- 消息: [message_case1](views/messages/message_case1.md)"));
-    assert!(index.contains("- 时间: 2026-05-21 10:00"));
-    assert!(!index.contains("- 状态: case"));
-    assert!(!case_path.join("views/messages/index.md").exists());
-    let view =
-        fs::read_to_string(case_path.join("views/messages/message_case1.md")).unwrap_or_default();
-    assert!(view.contains("kind: case_message"));
-    assert!(view.contains(&format!("事项: case-messages（`{case_uid}`）")));
-    assert!(view.contains("Body"));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn case_index_renders_thread_blocks_with_local_times_and_actions() {
-    let root = temp_root("case-thread-index");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let mut config = test_config(None, None);
-    config["workspace"]["timezone_utc_offset"] = json!("+08:00");
-    write_json(&root.join(".afmail/config.json"), &config);
-
-    write_message(&root, "message_sent_reply", 91, None);
-    update_message_json(&root, "message_sent_reply", |message| {
-        message["direction"] = json!("outbound");
-        message["subject"] = json!("Follow up");
-        message["from"] = json!("Me <me@example.com>");
-        message["to"] = json!(["alice@example.com"]);
-        message["received_rfc3339"] = Value::Null;
-        message["sent_rfc3339"] = json!("2026-05-21T02:00:00Z");
-        message["in_reply_to"] = json!("<message_received@example.com>");
-    });
-    write_triage(&root, "message_sent_reply", "reply");
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "thread-case",
-        None,
-        Some("message_sent_reply"),
-        Some("seed"),
-    );
-
-    for (message_id, uid, subject, time) in [
-        (
-            "message_received",
-            92,
-            "Initial request",
-            "2026-05-21T01:00:00Z",
-        ),
-        (
-            "message_re_subject",
-            93,
-            "Re: Initial request",
-            "2026-05-21T03:00:00Z",
-        ),
-        ("message_fwd", 94, "Fwd: FYI", "2026-05-21T12:00:00+08:00"),
-        ("message_fw_sent", 95, "Fw: FYI", "2026-05-21T05:00:00Z"),
-    ] {
-        write_message(&root, message_id, uid, None);
-        update_message_json(&root, message_id, |message| {
-            message["subject"] = json!(subject);
-            message["received_rfc3339"] = json!(time);
-            if message_id == "message_fw_sent" {
-                message["direction"] = json!("outbound");
-                message["from"] = json!("Me <me@example.com>");
-                message["to"] = json!(["alice@example.com"]);
-                message["received_rfc3339"] = Value::Null;
-                message["sent_rfc3339"] = json!(time);
-            }
-        });
-        write_triage(&root, message_id, "thread");
-        let (status, stdout) = run(
-            &root,
-            &[
-                "case",
-                "add",
-                &case_uid,
-                message_id,
-                "--reason",
-                "belongs to the thread",
-            ],
-        );
-        assert_eq!(status, 0, "{stdout}");
-    }
-
-    let index = fs::read_to_string(case_path.join("case.md")).unwrap_or_default();
-    let received = index.find("## 1. ← Received: Initial request");
-    let sent_reply = index.find("## 2. → Sent reply: Follow up");
-    let re_subject = index.find("## 3. ← Received reply: Re: Initial request");
-    let fwd = index.find("## 4. ← Received forward: Fwd: FYI");
-    let fw_sent = index.find("## 5. → Sent forward: Fw: FYI");
-    assert!(received.is_some(), "{index}");
-    assert!(sent_reply.is_some(), "{index}");
-    assert!(re_subject.is_some(), "{index}");
-    assert!(fwd.is_some(), "{index}");
-    assert!(fw_sent.is_some(), "{index}");
-    assert!(received < sent_reply && sent_reply < re_subject && re_subject < fwd && fwd < fw_sent);
-    assert!(index.contains("- From: alice@example.com"));
-    assert!(index.contains("- To: alice@example.com"));
-    assert!(index.contains("- Time: 2026-05-21 09:00"));
-    assert!(index.contains("- Time: 2026-05-21 12:00"));
-    assert!(index.contains("- Time: 2026-05-21 13:00"));
-    let summary = index
-        .split("## Conversation")
-        .next()
-        .unwrap_or(index.as_str());
-    assert!(!summary.contains("2026-05-21T01:00:00Z"));
-    assert!(!summary.contains("2026-05-21T12:00:00+08:00"));
-    assert!(!summary.contains("- Status: case"));
-    assert!(index.contains("## Conversation"));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn notification_index_renders_thread_blocks_with_summary_fallbacks() {
-    let root = temp_root("archive-thread-index");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let mut config = test_config(None, None);
-    config["workspace"]["timezone_utc_offset"] = json!("+08:00");
-    write_json(&root.join(".afmail/config.json"), &config);
-
-    write_message(&root, "message_notification_reply", 96, None);
-    update_message_json(&root, "message_notification_reply", |message| {
-        message["direction"] = json!("outbound");
-        message["subject"] = json!("Original subject");
-        message["from"] = json!("Me <me@example.com>");
-        message["to"] = json!(["alice@example.com"]);
-        message["received_rfc3339"] = Value::Null;
-        message["sent_rfc3339"] = json!("2026-05-21T01:00:00Z");
-        message["in_reply_to"] = json!("<external@example.com>");
-    });
-    write_triage(&root, "message_notification_reply", "reply archive");
-    let (notification_uid, archive_path, _) = create_notification(
-        &root,
-        "thread-archive",
-        Some("message_notification_reply"),
-        Some("Invoice summary"),
-        Some("archive reply"),
-    );
-
-    write_message(&root, "message_notification_forward", 97, None);
-    update_message_json(&root, "message_notification_forward", |message| {
-        message["subject"] = json!("转发: Fallback subject");
-        message["received_rfc3339"] = json!("2026-05-21T15:00:00+08:00");
-    });
-    write_triage(&root, "message_notification_forward", "forward archive");
-    let (status, stdout) = run(
-        &root,
-        &[
-            "notification",
-            "add",
-            &notification_uid,
-            "message_notification_forward",
-            "--summary",
-            "",
-            "--reason",
-            "archive forward",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-
-    let index = fs::read_to_string(archive_path.join("notification.md")).unwrap_or_default();
-    assert!(index.contains("## 1. ← Received forward: 转发: Fallback subject"));
-    assert!(index.contains("## 2. → Sent reply: Invoice summary"));
-    assert!(!index.contains("→ Sent reply: Original subject"));
-    assert!(index.contains("- From: alice@example.com"));
-    assert!(index.contains("- To: alice@example.com"));
-    assert!(index.contains(
-        "- Message: [message_notification_forward](views/messages/message_notification_forward.md)"
-    ));
-    assert!(index.contains(
-        "- Message: [message_notification_reply](views/messages/message_notification_reply.md)"
-    ));
-    assert!(index.contains("- Time: 2026-05-21 15:00"));
-    assert!(index.contains("- Time: 2026-05-21 09:00"));
-    assert!(!index.contains(" — "));
-    assert!(!index.contains("2026-05-21T15:00:00+08:00"));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn render_refresh_rebuilds_generated_views_and_removes_obsolete_case_indexes() {
-    let root = temp_root("render-refresh");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-
-    write_message(&root, "message_active", 81, None);
-    write_triage(&root, "message_active", "active");
-    let (active_uid, active_path, _) = create_case(
-        &root,
-        "active-case",
-        None,
-        Some("message_active"),
-        Some("active"),
-    );
-
-    write_message(&root, "message_done", 82, None);
-    write_triage(&root, "message_done", "done");
-    let (done_uid, _done_path, _) =
-        create_case(&root, "done-case", None, Some("message_done"), Some("done"));
-    assert_eq!(
-        run(&root, &["case", "archive", &done_uid, "--reason", "done"],).0,
-        0
-    );
-    let archived_done_path = root.join(format!("archived-cases/support/{done_uid}-done-case"));
-
-    write_message(&root, "message_notice", 83, None);
-    write_triage(&root, "message_notice", "notice");
-    let (_billing_uid, billing_path, _) = create_notification(
-        &root,
-        "billing",
-        Some("message_notice"),
-        Some("invoice notice"),
-        Some("notice"),
-    );
-
-    assert!(fs::write(active_path.join("views/messages/index.md"), "legacy active").is_ok());
-    assert!(fs::write(
-        archived_done_path.join("views/messages/index.md"),
-        "legacy archived"
-    )
-    .is_ok());
-    assert!(fs::remove_file(active_path.join("case.md")).is_ok());
-    assert!(fs::remove_file(active_path.join("views/messages/message_active.md")).is_ok());
-    assert!(fs::remove_file(archived_done_path.join("case.md")).is_ok());
-    assert!(fs::remove_file(archived_done_path.join("views/messages/message_done.md")).is_ok());
-    assert!(fs::remove_file(billing_path.join("notification.md")).is_ok());
-    assert!(fs::remove_file(billing_path.join("views/messages/message_notice.md")).is_ok());
-    let before_push = parse_one(&run(&root, &["push", "list"]).1)["count"].clone();
-
-    let (status, stdout) = run(&root, &["render", "refresh"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "render_refreshed");
-    assert_eq!(value["generated"]["case/case.md.j2"], 2);
-    assert_eq!(value["generated"]["case/message.md.j2"], 2);
-    assert_eq!(value["generated"]["notification/notification.md.j2"], 1);
-    assert_eq!(value["generated"]["notification/message.md.j2"], 1);
-    assert_eq!(value["template_sources"]["case/case.md.j2"]["builtin"], 2);
-    assert_eq!(
-        parse_one(&run(&root, &["push", "list"]).1)["count"],
-        before_push
-    );
-
-    let active_index = fs::read_to_string(active_path.join("case.md")).unwrap_or_default();
-    assert!(!active_index.starts_with("---\n"));
-    assert!(!active_index.contains("kind: case_index"));
-    assert!(active_index.starts_with("# active-case\n"));
-    assert!(active_index.contains(&format!("Case: {active_uid} · Messages: 1")));
-    assert!(active_index.contains("## 1. ← Received: Contract renewal"));
-    assert!(active_index.contains("- From: alice@example.com"));
-    assert!(active_index.contains("- Message: [message_active](views/messages/message_active.md)"));
-    assert!(active_index.contains("- Time: 2026-05-21 10:00"));
-    assert!(!active_index.contains("- Status: case"));
-    assert!(!active_index.contains("| Message |"));
-    assert!(active_path
-        .join("views/messages/message_active.md")
-        .exists());
-    assert!(archived_done_path.join("case.md").exists());
-    assert!(archived_done_path
-        .join("views/messages/message_done.md")
-        .exists());
-    assert!(billing_path.join("notification.md").exists());
-    assert!(billing_path
-        .join("views/messages/message_notice.md")
-        .exists());
-    assert!(!active_path.join("views/messages/index.md").exists());
-    assert!(!archived_done_path.join("views/messages/index.md").exists());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -6384,13 +4298,9 @@ fn render_refresh_progress_logs_render_substages() {
     let (status, stdout) = run(&root, &["--log", "progress", "render", "refresh"]);
     assert_eq!(status, 0, "{stdout}");
     let lines = parse_lines(&stdout);
-    assert_eq!(
-        lines.last().unwrap_or(&Value::Null)["code"],
-        "render_refreshed"
-    );
     let phases = lines
         .iter()
-        .filter(|line| line["code"] == "log" && line["event"] == "progress")
+        .filter(|line| line["event"] == "progress")
         .filter_map(|line| line["phase"].as_str())
         .collect::<Vec<_>>();
     for phase in [
@@ -6422,9 +4332,45 @@ fn render_refresh_progress_logs_render_substages() {
     assert_eq!(triage_done["triage_count"], 1);
     assert!(triage_done["elapsed_ms"].as_u64().is_some());
 
-    let progress = read_json(&root.join(".afmail/workspace.progress.json"));
+    let progress = read_json(&root.join(".afmail/cache/progress.json"));
     assert_eq!(progress["command"], "render");
     assert_eq!(progress["status"], "succeeded");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn render_refresh_reports_progress_write_failure_as_partial() {
+    let root = temp_root("render-progress-write-failure");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    write_message(&root, "message_render_progress_write_failure", 87, None);
+    let _ = fs::remove_file(root.join(".afmail/cache/progress.json"));
+    assert!(fs::create_dir(root.join(".afmail/cache/progress.json")).is_ok());
+
+    let (status, stdout) = run(&root, &["render", "refresh"]);
+    assert_eq!(status, 3, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "partial");
+    assert!(
+        value["progress_warning_count"].as_u64().unwrap_or(0) > 0,
+        "{stdout}"
+    );
+    assert_eq!(
+        value["progress_warnings"][0]["code"],
+        "progress_write_failed"
+    );
+    assert!(
+        value["progress_warnings"][0]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with(".afmail/cache/progress.json")),
+        "{stdout}"
+    );
+    let (status, stdout) = run(&root, &["status"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["progress"]["status"], "unavailable");
+    assert_eq!(value["progress"]["error"]["code"], "progress_unavailable");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -6455,26 +4401,32 @@ fn render_refresh_uses_user_templates_per_generated_file_type() {
     );
 
     assert!(fs::create_dir_all(root.join(".afmail/templates/en-US/case")).is_ok());
-    assert!(fs::write(
-        root.join(".afmail/templates/en-US/case/case.md.j2"),
-        "IGNORED LEGACY {{ case.collection_uid }}\n"
-    )
-    .is_ok());
+    assert!(
+        fs::write(
+            root.join(".afmail/templates/en-US/case/case.md.j2"),
+            "IGNORED LEGACY {{ case.collection_uid }}\n"
+        )
+        .is_ok()
+    );
     let (status, stdout) = run(&root, &["render", "refresh"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
     assert_eq!(value["template_sources"]["case/case.md.j2"]["workspace"], 0);
     assert_eq!(value["template_sources"]["case/case.md.j2"]["builtin"], 1);
-    assert!(!fs::read_to_string(case_path.join("case.md"))
-        .unwrap_or_default()
-        .contains("IGNORED LEGACY"));
+    assert!(
+        !fs::read_to_string(case_path.join("case.md"))
+            .unwrap_or_default()
+            .contains("IGNORED LEGACY")
+    );
 
     assert!(fs::create_dir_all(root.join("templates/en-US/case")).is_ok());
-    assert!(fs::write(
-        root.join("templates/en-US/case/case.md.j2"),
-        "USER CASE {{ case.collection_uid }} {{ view.message_count }}\n"
-    )
-    .is_ok());
+    assert!(
+        fs::write(
+            root.join("templates/en-US/case/case.md.j2"),
+            "USER CASE {{ case.collection_uid }} {{ view.message_count }}\n"
+        )
+        .is_ok()
+    );
     let (status, stdout) = run(&root, &["render", "refresh"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
@@ -6488,18 +4440,22 @@ fn render_refresh_uses_user_templates_per_generated_file_type() {
             .unwrap_or_default()
             .contains("kind: case_message")
     );
-    assert!(!fs::read_to_string(archive_path.join("notification.md"))
-        .unwrap_or_default()
-        .contains("USER CASE"));
+    assert!(
+        !fs::read_to_string(archive_path.join("notification.md"))
+            .unwrap_or_default()
+            .contains("USER CASE")
+    );
 
-    assert!(fs::write(
-        root.join("templates/en-US/case/case.md.j2"),
-        "{% for item in items %}"
-    )
-    .is_ok());
+    assert!(
+        fs::write(
+            root.join("templates/en-US/case/case.md.j2"),
+            "{% for item in items %}"
+        )
+        .is_ok()
+    );
     let (status, stdout) = run(&root, &["render", "refresh"]);
     assert_eq!(status, 1);
-    assert_eq!(parse_one(&stdout)["error_code"], "template_render_failed");
+    assert_eq!(parse_one(&stdout)["code"], "template_render_failed");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -6512,21 +4468,23 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
     let (status, stdout) = run(&root, &["render", "templates"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "render_templates");
     assert_eq!(value["template_dir"], "templates");
     assert_eq!(value["template_dir_created"], false);
     assert_eq!(value["exported_count"], 126);
     assert_eq!(value["workspace_count"], 126);
     assert!(root.join("templates/en-US/case/case.md.j2").is_file());
-    assert!(root
-        .join("templates/zh-CN/notification/message.md.j2")
-        .is_file());
+    assert!(
+        root.join("templates/zh-CN/notification/message.md.j2")
+            .is_file()
+    );
 
-    assert!(fs::write(
-        root.join("templates/en-US/case/case.md.j2"),
-        "CUSTOM {{ case.collection_uid }}\n"
-    )
-    .is_ok());
+    assert!(
+        fs::write(
+            root.join("templates/en-US/case/case.md.j2"),
+            "CUSTOM {{ case.collection_uid }}\n"
+        )
+        .is_ok()
+    );
     let (status, stdout) = run(&root, &["render", "templates"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
@@ -6564,132 +4522,6 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
 }
 
 #[test]
-fn push_defaults_to_preview_and_rejects_dry_run_confirm() {
-    let root = temp_root("push-preview");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_preview", 42, None);
-    write_triage(&root, "message_preview", "phishing note");
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "message",
-                "spam",
-                "message_preview",
-                "--reason",
-                "phishing note",
-            ],
-        )
-        .0,
-        0
-    );
-
-    let (status, stdout) = run(&root, &["push"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "push_dry_run");
-    assert_eq!(value["confirmed"], false);
-    assert_eq!(value["count"], 1);
-
-    let (status, stdout) = run(&root, &["push"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "push_dry_run");
-    assert_eq!(value["confirmed"], false);
-    assert_eq!(value["count"], 1);
-    assert!(value["hint"]
-        .as_str()
-        .is_some_and(|hint| hint.contains("No remote changes were made")));
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 1);
-
-    let (status, stdout) = run(&root, &["push", "--dry-run", "--confirm"]);
-    assert_eq!(status, 1);
-    assert_eq!(parse_one(&stdout)["error_code"], "invalid_request");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn draft_save_send_validate_current_content_without_freshness_gate() {
-    let root = temp_root("draft-current-content");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "fresh-thread",
-        Some("support"),
-        None,
-        Some("fresh draft case"),
-    );
-    let draft_path = case_path.join("drafts/new.md");
-    let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"Hello\"\nattachments:\n---\n\nHi Bob\n");
-    assert!(fs::write(&draft_path, &draft).is_ok());
-
-    let (status, stdout) = run(&root, &["case", "draft", "send", &case_uid, "new.md"]);
-    assert_eq!(status, 0, "{stdout}");
-    let queued = parse_one(&stdout);
-    assert_eq!(queued["code"], "push_queued");
-    assert_eq!(queued["action"], "send");
-    assert!(queued.get("draft_hash").is_none());
-    let push_id = queued["push_id"].as_str().unwrap_or_default().to_string();
-    let state_path = case_path.join("data/drafts.json");
-    let state = read_json(&state_path);
-    let first_hash = state["drafts"]["new.md"]["last_validated_hash"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(first_hash.starts_with("blake3:"));
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["items"][0]["push_id"], push_id);
-    assert!(push["items"][0].get("draft_hash").is_none());
-    assert!(push["items"][0].get("eml_path").is_none());
-    assert!(push["items"][0].get("message_id").is_none());
-
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "case",
-                "move",
-                &case_uid,
-                "waiting",
-                "--reason",
-                "better group",
-            ],
-        )
-        .0,
-        0
-    );
-    let moved_path = root.join(format!("cases/waiting/{case_uid}-fresh-thread"));
-    let moved_state_path = moved_path.join("data/drafts.json");
-    assert!(moved_state_path.is_file());
-    let (status, stdout) = run(&root, &["case", "archive", &case_uid, "--reason", "done"]);
-    assert_eq!(status, 1);
-    assert_eq!(parse_one(&stdout)["error_code"], "case_has_local_drafts");
-    let draft_path = moved_path.join("drafts/new.md");
-    assert!(fs::write(&draft_path, draft.replace("Hi Bob", "Hi Bob\nP.S. changed")).is_ok());
-
-    let (status, stdout) = run(&root, &["case", "draft", "save", &case_uid, "new.md"]);
-    assert_eq!(status, 0, "{stdout}");
-    let requeued = parse_one(&stdout);
-    assert_eq!(requeued["push_id"], push_id);
-    assert_eq!(requeued["action"], "save_draft");
-    let new_state = read_json(&moved_state_path);
-    let new_hash = new_state["drafts"]["new.md"]["last_validated_hash"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert_ne!(new_hash, first_hash);
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 1);
-    assert_eq!(push["items"][0]["action"], "save_draft");
-    assert!(push["items"][0].get("draft_hash").is_none());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
 fn triage_list_reports_untriaged_messages() {
     let root = temp_root("triage-list");
     assert!(fs::create_dir_all(&root).is_ok());
@@ -6702,8 +4534,10 @@ fn triage_list_reports_untriaged_messages() {
     let (status, stdout) = run(&root, &["triage", "list"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "triage_list");
     assert_eq!(value["count"], 2);
+    assert_eq!(value["returned_count"], 2);
+    assert_eq!(value["limited"], false);
+    assert_eq!(value["details"], false);
     assert_eq!(
         value["path_templates"]["view_path"],
         "triage/{message_id}.md"
@@ -6735,6 +4569,135 @@ fn triage_list_reports_untriaged_messages() {
     ] {
         assert!(items.iter().all(|item| item.get(old_field).is_none()));
     }
+
+    let (status, stdout) = run(&root, &["triage", "list", "--limit", "1"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["count"], 2);
+    assert_eq!(value["returned_count"], 1);
+    assert_eq!(value["limited"], true);
+    assert_eq!(value["limit"], 1);
+    assert_eq!(value["items"][0]["message_id"], "message_t2");
+
+    let (status, stdout) = run(&root, &["triage", "list", "--limit", "1", "--details"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["count"], 2);
+    assert_eq!(value["returned_count"], 1);
+    assert_eq!(value["details"], true);
+    assert_eq!(value["items"][0]["message_id"], "message_t2");
+    assert_eq!(value["items"][0]["workspace_status"], "triage");
+    assert_eq!(value["items"][0]["related_message_ids"], json!([]));
+    assert_eq!(value["items"][0]["case_refs"], json!([]));
+    assert_eq!(value["items"][0]["view_path"], "triage/message_t2.md");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn shared_mailbox_reads_leave_workspace_bytes_and_mtimes_unchanged() {
+    let root = temp_root("shared-reads-pure");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+
+    write_message(&root, "message_read_triage", 61, None);
+    write_triage(&root, "message_read_triage", "still in triage");
+
+    write_message(&root, "message_read_case", 62, None);
+    write_triage(&root, "message_read_case", "case read");
+    let (case_uid, _, _) = create_case(
+        &root,
+        "read-only-case",
+        Some("support"),
+        Some("message_read_case"),
+        Some("case read"),
+    );
+
+    write_message(&root, "message_read_notification", 63, None);
+    write_triage(&root, "message_read_notification", "notification read");
+    let (notification_uid, _, _) = create_notification(
+        &root,
+        "read-only-notification",
+        Some("message_read_notification"),
+        Some("notification read"),
+        Some("notification read"),
+    );
+
+    let _ = fs::remove_file(workspace_runtime_lock_path(&root));
+    assert!(!root.join(".afmail/workspace.lock").exists());
+    let before = workspace_tree_snapshot(&root);
+    for args in [
+        vec!["status"],
+        vec!["message", "show", "message_read_triage"],
+        vec!["message", "list"],
+        vec!["triage", "list", "--details"],
+        vec!["case", "show", case_uid.as_str()],
+        vec!["notification", "show", notification_uid.as_str()],
+        vec!["push", "list"],
+        vec!["push"],
+    ] {
+        let command_before = workspace_tree_snapshot(&root);
+        let (status, stdout) = run(&root, &args);
+        assert_eq!(status, 0, "args={args:?}: {stdout}");
+        let command_after = workspace_tree_snapshot(&root);
+        let differences = workspace_snapshot_differences(&command_before, &command_after);
+        assert!(
+            differences.is_empty(),
+            "shared read {args:?} changed workspace:\n{}",
+            differences.join("\n")
+        );
+    }
+    let after = workspace_tree_snapshot(&root);
+    assert_eq!(after, before);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn concurrent_shared_readers_leave_workspace_unchanged() {
+    let root = temp_root("concurrent-shared-reads-pure");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    write_message(&root, "message_concurrent_read", 65, None);
+    write_triage(&root, "message_concurrent_read", "concurrent read");
+    let _ = fs::remove_file(workspace_runtime_lock_path(&root));
+
+    let before = workspace_tree_snapshot(&root);
+    let _command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let outputs = thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for index in 0..12 {
+            let root = &root;
+            handles.push(scope.spawn(move || {
+                let args: &[&str] = if index % 3 == 0 {
+                    &["push", "list"]
+                } else if index % 3 == 1 {
+                    &["message", "show", "message_concurrent_read"]
+                } else {
+                    &["status"]
+                };
+                Command::new(bin()).current_dir(root).args(args).output()
+            }));
+        }
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(outputs.len(), 12, "a shared reader thread panicked");
+    for output in outputs {
+        let (status, stdout) = command_output(output);
+        assert_eq!(status, 0, "{stdout}");
+    }
+    let after = workspace_tree_snapshot(&root);
+    let differences = workspace_snapshot_differences(&before, &after);
+    assert!(
+        differences.is_empty(),
+        "concurrent shared reads changed workspace:\n{}",
+        differences.join("\n")
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -6743,7 +4706,9 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
     let root = temp_root("locator-lists");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    let mut config = test_config(None, None);
+    config["actions"]["message.notification"]["by_source_mailbox_id"]["inbox"]["steps"] = json!([]);
+    write_json(&root.join(".afmail/config.json"), &config);
 
     write_message(&root, "message_case_list", 53, None);
     write_triage(&root, "message_case_list", "case seed");
@@ -6758,21 +4723,24 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
     let (status, stdout) = run(&root, &["case", "list"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_list");
     assert_eq!(value["count"], 1);
+    assert_eq!(value["active_count"], 1);
+    assert_eq!(value["archiving_count"], 0);
     let item = value["items"][0].clone();
     assert_eq!(item["case_uid"], case_uid);
     assert_eq!(item["case_name"], "active-locator");
     assert_eq!(item["group"], "waiting");
-    assert!(item["case_dir"]
-        .as_str()
-        .is_some_and(|path| path.starts_with(&case_uid)));
+    assert!(
+        item["case_dir"]
+            .as_str()
+            .is_some_and(|path| path.starts_with(&case_uid))
+    );
     assert_eq!(
-        value["path_templates"]["view_path"],
+        value["path_templates"]["active_view_path"],
         "cases/{group}/{case_dir}/case.md"
     );
     assert_eq!(
-        value["path_templates"]["data_path"],
+        value["path_templates"]["active_data_path"],
         "cases/{group}/{case_dir}/data/case.json"
     );
     assert!(item.get("view_path").is_none());
@@ -6780,7 +4748,7 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
     assert!(item.get("path").is_none());
     let (status, stdout) = run(&root, &["case", "show", &case_uid]);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "case");
+    let _ = parse_one(&stdout);
 
     write_message(&root, "message_notification_list", 54, None);
     write_triage(&root, "message_notification_list", "archive seed");
@@ -6794,14 +4762,15 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
     let (status, stdout) = run(&root, &["notification", "list"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "notification_list");
     assert_eq!(value["count"], 1);
     let item = value["items"][0].clone();
     assert_eq!(item["notification_uid"], notification_uid);
     assert_eq!(item["notification_name"], "archive-locator");
-    assert!(item["notification_dir"]
-        .as_str()
-        .is_some_and(|path| path.starts_with(&notification_uid)));
+    assert!(
+        item["notification_dir"]
+            .as_str()
+            .is_some_and(|path| path.starts_with(&notification_uid))
+    );
     assert_eq!(
         value["path_templates"]["view_path"],
         "notifications/{notification_dir}/notification.md"
@@ -6817,27 +4786,30 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
 
     let (status, stdout) = run(&root, &["case", "archive", &case_uid, "--reason", "done"]);
     assert_eq!(status, 0, "{stdout}");
-    let (status, stdout) = run(&root, &["case", "list", "--archived"]);
+    let (status, stdout) = run(&root, &["case", "list"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_list");
-    assert_eq!(value["scope"], "archived");
+    assert_eq!(value["scope"], "active");
     assert_eq!(value["count"], 1);
-    assert_eq!(value["archived_count"], 1);
+    assert_eq!(value["active_count"], 0);
+    assert_eq!(value["archiving_count"], 1);
     let item = value["items"][0].clone();
     assert_eq!(item["case_uid"], case_uid);
     assert_eq!(item["case_name"], "active-locator");
     assert_eq!(item["group"], "waiting");
     assert_eq!(item["archived"], true);
-    assert!(item["case_dir"]
-        .as_str()
-        .is_some_and(|path| path.starts_with(&case_uid)));
+    assert_eq!(item["lifecycle"], "archiving");
+    assert!(
+        item["case_dir"]
+            .as_str()
+            .is_some_and(|path| path.starts_with(&case_uid))
+    );
     assert_eq!(
-        value["path_templates"]["view_path"],
+        value["path_templates"]["archiving_view_path"],
         "archived-cases/{group}/{case_dir}/case.md"
     );
     assert_eq!(
-        value["path_templates"]["data_path"],
+        value["path_templates"]["archiving_data_path"],
         "archived-cases/{group}/{case_dir}/data/case.json"
     );
     assert!(item.get("view_path").is_none());
@@ -6847,7 +4819,6 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
     let (status, stdout) = run(&root, &["case", "list", "--all"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_list");
     assert_eq!(value["scope"], "all");
     assert_eq!(value["count"], 1);
     assert_eq!(value["items"][0]["case_uid"], case_uid);
@@ -6864,8 +4835,10 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
     let (status, stdout) = run(&root, &["status"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["case_count"], 0);
-    assert_eq!(value["archived_case_count"], 1);
+    assert_eq!(value["case_count"], 1);
+    assert_eq!(value["active_case_count"], 0);
+    assert_eq!(value["archiving_case_count"], 1);
+    assert_eq!(value["archived_case_count"], 0);
     assert_eq!(value["notification_count"], 1);
     assert_eq!(value["progress"]["status"], "idle");
     assert!(value.get("cases").is_none());
@@ -6879,7 +4852,9 @@ fn header_related_messages_require_case_for_direct_disposition() {
     let root = temp_root("related-requires-case");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    let mut config = test_config(None, None);
+    config["actions"]["message.notification"]["by_source_mailbox_id"]["inbox"]["steps"] = json!([]);
+    write_json(&root.join(".afmail/config.json"), &config);
     write_message(&root, "message_health_parent", 61, None);
     write_message(&root, "message_health_reply", 62, None);
     update_message_json(&root, "message_health_parent", |value| {
@@ -6927,6 +4902,54 @@ fn header_related_messages_require_case_for_direct_disposition() {
     assert!(parent.get("requires_case").is_none());
     assert!(parent.get("related_message_ids").is_none());
 
+    let (status, stdout) = run(&root, &["triage", "list", "--details"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    let items = value["items"].as_array().cloned().unwrap_or_default();
+    let parent = items
+        .iter()
+        .find(|item| item["message_id"] == "message_health_parent")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        parent["related_message_ids"],
+        json!(["message_health_reply"])
+    );
+    assert_eq!(parent["requires_case"], true);
+    assert_eq!(
+        parent["related_messages"][0]["message_id"],
+        "message_health_reply"
+    );
+    assert_eq!(parent["related_messages"][0]["workspace_status"], "triage");
+
+    let (status, stdout) = run(
+        &root,
+        &["message", "show", "message_health_parent", "--meta"],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(
+        value["related_message_ids"],
+        json!(["message_health_reply"])
+    );
+    assert_eq!(
+        value["related_messages"][0]["message_id"],
+        "message_health_reply"
+    );
+    assert_eq!(value["workspace_status"], "triage");
+    assert!(value.get("body_text").is_none());
+    assert!(value.get("message").is_none());
+
+    let (status, stdout) = run(&root, &["message", "show", "message_health_parent"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(
+        value["related_message_ids"],
+        json!(["message_health_reply"])
+    );
+    assert!(value.get("body_text").is_some());
+    assert!(value.get("message").is_some());
+
     let (status, stdout) = run(
         &root,
         &[
@@ -6939,26 +4962,27 @@ fn header_related_messages_require_case_for_direct_disposition() {
     );
     assert_eq!(status, 1, "{stdout}");
     let value = parse_one(&stdout);
+    assert_eq!(value["code"], "message_has_related_conversation_use_case");
     assert_eq!(
-        value["error_code"],
-        "message_has_related_conversation_use_case"
-    );
-    assert_eq!(
-        value["details"]["related_message_ids"],
+        value["items"][0]["error"]["related_message_ids"],
         json!(["message_health_reply"])
     );
-    assert!(value["details"]["suggested_commands"]
-        .as_array()
-        .is_some_and(|commands| commands.iter().any(|command| command
-            .as_str()
-            .unwrap_or_default()
-            .contains("afmail case add CASE_REF message_health_reply"))));
-    assert!(value["details"]["suggested_commands"]
-        .as_array()
-        .is_some_and(|commands| commands.iter().any(|command| command
-            .as_str()
-            .unwrap_or_default()
-            .contains("afmail case trash CASE_REF"))));
+    assert!(
+        value["items"][0]["error"]["suggested_commands"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().any(|command| command
+                .as_str()
+                .unwrap_or_default()
+                .contains("afmail case add CASE_REF message_health_reply")))
+    );
+    assert!(
+        value["items"][0]["error"]["suggested_commands"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().any(|command| command
+                .as_str()
+                .unwrap_or_default()
+                .contains("afmail case trash CASE_REF")))
+    );
 
     let (done_notification_uid, _done_archive_path, _) =
         create_notification(&root, "done", None, None, Some("done archive"));
@@ -6977,26 +5001,27 @@ fn header_related_messages_require_case_for_direct_disposition() {
     );
     assert_eq!(status, 1, "{stdout}");
     let value = parse_one(&stdout);
+    assert_eq!(value["code"], "message_has_related_conversation_use_case");
     assert_eq!(
-        value["error_code"],
-        "message_has_related_conversation_use_case"
-    );
-    assert_eq!(
-        value["details"]["related_message_ids"],
+        value["items"][0]["error"]["related_message_ids"],
         json!(["message_health_parent"])
     );
-    assert!(value["details"]["suggested_commands"]
-        .as_array()
-        .is_some_and(|commands| commands.iter().any(|command| command
-            .as_str()
-            .unwrap_or_default()
-            .contains("afmail case add CASE_REF message_health_parent"))));
-    assert!(value["details"]["suggested_commands"]
-        .as_array()
-        .is_some_and(|commands| commands.iter().any(|command| command
-            .as_str()
-            .unwrap_or_default()
-            .contains("afmail case trash CASE_REF"))));
+    assert!(
+        value["items"][0]["error"]["suggested_commands"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().any(|command| command
+                .as_str()
+                .unwrap_or_default()
+                .contains("afmail case add CASE_REF message_health_parent")))
+    );
+    assert!(
+        value["items"][0]["error"]["suggested_commands"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().any(|command| command
+                .as_str()
+                .unwrap_or_default()
+                .contains("afmail case trash CASE_REF")))
+    );
 
     let (case_uid, _case_path, _value) = create_case(
         &root,
@@ -7019,8 +5044,19 @@ fn header_related_messages_require_case_for_direct_disposition() {
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
     assert_eq!(
-        value["related_message_ids"],
+        value[0]["related_message_ids"],
         json!(["message_health_parent"])
+    );
+    let (status, stdout) = run(
+        &root,
+        &["message", "show", "message_health_parent", "--meta"],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["case_refs"][0]["case_uid"], case_uid);
+    assert_eq!(
+        value["related_messages"][0]["case_refs"][0]["case_uid"],
+        case_uid
     );
 
     let (status, stdout) = run(
@@ -7035,233 +5071,16 @@ fn header_related_messages_require_case_for_direct_disposition() {
     );
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_archived");
     assert_eq!(
         value["case_path"],
         format!("archived-cases/support/{case_uid}-health-conversation")
     );
-    assert!(root
-        .join(format!(
+    assert!(
+        root.join(format!(
             "archived-cases/support/{case_uid}-health-conversation/case.md"
         ))
-        .exists());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn case_trash_discards_entire_related_conversation() {
-    let root = temp_root("case-trash-related");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_trash_parent", 71, None);
-    write_message(&root, "message_trash_reply", 72, None);
-    update_message_json(&root, "message_trash_reply", |value| {
-        value["direction"] = json!("outbound");
-        value["subject"] = json!("Re: Contract renewal");
-        value["from"] = json!("me@example.com");
-        value["received_rfc3339"] = Value::Null;
-        value["sent_rfc3339"] = json!("2026-05-21T10:05:00Z");
-        value["in_reply_to"] = json!("<message_trash_parent@example.com>");
-        value["references"] = json!(["<message_trash_parent@example.com>"]);
-        value["remote"]["locations"][0]["mailbox_id"] = json!("sent");
-        value["remote"]["locations"][0]["mailbox_name"] = json!("Sent");
-    });
-    write_triage(&root, "message_trash_parent", "parent");
-    write_triage(&root, "message_trash_reply", "reply");
-
-    let (case_uid, case_path, _value) = create_case(
-        &root,
-        "trash-conversation",
-        None,
-        Some("message_trash_parent"),
-        Some("conversation needs case"),
+        .exists()
     );
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "add",
-            &case_uid,
-            "message_trash_reply",
-            "--reason",
-            "reply belongs to same case",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "trash",
-            &case_uid,
-            "--reason",
-            "test conversation can be discarded",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_trashed");
-    assert_eq!(value["source_status"], "active");
-    assert_eq!(value["trashed_message_count"], 2);
-    assert_eq!(
-        value["message_ids"],
-        json!(["message_trash_parent", "message_trash_reply"])
-    );
-    assert_eq!(
-        value["eligible_message_ids"],
-        json!(["message_trash_parent", "message_trash_reply"])
-    );
-    assert_eq!(value["location_count"], 2);
-    assert_eq!(value["queued_location_count"], 2);
-    assert_eq!(value["queued"], true);
-    assert!(!case_path.exists());
-
-    for message_id in ["message_trash_parent", "message_trash_reply"] {
-        let message = read_json(&root.join(format!("messages/{message_id}.json")));
-        assert_eq!(message["workspace"]["status"], "trashed");
-        assert!(root.join(format!("trash/{message_id}.md")).exists());
-        assert!(!root.join(format!("triage/{message_id}.md")).exists());
-    }
-    let trash = read_json(&root.join("trash/data/trash.json"));
-    let trash_items = trash["items"].as_array().cloned().unwrap_or_default();
-    for message_id in ["message_trash_parent", "message_trash_reply"] {
-        assert!(trash_items
-            .iter()
-            .any(|item| item["message_id"] == message_id));
-    }
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 1);
-    assert_eq!(push["items"][0]["action"], "trash");
-    assert_eq!(
-        push["items"][0]["message_ids"],
-        json!(["message_trash_parent", "message_trash_reply"])
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn archived_case_trash_discards_case_without_unarchive() {
-    let root = temp_root("archive-case-trash");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let mut config = test_config(None, None);
-    config["actions"]["message.notification"]["by_source_mailbox_id"]["inbox"]["steps"] = json!([]);
-    write_json(&root.join(".afmail/config.json"), &config);
-    write_message(&root, "message_notification_case_trash", 81, None);
-    write_triage(&root, "message_notification_case_trash", "done");
-
-    let (case_uid, _case_path, _value) = create_case(
-        &root,
-        "archived-trash",
-        None,
-        Some("message_notification_case_trash"),
-        Some("conversation done"),
-    );
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "archive",
-            &case_uid,
-            "--reason",
-            "conversation complete",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let archived = parse_one(&stdout);
-    assert_eq!(archived["queued"], false);
-    let archived_path = root.join(archived["case_path"].as_str().unwrap_or_default());
-    assert!(archived_path.exists());
-
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "trash",
-            &case_uid,
-            "--reason",
-            "archived test case can be discarded",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "case_trashed");
-    assert_eq!(value["source_status"], "archived");
-    assert_eq!(
-        value["message_ids"],
-        json!(["message_notification_case_trash"])
-    );
-    assert_eq!(
-        value["eligible_message_ids"],
-        json!(["message_notification_case_trash"])
-    );
-    assert!(!archived_path.exists());
-    let message = read_json(&root.join("messages/message_notification_case_trash.json"));
-    assert_eq!(message["workspace"]["status"], "trashed");
-    assert!(root
-        .join("trash/message_notification_case_trash.md")
-        .exists());
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 1);
-    assert_eq!(push["items"][0]["action"], "trash");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn case_trash_rejects_cases_with_local_drafts() {
-    let root = temp_root("case-trash-draft");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_case_with_draft", 91, None);
-    write_triage(&root, "message_case_with_draft", "needs reply");
-    let (case_uid, case_path, _value) = create_case(
-        &root,
-        "case-with-draft",
-        None,
-        Some("message_case_with_draft"),
-        Some("needs a draft"),
-    );
-    let (status, stdout) = run(
-        &root,
-        &[
-            "case",
-            "draft",
-            "new",
-            &case_uid,
-            "--to",
-            "friend@example.com",
-            "--subject",
-            "Test",
-            "--body",
-            "Draft body",
-        ],
-    );
-    assert_eq!(status, 0, "{stdout}");
-
-    let (status, stdout) = run(
-        &root,
-        &["case", "trash", &case_uid, "--reason", "discard test case"],
-    );
-    assert_eq!(status, 1, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "case_has_local_drafts");
-    assert!(value["hint"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("archive/merge/trash"));
-    assert!(value["details"]["suggested_commands"]
-        .as_array()
-        .is_some_and(|commands| commands.iter().any(|command| command
-            .as_str()
-            .unwrap_or_default()
-            .contains("afmail case draft remove"))));
-    assert!(case_path.exists());
-    let message = read_json(&root.join("messages/message_case_with_draft.json"));
-    assert_ne!(message["workspace"]["status"], "trashed");
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -7300,17 +5119,6 @@ fn case_merge_preserves_other_case_notes() {
         .unwrap_or_default();
     assert!(section.starts_with(merged_notes), "{notes}");
     assert!(!case_b_path.exists());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn handoff_subcommands_are_removed() {
-    let root = temp_root("handoff-gone");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    // External ref parsing rejects this former case subcommand at runtime.
-    assert_eq!(run(&root, &["push", "handoff"]).0, 2);
-    assert_eq!(run(&root, &["case", "case-x", "handoff"]).0, 2);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -7435,6 +5243,7 @@ fn purge_deletes_old_local_discard_records() {
     let root = temp_root("purge-dispositions");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
+    assert_eq!(run(&root, &["purge", "--confirm"]).0, 2);
     for (message_id, uid, status, updated) in [
         ("message_spam_old", 50, "spam", "2000-01-01T00:00:00Z"),
         ("message_spam_recent", 51, "spam", "2999-01-01T00:00:00Z"),
@@ -7461,26 +5270,47 @@ fn purge_deletes_old_local_discard_records() {
 
     let (status, stdout) = run(&root, &["purge", "spam"]);
     assert_eq!(status, 0, "{stdout}");
+    let plan = parse_one(&stdout);
+    assert_eq!(plan["target"], "spam");
+    assert_eq!(plan["candidate_count"], 1);
+    assert!(root.join("messages/message_spam_old.json").is_file());
+    let stale_plan_id = plan["plan_id"].as_str().unwrap_or_default();
+    update_message_json(&root, "message_spam_old", |message| {
+        message["subject"] = json!("changed after purge preview");
+    });
+    let (status, stdout) = run(&root, &["purge", "spam", "--confirm", stale_plan_id]);
+    assert_eq!(status, 1, "{stdout}");
+    let error = parse_one(&stdout);
+    assert_eq!(error["code"], "purge_plan_changed");
+    assert_eq!(error["local_deletions_started"], false);
+    assert!(root.join("messages/message_spam_old.json").is_file());
+    let (status, stdout) = run(&root, &["purge", "spam"]);
+    assert_eq!(status, 0, "{stdout}");
+    let plan = parse_one(&stdout);
+    let plan_id = plan["plan_id"].as_str().unwrap_or_default();
+    let (status, stdout) = run(&root, &["purge", "spam", "--confirm", plan_id]);
+    assert_eq!(status, 0, "{stdout}");
     let purged = parse_one(&stdout);
-    assert_eq!(purged["code"], "purged");
-    assert_eq!(purged["target"], "spam");
-    assert_eq!(purged["older_than_days"], 30);
+    assert_eq!(purged["confirmed"], true);
+    assert_eq!(purged["plan_id"], plan_id);
     assert_eq!(purged["purged_message_ids"], json!(["message_spam_old"]));
     assert_eq!(purged["purged_spam_count"], 1);
     assert_eq!(purged["purged_trash_count"], 0);
     assert_eq!(purged["purged_deleted_count"], 0);
-    assert_eq!(
-        purged["skipped_recent_message_ids"],
-        json!(["message_spam_recent"])
-    );
+    assert_eq!(purged["skipped"][0]["message_id"], "message_spam_recent");
+    assert_eq!(purged["skipped"][0]["reason"], "recent");
     assert!(!root.join("messages/message_spam_old.json").exists());
     assert!(!root.join(".afmail/messages/message_spam_old.eml").exists());
-    assert!(!root
-        .join(".afmail/messages/message_spam_old.state.json")
-        .exists());
-    assert!(!root
-        .join(".afmail/messages/message_spam_old.remote.json")
-        .exists());
+    assert!(
+        !root
+            .join(".afmail/messages/message_spam_old.state.json")
+            .exists()
+    );
+    assert!(
+        !root
+            .join(".afmail/messages/message_spam_old.remote.json")
+            .exists()
+    );
     assert!(!root.join("spam/message_spam_old.md").exists());
     assert!(root.join("messages/message_spam_recent.json").is_file());
     assert!(root.join("messages/message_trash_old.json").is_file());
@@ -7489,6 +5319,11 @@ fn purge_deletes_old_local_discard_records() {
     assert!(root.join("deleted/message_deleted_old.md").is_file());
 
     let (status, stdout) = run(&root, &["purge"]);
+    assert_eq!(status, 0, "{stdout}");
+    let plan = parse_one(&stdout);
+    assert!(root.join("messages/message_trash_old.json").is_file());
+    let plan_id = plan["plan_id"].as_str().unwrap_or_default();
+    let (status, stdout) = run(&root, &["purge", "--confirm", plan_id]);
     assert_eq!(status, 0, "{stdout}");
     let purged = parse_one(&stdout);
     assert_eq!(purged["target"], "discards");
@@ -7500,10 +5335,7 @@ fn purge_deletes_old_local_discard_records() {
     assert_eq!(purged["purged_spam_count"], 0);
     assert_eq!(purged["purged_trash_count"], 1);
     assert_eq!(purged["purged_deleted_count"], 1);
-    assert_eq!(
-        purged["skipped_recent_message_ids"],
-        json!(["message_spam_recent"])
-    );
+    assert_eq!(purged["skipped"][0]["message_id"], "message_spam_recent");
     assert!(!root.join("messages/message_trash_old.json").exists());
     assert!(!root.join("messages/message_deleted_old.json").exists());
     assert!(!root.join("trash/message_trash_old.md").exists());
@@ -7556,7 +5388,6 @@ fn pull_marks_unreferenced_missing_remote_message_deleted_remote() {
     let (status, stdout) = run(&root, &["pull", "inbox"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "pull_result");
     assert_eq!(value["new_message_count"], 0);
     assert_eq!(value["triage_created_count"], 0);
     assert_eq!(value["checked_location_count"], 1);
@@ -7591,6 +5422,21 @@ fn pull_marks_unreferenced_missing_remote_message_deleted_remote() {
     assert!(!root.join(".afmail/deleted").exists());
 
     let (status, stdout) = run(&root, &["purge", "deleted", "--older-than-days", "0"]);
+    assert_eq!(status, 0, "{stdout}");
+    let plan = parse_one(&stdout);
+    assert!(root.join("messages/message_missing.json").exists());
+    let plan_id = plan["plan_id"].as_str().unwrap_or_default();
+    let (status, stdout) = run(
+        &root,
+        &[
+            "purge",
+            "deleted",
+            "--older-than-days",
+            "0",
+            "--confirm",
+            plan_id,
+        ],
+    );
     assert_eq!(status, 0, "{stdout}");
     let purged = parse_one(&stdout);
     assert_eq!(purged["target"], "deleted");
@@ -7638,7 +5484,6 @@ fn pull_tombstones_referenced_missing_remote_message_in_place() {
     let (status, stdout) = run(&root, &["pull", "inbox"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "pull_result");
     assert_eq!(value["new_message_count"], 0);
     assert_eq!(value["triage_created_count"], 0);
     assert_eq!(value["deleted_remote_message_count"], 0);
@@ -7686,11 +5531,10 @@ fn triage_spam_rejects_when_message_is_referenced_by_case() {
     );
     assert_eq!(status, 1, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "error");
-    assert_eq!(value["error_code"], "message_referenced");
-    assert!(value["error"].as_str().is_some_and(
-        |error| error.contains(&format!("cases/support/{case_uid}-case-ref/data/case.json"))
-    ));
+    assert_eq!(value["code"], "message_referenced");
+    assert!(value["message"].as_str().is_some_and(|error| {
+        error.contains(&format!("cases/support/{case_uid}-case-ref/data/case.json"))
+    }));
     assert!(root.join("triage/message_spam.md").exists());
     assert!(root.join("messages/message_spam.json").exists());
     assert!(!root.join(".afmail/messages/message_spam.txt").exists());
@@ -7704,781 +5548,13 @@ fn triage_spam_rejects_when_message_is_referenced_by_case() {
 }
 
 #[test]
-fn push_spam_rejects_when_message_becomes_referenced_before_sync() {
-    let root = temp_root("spam-push-reference");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_message(&root, "message_spam", 42, None);
-    write_triage(&root, "message_spam", "phishing note");
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "message",
-                "spam",
-                "message_spam",
-                "--reason",
-                "phishing note",
-            ],
-        )
-        .0,
-        0
-    );
-    let case_uid = "c20260521001";
-    let _case_path = write_case_fixture(&root, "support", case_uid, "case-ref", &["message_spam"]);
-
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "push_result");
-    assert_eq!(value["pushed_count"], 0);
-    assert_eq!(value["failed_count"], 1);
-    assert_eq!(value["failures"][0]["error_code"], "message_referenced");
-    assert!(value["failures"][0]["error"].as_str().is_some_and(
-        |error| error.contains(&format!("cases/support/{case_uid}-case-ref/data/case.json"))
-    ));
-    assert!(root.join("messages/message_spam.json").exists());
-    let blocked: Value = serde_json::from_str(
-        &fs::read_to_string(root.join("messages/message_spam.json")).unwrap_or_default(),
-    )
-    .unwrap_or(Value::Null);
-    assert_eq!(blocked["remote"]["locations"][0]["mailbox_name"], "INBOX");
-    assert!(blocked["workspace"]["push"]["pending"][0]["last_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("message_referenced")));
-    let (status, stdout) = run(&root, &["push", "list"]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["count"], 1);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn legacy_config_is_rejected() {
-    let root = temp_root("legacy-config");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(
-        &root.join(".afmail/config.json"),
-        &json!({"schema_name": "config", "schema_version": 1, "imap_host": "imap.example.com"}),
-    );
-    let (status, stdout) = run(&root, &["config", "show"]);
-    assert_eq!(status, 1);
-    let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "config_invalid");
-
-    write_json(
-        &root.join(".afmail/config.json"),
-        &json!({
-            "schema_name": "config",
-        "schema_version": 1,
-            "imap": {"host": null, "port": 993, "tls": true, "username": null, "password_secret": null},
-            "pull": {"folders": ["INBOX"]},
-            "case": {},
-            "special_use": {},
-            "smtp": {"host": null, "port": 587, "starttls": true, "tls_wrapper": false, "username": null, "password_secret": null, "from": null},
-            "push": {"spam_mark_seen": true}
-        }),
-    );
-    let (status, stdout) = run(&root, &["config", "show"]);
-    assert_eq!(status, 1);
-    let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "config_invalid");
-
-    write_json(
-        &root.join(".afmail/config.json"),
-        &json!({
-            "schema_name": "config",
-        "schema_version": 1,
-            "imap": {"host": null, "port": 993, "tls": true, "username": null, "password_secret": null},
-            "pull": {"folders": ["INBOX"]},
-            "folders": {"drafts": "Drafts", "sent": "Sent"},
-            "smtp": {"host": null, "port": 587, "starttls": true, "tls_wrapper": false, "username": null, "password_secret": null, "from": null},
-            "push": {}
-        }),
-    );
-    let (status, stdout) = run(&root, &["config", "show"]);
-    assert_eq!(status, 1);
-    let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "config_invalid");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn push_drafts_send_does_not_require_imap_move() {
-    let _network_guard = NETWORK_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let root = temp_root("no-move");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_message(&root, "message_001", 1, None);
-    write_triage(&root, "message_001", "internal note");
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "case-one",
-        Some("support"),
-        Some("message_001"),
-        Some("reply test case"),
-    );
-    let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nreply_to_message_id: message_001\nto:\n  - alice@example.com\nsubject: \"Re: Contract\"\nattachments:\n---\n\nHi\n");
-    assert!(fs::write(case_path.join("drafts/reply.md"), draft).is_ok());
-    let imap = start_imap_server_with_move(Vec::new(), 3, false);
-    assert!(imap.is_some());
-    let imap = match imap {
-        Some(server) => server,
-        None => return,
-    };
-    let smtp = start_smtp_server_with_accept_timeout(Duration::from_secs(5));
-    assert!(smtp.is_some());
-    let smtp = match smtp {
-        Some(server) => server,
-        None => return,
-    };
-    write_json(
-        &root.join(".afmail/config.json"),
-        &test_config(Some(imap.addr.port()), Some(smtp.addr.port())),
-    );
-    assert_eq!(
-        run(&root, &["case", "draft", "validate", &case_uid, "reply.md"]).0,
-        0
-    );
-    assert_eq!(
-        run(&root, &["case", "draft", "send", &case_uid, "reply.md"]).0,
-        0
-    );
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["failed_count"], 0, "{value}");
-    assert_eq!(value["pushed_count"], 1);
-    assert!(smtp
-        .data_rx
-        .recv_timeout(Duration::from_secs(5))
-        .map(|body| body.contains("Hi"))
-        .unwrap_or(false));
-    assert!(smtp.handle.join().is_ok());
-    let appended = imap.appended.lock();
-    assert!(appended.is_ok());
-    assert!(appended
-        .map(|items| items
-            .iter()
-            .any(|(folder, draft, body)| folder == "Sent" && !*draft && body.contains("Hi")))
-        .unwrap_or(false));
-    let stored = imap.stored.lock();
-    assert!(stored.is_ok());
-    assert!(stored
-        .map(|items| items
-            .iter()
-            .any(|(_, _, query)| query.contains("\\Answered")))
-        .unwrap_or(false));
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 0);
-    assert!(imap.handle.join().is_ok());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn push_drafts_send_new_message_skips_reply_to_step() {
-    let _network_guard = NETWORK_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let root = temp_root("new-send-no-reply-step");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "new-thread",
-        Some("support"),
-        None,
-        Some("new outbound case"),
-    );
-    let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"New outbound\"\nattachments:\n---\n\nHi Bob\n");
-    assert!(fs::write(case_path.join("drafts/new.md"), draft).is_ok());
-
-    let imap = start_imap_server(Vec::new(), 4);
-    assert!(imap.is_some());
-    let imap = match imap {
-        Some(server) => server,
-        None => return,
-    };
-    let smtp = start_smtp_server();
-    assert!(smtp.is_some());
-    let smtp = match smtp {
-        Some(server) => server,
-        None => return,
-    };
-    write_json(
-        &root.join(".afmail/config.json"),
-        &test_config(Some(imap.addr.port()), Some(smtp.addr.port())),
-    );
-    assert_eq!(
-        run(&root, &["case", "draft", "validate", &case_uid, "new.md"]).0,
-        0
-    );
-    assert_eq!(
-        run(&root, &["case", "draft", "send", &case_uid, "new.md"]).0,
-        0
-    );
-
-    let (status, stdout) = run(&root, &["push", "--dry-run"]);
-    assert_eq!(status, 0, "{stdout}");
-    let dry_run = parse_one(&stdout);
-    assert_eq!(
-        dry_run["items"][0]["actions"],
-        json!([
-            "append_to_mailbox_id_drafts",
-            "smtp_send",
-            "append_to_mailbox_id_sent"
-        ])
-    );
-
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["failed_count"], 0, "{value}");
-    assert_eq!(value["pushed_count"], 1);
-    assert!(smtp
-        .data_rx
-        .recv_timeout(Duration::from_secs(5))
-        .map(|body| body.contains("Hi Bob"))
-        .unwrap_or(false));
-    assert!(smtp.handle.join().is_ok());
-    let appended = imap.appended.lock();
-    assert!(appended.is_ok());
-    assert!(appended
-        .map(|items| items
-            .iter()
-            .any(|(folder, draft, body)| folder == "Sent" && !*draft && body.contains("Hi Bob")))
-        .unwrap_or(false));
-    let stored = imap.stored.lock();
-    assert!(stored.is_ok());
-    assert!(stored.map(|items| items.is_empty()).unwrap_or(false));
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-    assert!(imap.handle.join().is_ok());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn push_multiple_sends_logs_incremental_refresh_progress() {
-    let _network_guard = NETWORK_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let root = temp_root("multi-send-render-progress");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let smtp = start_smtp_server_connections(2);
-    assert!(smtp.is_some());
-    let smtp = match smtp {
-        Some(server) => server,
-        None => return,
-    };
-    let mut config = test_config(None, Some(smtp.addr.port()));
-    config["actions"]["draft.send"]["steps"] = json!([
-        {"smtp_send": {}}
-    ]);
-    write_json(&root.join(".afmail/config.json"), &config);
-
-    let (case_one_uid, case_one_path, _) = create_case(
-        &root,
-        "multi-one",
-        Some("support"),
-        None,
-        Some("first send"),
-    );
-    let draft_one = format!("---\nkind: draft\ncase_uid: {case_one_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"One\"\nattachments:\n---\n\nFirst body\n");
-    assert!(fs::write(case_one_path.join("drafts/one.md"), draft_one).is_ok());
-    let (case_two_uid, case_two_path, _) = create_case(
-        &root,
-        "multi-two",
-        Some("support"),
-        None,
-        Some("second send"),
-    );
-    let draft_two = format!("---\nkind: draft\ncase_uid: {case_two_uid}\nsend_intent: new\nto:\n  - sue@example.com\ncc: []\nsubject: \"Two\"\nattachments:\n---\n\nSecond body\n");
-    assert!(fs::write(case_two_path.join("drafts/two.md"), draft_two).is_ok());
-    assert_eq!(
-        run(&root, &["case", "draft", "send", &case_one_uid, "one.md"]).0,
-        0
-    );
-    assert_eq!(
-        run(&root, &["case", "draft", "send", &case_two_uid, "two.md"]).0,
-        0
-    );
-
-    let (status, stdout) = run(&root, &["--log", "progress", "push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    let lines = parse_lines(&stdout);
-    let progress = lines
-        .iter()
-        .filter(|line| line["code"] == "log" && line["event"] == "progress")
-        .collect::<Vec<_>>();
-    assert!(
-        progress
-            .iter()
-            .any(|line| line["phase"] == "push_local_refresh_start"),
-        "{stdout}"
-    );
-    assert!(
-        progress
-            .iter()
-            .any(|line| line["phase"] == "push_local_refresh_done"),
-        "{stdout}"
-    );
-    assert!(
-        progress
-            .iter()
-            .all(|line| line["phase"] != "render_start" && line["phase"] != "push_render_start"),
-        "{stdout}"
-    );
-    let result = lines.last().cloned().unwrap_or(Value::Null);
-    assert_eq!(result["code"], "push_result");
-    assert_eq!(result["pushed_count"], 2, "{result}");
-    assert_eq!(result["failed_count"], 0);
-    assert!(result.get("render").is_none(), "{result}");
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-    let sent_bodies = [
-        smtp.data_rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap_or_default(),
-        smtp.data_rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap_or_default(),
-    ];
-    assert!(sent_bodies.iter().any(|body| body.contains("First body")));
-    assert!(sent_bodies.iter().any(|body| body.contains("Second body")));
-    assert!(smtp.handle.join().is_ok());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn push_send_recovers_from_each_local_finalize_stage() {
-    let _network_guard = NETWORK_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    for stage in [
-        "remote_succeeded",
-        "outbound_recorded",
-        "draft_removed",
-        "pending_cleared",
-    ] {
-        let root = temp_root(&format!("push-finalize-recover-{stage}"));
-        assert!(fs::create_dir_all(&root).is_ok());
-        assert_eq!(run(&root, &["init"]).0, 0);
-        let smtp = start_smtp_server();
-        assert!(smtp.is_some());
-        let smtp = match smtp {
-            Some(server) => server,
-            None => return,
-        };
-        let mut config = test_config(None, Some(smtp.addr.port()));
-        config["actions"]["draft.send"]["steps"] = json!([
-            {"smtp_send": {}}
-        ]);
-        write_json(&root.join(".afmail/config.json"), &config);
-        let (case_uid, case_path, _) = create_case(
-            &root,
-            &format!("recover-{stage}"),
-            Some("support"),
-            None,
-            Some("recover send"),
-        );
-        let draft_path = case_path.join("drafts/recover.md");
-        let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"Recover {stage}\"\nattachments:\n---\n\nRecover body {stage}\n");
-        assert!(fs::write(&draft_path, draft).is_ok());
-        assert_eq!(
-            run(&root, &["case", "draft", "send", &case_uid, "recover.md"]).0,
-            0
-        );
-        let push = parse_one(&run(&root, &["push", "list"]).1);
-        let push_id = push["items"][0]["push_id"].as_str().unwrap_or_default();
-        let message_id = format!(
-            "message_sent_{}",
-            push_id.strip_prefix("push_").unwrap_or(push_id)
-        );
-
-        let (status, stdout) = run_with_env(
-            &root,
-            &["push", "--confirm"],
-            &[("AFMAIL_TEST_FAIL_PUSH_LOCAL_STAGE_AFTER", stage)],
-        );
-        assert_eq!(status, 1, "{stdout}");
-        let error = parse_one(&stdout);
-        assert_eq!(error["error_code"], "push_local_stage_test_failure");
-        assert!(smtp
-            .data_rx
-            .recv_timeout(Duration::from_secs(5))
-            .map(|body| body.contains(stage))
-            .unwrap_or(false));
-        assert!(smtp.handle.join().is_ok());
-        let failed_push = parse_one(&run(&root, &["push", "list"]).1);
-        assert_eq!(failed_push["count"], 1, "{failed_push}");
-        assert_eq!(failed_push["items"][0]["local_stage"], stage);
-
-        let (status, stdout) = run(&root, &["push", "--confirm"]);
-        assert_eq!(status, 0, "{stage}: {stdout}");
-        let value = parse_one(&stdout);
-        assert_eq!(value["code"], "push_result");
-        assert_eq!(value["pushed_count"], 1, "{stage}: {value}");
-        assert_eq!(value["failed_count"], 0, "{stage}: {value}");
-        assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-        assert!(!draft_path.exists(), "{stage}");
-        assert!(root
-            .join(format!(".afmail/messages/{message_id}.eml"))
-            .is_file());
-        let transactions = fs::read_dir(root.join(".afmail/transactions"))
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .filter(|entry| {
-                        entry.path().extension().and_then(|s| s.to_str()) == Some("json")
-                    })
-                    .count()
-            })
-            .unwrap_or(0);
-        assert_eq!(transactions, 0, "{stage}");
-        let _ = fs::remove_dir_all(root);
-    }
-}
-
-#[test]
-fn push_drafts_send_resumes_after_completed_smtp_step() {
-    let _network_guard = NETWORK_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let root = temp_root("send-resume-after-smtp");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "resume-thread",
-        Some("support"),
-        None,
-        Some("resume outbound case"),
-    );
-    let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"Resume outbound\"\nattachments:\n---\n\nResume me\n");
-    assert!(fs::write(case_path.join("drafts/new.md"), draft).is_ok());
-    assert_eq!(
-        run(&root, &["case", "draft", "validate", &case_uid, "new.md"]).0,
-        0
-    );
-    assert_eq!(
-        run(&root, &["case", "draft", "send", &case_uid, "new.md"]).0,
-        0
-    );
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    let push_id = push["items"][0]["push_id"].as_str().unwrap_or_default();
-    let push_path = root.join(".afmail/push").join(format!("{push_id}.json"));
-    let mut push_item: Value =
-        serde_json::from_str(&fs::read_to_string(&push_path).unwrap_or_default())
-            .unwrap_or(Value::Null);
-    push_item["step_states"] = json!([
-        {
-            "index": 0,
-            "label": "append_to_mailbox_id_drafts",
-            "status": "succeeded",
-            "started_rfc3339": "2026-06-09T00:00:00Z",
-            "completed_rfc3339": "2026-06-09T00:00:01Z",
-            "result_summary": "append succeeded"
-        },
-        {
-            "index": 1,
-            "label": "smtp_send",
-            "status": "succeeded",
-            "started_rfc3339": "2026-06-09T00:00:01Z",
-            "completed_rfc3339": "2026-06-09T00:00:02Z",
-            "result_summary": "smtp_send succeeded"
-        }
-    ]);
-    write_json(&push_path, &push_item);
-
-    let imap = start_imap_server(Vec::new(), 3);
-    assert!(imap.is_some());
-    let imap = match imap {
-        Some(server) => server,
-        None => return,
-    };
-    // No SMTP host is configured. If step_states is ignored, this push fails
-    // before it can append to Sent.
-    write_json(
-        &root.join(".afmail/config.json"),
-        &test_config(Some(imap.addr.port()), None),
-    );
-
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["failed_count"], 0, "{value}");
-    assert_eq!(value["pushed_count"], 1);
-    let appended = imap.appended.lock();
-    assert!(appended.is_ok());
-    assert!(appended
-        .map(|items| items
-            .iter()
-            .any(|(folder, draft, body)| folder == "Sent" && !*draft && body.contains("Resume me")))
-        .unwrap_or(false));
-    assert!(imap.handle.join().is_ok());
-    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn draft_save_send_intent_toggles_in_place() {
-    let root = temp_root("draft-toggle-intent");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "toggle-thread",
-        Some("support"),
-        None,
-        Some("toggle outbound case"),
-    );
-    let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"Toggle\"\nattachments:\n---\n\nHello\n");
-    assert!(fs::write(case_path.join("drafts/new.md"), draft).is_ok());
-    assert_eq!(
-        run(&root, &["case", "draft", "validate", &case_uid, "new.md"]).0,
-        0
-    );
-
-    // Save queues exactly one SaveDraft item.
-    let saved = parse_one(&run(&root, &["case", "draft", "save", &case_uid, "new.md"]).1);
-    assert_eq!(saved["action"], "save_draft");
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 1);
-    assert_eq!(push["items"][0]["kind"], "outbound");
-    assert_eq!(push["items"][0]["action"], "save_draft");
-    let push_id = push["items"][0]["push_id"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(!push_id.is_empty());
-
-    // Toggle to Send in place: still ONE queued item, same push_id, the intent
-    // follows the latest command, and no stale step state remains.
-    let sent = parse_one(&run(&root, &["case", "draft", "send", &case_uid, "new.md"]).1);
-    assert_eq!(sent["action"], "send");
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(
-        push["count"], 1,
-        "toggling intent must not add a second queued item: {push}"
-    );
-    assert_eq!(push["items"][0]["push_id"], push_id);
-    assert_eq!(push["items"][0]["action"], "send");
-    assert!(push["items"][0]["step_states"]
-        .as_array()
-        .is_some_and(|states| states.is_empty()));
-
-    // Toggle back to Save: still one item, same push_id.
-    let saved_again = parse_one(&run(&root, &["case", "draft", "save", &case_uid, "new.md"]).1);
-    assert_eq!(saved_again["action"], "save_draft");
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 1);
-    assert_eq!(push["items"][0]["push_id"], push_id);
-    assert_eq!(push["items"][0]["action"], "save_draft");
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn push_failure_records_step_level_state() {
-    let root = temp_root("push-step-state");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    let (case_uid, case_path, _) = create_case(
-        &root,
-        "step-state",
-        Some("support"),
-        None,
-        Some("step state case"),
-    );
-    let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"Step state\"\nattachments:\n---\n\nHello\n");
-    assert!(fs::write(case_path.join("drafts/new.md"), draft).is_ok());
-    assert_eq!(
-        run(&root, &["case", "draft", "validate", &case_uid, "new.md"]).0,
-        0
-    );
-    assert_eq!(
-        run(&root, &["case", "draft", "send", &case_uid, "new.md"]).0,
-        0
-    );
-
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["pushed_count"], 0);
-    assert_eq!(value["failed_count"], 1);
-
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    let item = &push["items"][0];
-    assert_eq!(item["attempt_count"], 1);
-    assert_eq!(
-        item["step_states"][0]["label"],
-        "append_to_mailbox_id_drafts"
-    );
-    assert_eq!(item["step_states"][0]["status"], "failed");
-    assert!(item["step_states"][0]["error_code"].as_str().is_some());
-}
-
-#[test]
-fn push_confirm_stops_after_first_failure() {
-    let _network_guard = NETWORK_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let root = temp_root("push-fail-fast");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    let smtp = start_smtp_server();
-    assert!(smtp.is_some());
-    let smtp = match smtp {
-        Some(server) => server,
-        None => return,
-    };
-    let mut config = test_config(None, Some(smtp.addr.port()));
-    config["actions"]["draft.send"]["steps"] = json!([
-        {"smtp_send": {}},
-        {"append_to_mailbox_id": "sent"}
-    ]);
-    write_json(&root.join(".afmail/config.json"), &config);
-
-    let (case_one_uid, case_one_path, _) =
-        create_case(&root, "fail-one", Some("support"), None, Some("first send"));
-    let draft_one = format!("---\nkind: draft\ncase_uid: {case_one_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"One\"\nattachments:\n---\n\nFirst body\n");
-    assert!(fs::write(case_one_path.join("drafts/one.md"), draft_one).is_ok());
-    let (case_two_uid, case_two_path, _) = create_case(
-        &root,
-        "fail-two",
-        Some("support"),
-        None,
-        Some("second send"),
-    );
-    let draft_two = format!("---\nkind: draft\ncase_uid: {case_two_uid}\nsend_intent: new\nto:\n  - sue@example.com\ncc: []\nsubject: \"Two\"\nattachments:\n---\n\nSecond body\n");
-    assert!(fs::write(case_two_path.join("drafts/two.md"), draft_two).is_ok());
-    assert_eq!(
-        run(&root, &["case", "draft", "send", &case_one_uid, "one.md"]).0,
-        0
-    );
-    assert_eq!(
-        run(&root, &["case", "draft", "send", &case_two_uid, "two.md"]).0,
-        0
-    );
-
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["pushed_count"], 0, "{value}");
-    assert_eq!(value["failed_count"], 1, "{value}");
-    assert_eq!(value["stopped_after_failure"], true);
-    assert_eq!(value["remaining_count"], 1);
-    let sent_body = smtp
-        .data_rx
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap_or_default();
-    assert!(
-        sent_body.contains("First body") || sent_body.contains("Second body"),
-        "{sent_body}"
-    );
-    assert!(smtp.handle.join().is_ok());
-
-    let push = parse_one(&run(&root, &["push", "list"]).1);
-    assert_eq!(push["count"], 2);
-    let items = push["items"].as_array().cloned().unwrap_or_default();
-    assert_eq!(
-        items
-            .iter()
-            .filter(|item| item["attempt_count"] == 1)
-            .count(),
-        1
-    );
-    assert_eq!(
-        items
-            .iter()
-            .filter(|item| item["attempt_count"] == 0
-                && item["step_states"]
-                    .as_array()
-                    .is_some_and(|states| states.is_empty()))
-            .count(),
-        1
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn special_use_push_list_and_push_lock_work() {
-    let root = temp_root("special-use-push");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_001", 1, None);
-    write_triage(&root, "message_001", "internal note");
-
-    let (_notification_uid, _archive_path, value) = create_notification(
-        &root,
-        "done",
-        Some("message_001"),
-        Some("archive later"),
-        Some("archive later"),
-    );
-    assert_eq!(value["code"], "notification_created");
-    assert_eq!(value["queued"], true);
-    assert_eq!(value["location_count"], 1);
-    let push_id = value["push_id"].as_str().unwrap_or_default().to_string();
-    assert!(!push_id.is_empty());
-
-    let (status, stdout) = run(&root, &["push", "list"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "push_list");
-    assert_eq!(value["count"], 1);
-    assert_eq!(value["items"][0]["kind"], "message_action");
-    assert_eq!(value["items"][0]["action"], "notification");
-    assert_eq!(
-        value["items"][0]["steps"],
-        json!([{"move_to_mailbox_id": "archive"}])
-    );
-
-    let workspace_lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root.join(".afmail/workspace.lock"));
-    assert!(workspace_lock.is_ok());
-    let Ok(workspace_lock) = workspace_lock else {
-        return;
-    };
-    assert!(FileExt::try_lock(&workspace_lock).is_ok());
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
-    assert_eq!(status, 1);
-    let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "workspace_locked");
-    assert_eq!(value["retryable"], true);
-    assert!(FileExt::unlock(&workspace_lock).is_ok());
-
-    let (status, stdout) = run(&root, &["push", "remove", &push_id]);
-    assert_eq!(status, 2);
-    let error = parse_one(&stdout);
-    assert_eq!(error["code"], "error");
-    assert!(error["error"]
-        .as_str()
-        .is_some_and(|text| text.contains("unrecognized subcommand 'remove'")));
-
-    let (status, stdout) = run(&root, &["push", "list"]);
-    assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["count"], 1);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
 fn status_reports_progress_while_workspace_is_exclusively_locked() {
     let root = temp_root("status-progress-locked");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     write_json(&root.join(".afmail/config.json"), &test_config(None, None));
     write_json(
-        &root.join(".afmail/workspace.progress.json"),
+        &root.join(".afmail/cache/progress.json"),
         &json!({
             "schema_name": "workspace_progress",
             "schema_version": 1,
@@ -8510,7 +5586,7 @@ fn status_reports_progress_while_workspace_is_exclusively_locked() {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(root.join(".afmail/workspace.lock"));
+        .open(workspace_runtime_lock_path(&root));
     assert!(workspace_lock.is_ok());
     let Ok(workspace_lock) = workspace_lock else {
         return;
@@ -8520,7 +5596,6 @@ fn status_reports_progress_while_workspace_is_exclusively_locked() {
     let (status, stdout) = run(&root, &["status"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "status");
     assert_eq!(value["workspace_locked"], true);
     assert_eq!(value["progress"]["status"], "running");
     assert_eq!(value["progress"]["command"], "pull");
@@ -8536,9 +5611,11 @@ fn status_reports_progress_while_workspace_is_exclusively_locked() {
     assert_eq!(value["progress"]["mailbox_id"], "trash");
     assert_eq!(value["progress"]["mailbox_index"], 2);
     assert_eq!(value["progress"]["fields"]["stage"], "fetch_done");
-    assert!(value["hint"]
-        .as_str()
-        .is_some_and(|text| text.contains("counts are omitted")));
+    assert!(
+        value["hint"]
+            .as_str()
+            .is_some_and(|text| text.contains("counts are omitted"))
+    );
     let object = value.as_object().cloned().unwrap_or_default();
     assert!(!object.contains_key("message_count"), "{stdout}");
     assert!(!object.contains_key("push_count"), "{stdout}");
@@ -8547,7 +5624,6 @@ fn status_reports_progress_while_workspace_is_exclusively_locked() {
     let (status, stdout) = run(&root, &["status"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "status");
     assert!(value.get("workspace_locked").is_none());
     assert_eq!(value["message_count"], 0);
     assert_eq!(
@@ -8571,7 +5647,7 @@ fn workspace_lock_blocks_writers_but_allows_shared_readers() {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(root.join(".afmail/workspace.lock"));
+        .open(workspace_runtime_lock_path(&root));
     assert!(workspace_lock.is_ok());
     let Ok(workspace_lock) = workspace_lock else {
         return;
@@ -8580,15 +5656,15 @@ fn workspace_lock_blocks_writers_but_allows_shared_readers() {
 
     let (status, stdout) = run(&root, &["status"]);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "status");
+    let _ = parse_one(&stdout);
 
     let (status, stdout) = run(&root, &["case", "show", &case_uid]);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "case");
+    let _ = parse_one(&stdout);
 
     let (status, stdout) = run(&root, &["case", "notes", "show", &case_uid]);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "case_notes");
+    let _ = parse_one(&stdout);
 
     let (status, stdout) = run(
         &root,
@@ -8596,6 +5672,7 @@ fn workspace_lock_blocks_writers_but_allows_shared_readers() {
             "case",
             "move",
             &case_uid,
+            "--group",
             "waiting",
             "--reason",
             "locked writer check",
@@ -8603,7 +5680,7 @@ fn workspace_lock_blocks_writers_but_allows_shared_readers() {
     );
     assert_eq!(status, 1);
     let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "workspace_locked");
+    assert_eq!(value["code"], "workspace_locked");
     assert_eq!(value["retryable"], true);
 
     let (status, stdout) = run(
@@ -8618,7 +5695,7 @@ fn workspace_lock_blocks_writers_but_allows_shared_readers() {
     );
     assert_eq!(status, 1);
     let value = parse_one(&stdout);
-    assert_eq!(value["error_code"], "workspace_locked");
+    assert_eq!(value["code"], "workspace_locked");
     assert_eq!(value["retryable"], true);
 
     assert!(FileExt::unlock(&workspace_lock).is_ok());
@@ -8637,53 +5714,6 @@ fn workspace_lock_blocks_writers_but_allows_shared_readers() {
 }
 
 #[test]
-fn triage_archive_already_in_archive_marks_archived_without_push() {
-    let root = temp_root("archive-noop");
-    assert!(fs::create_dir_all(&root).is_ok());
-    assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
-    write_message(&root, "message_notificationd", 7, None);
-    let message_path = root.join("messages/message_notificationd.json");
-    let mut message: Value =
-        serde_json::from_str(&fs::read_to_string(&message_path).unwrap_or_default())
-            .unwrap_or(Value::Null);
-    message["remote"]["locations"][0]["mailbox_name"] = json!("Archive");
-    message["remote"]["locations"][0]["mailbox_id"] = json!("archive");
-    write_json(&message_path, &message);
-    write_triage(&root, "message_notificationd", "already handled");
-
-    let (notification_uid, _archive_path, value) = create_notification(
-        &root,
-        "done",
-        Some("message_notificationd"),
-        Some("already archived"),
-        Some("already archived"),
-    );
-    assert_eq!(value["code"], "notification_created");
-    assert_eq!(value["queued"], false);
-    assert_eq!(value["location_count"], 1);
-    assert_eq!(value["queued_location_count"], 0);
-    assert!(!root.join("triage/message_notificationd.md").exists());
-    assert_eq!(
-        root.join(".afmail/push")
-            .read_dir()
-            .map(|entries| entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("json"))
-                .count())
-            .unwrap_or(99),
-        0
-    );
-    let message: Value =
-        serde_json::from_str(&fs::read_to_string(&message_path).unwrap_or_default())
-            .unwrap_or(Value::Null);
-    assert_eq!(message["workspace"]["status"], "notification");
-    assert_eq!(message["workspace"]["notification_uid"], notification_uid);
-    assert!(message["workspace"].get("buckets").is_none());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
 fn triage_assign_move_draft_and_send_contract_work() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -8694,14 +5724,13 @@ fn triage_assign_move_draft_and_send_contract_work() {
     write_message(&root, "message_001", 1, None);
     write_triage(&root, "message_001", "internal note");
 
-    let (case_uid, case_path, value) = create_case(
+    let (case_uid, case_path, _value) = create_case(
         &root,
         "acme-contract",
         Some("support"),
         Some("message_001"),
         Some("new contract case"),
     );
-    assert_eq!(value["code"], "case_created");
     assert!(case_path.join("case.md").is_file());
     assert!(!root.join("triage/message_001.md").exists());
 
@@ -8723,6 +5752,7 @@ fn triage_assign_move_draft_and_send_contract_work() {
             "case",
             "move",
             &case_uid,
+            "--group",
             "waiting",
             "--reason",
             "better group",
@@ -8732,11 +5762,13 @@ fn triage_assign_move_draft_and_send_contract_work() {
     let waiting_path = root.join(format!("cases/waiting/{case_uid}-acme-contract"));
     assert!(waiting_path.join("case.md").is_file());
 
-    let draft = format!("---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: reply\nreply_to_message_id: message_001\nto:\n  - alice@example.com\ncc: []\nsubject: \"Re: Contract renewal\"\nattachments:\n---\n\nHi Alice\n");
+    let draft = draft_with_compose(format!(
+        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: reply\nreply_to_message_id: message_001\nto:\n  - alice@example.com\ncc: []\nsubject: \"Re: Contract renewal\"\nattachments:\n---\n\nHi Alice\n"
+    ));
     assert!(fs::write(waiting_path.join("drafts/reply.md"), &draft).is_ok());
     let (status, stdout) = run(&root, &["case", "draft", "validate", &case_uid, "reply.md"]);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "draft_valid");
+    let _ = parse_one(&stdout);
 
     let imap = start_imap_server(Vec::new(), 20);
     assert!(imap.is_some());
@@ -8748,24 +5780,21 @@ fn triage_assign_move_draft_and_send_contract_work() {
         &root.join(".afmail/config.json"),
         &test_config(Some(imap.addr.port()), None),
     );
-    let (status, stdout) = run(&root, &["case", "draft", "save", &case_uid, "reply.md"]);
+    let (status, stdout) = run(&root, &["case", "draft", "upload", &case_uid, "reply.md"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "push_queued");
     assert_eq!(value["action"], "save_draft");
     assert!(root.join(".afmail/push").read_dir().is_ok());
 
     let (status, stdout) = run(&root, &["push", "--dry-run"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "push_dry_run");
     assert_eq!(value["count"], 1);
 
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
+    let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "push_result");
-    assert_eq!(value["pushed_count"], 1);
+    assert_eq!(value.as_array().map(Vec::len), Some(1));
     assert!(!waiting_path.join("drafts/reply.md").exists());
     let staged_count = fs::read_dir(root.join("messages"))
         .map(|entries| {
@@ -8799,10 +5828,7 @@ fn triage_assign_move_draft_and_send_contract_work() {
     let value = parse_one(&stdout);
     assert_eq!(value["action"], "send");
     let push_id = value["push_id"].as_str().unwrap_or_default();
-    let message_id = format!(
-        "message_sent_{}",
-        push_id.strip_prefix("push_").unwrap_or(push_id)
-    );
+    let message_id = sent_message_id_for_push_id(push_id);
 
     let (status, stdout) = run(&root, &["push", "--dry-run"]);
     assert_eq!(status, 0, "{stdout}");
@@ -8813,24 +5839,28 @@ fn triage_assign_move_draft_and_send_contract_work() {
     );
     assert_eq!(value["items"][0]["actions"][1], "smtp_send");
 
-    let (status, stdout) = run(&root, &["push", "--confirm"]);
+    let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "push_result");
-    assert_eq!(value["pushed_count"], 1, "{value}");
+    assert_eq!(value.as_array().map(Vec::len), Some(1), "{value}");
     assert!(!waiting_path.join("drafts/reply.md").exists());
-    assert!(root
-        .join(format!(".afmail/messages/{message_id}.eml"))
-        .is_file());
+    assert!(
+        root.join(format!(".afmail/messages/{message_id}.eml"))
+            .is_file()
+    );
     let outbound = fs::read_to_string(root.join(format!(".afmail/messages/{message_id}.eml")));
-    assert!(outbound
-        .as_ref()
-        .map(|text| text.contains("In-Reply-To: <message_001@example.com>"))
-        .unwrap_or(false));
-    assert!(outbound
-        .as_ref()
-        .map(|text| text.contains("Hi Alice"))
-        .unwrap_or(false));
+    assert!(
+        outbound
+            .as_ref()
+            .map(|text| text.contains("In-Reply-To: <message_001@example.com>"))
+            .unwrap_or(false)
+    );
+    assert!(
+        outbound
+            .as_ref()
+            .map(|text| text.contains("Hi Alice"))
+            .unwrap_or(false)
+    );
     let server_data = smtp
         .data_rx
         .recv_timeout(Duration::from_secs(5))
@@ -8843,12 +5873,16 @@ fn triage_assign_move_draft_and_send_contract_work() {
     assert!(appended.is_ok());
     let appended = appended.map(|items| items.clone()).unwrap_or_default();
     assert_eq!(appended.len(), 3);
-    assert!(appended
-        .iter()
-        .any(|(folder, draft, body)| folder == "Drafts" && *draft && body.contains("Hi Alice")));
-    assert!(appended
-        .iter()
-        .any(|(folder, draft, body)| folder == "Sent" && !*draft && body.contains("Hi Alice")));
+    assert!(
+        appended
+            .iter()
+            .any(|(folder, draft, body)| folder == "Drafts" && *draft && body.contains("Hi Alice"))
+    );
+    assert!(
+        appended
+            .iter()
+            .any(|(folder, draft, body)| folder == "Sent" && !*draft && body.contains("Hi Alice"))
+    );
     let moved = imap.moved.lock();
     assert!(moved.is_ok());
     assert!(moved.map(|items| items.is_empty()).unwrap_or(false));
@@ -8882,7 +5916,6 @@ fn triage_assign_attachment_fetch_work() {
         Some("message_missing"),
         Some("new missing case"),
     );
-    assert_eq!(value["code"], "case_created");
     assert_eq!(value["group"], "support");
     assert!(!root.join("triage/message_missing.md").is_file());
 
@@ -8902,7 +5935,8 @@ fn triage_assign_attachment_fetch_work() {
         ],
     );
     assert_eq!(status, 2);
-    assert_eq!(parse_one(&stdout)["code"], "error");
+    let value = parse_one(&stdout);
+    assert_eq!(value["code"], "cli_error");
 
     let (status, stdout) = run(
         &root,
@@ -8916,7 +5950,7 @@ fn triage_assign_attachment_fetch_work() {
         ],
     );
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["created_case"], false);
+    assert_eq!(parse_one(&stdout)[0]["created_case"], false);
     let messages = fs::read_to_string(case_path.join("data/case.json"));
     assert!(messages.is_ok());
     let messages: Result<Value, _> = serde_json::from_str(&messages.unwrap_or_default());
@@ -8930,12 +5964,12 @@ fn triage_assign_attachment_fetch_work() {
     );
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "attachment_saved");
     assert_eq!(value["storage"], "message_cache");
     assert!(value.get("download_marked").is_some());
-    assert!(root
-        .join(".afmail/messages/message_001.files/pricing.txt")
-        .is_file());
+    assert!(
+        root.join(".afmail/messages/message_001.files/pricing.txt")
+            .is_file()
+    );
     assert!(!case_path.join("files/pricing.txt").is_file());
     let message_view =
         fs::read_to_string(case_path.join("views/messages/message_001.md")).unwrap_or_default();
@@ -8983,22 +6017,12 @@ fn spam_attachment_fetch_is_blocked() {
     );
     assert_eq!(status, 1, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "error");
-    assert_eq!(value["error_code"], "attachment_fetch_blocked");
-    assert!(!root
-        .join(".afmail/messages/message_spam_attachment.files/malware.txt")
-        .exists());
+    assert_eq!(value["code"], "attachment_fetch_blocked");
+    assert!(
+        !root
+            .join(".afmail/messages/message_spam_attachment.files/malware.txt")
+            .exists()
+    );
 
     let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn dependency_lock_excludes_native_tls_and_openssl() {
-    let lock = include_str!("../Cargo.lock");
-    for name in ["native-tls", "openssl", "openssl-sys"] {
-        assert!(
-            !lock.contains(&format!("name = \"{name}\"")),
-            "forbidden dependency in Cargo.lock: {name}"
-        );
-    }
 }

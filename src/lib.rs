@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+mod draft_content;
 pub mod error;
 pub mod frontmatter;
 pub(crate) mod imap_client;
@@ -7,6 +8,7 @@ pub mod imap_pull;
 pub(crate) mod layout;
 pub mod mail;
 pub mod markdown;
+pub(crate) mod plan_id;
 pub(crate) mod progress;
 pub mod push_queue;
 pub mod remote;
@@ -20,4 +22,5 @@ pub mod types;
 #[cfg(feature = "ui")]
 pub mod ui;
 mod util;
+pub(crate) mod workspace_identity;
 mod workspace_lock;

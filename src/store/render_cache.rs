@@ -189,7 +189,8 @@ impl Workspace {
     }
 
     fn render_cache_path(&self) -> PathBuf {
-        self.root.join(".afmail/render-cache.json")
+        self.root
+            .join(layout::afmail_path(layout::AFMAIL_RENDER_CACHE))
     }
 }
 

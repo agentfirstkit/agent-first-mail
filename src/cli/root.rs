@@ -28,10 +28,11 @@ use clap::{Parser, Subcommand};
 
 ```text
 .afmail/messages/        raw .eml plus durable remote sidecars
+.afmail/workspace.json   immutable workspace identity used by plan digests
 messages/               rebuildable parsed message cache
 .afmail/logs/events.jsonl append-only audit log
 .afmail/transactions/    transient local write transaction sentinels
-.afmail/workspace.progress.json latest push/pull runtime snapshot
+.afmail/cache/progress.json latest push/pull runtime snapshot
 templates/               user-editable generated Markdown templates
 triage/message_*.md      active unprocessed message views
 spam/*.md                generated spam review views
@@ -61,46 +62,59 @@ afmail pull sent archive
 afmail remote folders
 afmail case create --name 应用反馈-肥料登记 --group support --message message_inbox_607146690_21 --reason "new feedback thread"
 afmail case show c20260603001
-afmail case add c20260603001 message_inbox_607146690_22 --reason "follow-up belongs to same feedback case"
+afmail case add c20260603001 message_inbox_607146690_22 message_inbox_607146690_23 --reason "follow-up belongs to same feedback case"
 afmail notification create --name 服务通知 --message message_inbox_607146690_23 --summary "billing notification" --reason "billing notification"
+afmail notification add n20260603001 message_inbox_607146690_24 message_inbox_607146690_25 --summary "billing notification" --reason "billing notification"
 afmail notification show n20260603001
 afmail notification remove n20260603001 message_inbox_607146690_23 --reason "does not belong in this notification"
-afmail message spam message_inbox_607146690_23 --reason "phishing attempt"
-afmail message trash message_inbox_607146690_24 --reason "duplicate no longer needed"
+afmail message spam message_inbox_607146690_23 message_inbox_607146690_24 --reason "phishing attempt"
+afmail message trash message_inbox_607146690_25 message_inbox_607146690_26 --reason "duplicate no longer needed"
 afmail render refresh
 afmail doctor repair --confirm
-afmail case move c20260603001 waiting --reason "better category"
+afmail case move c20260603001 --group waiting --reason "better category"
 afmail case archive c20260603001 --reason "feedback handled"
 afmail case unarchive c20260603001 --group support --reason "customer replied"
 afmail case tag c20260603001 legal --reason "legal review needed"
-afmail contact create --name "Zhang San" --email zhang@example.com --org Acme --role Buyer
+afmail contact create --name "Zhang San" --email zhang@example.com --org Acme --role Buyer --reason "new contact"
 afmail contact list --group people
-afmail contact email add p20260603001 zhang-alt@example.com
-afmail contact rename p20260603001 --name "Zhang Sanfeng"
+afmail contact email add p20260603001 zhang-alt@example.com --reason "alternate email"
+afmail contact rename p20260603001 --name "Zhang Sanfeng" --reason "better display name"
 afmail contact extract --from-triage
 afmail contact delete p20260603001 --reason "duplicate contact"
 afmail case draft reply c20260603001 message_inbox_607146690_22
 afmail case draft attach c20260603001 reply-message_inbox_607146690_22.md ./screenshot.png
 afmail case draft change c20260603001 reply-message_inbox_607146690_22.md --body "Thanks, I will check this."
 afmail case draft validate c20260603001 reply-message_inbox_607146690_22.md
+afmail case draft list c20260603001
 afmail case draft send c20260603001 reply-message_inbox_607146690_22.md
 afmail case draft remove c20260603001 reply-message_inbox_607146690_22.md --reason "mistaken draft"
 afmail push list
 afmail push
-afmail push --confirm
+afmail push --confirm push_plan_<REVIEWED_PLAN_ID>
 afmail purge
 afmail purge spam --older-than-days 30
 afmail purge deleted
 afmail log list --limit 20
+afmail triage list --limit 10 --details
 afmail message show message_inbox_607146690_21
+afmail message show message_inbox_607146690_21 --meta
+afmail message list --sender alice@example.com --subject-contains invoice --since 2026-05-21 --in all
 afmail message attachment fetch message_inbox_607146690_21 2
 ```
 
 ### Exit Codes
 
 - `0`: command completed successfully
-- `1`: runtime/store/protocol error
+- `1`: command failed, including an aggregate command where no item completed successfully
 - `2`: invalid CLI arguments
+- `3`: command completed partially; inspect the canonical error for successful and failed items
+- `4`: canonical stdout output was not fully written
+
+Only completely successful commands emit `kind: result`; their payload has no generic `code`, `ok`,
+or `outcome` field. Any item failure emits `kind: error`. Partial failures use `error.code: partial`,
+and the complete item list is carried in `error.items`; a failed item has an `error` child object.
+Exit code `4` means the command could not deliver a complete stdout protocol event; inspect stderr
+for the non-protocol fallback diagnostic.
 "#]
 pub struct Cli {
     /// Output format: json (default), yaml, plain.
@@ -111,7 +125,7 @@ pub struct Cli {
     #[arg(long, value_delimiter = ',', global = true)]
     pub log: Vec<String>,
 
-    /// Enable all log categories.
+    /// Enable all log categories. Startup argv redacts values and non-command positional tokens.
     #[arg(long, global = true)]
     pub verbose: bool,
 
@@ -122,6 +136,14 @@ pub struct Cli {
     /// Redirect stderr bytes to this file.
     #[arg(long = "stderr-file", value_name = "PATH", global = true)]
     pub stderr_file: Option<String>,
+
+    /// Operate on this existing afmail workspace instead of discovering from cwd.
+    #[arg(long, value_name = "PATH", global = true)]
+    pub workspace: Option<String>,
+
+    /// Idempotency key for supported non-idempotent local mutations.
+    #[arg(long = "request-id", value_name = "ID", global = true)]
+    pub request_id: Option<String>,
 
     /// Print structured version event.
     #[arg(short = 'V', long, global = true)]
@@ -142,6 +164,21 @@ pub enum Command {
     Pull {
         /// Configured mailbox ids to pull. With none, pulls actions.pull.default_mailbox_ids.
         ids: Vec<String>,
+        /// Estimate remote candidates and budgets without downloading or writing locally.
+        #[arg(long)]
+        dry_run: bool,
+        /// Limit the remote candidate range to messages from the last DAYS days.
+        #[arg(long, value_name = "DAYS", conflicts_with = "all_history")]
+        since_days: Option<u32>,
+        /// Maximum number of new messages stored across all selected mailboxes.
+        #[arg(long, value_name = "COUNT")]
+        max_new_messages: Option<usize>,
+        /// Maximum new raw message bytes stored across all selected mailboxes.
+        #[arg(long, value_name = "BYTES")]
+        max_total_bytes: Option<u64>,
+        /// Explicitly include all remote history instead of the default initial window.
+        #[arg(long, conflicts_with = "since_days")]
+        all_history: bool,
     },
     /// Read or update local afmail configuration.
     Config {
@@ -158,9 +195,9 @@ pub enum Command {
         /// Show planned push actions without IMAP/SMTP writes. This is the default.
         #[arg(long)]
         dry_run: bool,
-        /// Apply queued IMAP/SMTP effects.
-        #[arg(long)]
-        confirm: bool,
+        /// Apply exactly the reviewed plan returned by push preview.
+        #[arg(long, value_name = "PLAN_ID")]
+        confirm: Option<String>,
         #[command(subcommand)]
         action: Option<PushAction>,
     },
@@ -176,6 +213,9 @@ pub enum Command {
         /// Only purge messages in a discard state at least this many days ago. Defaults to 30.
         #[arg(long = "older-than-days", value_name = "DAYS")]
         older_than_days: Option<u64>,
+        /// Permanently delete exactly the reviewed purge plan.
+        #[arg(long, value_name = "PLAN_ID", global = true)]
+        confirm: Option<String>,
         #[command(subcommand)]
         action: Option<PurgeAction>,
     },

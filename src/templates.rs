@@ -1,9 +1,9 @@
 use crate::config::TemplateLanguage;
 use crate::error::{AppError, Result};
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use minijinja::Environment;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -168,12 +168,18 @@ impl<'a> MarkdownTemplateRenderer<'a> {
     pub fn render<T: Serialize>(&mut self, key: TemplateKey, context: &T) -> Result<String> {
         let source = self.template_source(key)?;
         let mut env = Environment::new();
+        // SemiStrict: printing/iterating/accessing an undefined name is a hard
+        // error (catches template typos like `{{ view.message_cont }}` instead
+        // of silently rendering empty), but `{% if maybe_absent %}` still just
+        // evaluates false, so intentionally-optional fields keep working.
+        env.set_undefined_behavior(minijinja::UndefinedBehavior::SemiStrict);
         // Untrusted email-derived fields (subject, from/to/cc, sender, mailing
         // list, domains) are interpolated into generated views the agent reads.
         // `inline` collapses CR/LF to spaces so a crafted header cannot inject
         // new Markdown lines that impersonate afmail's own block-level labels
         // (Warnings:/Notes:/headings) outside the body fence.
         env.add_filter("inline", template_inline_filter);
+        env.add_filter("plain", template_plain_filter);
         env.add_template(key.as_str(), &source.text)
             .map_err(|e| template_error(key, self.language, &source.label, e))?;
         let template = env
@@ -238,7 +244,24 @@ fn path_to_string(path: &Path) -> String {
 /// untrusted header value stays on its own labeled line and cannot introduce
 /// new Markdown block structure. Mirrors `store::render::markdown_inline`.
 fn template_inline_filter(value: String) -> String {
-    value.replace(['\r', '\n'], " ").trim().to_string()
+    let inline = value.replace(['\r', '\n'], " ");
+    let mut out = String::new();
+    for ch in inline.trim().chars() {
+        if matches!(
+            ch,
+            '\\' | '`' | '[' | ']' | '(' | ')' | '<' | '>' | '!' | '|'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// minijinja `plain` filter: keep an untrusted inline value readable while
+/// preventing Markdown autolinks and explicit link syntax in generated views.
+fn template_plain_filter(value: String) -> String {
+    template_inline_filter(value)
 }
 
 #[cfg(test)]
@@ -258,6 +281,45 @@ mod tests {
                     language.as_str(),
                     key.as_str()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_agents_templates_do_not_hardcode_agent_install_target() {
+        for language in TemplateLanguage::ALL {
+            let text = TemplateKey::WorkspaceAgents.builtin_text(language);
+            assert!(
+                text.contains("`afmail skill install`"),
+                "{} workspace AGENTS template should mention bare skill install",
+                language.as_str()
+            );
+            assert!(
+                !text.contains("--agent"),
+                "{} workspace AGENTS template should not pin an agent",
+                language.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn generated_message_templates_only_use_sanitized_display_fields() {
+        for language in TemplateLanguage::ALL {
+            for key in [
+                TemplateKey::TriageView,
+                TemplateKey::CaseMessage,
+                TemplateKey::NotificationMessage,
+                TemplateKey::StatusMessage,
+            ] {
+                let text = key.builtin_text(language);
+                for unsafe_field in ["view.title", "item.view.from", "item.view.subject"] {
+                    assert!(
+                        !text.contains(unsafe_field),
+                        "{} {} reads unsafe field {unsafe_field}",
+                        language.as_str(),
+                        key.as_str()
+                    );
+                }
             }
         }
     }

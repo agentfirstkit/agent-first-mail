@@ -1,6 +1,12 @@
 use super::*;
 
-pub(super) fn archive_index_field_value(
+#[derive(Clone, Debug)]
+struct NotificationRenderRow {
+    item: NotificationMessageItem,
+    message: MessageFile,
+}
+
+pub(super) fn notification_index_field_value(
     field: NotificationIndexField,
     message: &MessageFile,
     item: &NotificationMessageItem,
@@ -86,7 +92,6 @@ impl Workspace {
         )?;
 
         let mut result = json!({
-            "code": "notification_created",
             "notification_uid": notification_uid,
             "notification_name": name,
             "message_count": 0,
@@ -103,9 +108,8 @@ impl Workspace {
             )?;
             self.refresh_notification(&notification_uid)?;
             let queue =
-                self.queue_archive_for_archived_messages(&[message_id.to_string()], None)?;
+                self.queue_archive_for_archived_messages(&[message_id.to_string()], None, None)?;
             result = json!({
-                "code": "notification_created",
                 "notification_uid": notification_uid,
                 "notification_name": name,
                 "message_id": message_id,
@@ -149,7 +153,6 @@ impl Workspace {
         ]
         .concat();
         Ok(json!({
-            "code": "notification_list",
             "count": messages.len(),
             "path_templates": {
                 "notification_path": pt_notification_path,
@@ -163,12 +166,13 @@ impl Workspace {
     pub fn notification_show(&self, notification_ref: &str) -> Result<Value> {
         self.require_workspace()?;
         let (notification_uid, notification_dir) = self.resolve_notification(notification_ref)?;
-        self.refresh_notification(&notification_uid)?;
         let data = self.read_notifications(&notification_uid)?;
+        for item in &data.items {
+            self.read_message_by_id(&item.message_id)?;
+        }
         let notification_path = self.notification_index_path(&notification_uid);
-        let text = read_to_string(&notification_path, "read notification view")?;
+        let text = read_generated_view(&self.root, &notification_path, "notification index")?;
         Ok(json!({
-            "code": "notification",
             "notification_uid": notification_uid,
             "notification_name": data.collection_name,
             "path": rel_path(&self.root, &notification_dir),
@@ -204,7 +208,7 @@ impl Workspace {
         message_id: &str,
         reason: Option<&str>,
         event_kind: &str,
-        result_code: &str,
+        _result_code: &str,
     ) -> Result<Value> {
         validate_notification_uid(notification_uid)?;
         validate_id("message_id", message_id)?;
@@ -254,7 +258,6 @@ impl Workspace {
             }),
         )?;
         Ok(json!({
-            "code": result_code,
             "message_id": message_id,
             "notification_uid": notification_uid,
             "triage_path": format!("{}/{message_id}.md", layout::TRIAGE),
@@ -277,7 +280,6 @@ impl Workspace {
         let (new_notification_uid, _) = self.resolve_notification(new_notification_ref)?;
         if notification_uid == new_notification_uid {
             return Ok(json!({
-                "code": "notification_message_moved",
                 "message_id": message_id,
                 "notification_uid": notification_uid,
                 "new_notification_uid": new_notification_uid,
@@ -331,7 +333,6 @@ impl Workspace {
             }),
         )?;
         Ok(json!({
-            "code": "notification_message_moved",
             "message_id": message_id,
             "from_notification_uid": notification_uid,
             "notification_uid": new_notification_uid,
@@ -384,7 +385,6 @@ impl Workspace {
             }),
         )?;
         Ok(json!({
-            "code": "notification_renamed",
             "notification_uid": notification_uid,
             "old_notification_name": old_name,
             "notification_name": name,
@@ -421,7 +421,6 @@ impl Workspace {
             }),
         )?;
         Ok(json!({
-            "code": "notification_summary_set",
             "message_id": message_id,
             "notification_uid": notification_uid,
             "summary": summary,
@@ -515,7 +514,6 @@ impl Workspace {
             }),
         )?;
         Ok(json!({
-            "code": "notification_deleted",
             "notification_uid": notification_uid,
             "notification_name": data.collection_name,
             "from_path": path,
@@ -564,15 +562,15 @@ impl Workspace {
     ) -> Result<String> {
         let now = now_rfc3339();
         let mut msg = self.read_message_by_id(message_id)?;
-        if let Some(existing) = msg.workspace.notification_uid.as_deref() {
-            if existing != notification_uid {
-                return Err(AppError::new(
-                    "message_already_notified",
-                    format!(
-                        "message {message_id} is already in notification {existing}; use notification {existing} move"
-                    ),
-                ));
-            }
+        if let Some(existing) = msg.workspace.notification_uid.as_deref()
+            && existing != notification_uid
+        {
+            return Err(AppError::new(
+                "message_already_notified",
+                format!(
+                    "message {message_id} is already in notification {existing}; use notification {existing} move"
+                ),
+            ));
         }
         msg.workspace.status = MessageStatus::Notification.as_str().to_string();
         msg.workspace.notification_uid = Some(notification_uid.to_string());
@@ -766,27 +764,68 @@ impl Workspace {
         Ok(())
     }
 
+    pub(super) fn synchronize_notification_membership(&self) -> Result<()> {
+        for notification_uid in self.notification_ids()? {
+            let mut data = self.read_notifications(&notification_uid)?;
+            let rows = self
+                .notification_render_rows(&data.items)?
+                .into_iter()
+                .filter(|row| {
+                    row.message.workspace.notification_uid.as_deref()
+                        == Some(notification_uid.as_str())
+                })
+                .collect::<Vec<_>>();
+            if rows.len() != data.items.len() {
+                data.items = rows.into_iter().map(|row| row.item).collect();
+                data.updated_rfc3339 = Some(now_rfc3339());
+                self.write_notifications(&notification_uid, &data)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn refresh_notification_indexes_cached(
         &self,
         cache: &mut RenderCache,
+        sync_state: bool,
+        render_context: &RenderContext,
+        mut progress: Option<&mut crate::progress::ProgressCallback<'_>>,
     ) -> Result<NotificationViewRefresh> {
         create_dir_all(&self.root.join(layout::ARCHIVED_CASES))?;
         create_dir_all(&self.root.join(layout::NOTIFICATIONS))?;
-        let language = self.template_language()?;
+        let language = render_context.config().template_language();
         let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
         let mut totals = NotificationViewRefresh::default();
-        for notification_uid in self.notification_ids()? {
+        let notification_ids = self.notification_ids()?;
+        let total_count = notification_ids.len();
+        for (index, notification_uid) in notification_ids.into_iter().enumerate() {
             let refresh = self.refresh_notification_with_cache(
                 &notification_uid,
                 &mut renderer,
-                true,
+                sync_state,
                 cache,
+                render_context,
             )?;
             totals.notification_index_count += refresh.notification_index_count;
             totals.notification_message_count += refresh.notification_message_count;
             totals.notification_index_unchanged_count += refresh.notification_index_unchanged_count;
             totals.notification_message_unchanged_count +=
                 refresh.notification_message_unchanged_count;
+            let processed_count = index + 1;
+            if processed_count == total_count || processed_count.is_multiple_of(25) {
+                crate::progress::emit(
+                    &mut progress,
+                    "pull_render_notifications_progress",
+                    json!({
+                        "render_stage": "notifications",
+                        "processed_count": processed_count,
+                        "total_count": total_count,
+                        "notification_count": processed_count,
+                        "notification_view_written_count": totals.notification_index_count + totals.notification_message_count,
+                        "notification_view_unchanged_count": totals.notification_index_unchanged_count + totals.notification_message_unchanged_count,
+                    }),
+                );
+            }
         }
         Ok(totals)
     }
@@ -804,7 +843,7 @@ impl Workspace {
         renderer: &mut MarkdownTemplateRenderer<'_>,
         sync_state: bool,
     ) -> Result<NotificationViewRefresh> {
-        self.refresh_notification_inner(notification_uid, renderer, sync_state, None)
+        self.refresh_notification_inner(notification_uid, renderer, sync_state, None, None)
     }
 
     pub(super) fn refresh_notification_with_cache(
@@ -813,8 +852,15 @@ impl Workspace {
         renderer: &mut MarkdownTemplateRenderer<'_>,
         sync_state: bool,
         cache: &mut RenderCache,
+        render_context: &RenderContext,
     ) -> Result<NotificationViewRefresh> {
-        self.refresh_notification_inner(notification_uid, renderer, sync_state, Some(cache))
+        self.refresh_notification_inner(
+            notification_uid,
+            renderer,
+            sync_state,
+            Some(cache),
+            Some(render_context),
+        )
     }
 
     fn refresh_notification_inner(
@@ -823,45 +869,34 @@ impl Workspace {
         renderer: &mut MarkdownTemplateRenderer<'_>,
         sync_state: bool,
         mut cache: Option<&mut RenderCache>,
+        render_context: Option<&RenderContext>,
     ) -> Result<NotificationViewRefresh> {
         validate_notification_uid(notification_uid)?;
         let notification_dir = self.notification_dir(notification_uid);
         let messages_dir = notification_dir.join("views").join("messages");
         create_dir_all(&messages_dir)?;
         let mut data = self.read_notifications(notification_uid)?;
-        if sync_state {
-            let before = data.items.len();
-            data.items.retain(|item| {
-                self.read_message_by_id(&item.message_id)
-                    .map(|message| {
-                        message.workspace.notification_uid.as_deref() == Some(notification_uid)
-                    })
-                    .unwrap_or(false)
-            });
-            if data.items.len() != before {
-                data.updated_rfc3339 = Some(now_rfc3339());
-                self.write_notifications(notification_uid, &data)?;
-            }
-        }
-        let items = data
-            .items
-            .iter()
-            .filter(|item| {
-                self.read_message_by_id(&item.message_id)
-                    .map(|message| {
-                        message.workspace.notification_uid.as_deref() == Some(notification_uid)
-                    })
-                    .unwrap_or(false)
+        let before = data.items.len();
+        let rows = self
+            .notification_render_rows_with_context(&data.items, render_context)?
+            .into_iter()
+            .filter(|row| {
+                row.message.workspace.notification_uid.as_deref() == Some(notification_uid)
             })
-            .cloned()
             .collect::<Vec<_>>();
-        let desired = items
+        if sync_state && rows.len() != before {
+            data.items = rows.iter().map(|row| row.item.clone()).collect();
+            data.updated_rfc3339 = Some(now_rfc3339());
+            self.write_notifications(notification_uid, &data)?;
+        }
+        let desired = rows
             .iter()
-            .map(|item| item.message_id.clone())
+            .map(|row| row.item.message_id.clone())
             .collect::<BTreeSet<_>>();
         let mut message_stats = RenderWriteStats::default();
-        for item in &items {
-            let message = self.read_message_by_id(&item.message_id)?;
+        for row in &rows {
+            let item = &row.item;
+            let message = &row.message;
             let view_path = self.notification_view_path(notification_uid, &item.message_id);
             let outcome = if let Some(cache) = cache.as_deref_mut() {
                 let input_hash = self.render_input_hash_cached(
@@ -876,27 +911,34 @@ impl Workspace {
                         "notification_uid": notification_uid,
                         "notification_name": data.collection_name.as_str(),
                         "item": item,
-                        "message_hash": blake3_json_fingerprint(&message)?,
+                        "message_hash": render_context
+                            .and_then(|context| context.snapshot(&message.message_id))
+                            .map(|snapshot| snapshot.hash.clone())
+                            .unwrap_or(blake3_json_fingerprint(message)?),
+                        "quoted_message_id": render_context
+                            .and_then(|context| context.quoted_message_id(&message.message_id)),
                     }),
                 )?;
                 self.render_cached_string(cache, &view_path, "notification", input_hash, || {
                     self.render_notification_view(
-                        &message,
+                        message,
                         notification_uid,
                         &data.collection_name,
                         item,
                         renderer,
                         view_path.parent(),
+                        render_context,
                     )
                 })?
             } else {
                 let rendered = self.render_notification_view(
-                    &message,
+                    message,
                     notification_uid,
                     &data.collection_name,
                     item,
                     renderer,
                     view_path.parent(),
+                    render_context,
                 )?;
                 write_string(&view_path, &rendered)?;
                 FileWriteOutcome::Written
@@ -917,7 +959,15 @@ impl Workspace {
                 }
             }
         }
-        let config = MailConfig::load(&self.root)?;
+        let owned_config = if render_context.is_none() {
+            Some(MailConfig::load(&self.root)?)
+        } else {
+            None
+        };
+        let config = render_context
+            .map(RenderContext::config)
+            .or(owned_config.as_ref())
+            .ok_or_else(|| AppError::new("internal", "render config was not initialized"))?;
         let index_path = notification_dir.join("notification.md");
         let index_outcome = if let Some(cache) = cache {
             let input_hash = self.render_input_hash_cached(
@@ -928,31 +978,28 @@ impl Workspace {
                 json!({
                     "notification_uid": notification_uid,
                     "notification_name": data.collection_name.as_str(),
-                    "items": items.clone(),
-                    "message_hashes": items
+                    "items": rows.iter().map(|row| row.item.clone()).collect::<Vec<_>>(),
+                    "message_hashes": rows
                         .iter()
-                        .map(|item| {
-                            self.read_message_by_id(&item.message_id)
-                                .and_then(|message| blake3_json_fingerprint(&message))
-                        })
+                        .map(|row| blake3_json_fingerprint(&row.message))
                         .collect::<Result<Vec<_>>>()?,
                 }),
             )?;
             self.render_cached_string(cache, &index_path, "notification_index", input_hash, || {
-                self.render_notification_index(
+                self.render_notification_index_rows(
                     notification_uid,
                     &data.collection_name,
-                    &items,
-                    &config,
+                    &rows,
+                    config,
                     renderer,
                 )
             })?
         } else {
-            let rendered = self.render_notification_index(
+            let rendered = self.render_notification_index_rows(
                 notification_uid,
                 &data.collection_name,
-                &items,
-                &config,
+                &rows,
+                config,
                 renderer,
             )?;
             write_string(&index_path, &rendered)?;
@@ -968,6 +1015,7 @@ impl Workspace {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_notification_view(
         &self,
         message: &MessageFile,
@@ -976,14 +1024,28 @@ impl Workspace {
         item: &NotificationMessageItem,
         renderer: &mut MarkdownTemplateRenderer<'_>,
         output_dir: Option<&Path>,
+        render_context: Option<&RenderContext>,
     ) -> Result<String> {
-        let config = MailConfig::load(&self.root)?;
+        let owned_config = if render_context.is_none() {
+            Some(MailConfig::load(&self.root)?)
+        } else {
+            None
+        };
+        let config = render_context
+            .map(RenderContext::config)
+            .or(owned_config.as_ref())
+            .ok_or_else(|| AppError::new("internal", "render config was not initialized"))?;
         let title = message.subject.as_deref().unwrap_or("");
         let message_value = message_template_value(message)?;
         let item_value = serde_json::to_value(item)
             .map_err(|e| AppError::json("serialize notification item", &e))?;
-        let conversation =
-            self.message_conversation_with_renderer(message, &config, renderer, output_dir)?;
+        let conversation = self.message_conversation_with_renderer_context(
+            message,
+            config,
+            renderer,
+            output_dir,
+            render_context,
+        )?;
         let context = json!({
             "frontmatter": {
                 "kind": "notification",
@@ -1001,6 +1063,7 @@ impl Workspace {
             "view": {
                 "language": config.resolved_language_bcp47(),
                 "title": title,
+                "display_title": markdown_inline(title),
                 "summary": item.summary.as_deref().unwrap_or(""),
                 "added_rfc3339": item.added_rfc3339.as_str(),
                 "conversation": conversation.trim(),
@@ -1009,6 +1072,7 @@ impl Workspace {
         renderer.render(TemplateKey::NotificationMessage, &context)
     }
 
+    #[cfg(test)]
     pub(super) fn render_notification_index(
         &self,
         notification_uid: &str,
@@ -1017,30 +1081,68 @@ impl Workspace {
         config: &MailConfig,
         renderer: &mut MarkdownTemplateRenderer<'_>,
     ) -> Result<String> {
-        let mut items = data_items.to_vec();
-        items.sort_by(|a, b| {
-            let a_time = self
-                .read_message_by_id(&a.message_id)
-                .ok()
-                .and_then(|message| message_time(&message))
-                .unwrap_or_else(|| a.added_rfc3339.clone());
-            let b_time = self
-                .read_message_by_id(&b.message_id)
-                .ok()
-                .and_then(|message| message_time(&message))
-                .unwrap_or_else(|| b.added_rfc3339.clone());
-            compare_rfc3339_asc(&b_time, &a_time).then_with(|| a.message_id.cmp(&b.message_id))
+        let rows = self.notification_render_rows(data_items)?;
+        self.render_notification_index_rows(
+            notification_uid,
+            notification_name,
+            &rows,
+            config,
+            renderer,
+        )
+    }
+
+    fn notification_render_rows(
+        &self,
+        data_items: &[NotificationMessageItem],
+    ) -> Result<Vec<NotificationRenderRow>> {
+        self.notification_render_rows_with_context(data_items, None)
+    }
+
+    fn notification_render_rows_with_context(
+        &self,
+        data_items: &[NotificationMessageItem],
+        render_context: Option<&RenderContext>,
+    ) -> Result<Vec<NotificationRenderRow>> {
+        data_items
+            .iter()
+            .map(|item| {
+                Ok(NotificationRenderRow {
+                    item: item.clone(),
+                    message: match render_context {
+                        Some(context) => context.read_message(self, &item.message_id)?,
+                        None => self.read_message_by_id(&item.message_id)?,
+                    },
+                })
+            })
+            .collect()
+    }
+
+    fn render_notification_index_rows(
+        &self,
+        notification_uid: &str,
+        notification_name: &str,
+        rows: &[NotificationRenderRow],
+        config: &MailConfig,
+        renderer: &mut MarkdownTemplateRenderer<'_>,
+    ) -> Result<String> {
+        let mut rows = rows.to_vec();
+        rows.sort_by(|a, b| {
+            let a_time = message_time(&a.message).unwrap_or_else(|| a.item.added_rfc3339.clone());
+            let b_time = message_time(&b.message).unwrap_or_else(|| b.item.added_rfc3339.clone());
+            compare_rfc3339_asc(&b_time, &a_time)
+                .then_with(|| a.item.message_id.cmp(&b.item.message_id))
         });
         let mut rendered_items = Vec::new();
         let offset = config.resolved_timezone_offset();
-        for item in &items {
-            let message = self.read_message_by_id(&item.message_id)?;
+        for row in &rows {
+            let item = &row.item;
+            let message = &row.message;
             let fields = config
                 .notification
                 .message_index
                 .item_fields
                 .iter()
-                .filter_map(|field| archive_index_field_value(*field, &message, item, &offset))
+                .filter_map(|field| notification_index_field_value(*field, message, item, &offset))
                 .collect::<Vec<_>>();
             let has_message_id = config
                 .notification
@@ -1075,7 +1177,7 @@ impl Workspace {
                 .unwrap_or(item.message_id.as_str())
                 .to_string();
             let mut rendered_item = thread_item_common(
-                &message,
+                message,
                 &offset,
                 format!("views/messages/{}.md", item.message_id),
                 title,
@@ -1088,11 +1190,12 @@ impl Workspace {
                     );
                     view.insert(
                         "display_summary".to_string(),
-                        json!(item
-                            .summary
-                            .as_deref()
-                            .map(markdown_inline)
-                            .unwrap_or_default()),
+                        json!(
+                            item.summary
+                                .as_deref()
+                                .map(markdown_inline)
+                                .unwrap_or_default()
+                        ),
                     );
                     view.insert(
                         "added_rfc3339".to_string(),
@@ -1145,14 +1248,12 @@ impl Workspace {
         let mut ids = Vec::new();
         for entry in read_dir(&dir, "read notifications directory")? {
             let path = entry.path();
-            if path.is_dir() {
-                if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                    if path.join("data").join("notification.json").is_file() {
-                        if let Some(uid) = notification_uid_from_dir_name(name) {
-                            ids.push(uid);
-                        }
-                    }
-                }
+            if path.is_dir()
+                && let Some(name) = path.file_name().and_then(|s| s.to_str())
+                && path.join("data").join("notification.json").is_file()
+                && let Some(uid) = notification_uid_from_dir_name(name)
+            {
+                ids.push(uid);
             }
         }
         ids.sort();
@@ -1183,7 +1284,7 @@ impl Workspace {
             .map(|path| (notification_uid.clone(), path))
             .ok_or_else(|| {
                 AppError::new(
-                    "archive_not_found",
+                    "notification_not_found",
                     format!("notification category not found: {notification_uid}"),
                 )
             })
@@ -1216,7 +1317,7 @@ impl Workspace {
             1 => Ok(matches.into_iter().next()),
             _ => Err(AppError::new(
                 "duplicate_notification_uid",
-                format!("duplicate archive uid found: {notification_uid}"),
+                format!("duplicate notification uid found: {notification_uid}"),
             )),
         }
     }

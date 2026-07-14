@@ -24,7 +24,9 @@ impl Workspace {
         paths: impl IntoIterator<Item = String>,
     ) -> Result<LocalTransaction> {
         validate_id("transaction kind", kind)?;
-        let transactions_dir = self.root.join(".afmail/transactions");
+        let transactions_dir = self.root.join(crate::layout::afmail_path(
+            crate::layout::AFMAIL_TRANSACTIONS,
+        ));
         create_dir_all(&transactions_dir)?;
         let transaction_id = unique_transaction_id(kind);
         let path = transactions_dir.join(format!("{transaction_id}.json"));
@@ -63,7 +65,9 @@ impl Workspace {
     }
 
     pub(super) fn incomplete_transactions(&self) -> Result<Vec<TransactionFile>> {
-        let dir = self.root.join(".afmail/transactions");
+        let dir = self.root.join(crate::layout::afmail_path(
+            crate::layout::AFMAIL_TRANSACTIONS,
+        ));
         if !dir.exists() {
             return Ok(Vec::new());
         }
@@ -102,7 +106,9 @@ impl LocalTransaction {
 }
 
 fn incomplete_transaction_paths(root: &Path) -> Result<Vec<String>> {
-    let dir = root.join(".afmail/transactions");
+    let dir = root.join(crate::layout::afmail_path(
+        crate::layout::AFMAIL_TRANSACTIONS,
+    ));
     if !dir.exists() {
         return Ok(Vec::new());
     }

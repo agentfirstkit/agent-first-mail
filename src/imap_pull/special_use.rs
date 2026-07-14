@@ -5,43 +5,43 @@ pub fn resolve_special_use_from_mailboxes(
     kind: SpecialUseKind,
     mailboxes: &[MailboxInfo],
 ) -> SpecialUseTarget {
-    if let Some(id) = config.mailbox_id_for_special_use(kind) {
-        if let Ok(mailbox_config) = config.mailbox(&id) {
-            let mut configured_folder = None;
-            for rule in &mailbox_config.resolve {
-                if let Some(folder) = &rule.mailbox_name {
-                    if mailboxes
+    if let Some(id) = config.mailbox_id_for_special_use(kind)
+        && let Ok(mailbox_config) = config.mailbox(&id)
+    {
+        let mut configured_folder = None;
+        for rule in &mailbox_config.resolve {
+            if let Some(folder) = &rule.mailbox_name {
+                if mailboxes
+                    .iter()
+                    .any(|mailbox| mailbox.name.eq_ignore_ascii_case(folder))
+                {
+                    return special_use_target(
+                        config,
+                        kind,
+                        folder.clone(),
+                        SpecialUseSource::Mailboxes,
+                    );
+                }
+                configured_folder.get_or_insert_with(|| folder.clone());
+            }
+            if let Some(special_use) = &rule.special_use
+                && let Some(mailbox) = mailboxes.iter().find(|mailbox| {
+                    mailbox
+                        .attributes
                         .iter()
-                        .any(|mailbox| mailbox.name.eq_ignore_ascii_case(folder))
-                    {
-                        return special_use_target(
-                            config,
-                            kind,
-                            folder.clone(),
-                            SpecialUseSource::Mailboxes,
-                        );
-                    }
-                    configured_folder.get_or_insert_with(|| folder.clone());
-                }
-                if let Some(special_use) = &rule.special_use {
-                    if let Some(mailbox) = mailboxes.iter().find(|mailbox| {
-                        mailbox
-                            .attributes
-                            .iter()
-                            .any(|attribute| attribute.eq_ignore_ascii_case(special_use))
-                    }) {
-                        return special_use_target(
-                            config,
-                            kind,
-                            mailbox.name.clone(),
-                            SpecialUseSource::Mailboxes,
-                        );
-                    }
-                }
+                        .any(|attribute| attribute.eq_ignore_ascii_case(special_use))
+                })
+            {
+                return special_use_target(
+                    config,
+                    kind,
+                    mailbox.name.clone(),
+                    SpecialUseSource::Mailboxes,
+                );
             }
-            if let Some(folder) = configured_folder {
-                return special_use_target(config, kind, folder, SpecialUseSource::Mailboxes);
-            }
+        }
+        if let Some(folder) = configured_folder {
+            return special_use_target(config, kind, folder, SpecialUseSource::Mailboxes);
         }
     }
     if let Some(mailbox) = mailboxes

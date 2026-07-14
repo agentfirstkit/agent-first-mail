@@ -1,9 +1,9 @@
 #[cfg(feature = "ui")]
 use agent_first_ui::{
-    find_unit, prepare_request, validate_space, validate_space_bindings, AgentFirstUiMessage,
-    MessagePayload, PrepareRequestSpec, PreparedStatus,
+    AgentFirstUiMessage, MessagePayload, PrepareRequestSpec, PreparedStatus, find_unit,
+    prepare_request, validate_space, validate_space_bindings,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -17,6 +17,9 @@ mod test_fixtures;
 const GREENMAIL_SMTP_PORT: &str = "3025/tcp";
 const GREENMAIL_IMAP_PORT: &str = "3143/tcp";
 const GREENMAIL_IMAGE: &str = "greenmail/standalone:2.1.8";
+const DOVECOT_IMAP_PORT: &str = "31993/tcp";
+const DOVECOT_IMAGE: &str = "dovecot/dovecot:2.4.4";
+const DOVECOT_VMAIL_TMPFS: &str = "/srv/vmail:uid=1000,gid=1000,mode=0755";
 const MAIL_DOMAIN: &str = "localhost";
 const ME_LOGIN: &str = "me";
 const ALICE_LOGIN: &str = "alice";
@@ -102,17 +105,18 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(run(root.path(), &["init"]).0, 0);
     write_json(
         &root.path().join(".afmail/config.json"),
-        &test_config(imap_port, smtp_port),
+        &test_config("127.0.0.1", imap_port, smtp_port, false, None),
     );
 
     let (status, stdout) = run(root.path(), &["remote", "test"]);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "remote_test_result");
+    let remote = parse_one(&stdout);
+    assert_eq!(remote["smtp"]["status"], "succeeded");
+    assert_eq!(remote["smtp"]["message_sent"], false);
 
     let (status, stdout) = run(root.path(), &["pull"]);
     assert_eq!(status, 0, "{stdout}");
     let pull = parse_one(&stdout);
-    assert_eq!(pull["code"], "pull_result");
     assert_eq!(pull["new_message_count"], 30);
     assert_eq!(pull["triage_created_count"], 28);
     assert_eq!(pull["spam_message_count"], 1);
@@ -132,7 +136,7 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
         &["message", "attachment", "fetch", &attachment_id],
     );
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "attachments_saved");
+    let _ = parse_one(&stdout);
 
     let (status, stdout) = run(
         root.path(),
@@ -200,7 +204,7 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
         &["case", "draft", "send", &case_uid, &draft_name],
     );
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "push_queued");
+    let _ = parse_one(&stdout);
 
     let (status, stdout) = run(
         root.path(),
@@ -219,7 +223,6 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
     );
     assert_eq!(status, 0, "{stdout}");
     let archive_created = parse_one(&stdout);
-    assert_eq!(archive_created["code"], "notification_created");
     let notification_uid = archive_created["notification_uid"]
         .as_str()
         .unwrap_or_default()
@@ -250,16 +253,15 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(status, 0, "{stdout}");
 
     #[cfg(feature = "ui")]
-    assert_fixture_ui_room_snapshot(root.path(), &attachment_id, &case_uid, &notification_uid);
+    assert_fixture_ui_room_snapshot(root.path(), &attachment_id, &case_uid);
 
     let (status, stdout) = run(root.path(), &["push", "--dry-run"]);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "push_dry_run");
+    let _ = parse_one(&stdout);
 
-    let (status, stdout) = run(root.path(), &["push", "--confirm"]);
+    let (status, stdout) = run_confirmed_push(root.path());
     assert_eq!(status, 0, "{stdout}");
     let pushed = parse_one(&stdout);
-    assert_eq!(pushed["code"], "push_result");
     assert_eq!(pushed["failed_count"], 0, "{pushed}");
 
     assert!(
@@ -307,6 +309,140 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
 
 #[test]
 #[ignore]
+fn docker_dovecot_special_use_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>> {
+    let batch = test_fixtures::load_mail_batch().map_err(fixture_error)?;
+    let problems = batch.validate();
+    assert!(
+        problems.is_empty(),
+        "mail batch fixture is invalid: {problems:#?}"
+    );
+
+    let suffix = unique_suffix();
+    let container_name = format!("afmail-fixture-e2e-dovecot-{suffix}");
+    let _docker_guard = DockerE2eGuard {
+        containers: vec![container_name.clone()],
+    };
+    let root = TempRoot::new("dovecot-fixture-e2e");
+    assert!(fs::create_dir_all(root.path()).is_ok());
+    let password_env = format!("USER_PASSWORD={PASSWORD}");
+    let dovecot_special_use_conf = PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/e2e-dovecot-special-use.conf"
+    ));
+    let dovecot_special_use_mount = format!(
+        "{}:/etc/dovecot/conf.d/99-afmail-test.conf:ro",
+        dovecot_special_use_conf.display()
+    );
+
+    docker_success(
+        &[
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            &container_name,
+            "-e",
+            &password_env,
+            "-v",
+            &dovecot_special_use_mount,
+            "--tmpfs",
+            DOVECOT_VMAIL_TMPFS,
+            "-p",
+            "127.0.0.1::31993",
+            DOVECOT_IMAGE,
+            "/dovecot/sbin/dovecot",
+            "-F",
+        ],
+        "start Dovecot container",
+    );
+    let imap_port = docker_mapped_port(&container_name, DOVECOT_IMAP_PORT);
+    let tls_root_cert_path = root.path().join("dovecot-ca.pem");
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            write_dovecot_tls_root_cert(&tls_root_cert_path, imap_port).is_ok()
+        }),
+        "Dovecot TLS endpoint did not become ready"
+    );
+    unsafe {
+        std::env::set_var("SSL_CERT_FILE", &tls_root_cert_path);
+    }
+    assert!(
+        wait_until(Duration::from_secs(30), || imap_tls_login_works(
+            imap_port, ME_LOGIN, PASSWORD
+        )),
+        "Dovecot IMAP did not accept login"
+    );
+
+    create_fixture_remote_folders_tls(imap_port, &batch);
+    seed_fixture_batch_tls(imap_port, &batch).map_err(fixture_error)?;
+    assert_eq!(run(root.path(), &["init"]).0, 0);
+    let mut config = test_config(
+        "localhost",
+        imap_port,
+        2525,
+        true,
+        Some(tls_root_cert_path.to_str().unwrap_or_default()),
+    );
+    config["smtp"] = json!({});
+    write_json(&root.path().join(".afmail/config.json"), &config);
+
+    let (status, stdout) = run(root.path(), &["remote", "test"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["smtp"]["status"], "skipped");
+    assert_eq!(value["smtp"]["message_sent"], false);
+
+    let (status, stdout) = run(root.path(), &["remote", "folders"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert!(
+        value["mailboxes"]
+            .as_array()
+            .is_some_and(|folders| folders.iter().any(|folder| folder["mailbox_name"]
+                == "Archive"
+                && folder["special_use"] == "archive"
+                && folder["special_use_source"] == "rfc6154_attribute"
+                && folder["special_use_matches"]
+                    .as_array()
+                    .is_some_and(|matches| matches
+                        .iter()
+                        .any(|item| item["kind"] == "archive"
+                            && item["source"] == "rfc6154_attribute"))))
+    );
+    assert!(
+        value["special_use_targets"]
+            .as_array()
+            .is_some_and(
+                |targets| targets.iter().any(|target| target["kind"] == "archive"
+                    && target["mailbox_name"] == "Archive"
+                    && target["source"] == "mailboxes"
+                    && target["exists"] == true)
+            )
+    );
+
+    let (status, stdout) = run(root.path(), &["pull"]);
+    assert_eq!(status, 0, "{stdout}");
+    let pull = parse_one(&stdout);
+    assert_eq!(pull["new_message_count"], 30);
+    assert_eq!(pull["triage_created_count"], 28);
+    assert_eq!(pull["spam_message_count"], 1);
+    assert_eq!(pull["trashed_message_count"], 1);
+
+    assert_fixture_imports(root.path(), &batch);
+
+    let (status, stdout) = run(root.path(), &["pull"]);
+    assert_eq!(status, 0, "{stdout}");
+    let pull = parse_one(&stdout);
+    assert_eq!(pull["new_message_count"], 0);
+    assert_eq!(pull["triage_created_count"], 0);
+    assert_eq!(pull["spam_message_count"], 0);
+    assert_eq!(pull["trashed_message_count"], 0);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
 fn docker_greenmail_pull_reply_send_e2e() {
     let suffix = unique_suffix();
     let container_name = format!("afmail-e2e-greenmail-{suffix}");
@@ -348,7 +484,7 @@ fn docker_greenmail_pull_reply_send_e2e() {
     assert_eq!(run(root.path(), &["init"]).0, 0);
     write_json(
         &root.path().join(".afmail/config.json"),
-        &test_config(imap_port, smtp_port),
+        &test_config("127.0.0.1", imap_port, smtp_port, false, None),
     );
 
     seed_inbound_message(smtp_port, &suffix);
@@ -366,7 +502,6 @@ fn docker_greenmail_pull_reply_send_e2e() {
     let (status, stdout) = run(root.path(), &["remote", "test"]);
     assert_eq!(status, 0, "{stdout}");
     let remote = parse_one(&stdout);
-    assert_eq!(remote["code"], "remote_test_result");
     assert_eq!(remote["capabilities"]["move"], true);
 
     // GreenMail's `setup.test.all` only provisions INBOX, so create the standard
@@ -386,7 +521,6 @@ fn docker_greenmail_pull_reply_send_e2e() {
     let (status, stdout) = run(root.path(), &["pull"]);
     assert_eq!(status, 0, "{stdout}");
     let pull = parse_one(&stdout);
-    assert_eq!(pull["code"], "pull_result");
     assert_eq!(pull["new_message_count"], 1);
     assert_eq!(pull["triage_created_count"], 1);
 
@@ -418,7 +552,7 @@ fn docker_greenmail_pull_reply_send_e2e() {
 
     let draft_path = root.path().join(case_path).join("drafts/reply.md");
     let draft = format!(
-        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: reply\nreply_to_message_id: {inbound_message_id}\nto:\n  - alice@localhost\ncc: []\nsubject: \"Re: Docker GreenMail inbound\"\nattachments:\n---\n\nHi Alice, this reply went through the real SMTP server.\n"
+        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: reply\nreply_to_message_id: {inbound_message_id}\nto:\n  - alice@localhost\ncc: []\nsubject: \"Re: Docker GreenMail inbound\"\nattachments:\n---\n# Reply\n\n<!-- afmail:compose:start -->\nHi Alice, this reply went through the real SMTP server.\n<!-- afmail:compose:end -->\n"
     );
     assert!(fs::write(&draft_path, draft).is_ok());
     let (status, stdout) = run(
@@ -432,19 +566,14 @@ fn docker_greenmail_pull_reply_send_e2e() {
     );
     assert_eq!(status, 0, "{stdout}");
     let queued = parse_one(&stdout);
-    assert_eq!(queued["code"], "push_queued");
     let push_id = queued["push_id"].as_str().unwrap_or_default();
-    let outbound_message_id = format!(
-        "message_sent_{}",
-        push_id.strip_prefix("push_").unwrap_or(push_id)
-    );
+    let outbound_message_id = agent_first_mail::smtp_send::message_id_for_push(push_id);
     assert!(!outbound_message_id.is_empty());
 
-    let (status, stdout) = run(root.path(), &["push", "--confirm"]);
+    let (status, stdout) = run_confirmed_push(root.path());
     assert_eq!(status, 0, "{stdout}");
     let pushed = parse_one(&stdout);
-    assert_eq!(pushed["code"], "push_result");
-    assert_eq!(pushed["pushed_count"], 1);
+    assert_eq!(pushed.as_array().map(Vec::len), Some(1));
     assert_eq!(pushed["failed_count"], 0);
     assert_eq!(push_json_count(root.path()), 0);
 
@@ -468,6 +597,18 @@ fn docker_greenmail_pull_reply_send_e2e() {
         )),
         "recipient mailbox did not receive the SMTP message"
     );
+    for editor_only in [
+        "# Reply",
+        "afmail:compose:start",
+        "afmail:compose:end",
+        "afmail:quote:start",
+        "afmail:quote:end",
+    ] {
+        assert!(
+            !mailbox_contains(imap_port, ME_LOGIN, PASSWORD, "Sent", editor_only),
+            "editor-only draft schema leaked into the remote message: {editor_only}"
+        );
+    }
 
     let (status, stdout) = run(root.path(), &["pull", "sent"]);
     assert_eq!(status, 0, "{stdout}");
@@ -521,20 +662,19 @@ fn docker_greenmail_pull_reply_send_e2e() {
     );
     assert_eq!(status, 0, "{stdout}");
     let queued_spam = parse_one(&stdout);
-    assert_eq!(queued_spam["code"], "message_spam_marked");
     assert_eq!(queued_spam["message_ids"][0], old_spam_message_id);
     assert_eq!(queued_spam["queued"], true);
     assert_eq!(push_json_count(root.path()), 1);
-    assert!(root
-        .path()
-        .join(format!("messages/{old_spam_message_id}.json"))
-        .is_file());
+    assert!(
+        root.path()
+            .join(format!("messages/{old_spam_message_id}.json"))
+            .is_file()
+    );
 
-    let (status, stdout) = run(root.path(), &["push", "--confirm"]);
+    let (status, stdout) = run_confirmed_push(root.path());
     assert_eq!(status, 0, "{stdout}");
     let pushed_spam = parse_one(&stdout);
-    assert_eq!(pushed_spam["code"], "push_result");
-    assert_eq!(pushed_spam["pushed_count"], 1);
+    assert_eq!(pushed_spam.as_array().map(Vec::len), Some(1));
     assert_eq!(pushed_spam["failed_count"], 0);
     assert_eq!(push_json_count(root.path()), 0);
 
@@ -571,10 +711,11 @@ fn docker_greenmail_pull_reply_send_e2e() {
 
     let new_spam_message_id = message_id_by_subject(root.path(), "Docker GreenMail spam");
     assert_eq!(new_spam_message_id, old_spam_message_id);
-    assert!(root
-        .path()
-        .join(format!("messages/{old_spam_message_id}.json"))
-        .exists());
+    assert!(
+        root.path()
+            .join(format!("messages/{old_spam_message_id}.json"))
+            .exists()
+    );
     let spam_json = fs::read_to_string(
         root.path()
             .join(format!("messages/{new_spam_message_id}.json")),
@@ -587,14 +728,25 @@ fn docker_greenmail_pull_reply_send_e2e() {
     );
 }
 
-fn test_config(imap_port: u16, smtp_port: u16) -> Value {
+fn test_config(
+    imap_host: &str,
+    imap_port: u16,
+    smtp_port: u16,
+    tls: bool,
+    tls_root_cert_path: Option<&str>,
+) -> Value {
     json!({
         "schema_name": "config",
             "schema_version": 1,
         "imap": {
-            "host": "127.0.0.1",
+            "host": imap_host,
             "port": imap_port,
-            "tls": false,
+            "tls": tls,
+            "tls_root_cert_path": tls_root_cert_path,
+            // GreenMail closes connections for RFC partial BODY ranges. The
+            // compatibility fixture opts into one-at-a-time full literals;
+            // production config remains false by default.
+            "allow_unbounded_body_fetch": true,
             "username": ME_LOGIN,
             "password_secret": PASSWORD
         },
@@ -703,6 +855,99 @@ fn seed_fixture_batch(imap_port: u16, batch: &test_fixtures::MailBatch) -> Resul
     Ok(())
 }
 
+fn create_fixture_remote_folders_tls(imap_port: u16, batch: &test_fixtures::MailBatch) {
+    for mailbox in batch.mailboxes.values() {
+        if mailbox.mailbox_name != "INBOX" {
+            create_remote_folder_tls(imap_port, ME_LOGIN, PASSWORD, &mailbox.mailbox_name);
+        }
+    }
+}
+
+fn seed_fixture_batch_tls(imap_port: u16, batch: &test_fixtures::MailBatch) -> Result<(), String> {
+    let builder = imap::ClientBuilder::new("localhost", imap_port)
+        .mode(imap::ConnectionMode::Tls)
+        .tls_kind(imap::TlsKind::Rust)
+        .danger_skip_tls_verify(true);
+    let client = builder
+        .connect()
+        .map_err(|err| format!("connect to Dovecot IMAP for fixture seed failed: {err}"))?;
+    let mut session = client
+        .login(ME_LOGIN, PASSWORD)
+        .map_err(|err| format!("login to Dovecot IMAP for fixture seed failed: {}", err.0))?;
+    for message in &batch.messages {
+        let folder = batch.mailbox_name(&message.mailbox_id).ok_or_else(|| {
+            format!(
+                "fixture {} references unknown mailbox_id {}",
+                message.fixture_id, message.mailbox_id
+            )
+        })?;
+        let raw = batch.raw_message(message)?;
+        let appended = session.append(folder, raw.as_slice()).finish();
+        if let Err(err) = appended {
+            let _ = session.logout();
+            return Err(format!(
+                "append fixture {} to {folder} failed: {err}",
+                message.fixture_id
+            ));
+        }
+    }
+    let _ = session.logout();
+    Ok(())
+}
+
+fn create_remote_folder_tls(port: u16, username: &str, password: &str, folder: &str) {
+    let builder = imap::ClientBuilder::new("localhost", port)
+        .mode(imap::ConnectionMode::Tls)
+        .tls_kind(imap::TlsKind::Rust)
+        .danger_skip_tls_verify(true);
+    if let Ok(client) = builder.connect()
+        && let Ok(mut session) = client.login(username, password)
+    {
+        if folder == "Archive" {
+            let _ = session
+                .run_command_and_check_ok(r#"CREATE "Archive" (USE (\Archive))"#)
+                .or_else(|_| session.create(folder));
+        } else {
+            let _ = session.create(folder);
+        }
+        let _ = session.logout();
+    }
+}
+
+fn write_dovecot_tls_root_cert(path: &Path, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("openssl")
+        .args([
+            "s_client",
+            "-connect",
+            &format!("127.0.0.1:{port}"),
+            "-servername",
+            "localhost",
+            "-showcerts",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "openssl s_client failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let text = String::from_utf8(output.stdout)?;
+    let start = text
+        .find("-----BEGIN CERTIFICATE-----")
+        .ok_or("missing BEGIN CERTIFICATE in Dovecot certificate output")?;
+    let end_marker = "-----END CERTIFICATE-----";
+    let end = text[start..]
+        .find(end_marker)
+        .map(|idx| start + idx + end_marker.len())
+        .ok_or("missing END CERTIFICATE in Dovecot certificate output")?;
+    let mut pem = text[start..end].to_string();
+    pem.push('\n');
+    fs::write(path, pem)?;
+    Ok(())
+}
+
 fn assert_fixture_imports(root: &Path, batch: &test_fixtures::MailBatch) {
     for message in &batch.messages {
         let message_id = message_id_by_subject(root, &message.expected.subject);
@@ -750,12 +995,7 @@ fn assert_fixture_imports(root: &Path, batch: &test_fixtures::MailBatch) {
 }
 
 #[cfg(feature = "ui")]
-fn assert_fixture_ui_room_snapshot(
-    root: &Path,
-    triage_message_id: &str,
-    case_uid: &str,
-    notification_uid: &str,
-) {
+fn assert_fixture_ui_room_snapshot(root: &Path, message_id: &str, case_uid: &str) {
     let (status, stdout) = run(root, &["ui", "snapshot"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
@@ -779,7 +1019,20 @@ fn assert_fixture_ui_room_snapshot(
     assert!(binding_validation.is_ok(), "{binding_validation:?}");
     let afmail = &space.as_value()["afmail"];
 
-    for unit_id in [
+    let units = afmail["units"].as_array();
+    assert!(units.is_some(), "{afmail}");
+    let Some(units) = units else {
+        return;
+    };
+    let unit_ids = units
+        .iter()
+        .filter_map(|unit| unit["id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unit_ids,
+        ["mail_queue", "draft_list", "draft_editor", "mailbox_glance"]
+    );
+    for retired in [
         "mailbox_status",
         "inbox_triage",
         "active_cases",
@@ -789,113 +1042,62 @@ fn assert_fixture_ui_room_snapshot(
         "activity_log",
         "mail_terminal",
     ] {
-        assert!(
-            find_unit(&space, "afmail", unit_id).is_some(),
-            "{unit_id} missing"
-        );
+        assert!(find_unit(&space, "afmail", retired).is_none(), "{retired}");
     }
-    let pulse = find_unit(&space, "afmail", "mailbox_status");
-    assert!(pulse.is_some());
-    let Some(pulse) = pulse else {
-        return;
-    };
-    assert_eq!(pulse.field("title"), Some(&json!("Mailbox Status")));
-    assert_eq!(pulse.field("dockview"), None);
 
-    let triage = find_unit(&space, "afmail", "inbox_triage");
-    assert!(triage.is_some());
-    let triage_items = afmail["ui"]["triage_items"].as_array();
-    assert!(triage_items.is_some(), "{:?}", afmail["ui"]);
-    let Some(triage_items) = triage_items else {
+    let mail_items = afmail["mail"]["items"].as_array();
+    assert!(mail_items.is_some(), "{afmail}");
+    let Some(mail_items) = mail_items else {
         return;
     };
+    assert_eq!(mail_items.len(), 30);
     assert!(
-        triage_items.len() >= 20,
-        "UI snapshot should reflect the 30-message Docker fixture corpus"
+        mail_items
+            .iter()
+            .any(|item| item["message"]["message_id"].as_str() == Some(message_id))
     );
-    let triage_match = triage_items
+
+    let drafts = afmail["drafts"]["items"].as_array();
+    assert!(drafts.is_some(), "{afmail}");
+    let Some(drafts) = drafts else {
+        return;
+    };
+    let draft_match = drafts
         .iter()
         .enumerate()
-        .find(|(_, item)| item["message"]["message_id"].as_str() == Some(triage_message_id));
+        .find(|(_, item)| item["case_ref"].as_str() == Some(case_uid));
+    assert!(draft_match.is_some(), "draft missing: {drafts:?}");
+    let Some((draft_index, draft)) = draft_match else {
+        return;
+    };
+    assert_eq!(draft["status"], "queued_send");
+    assert_eq!(draft["queued_action"], "send");
+    assert_eq!(draft["remote_changed"], false);
+    assert_eq!(draft["completeness"], "complete");
+    assert_eq!(draft["availability"]["send_ready"], true);
     assert!(
-        triage_match.is_some(),
-        "triage item missing: {triage_items:?}"
+        draft["body"]
+            .as_str()
+            .is_some_and(|body| body.contains("shipping refund has been approved"))
     );
-    let Some((triage_index, _)) = triage_match else {
-        return;
-    };
-    let prepared = prepare_request(
-        &space,
-        PrepareRequestSpec::new("session_operator", "afmail", "message_trash")
-            .with_source_unit_id("inbox_triage")
-            .with_record_path(format!("/afmail/ui/triage_items/{triage_index}")),
-    );
-    assert!(prepared.is_ok(), "{prepared:?}");
-    let Ok(prepared) = prepared else {
-        return;
-    };
-    assert_eq!(prepared.status, PreparedStatus::Ready);
-    assert_eq!(prepared.input["message_id"], triage_message_id);
-
-    let cases = find_unit(&space, "afmail", "active_cases");
-    assert!(cases.is_some());
-    let case_items = afmail["ui"]["case_items"].as_array();
-    assert!(case_items.is_some(), "{:?}", afmail["ui"]);
-    let Some(case_items) = case_items else {
-        return;
-    };
-    let case_match = case_items
-        .iter()
-        .enumerate()
-        .find(|(_, item)| item["case"]["collection_uid"].as_str() == Some(case_uid));
-    assert!(case_match.is_some(), "case item missing: {case_items:?}");
-    let Some((case_index, _)) = case_match else {
-        return;
-    };
-    let prepared = prepare_request(
-        &space,
-        PrepareRequestSpec::new("session_operator", "afmail", "case_show")
-            .with_source_unit_id("active_cases")
-            .with_record_path(format!("/afmail/ui/case_items/{case_index}")),
-    );
-    assert!(prepared.is_ok(), "{prepared:?}");
-    let Ok(prepared) = prepared else {
-        return;
-    };
-    assert_eq!(prepared.status, PreparedStatus::Ready);
-    assert_eq!(prepared.input["case_ref"], case_uid);
-
-    let notifications = find_unit(&space, "afmail", "notifications");
-    assert!(notifications.is_some());
-    let notification_items = afmail["ui"]["notification_items"].as_array();
-    assert!(notification_items.is_some(), "{:?}", afmail["ui"]);
-    let Some(notification_items) = notification_items else {
-        return;
-    };
-    let notification_match = notification_items.iter().enumerate().find(|(_, item)| {
-        item["notification"]["collection_uid"].as_str() == Some(notification_uid)
-    });
     assert!(
-        notification_match.is_some(),
-        "notification item missing: {notification_items:?}"
+        !draft["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("afmail:compose")
     );
-    let Some((notification_index, _)) = notification_match else {
-        return;
-    };
+
     let prepared = prepare_request(
         &space,
-        PrepareRequestSpec::new("session_operator", "afmail", "notification_show")
-            .with_source_unit_id("notifications")
-            .with_record_path(format!(
-                "/afmail/ui/notification_items/{notification_index}"
-            )),
+        PrepareRequestSpec::new("session_operator", "afmail", "draft_change")
+            .with_source_unit_id("draft_list")
+            .with_record_path(format!("/afmail/drafts/items/{draft_index}")),
     );
     assert!(prepared.is_ok(), "{prepared:?}");
     let Ok(prepared) = prepared else {
         return;
     };
-    assert_eq!(prepared.status, PreparedStatus::Ready);
-    assert_eq!(prepared.input["notification_ref"], notification_uid);
+    assert_eq!(prepared.status, PreparedStatus::NeedsInput);
 }
 
 fn message_id_by_fixture(
@@ -913,7 +1115,7 @@ fn message_id_by_fixture(
 
 fn write_demo_reply_draft(path: &Path, case_uid: &str, reply_to_message_id: &str) {
     let draft = format!(
-        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: reply\nreply_to_message_id: {reply_to_message_id}\nto:\n  - Alice Customer <alice@localhost>\ncc: []\nsubject: \"Re: Refund request for order 4471\"\nattachments:\n---\n\nHi Alice,\n\nThe shipping refund has been approved. I am sorry the cold pack arrived warm, and I have added a note to the order.\n\nBest,\nMe\n"
+        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: reply\nreply_to_message_id: {reply_to_message_id}\nto:\n  - Alice Customer <alice@localhost>\ncc: []\nsubject: \"Re: Refund request for order 4471\"\nattachments:\n---\n# Reply\n\n<!-- afmail:compose:start -->\nHi Alice,\n\nThe shipping refund has been approved. I am sorry the cold pack arrived warm, and I have added a note to the order.\n\nBest,\nMe\n<!-- afmail:compose:end -->\n"
     );
     assert!(fs::write(path, draft).is_ok());
 }
@@ -1043,6 +1245,17 @@ fn imap_login_works(port: u16, username: &str, password: &str) -> bool {
     let ok = session.list(None, Some("*")).is_ok();
     let _ = session.logout();
     ok
+}
+
+fn imap_tls_login_works(port: u16, username: &str, password: &str) -> bool {
+    let builder = imap::ClientBuilder::new("localhost", port)
+        .mode(imap::ConnectionMode::Tls)
+        .tls_kind(imap::TlsKind::Rust)
+        .danger_skip_tls_verify(true);
+    let Ok(client) = builder.connect() else {
+        return false;
+    };
+    client.login(username, password).is_ok()
 }
 
 fn mailbox_contains(
@@ -1266,11 +1479,23 @@ fn run(cwd: &Path, args: &[&str]) -> (i32, String) {
     (status, stdout)
 }
 
+fn run_confirmed_push(cwd: &Path) -> (i32, String) {
+    let (status, stdout) = run(cwd, &["push"]);
+    assert_eq!(status, 0, "{stdout}");
+    let plan = parse_one(&stdout);
+    let plan_id = plan["plan_id"].as_str().unwrap_or_default();
+    run(cwd, &["push", "--confirm", plan_id])
+}
+
 fn parse_one(stdout: &str) -> Value {
     let parsed = serde_json::from_str(stdout.trim());
     assert!(parsed.is_ok(), "stdout was not JSON: {stdout}");
     match parsed {
-        Ok(v) => v,
+        Ok(v) => {
+            assert!(agent_first_data::validate_protocol_event(&v, false).is_ok());
+            let kind = v.get("kind").and_then(Value::as_str).unwrap_or_default();
+            v.get(kind).cloned().unwrap_or(Value::Null)
+        }
         Err(_) => Value::Null,
     }
 }
@@ -1446,7 +1671,6 @@ fn contact_crud_local_e2e() {
     );
     assert_eq!(status, 0, "contact create failed: {stdout}");
     let result = parse_one(&stdout);
-    assert_eq!(result["code"], "contact_created");
     let p001 = result["contact_uid"].as_str().unwrap_or("").to_string();
     assert!(p001.starts_with('p'), "uid should start with p: {p001}");
     assert_eq!(result["emails"], json!(["zhang@example.com"]));
@@ -1470,27 +1694,32 @@ fn contact_crud_local_e2e() {
     let (status, stdout) = run(root.path(), &["contact", "show", &p001]);
     assert_eq!(status, 0, "contact show failed: {stdout}");
     let result = parse_one(&stdout);
-    assert_eq!(result["code"], "contact_show");
-    assert!(result["content"]
-        .as_str()
-        .unwrap_or("")
-        .contains("Zhang San"));
+    assert!(
+        result["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Zhang San")
+    );
 
     // Step 5: tag
     let (status, stdout) = run(root.path(), &["contact", "tag", &p001, "vip"]);
     assert_eq!(status, 0, "contact tag failed: {stdout}");
     let result = parse_one(&stdout);
-    assert!(result["tags"]
-        .as_array()
-        .is_some_and(|t| t.contains(&json!("vip"))));
+    assert!(
+        result["tags"]
+            .as_array()
+            .is_some_and(|t| t.contains(&json!("vip")))
+    );
 
     // Step 6: untag
     let (status, stdout) = run(root.path(), &["contact", "untag", &p001, "vip"]);
     assert_eq!(status, 0, "contact untag failed: {stdout}");
     let result = parse_one(&stdout);
-    assert!(!result["tags"]
-        .as_array()
-        .is_some_and(|t| t.contains(&json!("vip"))));
+    assert!(
+        !result["tags"]
+            .as_array()
+            .is_some_and(|t| t.contains(&json!("vip")))
+    );
 
     // Step 7: notes show
     let (status, _) = run(root.path(), &["contact", "notes", "show", &p001]);
@@ -1644,7 +1873,7 @@ fn contact_crud_local_e2e() {
         ],
     );
     assert_eq!(status, 0, "contact delete failed: {stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "contact_deleted");
+    let _ = parse_one(&stdout);
     let (_, list_stdout) = run(root.path(), &["contact", "list"]);
     let list = parse_one(&list_stdout);
     assert_eq!(list["count"], 1, "only p002 should be active");
@@ -1711,7 +1940,7 @@ fn docker_greenmail_contact_cards_e2e() {
     let root = TempRoot::new("greenmail-contact");
     assert!(fs::create_dir_all(root.path()).is_ok());
     assert_eq!(run(root.path(), &["init"]).0, 0);
-    let mut config = test_config(imap_port, smtp_port);
+    let mut config = test_config("127.0.0.1", imap_port, smtp_port, false, None);
     config["contact"] = json!({"default_group": "people"});
     config["audit"] = json!({"reason_mode": "optional"});
     write_json(&root.path().join(".afmail/config.json"), &config);
@@ -1916,7 +2145,7 @@ fn docker_greenmail_contact_cards_e2e() {
         ],
     );
     assert_eq!(status, 0, "contact delete p002 failed: {stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "contact_deleted");
+    let _ = parse_one(&stdout);
 
     // Step 14: active contact list shows only p001
     let (status, stdout) = run(root.path(), &["contact", "list"]);

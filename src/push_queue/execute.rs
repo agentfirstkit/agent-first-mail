@@ -26,23 +26,27 @@ pub(super) fn push_outbound(
     let outbound = item
         .outbound()
         .ok_or_else(|| AppError::new("push_item_invalid", "push item is not outbound"))?;
-    let steps = match outbound.action {
-        OutboundAction::SaveDraft => {
-            if config.actions.draft_save.steps.is_empty() {
-                vec![ActionStep::append_to_mailbox_id("drafts")]
-            } else {
-                config.actions.draft_save.steps.clone()
+    let steps = if outbound.steps.is_empty() {
+        let configured = match outbound.action {
+            OutboundAction::SaveDraft => {
+                if config.actions.draft_save.steps.is_empty() {
+                    vec![ActionStep::append_to_mailbox_id("drafts")]
+                } else {
+                    config.actions.draft_save.steps.clone()
+                }
             }
-        }
-        OutboundAction::Send => {
-            if config.actions.draft_send.steps.is_empty() {
-                crate::config::default_draft_send_steps()
-            } else {
-                config.actions.draft_send.steps.clone()
+            OutboundAction::Send => {
+                if config.actions.draft_send.steps.is_empty() {
+                    crate::config::default_draft_send_steps()
+                } else {
+                    config.actions.draft_send.steps.clone()
+                }
             }
-        }
+        };
+        filter_reply_to_steps(root, item, configured)?
+    } else {
+        outbound.steps.clone()
     };
-    let steps = filter_reply_to_steps(root, item, steps)?;
     execute_tracked_steps(
         PushExecutionContext {
             root,
@@ -123,7 +127,10 @@ pub(super) fn prepare_current_outbound(
     root: &Path,
     config: &MailConfig,
     item: &PushItem,
-) -> Result<crate::smtp_send::PreparedOutbound> {
+) -> Result<crate::types::PreparedOutbound> {
+    if let Some(prepared) = &item.planned_outbound_message {
+        return Ok(prepared.clone());
+    }
     let outbound = item
         .outbound()
         .ok_or_else(|| AppError::new("push_item_invalid", "push item is not outbound"))?;
@@ -133,7 +140,7 @@ pub(super) fn prepare_current_outbound(
     let draft_path = case_path.join("drafts").join(draft_name);
     ensure_draft_file_exists(root, case_uid, draft_name, &draft_path)?;
     let workspace = crate::store::Workspace::at(root);
-    workspace.validate_draft_for_push(case_uid, draft_name, &case_path)?;
+    workspace.validate_draft_for_push(case_uid, draft_name, &case_path, outbound.action)?;
     crate::smtp_send::prepare_outbound(
         root,
         &case_path,
@@ -141,6 +148,7 @@ pub(super) fn prepare_current_outbound(
         draft_name,
         config,
         Some(&crate::smtp_send::message_id_for_push(&item.push_id)),
+        Some(&item.created_rfc3339),
     )
 }
 
@@ -187,7 +195,7 @@ pub(super) fn execute_tracked_steps(
     item: &mut PushItem,
     steps: &[ActionStep],
     progress: Option<&mut ProgressCallback<'_>>,
-    mut execute: impl FnMut(PushExecutionContext<'_>, &mut PushItem, &ActionStep) -> Result<()>,
+    mut execute: impl FnMut(PushExecutionContext<'_>, &mut PushItem, usize, &ActionStep) -> Result<()>,
 ) -> Result<()> {
     let mut progress = progress;
     ensure_step_states(item, steps);
@@ -207,6 +215,39 @@ pub(super) fn execute_tracked_steps(
             }
             continue;
         }
+        if step_remote_outcome_unknown(item, index) {
+            if recover_remote_outcome_unknown_step(context, item, index, step)? {
+                crate::progress::emit(
+                    &mut progress,
+                    "push_step_done",
+                    push_step_progress_fields(
+                        item,
+                        context.progress,
+                        index,
+                        steps.len(),
+                        &label,
+                        None,
+                    ),
+                );
+                refresh_after_successful_step(
+                    context,
+                    item,
+                    step,
+                    index,
+                    steps.len(),
+                    &label,
+                    &mut progress,
+                )?;
+                continue;
+            }
+            return Err(remote_outcome_unknown_error(
+                context.root,
+                item,
+                index,
+                step,
+                None,
+            ));
+        }
         crate::progress::emit(
             &mut progress,
             "push_step_start",
@@ -214,7 +255,7 @@ pub(super) fn execute_tracked_steps(
         );
         mark_step_pending(item, index, step);
         write_item(context.root, item)?;
-        match execute(context, item, step) {
+        match execute(context, item, index, step) {
             Ok(()) => {
                 mark_step_succeeded(item, index, step);
                 item.updated_rfc3339 = crate::store::now_rfc3339();
@@ -243,10 +284,21 @@ pub(super) fn execute_tracked_steps(
                 )?;
             }
             Err(err) => {
-                mark_step_failed(item, index, step, &err);
-                item.updated_rfc3339 = crate::store::now_rfc3339();
-                item.last_error = Some(err.to_string());
-                write_item(context.root, item)?;
+                let err = if step_remote_outcome_unknown(item, index) {
+                    let unknown =
+                        remote_outcome_unknown_error(context.root, item, index, step, Some(&err));
+                    mark_step_remote_outcome_unknown(item, index, step, Some(&err));
+                    item.updated_rfc3339 = crate::store::now_rfc3339();
+                    item.last_error = Some(unknown.to_string());
+                    write_item(context.root, item)?;
+                    unknown
+                } else {
+                    mark_step_failed(item, index, step, &err);
+                    item.updated_rfc3339 = crate::store::now_rfc3339();
+                    item.last_error = Some(err.to_string());
+                    write_item(context.root, item)?;
+                    err
+                };
                 crate::progress::emit(
                     &mut progress,
                     "push_step_failed",
@@ -334,12 +386,12 @@ fn push_step_progress_fields(
         "step_count": step_count,
         "label": label,
     });
-    if let Some(err) = err {
-        if let Value::Object(map) = &mut value {
-            map.insert("error_code".to_string(), json!(err.error_code));
-            map.insert("error".to_string(), json!(err.message.as_str()));
-            map.insert("retryable".to_string(), json!(err.retryable));
-        }
+    if let Some(err) = err
+        && let Value::Object(map) = &mut value
+    {
+        map.insert("error_code".to_string(), json!(err.error_code));
+        map.insert("error".to_string(), json!(err.message.as_str()));
+        map.insert("retryable".to_string(), json!(err.retryable));
     }
     value
 }
@@ -368,6 +420,12 @@ fn step_succeeded(item: &PushItem, index: usize) -> bool {
     item.step_states
         .iter()
         .any(|state| state.index == index && state.status == PushStepStatus::Succeeded)
+}
+
+fn step_remote_outcome_unknown(item: &PushItem, index: usize) -> bool {
+    item.step_states
+        .iter()
+        .any(|state| state.index == index && state.status == PushStepStatus::RemoteOutcomeUnknown)
 }
 
 fn step_state_mut(item: &mut PushItem, index: usize) -> Option<&mut PushStepState> {
@@ -423,6 +481,150 @@ fn mark_step_failed(item: &mut PushItem, index: usize, step: &ActionStep, err: &
     }
 }
 
+fn persist_remote_outcome_unknown(
+    root: &Path,
+    item: &mut PushItem,
+    index: usize,
+    step: &ActionStep,
+) -> Result<()> {
+    mark_step_remote_outcome_unknown(item, index, step, None);
+    item.updated_rfc3339 = crate::store::now_rfc3339();
+    item.last_error = None;
+    write_item(root, item)
+}
+
+fn mark_step_remote_outcome_unknown(
+    item: &mut PushItem,
+    index: usize,
+    step: &ActionStep,
+    err: Option<&AppError>,
+) {
+    let now = crate::store::now_rfc3339();
+    if let Some(state) = step_state_mut(item, index) {
+        state.label = step_label(step);
+        state.status = PushStepStatus::RemoteOutcomeUnknown;
+        if state.started_rfc3339.is_none() {
+            state.started_rfc3339 = Some(now);
+        }
+        state.completed_rfc3339 = None;
+        state.result_summary = Some("remote outcome unknown".to_string());
+        state.error_code = err.map(|err| err.error_code.to_string());
+        state.error = err.map(|err| err.message.clone());
+        state.retryable = Some(false);
+    }
+}
+
+fn recover_remote_outcome_unknown_step(
+    context: PushExecutionContext<'_>,
+    item: &mut PushItem,
+    index: usize,
+    step: &ActionStep,
+) -> Result<bool> {
+    if step.append_to_mailbox_id.is_none() {
+        return Ok(false);
+    }
+    let Some(mailbox_id) = &step.append_to_mailbox_id else {
+        return Ok(false);
+    };
+    let folder = context.remote.action_mailbox_folder(mailbox_id)?;
+    let message_ids = append_rfc822_message_ids(context.root, item)?;
+    if message_ids.is_empty() {
+        return Ok(false);
+    }
+    for message_id in &message_ids {
+        match context.remote.find_by_message_id(&folder, message_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(false),
+            Err(err) if append_find_absence_is_nonfatal(&err) => return Ok(false),
+            Err(err) => return Err(err),
+        }
+    }
+    mark_step_succeeded(item, index, step);
+    item.updated_rfc3339 = crate::store::now_rfc3339();
+    item.last_error = None;
+    write_item(context.root, item)?;
+    Ok(true)
+}
+
+fn append_find_absence_is_nonfatal(err: &AppError) -> bool {
+    matches!(
+        err.error_code,
+        "imap_uid_missing" | "remote_operation_unsupported"
+    )
+}
+
+fn append_rfc822_message_ids(root: &Path, item: &PushItem) -> Result<Vec<String>> {
+    if item.outbound().is_some() {
+        return Ok(vec![outbound_rfc822_message_id(item)]);
+    }
+    let workspace = crate::store::Workspace::at(root);
+    item.message_ids()
+        .iter()
+        .map(|message_id| {
+            workspace
+                .read_message_by_id(message_id)?
+                .rfc822_message_id
+                .ok_or_else(|| {
+                    AppError::new(
+                        "rfc822_message_id_missing",
+                        format!("message cannot be verified after append: {message_id}"),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn outbound_rfc822_message_id(item: &PushItem) -> String {
+    format!(
+        "<{}@afmail.local>",
+        crate::smtp_send::message_id_for_push(&item.push_id)
+    )
+}
+
+fn remote_outcome_unknown_error(
+    root: &Path,
+    item: &PushItem,
+    index: usize,
+    step: &ActionStep,
+    cause: Option<&AppError>,
+) -> AppError {
+    let label = step_label(step);
+    let mut details = json!({
+        "push_id": item.push_id.as_str(),
+        "step_index": index + 1,
+        "label": label.as_str(),
+        "step_status": "remote_outcome_unknown",
+        "suggested_commands": [
+            "afmail push list",
+            "afmail doctor"
+        ]
+    });
+    if let Some(mailbox_id) = step.append_to_mailbox_id.as_deref()
+        && let Value::Object(map) = &mut details
+    {
+        map.insert("append_to_mailbox_id".to_string(), json!(mailbox_id));
+        if let Ok(message_ids) = append_rfc822_message_ids(root, item) {
+            map.insert("rfc822_message_ids".to_string(), json!(message_ids));
+        }
+    }
+    if let Some(cause) = cause
+        && let Value::Object(map) = &mut details
+    {
+        map.insert("cause_error_code".to_string(), json!(cause.error_code));
+        map.insert("cause_error".to_string(), json!(cause.message.as_str()));
+    }
+    AppError::new(
+        "push_remote_outcome_unknown",
+        format!(
+            "remote outcome is unknown for push step {label}; refusing to retry automatically"
+        ),
+    )
+    .with_hint(
+        "Inspect the remote mailbox or SMTP outcome before retrying. Append steps can resume automatically only when the appended Message-ID is found remotely.",
+    )
+    .with_details(details)
+}
+
 fn step_result_summary(step: &ActionStep) -> &'static str {
     if step.smtp_send.is_some() {
         "smtp_send succeeded"
@@ -440,12 +642,15 @@ fn step_result_summary(step: &ActionStep) -> &'static str {
 pub(super) fn execute_outbound_step(
     context: PushExecutionContext<'_>,
     item: &mut PushItem,
+    index: usize,
     step: &ActionStep,
 ) -> Result<()> {
     item.outbound()
         .ok_or_else(|| AppError::new("push_item_invalid", "push item is not outbound"))?;
     let prepared = prepare_current_outbound(context.root, context.config, item)?;
     if step.smtp_send.is_some() {
+        validate_smtp_send_attempt(context.config, &prepared)?;
+        persist_remote_outcome_unknown(context.root, item, index, step)?;
         context.remote.send_raw_message(
             &prepared.envelope_from,
             &prepared.envelope_to,
@@ -455,6 +660,7 @@ pub(super) fn execute_outbound_step(
     if let Some(mailbox_id) = &step.append_to_mailbox_id {
         let folder = context.remote.action_mailbox_folder(mailbox_id)?;
         let draft = mailbox_is_kind(context.config, mailbox_id, SpecialUseKind::Drafts);
+        persist_remote_outcome_unknown(context.root, item, index, step)?;
         context
             .remote
             .append_message(&folder, &prepared.raw, draft)?;
@@ -464,7 +670,27 @@ pub(super) fn execute_outbound_step(
         execute_add_flags(context.root, context.remote, &locations, &step.add_flags)?;
     }
     if step.move_to_mailbox_id.is_some() {
-        execute_message_step(context, item, step)?;
+        execute_message_step(context, item, index, step)?;
+    }
+    Ok(())
+}
+
+fn validate_smtp_send_attempt(
+    config: &MailConfig,
+    prepared: &crate::types::PreparedOutbound,
+) -> Result<()> {
+    config.require_smtp()?;
+    prepared
+        .envelope_from
+        .parse::<lettre::address::Address>()
+        .map_err(|e| AppError::new("smtp_send_failed", format!("invalid envelope from: {e}")))?;
+    for address in &prepared.envelope_to {
+        address.parse::<lettre::address::Address>().map_err(|e| {
+            AppError::new(
+                "smtp_send_failed",
+                format!("invalid envelope recipient: {e}"),
+            )
+        })?;
     }
     Ok(())
 }
@@ -472,6 +698,7 @@ pub(super) fn execute_outbound_step(
 pub(super) fn execute_message_step(
     context: PushExecutionContext<'_>,
     item: &mut PushItem,
+    index: usize,
     step: &ActionStep,
 ) -> Result<()> {
     if !step.add_flags.is_empty() {
@@ -484,13 +711,22 @@ pub(super) fn execute_message_step(
     }
     if let Some(mailbox_id) = &step.append_to_mailbox_id {
         let folder = context.remote.action_mailbox_folder(mailbox_id)?;
-        for message_id in item.message_ids() {
-            let raw = fs::read(
-                context
-                    .root
-                    .join(format!(".afmail/messages/{message_id}.eml")),
-            )
-            .map_err(|e| AppError::io("read message eml", &e))?;
+        let mut marked_unknown = false;
+        let message_ids = item.message_ids().to_vec();
+        for message_id in message_ids {
+            let raw = match item.planned_message_rfc822.get(&message_id) {
+                Some(raw) => raw.clone(),
+                None => fs::read(
+                    context
+                        .root
+                        .join(format!(".afmail/messages/{message_id}.eml")),
+                )
+                .map_err(|e| AppError::io("read message eml", &e))?,
+            };
+            if !marked_unknown {
+                persist_remote_outcome_unknown(context.root, item, index, step)?;
+                marked_unknown = true;
+            }
             context.remote.append_message(&folder, &raw, false)?;
         }
     }
@@ -602,6 +838,11 @@ pub(super) fn execute_move(
             }
         }
     }
+    for message_id in item.message_ids() {
+        if let Some(target_locations) = target_locations.get(message_id) {
+            workspace.relocate_message(message_id, target_locations)?;
+        }
+    }
     for location in locations {
         if target_locations.contains_key(&location.message_id) {
             continue;
@@ -620,11 +861,9 @@ pub(super) fn execute_move(
                 .entry(location.message_id.clone())
                 .or_default()
                 .push(target_location);
-        }
-    }
-    for message_id in item.message_ids() {
-        if let Some(target_locations) = target_locations.get(message_id) {
-            workspace.relocate_message(message_id, target_locations)?;
+            if let Some(target_locations) = target_locations.get(&location.message_id) {
+                workspace.relocate_message(&location.message_id, target_locations)?;
+            }
         }
     }
     Ok(())
@@ -636,4 +875,341 @@ pub(super) fn mailbox_is_kind(config: &MailConfig, mailbox_id: &str, kind: Speci
         .ok()
         .is_some_and(|mailbox| mailbox.contains_special_use(kind))
         || mailbox_id == kind.as_str()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{
+        DraftPush, MessageActionPush, MessagePush, OutboundPush, PushKind, PushPayload,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "afmail-push-execute-{name}-{}-{suffix}",
+            std::process::id()
+        ))
+    }
+
+    fn outbound_item(push_id: &str, step_states: Vec<PushStepState>) -> PushItem {
+        PushItem {
+            schema_name: "push_item".to_string(),
+            schema_version: 1,
+            push_id: push_id.to_string(),
+            enqueue_seq: 1,
+            payload: PushPayload::Draft(Box::new(DraftPush {
+                case_uid: "c20260609001".to_string(),
+                draft_name: "reply.md".to_string(),
+                draft_uid_validity: None,
+                draft_uid: None,
+            })),
+            planned_outbound: Some(OutboundPush {
+                action: OutboundAction::Send,
+                case_uid: "c20260609001".to_string(),
+                draft_name: "reply.md".to_string(),
+                draft_uid_validity: None,
+                draft_uid: None,
+                steps: Vec::new(),
+                reply_to_message_id: None,
+            }),
+            planned_outbound_message: None,
+            planned_message_action: None,
+            planned_message_rfc822: BTreeMap::new(),
+            created_rfc3339: "2026-06-09T00:00:00Z".to_string(),
+            updated_rfc3339: "2026-06-09T00:00:00Z".to_string(),
+            attempt_count: 0,
+            step_states,
+            local_stage: None,
+            audit_pending: None,
+            last_error: None,
+        }
+    }
+
+    fn step_state(index: usize, step: &ActionStep, status: PushStepStatus) -> PushStepState {
+        PushStepState {
+            index,
+            label: step_label(step),
+            status,
+            started_rfc3339: Some("2026-06-09T00:00:00Z".to_string()),
+            completed_rfc3339: None,
+            result_summary: None,
+            error_code: None,
+            error: None,
+            retryable: None,
+        }
+    }
+
+    fn write_message_json(root: &Path, message_id: &str, rfc822_message_id: &str, uid: u64) {
+        assert!(fs::create_dir_all(root.join("messages")).is_ok());
+        assert!(fs::create_dir_all(root.join(".afmail")).is_ok());
+        assert!(
+            crate::util::write_json_pretty(
+                &root.join(".afmail/config.json"),
+                &MailConfig::default(),
+            )
+            .is_ok()
+        );
+        let path = root.join(format!("messages/{message_id}.json"));
+        assert!(
+            crate::util::write_json_pretty(
+                &path,
+                &json!({
+                    "schema_name": "message",
+                    "schema_version": 1,
+                    "message_id": message_id,
+                    "rfc822_message_id": rfc822_message_id,
+                    "remote": {
+                        "locations": [{
+                            "mailbox_name": "INBOX",
+                            "uid_validity": 44,
+                            "uid": uid,
+                            "flags": [],
+                            "observed_rfc3339": "2026-06-09T00:00:00Z"
+                        }]
+                    },
+                    "workspace": {
+                        "status": "triage"
+                    }
+                }),
+            )
+            .is_ok()
+        );
+    }
+
+    fn context<'a>(
+        root: &'a Path,
+        config: &'a MailConfig,
+        remote: &'a dyn MailRemote,
+    ) -> PushExecutionContext<'a> {
+        PushExecutionContext {
+            root,
+            config,
+            remote,
+            progress: PushProgressContext {
+                item_index: 0,
+                item_count: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn remote_outcome_unknown_smtp_step_refuses_retry() {
+        let root = temp_root("smtp-unknown");
+        let config = MailConfig::default();
+        let remote = crate::remote::FakeMailRemote::default();
+        let step = ActionStep::smtp_send();
+        let steps = vec![step.clone()];
+        let mut item = outbound_item(
+            "push_smtp_unknown",
+            vec![step_state(0, &step, PushStepStatus::RemoteOutcomeUnknown)],
+        );
+        let mut called = false;
+
+        let result = execute_tracked_steps(
+            context(&root, &config, &remote),
+            &mut item,
+            &steps,
+            None,
+            |_context, _item, _index, _step| {
+                called = true;
+                Ok(())
+            },
+        );
+
+        assert_eq!(
+            result.err().map(|err| err.error_code),
+            Some("push_remote_outcome_unknown")
+        );
+        assert!(!called);
+        assert_eq!(
+            item.step_states[0].status,
+            PushStepStatus::RemoteOutcomeUnknown
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_outcome_unknown_append_recovers_when_message_id_is_found() {
+        let root = temp_root("append-found");
+        let config = MailConfig::default();
+        let remote = crate::remote::FakeMailRemote::default();
+        let step = ActionStep::append_to_mailbox_id("sent");
+        let steps = vec![step.clone()];
+        let mut item = outbound_item(
+            "push_append_found",
+            vec![step_state(0, &step, PushStepStatus::RemoteOutcomeUnknown)],
+        );
+        let mut called = false;
+
+        let result = execute_tracked_steps(
+            context(&root, &config, &remote),
+            &mut item,
+            &steps,
+            None,
+            |_context, _item, _index, _step| {
+                called = true;
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!called);
+        assert_eq!(item.step_states[0].status, PushStepStatus::Succeeded);
+        assert_eq!(
+            item.step_states[0].result_summary.as_deref(),
+            Some("append succeeded")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn irreversible_remote_error_preserves_unknown_status() {
+        let root = temp_root("remote-error");
+        let config = MailConfig::default();
+        let remote = crate::remote::FakeMailRemote::default();
+        let step = ActionStep::smtp_send();
+        let steps = vec![step.clone()];
+        let mut item = outbound_item("push_remote_error", Vec::new());
+
+        let result = execute_tracked_steps(
+            context(&root, &config, &remote),
+            &mut item,
+            &steps,
+            None,
+            |context, item, index, step| {
+                persist_remote_outcome_unknown(context.root, item, index, step)?;
+                let data = fs::read_to_string(push_path(context.root, &item.push_id))
+                    .map_err(|e| AppError::io("read push item", &e))?;
+                let persisted = PushItem::parse_json(&data)?;
+                assert_eq!(
+                    persisted.step_states[0].status,
+                    PushStepStatus::RemoteOutcomeUnknown
+                );
+                Err(AppError::new("smtp_send_failed", "simulated send error"))
+            },
+        );
+
+        assert_eq!(
+            result.err().map(|err| err.error_code),
+            Some("push_remote_outcome_unknown")
+        );
+        assert_eq!(
+            item.step_states[0].status,
+            PushStepStatus::RemoteOutcomeUnknown
+        );
+        assert_eq!(
+            item.step_states[0].error_code.as_deref(),
+            Some("smtp_send_failed")
+        );
+        assert_eq!(item.push_kind(), PushKind::Draft);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn move_relocates_each_message_immediately_after_remote_success() {
+        let root = temp_root("move-partial");
+        write_message_json(&root, "message_one", "<one@example.com>", 1);
+        write_message_json(&root, "message_two", "<two@example.com>", 2);
+        let remote = crate::remote::FakeMailRemote::default();
+        remote
+            .move_results
+            .borrow_mut()
+            .push_back(Ok(crate::imap_client::MoveOutcome {
+                keyword_set: false,
+                keyword_error: None,
+                seen_set: false,
+                seen_error: None,
+                moved: true,
+                target_location: Some(crate::types::RemoteLocation {
+                    mailbox_name: "junk".to_string(),
+                    mailbox_id: None,
+                    uid_validity: Some(44),
+                    uid: Some(101),
+                    flags: Vec::new(),
+                    observed_rfc3339: "2026-06-09T00:00:01Z".to_string(),
+                    missing_rfc3339: None,
+                }),
+            }));
+        remote
+            .move_results
+            .borrow_mut()
+            .push_back(Err(AppError::new(
+                "imap_move_failed",
+                "simulated second move failure",
+            )));
+        let item = PushItem {
+            schema_name: "push_item".to_string(),
+            schema_version: 1,
+            push_id: "push_move_partial".to_string(),
+            enqueue_seq: 1,
+            payload: PushPayload::Message(MessagePush {
+                message_id: "message_one".to_string(),
+            }),
+            planned_outbound: None,
+            planned_outbound_message: None,
+            planned_message_action: Some(MessageActionPush {
+                action: MessagePushAction::Spam,
+                message_ids: vec!["message_one".to_string(), "message_two".to_string()],
+                locations: vec![
+                    PushLocation {
+                        message_id: "message_one".to_string(),
+                        mailbox_name: "INBOX".to_string(),
+                        uid_validity: 44,
+                        uid: 1,
+                    },
+                    PushLocation {
+                        message_id: "message_two".to_string(),
+                        mailbox_name: "INBOX".to_string(),
+                        uid_validity: 44,
+                        uid: 2,
+                    },
+                ],
+                steps: vec![ActionStep::move_to_mailbox_id("junk")],
+                reply_to_message_id: None,
+            }),
+            planned_message_rfc822: BTreeMap::new(),
+            created_rfc3339: "2026-06-09T00:00:00Z".to_string(),
+            updated_rfc3339: "2026-06-09T00:00:00Z".to_string(),
+            attempt_count: 0,
+            step_states: Vec::new(),
+            local_stage: None,
+            audit_pending: None,
+            last_error: None,
+        };
+        let locations = item.locations().to_vec();
+
+        let result = execute_move(&root, &remote, &item, &locations, "junk");
+
+        assert!(result.is_err(), "move unexpectedly succeeded");
+        let error = result.err();
+        assert_eq!(
+            error.as_ref().map(|err| err.error_code),
+            Some("imap_move_failed"),
+            "{error:?}"
+        );
+        let first = fs::read_to_string(root.join("messages/message_one.json"))
+            .ok()
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .unwrap_or(Value::Null);
+        assert_eq!(
+            first["remote"]["locations"][0]["mailbox_name"],
+            json!("junk")
+        );
+        assert_eq!(first["remote"]["locations"][0]["uid"], json!(101));
+        let second = fs::read_to_string(root.join("messages/message_two.json"))
+            .ok()
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .unwrap_or(Value::Null);
+        assert_eq!(
+            second["remote"]["locations"][0]["mailbox_name"],
+            json!("INBOX")
+        );
+        assert_eq!(second["remote"]["locations"][0]["uid"], json!(2));
+        let _ = fs::remove_dir_all(root);
+    }
 }

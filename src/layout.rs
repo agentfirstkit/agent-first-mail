@@ -9,8 +9,43 @@
 //! These are structural identifiers, not localizable labels: they are part of
 //! afmail's CLI and skill contract and stay English. Human-facing localization
 //! happens in generated Markdown via per-language template packs, not here. The
-//! `.afmail/` metadata root and per-object subdirectories (`views/`, `data/`,
-//! `drafts/`, `files/`) are intentionally out of scope.
+//! Per-object subdirectories (`views/`, `data/`, `drafts/`, `files/`) are
+//! intentionally out of scope.
+
+/// Machine-managed metadata root.
+pub(crate) const AFMAIL: &str = ".afmail";
+/// Durable raw message evidence under [`AFMAIL`].
+pub(crate) const AFMAIL_MESSAGES: &str = "messages";
+/// Durable pull synchronization state under [`AFMAIL`].
+pub(crate) const AFMAIL_PULL: &str = "pull";
+/// Machine-local push intent under [`AFMAIL`].
+pub(crate) const AFMAIL_PUSH: &str = "push";
+/// Machine-local transaction sentinels under [`AFMAIL`].
+pub(crate) const AFMAIL_TRANSACTIONS: &str = "transactions";
+/// Machine-local idempotency records under [`AFMAIL`].
+pub(crate) const AFMAIL_REQUESTS: &str = "requests";
+/// Machine-local audit history under [`AFMAIL`].
+pub(crate) const AFMAIL_LOGS: &str = "logs";
+/// Freely rebuildable machine-local state under [`AFMAIL`].
+pub(crate) const AFMAIL_CACHE: &str = "cache";
+
+pub(crate) const AFMAIL_PULL_CURSORS: &str = "pull/cursors.json";
+pub(crate) const AFMAIL_RENDER_CACHE: &str = "cache/render-cache.json";
+pub(crate) const AFMAIL_PROGRESS: &str = "cache/progress.json";
+pub(crate) const AFMAIL_AUDIT_LOG: &str = "logs/events.jsonl";
+
+/// Root-level files written by older pre-release layouts.
+pub(crate) const LEGACY_AFMAIL_FILES: &[&str] = &[
+    "pull-cursors.json",
+    "workspace.progress.json",
+    "render-cache.json",
+    "config.example.json",
+    "workspace.lock",
+];
+
+pub(crate) fn afmail_path(relative: &str) -> std::path::PathBuf {
+    std::path::Path::new(AFMAIL).join(relative)
+}
 
 /// New mail awaiting a decision.
 pub(crate) const TRIAGE: &str = "triage";

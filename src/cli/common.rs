@@ -20,7 +20,7 @@ pub enum ConfigAction {
 
 #[derive(Subcommand, Debug)]
 pub enum RemoteAction {
-    /// Test IMAP login using local config.
+    /// Test configured IMAP and SMTP access without sending mail.
     Test,
     /// List IMAP folders/mailboxes.
     Folders,
@@ -29,12 +29,19 @@ pub enum RemoteAction {
 #[derive(Subcommand, Debug)]
 pub enum TriageAction {
     /// List compact untriaged message locators.
-    List,
+    List {
+        /// Maximum number of newest triage messages to return.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Include message metadata, related message ids, and case refs.
+        #[arg(long)]
+        details: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum PushAction {
-    /// List queued local push items.
+    /// Preview the complete resolved push plan without writing.
     List,
 }
 

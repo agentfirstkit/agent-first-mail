@@ -163,7 +163,7 @@ impl super::MailConfig {
         workspace_root: &Path,
         message: &MessageFile,
     ) -> Result<MessageIdentityMatch> {
-        Ok(match_message_identity(
+        Ok(match_message_identity_with_profiles(
             &self.identity_profiles(workspace_root)?,
             message,
         ))
@@ -286,7 +286,7 @@ fn resolve_identity_from_file(
     }
 }
 
-fn match_message_identity(
+pub(crate) fn match_message_identity_with_profiles(
     profiles: &[ResolvedIdentity],
     message: &MessageFile,
 ) -> MessageIdentityMatch {
@@ -380,10 +380,10 @@ fn parse_recipient_observation(value: &str) -> Option<RecipientObservation> {
 
 fn extract_email(value: &str) -> String {
     let trimmed = value.trim();
-    if let (Some(start), Some(end)) = (trimmed.rfind('<'), trimmed.rfind('>')) {
-        if start < end {
-            return normalize_email(&trimmed[start + 1..end]);
-        }
+    if let (Some(start), Some(end)) = (trimmed.rfind('<'), trimmed.rfind('>'))
+        && start < end
+    {
+        return normalize_email(&trimmed[start + 1..end]);
     }
     normalize_email(trimmed)
 }
@@ -392,11 +392,7 @@ fn extract_display_name(value: &str) -> Option<String> {
     let trimmed = value.trim();
     let start = trimmed.rfind('<')?;
     let name = trimmed[..start].trim().trim_matches('"').trim().to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 fn normalize_email(value: &str) -> String {
@@ -518,7 +514,7 @@ mod tests {
 
     #[test]
     fn same_email_matches_display_name() {
-        let result = match_message_identity(
+        let result = match_message_identity_with_profiles(
             &profiles(),
             &message(
                 vec!["Support Team <hello@example.com>".to_string()],
@@ -531,7 +527,7 @@ mod tests {
 
     #[test]
     fn same_email_without_name_is_multiple() {
-        let result = match_message_identity(
+        let result = match_message_identity_with_profiles(
             &profiles(),
             &message(vec!["hello@example.com".to_string()], Vec::new()),
         );
@@ -541,7 +537,7 @@ mod tests {
 
     #[test]
     fn unknown_email_is_unmatched_with_observed_recipients() {
-        let result = match_message_identity(
+        let result = match_message_identity_with_profiles(
             &profiles(),
             &message(Vec::new(), vec!["other@example.com".to_string()]),
         );

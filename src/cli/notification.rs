@@ -8,12 +8,13 @@ pub enum NotificationCommand {
     Add {
         /// Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix.
         notification_ref: String,
-        /// Message id to file.
-        message_id: String,
+        /// Message ids to file.
+        #[arg(required = true)]
+        message_id: Vec<String>,
         /// Human/agent-authored summary for this notification entry.
         #[arg(long)]
         summary: String,
-        /// Why this disposition is correct; required by default.
+        /// Why this message belongs in this notification; required by default.
         #[arg(long)]
         reason: Option<String>,
     },

@@ -31,6 +31,9 @@ pub enum ContactCommand {
         /// Destination group.
         #[arg(long)]
         group: String,
+        /// Why this contact should move groups; required by default.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Rename a contact's display name.
     Rename {
@@ -39,6 +42,9 @@ pub enum ContactCommand {
         /// New display name.
         #[arg(long)]
         name: String,
+        /// Why this name better represents the contact; required by default.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Add or remove email addresses for a contact.
     Email {
@@ -56,6 +62,9 @@ pub enum ContactCommand {
         contact_ref: String,
         /// Tag to add.
         tag: String,
+        /// Why this tag is useful; required by default.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Remove a tag from a contact.
     Untag {
@@ -63,6 +72,9 @@ pub enum ContactCommand {
         contact_ref: String,
         /// Tag to remove.
         tag: String,
+        /// Why this tag should be removed; required by default.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Show or edit contact notes.
     Notes {
@@ -120,6 +132,9 @@ pub struct ContactCreateArgs {
     /// Tag. Repeatable.
     #[arg(long = "tag")]
     pub tags: Vec<String>,
+    /// Why this contact is being created; required by default.
+    #[arg(long)]
+    pub reason: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -130,6 +145,9 @@ pub enum ContactEmailAction {
         contact_ref: String,
         /// Email address to add.
         email: String,
+        /// Why this email should be associated with the contact; required by default.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Remove an email address from the contact.
     Remove {
@@ -137,6 +155,9 @@ pub enum ContactEmailAction {
         contact_ref: String,
         /// Email address to remove.
         email: String,
+        /// Why this email should be removed; required by default.
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -148,6 +169,9 @@ pub enum ContactPhoneAction {
         contact_ref: String,
         /// Phone number to add.
         phone: String,
+        /// Why this phone number should be associated with the contact; required by default.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Remove a phone number from the contact.
     Remove {
@@ -155,6 +179,9 @@ pub enum ContactPhoneAction {
         contact_ref: String,
         /// Phone number to remove.
         phone: String,
+        /// Why this phone number should be removed; required by default.
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 

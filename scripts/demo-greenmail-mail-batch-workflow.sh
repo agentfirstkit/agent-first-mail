@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Runs a human-facing GreenMail workflow demo against the mail-batch fixtures.
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CRATE_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 FIXTURE_DIR="$CRATE_DIR/tests/fixtures/mail-batch"
@@ -11,14 +12,14 @@ CONTAINER=${AFMAIL_DEMO_CONTAINER:-afmail-demo-greenmail-$(date +%s)-$$}
 STEP_DELAY_S=${AFMAIL_DEMO_STEP_DELAY_S:-0}
 
 case "$MODE" in
-  prepare | run) ;;
+  prepare | ui | run) ;;
   *)
-    printf 'usage: %s [prepare|run]\n' "$0" >&2
+    printf 'usage: %s [prepare|ui|run]\n' "$0" >&2
     exit 2
     ;;
 esac
 
-if [[ "$MODE" == "prepare" ]]; then
+if [[ "$MODE" == "prepare" || "$MODE" == "ui" ]]; then
   KEEP_CONTAINER=1
 else
   KEEP_CONTAINER=0
@@ -81,6 +82,9 @@ json_field() {
 import json, sys
 field = sys.argv[1]
 value = json.load(sys.stdin)
+kind = value.get("kind") if isinstance(value, dict) else None
+if kind in ("result", "error", "progress", "log"):
+    value = value[kind]
 for part in field.split("."):
     value = value[part]
 print(value)
@@ -123,6 +127,7 @@ write_config() {
     "host": "127.0.0.1",
     "port": $imap_port,
     "tls": false,
+    "allow_unbounded_body_fetch": true,
     "username": "me",
     "password_secret": "secret"
   },
@@ -167,6 +172,9 @@ write_config() {
       "drafts": {"steps": []}
     }}
   },
+  "identities": [
+    {"identity": "me", "name": "Me", "email": "me@localhost", "default": true}
+  ],
   "case": {},
   "audit": {"reason_mode": "required"},
   "smtp": {
@@ -175,8 +183,7 @@ write_config() {
     "starttls": false,
     "tls_wrapper": false,
     "username": null,
-    "password_secret": null,
-    "from": "Me <me@localhost>"
+    "password_secret": null
   },
   "workspace": {"language_bcp47": null, "timezone_utc_offset": "UTC"}
 }
@@ -454,6 +461,26 @@ docker rm -f $CONTAINER
 EOF
 }
 
+print_ui_summary() {
+  cat <<EOF
+
+Ready for AFUI product verification.
+
+Workspace:  $WORKSPACE
+Mailbox:    GreenMail container=$CONTAINER imap=$IMAP_PORT smtp=$SMTP_PORT
+Draft:      case=$CASE_UID file=$DRAFT_NAME
+
+Build or locate the generic afui Host, then run inside the workspace:
+
+./bin/afmail ui --afui-bin /path/to/afui
+
+The UI workspace contains the 30-message fixture set and one editable local
+reply draft. Stop the mailbox when done:
+
+docker rm -f $CONTAINER
+EOF
+}
+
 say "Starting GreenMail container $CONTAINER"
 docker run -d --rm --name "$CONTAINER" \
   -e "GREENMAIL_OPTS=-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled -Dgreenmail.users=me:secret@localhost,alice:secret@localhost" \
@@ -514,22 +541,29 @@ subject: "Re: Refund request for order 4471"
 attachments:
 ---
 
+<!-- afmail:compose:start -->
 Hi Alice,
 
 The shipping refund has been approved. I am sorry the cold pack arrived warm, and I have added a note to the order.
 
 Best,
 Me
+<!-- afmail:compose:end -->
 EOF
 
 demo_cmd case draft validate "$CASE_UID" "$DRAFT_NAME"
+if [[ "$MODE" == "ui" ]]; then
+  print_ui_summary
+  exit 0
+fi
 demo_cmd case draft send "$CASE_UID" "$DRAFT_NAME"
-demo_cmd archive message create --name receipts --message "$RECEIPT_CLOUD" --summary 'cloud service receipt' --reason 'receipt can be filed'
+demo_cmd notification create --name receipts --message "$RECEIPT_CLOUD" --summary 'cloud service receipt' --reason 'receipt can be filed'
 demo_cmd message spam "$INBOX_PHISH" --reason 'obvious phishing in inbox'
 demo_cmd message trash "$INBOX_DUPLICATE" --reason 'duplicate notification from inbox'
 
-demo_cmd push --dry-run
-demo_cmd push --confirm
+PUSH_PLAN_JSON=$(demo_capture push --dry-run)
+PUSH_PLAN_ID=$(printf '%s' "$PUSH_PLAN_JSON" | json_field plan_id)
+demo_cmd push --confirm "$PUSH_PLAN_ID"
 demo_cmd pull
 demo_cmd status
 
@@ -546,6 +580,7 @@ Suggested GIF beats:
 5. Dry-run then confirm pushes to SMTP/IMAP.
 6. Show final status and the generated workspace files.
 
-Use \`bash scripts/demo-greenmail-fixtures.sh prepare\` when you want a live
+From the repository root, use
+\`./scripts/projects/agent-first-mail/test.sh demo-prepare\` when you want a live
 workspace where an agent can really receive and inspect the mailbox itself.
 EOF

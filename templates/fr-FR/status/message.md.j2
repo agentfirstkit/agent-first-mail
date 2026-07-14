@@ -4,7 +4,7 @@ message_id: {{ frontmatter.message_id }}
 status: {{ frontmatter.status }}
 ---
 
-# {% if view.title %}{{ view.title }}{% else %}{% if view.status == 'spam' %}Message indésirable{% elif view.status == 'trashed' %}Message de la corbeille{% else %}Message supprimé à distance{% endif %}{% endif %}
+# {% if view.display_title %}{{ view.display_title }}{% else %}{% if view.status == 'spam' %}Message indésirable{% elif view.status == 'trashed' %}Message de la corbeille{% else %}Message supprimé à distance{% endif %}{% endif %}
 
 Statut du workspace: {% if view.status == 'spam' %}Indésirables{% elif view.status == 'trashed' %}Corbeille{% else %}Supprimé à distance{% endif %} (`{{ view.status }}`)
 

@@ -22,22 +22,46 @@ agent's tool calls, not something you type.
 Say a mailbox is already configured (one folder per account, like a git
 worktree). You ask:
 
-> **You:** Can you go through my email and handle it?
+> **You:** Check my latest email, go through it, and handle anything urgent.
 
 The agent decides how to do that on its own. It starts by investigating — all
-read-only, so it needs no permission: it pulls the mailbox into local files, sees
+read-only and within the explicit request to check current remote mail: it pulls the mailbox into local files, sees
 what came down, opens a **case** for the refund request, and reads what it
 actually says:
 
 ```bash
 afmail status                                            # local counts and latest pull/push progress
 afmail push list                                         # pending real-mailbox effects
-afmail pull                                              # read-only: mail → local files
+afmail pull                                              # bounded remote read → local files
 afmail triage list                                       # locators for what came down
 afmail case create --name "Refund request" --group support \
   --message message_inbox_88213_4 --summary "refund request for late order" --reason "wants a refund"
 afmail message show message_inbox_88213_4                # read the request: order #4471, arrived late
 ```
+
+Fresh pulls default to the last 90 days, at most 500 new messages and 512 MiB
+across all selected mailboxes. Use `pull --dry-run` to estimate candidates
+without downloading bodies or changing workspace bytes; use `--all-history`
+only for an explicitly reviewed full-history import. Explicit
+`--max-new-messages` and `--max-total-bytes` remain hard command-wide budgets.
+
+The mailbox workspace is designed to be kept in your own private Git repository.
+Raw `.eml` evidence, sidecars, generated read views, attachments, queued effects,
+and audit files are normal workspace state that private Git can version, sync,
+and back up. That is a Git trust boundary, not an encryption boundary: anyone
+with repository access, host backups, local machine access, or retained Git
+history may still be able to read the mail evidence. Deleting files from the
+worktree does not erase old commits. Service credentials are different from mail
+evidence; private Git support for mailbox state does not mean passwords or API
+secrets should be committed.
+
+To restore or move a mailbox workspace, clone or fetch the private repository,
+then run `afmail status` from the workspace to verify the `workspace_uid`, local
+counts, and `storage.*_bytes` summary. Run `afmail doctor` before making new
+changes or pushing remote effects; it checks canonical files, incomplete local
+transactions, pending idempotency records, contact index conflicts, and retained
+push/audit recovery state. This is a validation flow over the existing
+workspace, not a separate restore command.
 
 Reading the email tells it what's being claimed. To check whether the claim holds,
 it steps outside afmail to **another skill** — your store's transaction system —
@@ -85,9 +109,22 @@ use `draft change`; the queued item still points at the latest draft content:
 afmail case draft change c20260606001 reply-message_inbox_88213_4.md --body-file revised-reply.txt
 ```
 
-Pushing is the moment your real mailbox changes, and afmail will not push without
-an explicit `--confirm`. So the agent stops and shows you the draft to review
-before anything goes out:
+Edits are allowed until preview. Once `afmail push` returns a `plan_id`, changing
+the draft, attachment bytes, identity, queue, or action configuration invalidates
+that reviewed plan; afmail requires a new preview instead of silently sending
+newer content under an older approval.
+
+Draft Markdown has a marked compose section so afmail can distinguish the text
+you wrote from template headings, quoted history, and the identity footer. An
+unfinished draft may be uploaded to the remote Drafts mailbox, but it cannot be
+queued for sending until that compose section contains authored text. The local
+state is then `queued_send`, not `sent`; afmail revalidates the latest file at
+push time and strips editor-only markers from the outgoing plain-text message.
+
+Pushing is the moment your real mailbox changes. Bare `afmail push` is a pure
+preview containing the complete resolved queue and a workspace-bound `plan_id`;
+only `--confirm PLAN_ID` can apply that exact snapshot. So the agent stops and
+shows you the draft and all other effects before anything goes out:
 
 > **Agent:** Refund's done. Here's the reply before I send it:
 >
@@ -102,8 +139,25 @@ Only now, with the draft approved, does it push:
 
 ```bash
 afmail case archive c20260606001 --reason "refunded order #4471, replied to customer"
-afmail push --confirm                                    # send the reply and apply the archive in one push
+afmail push                                              # review the full plan and copy plan_id
+afmail push --confirm push_plan_<REVIEWED_PLAN_ID>       # apply only that exact plan
 ```
+
+If the case still contains queued send drafts or a remote archive effect,
+`case archive` returns lifecycle `archiving` and queues the remote archive as
+its own push item. Its workspace is held under `archived-cases/`, but it does
+not become lifecycle `archived` or receive `archived_rfc3339` until the send and
+archive pushes both succeed.
+
+If a confirmed push exits with code `3` and `outcome: partial`, do not blindly
+repeat the whole push. Inspect `failures`, `partially_applied_count`,
+`remaining_count`, and `audit_warnings`, then compare `afmail push list` with
+`afmail status` before deciding whether another confirmed push is safe. A
+`remote_outcome_unknown` item must never be retried automatically. If a remote
+effect succeeded but its audit append did not complete, the queue retains an
+`audit_pending` item. The next preview marks it `effect_scope: local_recovery`;
+after review, confirming that new plan only completes the idempotent audit append
+and queue cleanup, and never repeats SMTP or IMAP effects.
 
 Then it reports back:
 
@@ -119,18 +173,26 @@ Then it reports back:
 
 That is the whole shape: **you ask in plain language and the agent does the work
 in local files — investigating, proposing a plan, drafting — and nothing reaches
-your real mailbox until you've reviewed what's queued and it runs an explicit
-`afmail push --confirm`.**
+your real mailbox until you've reviewed the resolved plan and it runs
+`afmail push --confirm PLAN_ID` with that exact ID.**
+
+The exact permission boundary for local reads, remote reads, local changes,
+remote effects, and permanent deletion is the
+[authorization contract](docs/authorization.md). Loading the afmail skill is
+automatic when an installed agent recognizes a mail task; loading it grants no
+additional permission.
 
 ## Nothing touches your real mailbox until you confirm
 
 Everything your agent does by default is local: replying writes a draft,
 archiving moves a local folder, marking spam/trash removes it from triage and
 adds it to generated `spam/` or `trash/` review views, and remotely deleted mail
-is retained under generated `deleted/` views until `afmail purge` clears old
-local copies. Local filing only *queues* a remote effect. `afmail push` is like `git push` — it
-previews everything pending, and a single **`--confirm` is the one explicit
-moment** all of it is sent, moved, or flagged.
+is retained under generated `deleted/` views. `afmail purge` only previews the
+old local copies it would permanently remove; deletion requires rerunning it
+with the exact returned `--confirm PLAN_ID`. Local filing only *queues* a remote effect. `afmail push` is like `git push` — it
+previews everything pending, and **`--confirm PLAN_ID` is the one explicit
+plan-bound moment** that reviewed snapshot is sent, moved, or flagged. Any
+relevant change makes the old ID fail before remote access.
 Every confirmed effect lands in an append-only audit log, so a suggestion is never
 mistaken for a change after the fact.
 
@@ -162,14 +224,33 @@ machine evidence in separate places:
   attention.
 - **`cases/`** — a folder per ongoing issue, holding notes, the messages
   involved, and draft replies.
-- **`notifications/` and `archived-cases/`** — completed notification mail and archived cases, filed and out of the way.
+- **`archived-cases/`** — both archiving cases waiting for confirmed effects and
+  fully archived cases, distinguished by their typed lifecycle.
+- **`notifications/`** — completed notification mail filed out of the way.
 - **Stable refs** — every message, case, and notification collection has a durable id,
   so an agent can point at the same thing across runs.
-- **Locator lists** — `triage list`, `case list`, `notification list`, and `case list --archived` return
+- **Locator lists** — `triage list`, `case list`, `notification list`,
+  `case list`, and `case list --archived` return
   compact stable ids plus path templates; the agent expands those templates or
   uses the matching `show` command to read detail.
 
 That is the shape. The [docs](#docs) cover the exact files, fields, and commands.
+
+## Review mail and edit drafts with AFUI
+
+Run `afmail ui` inside a workspace to open the product view. It is intentionally
+small: one split mail window with the queue on the left and selected message on
+the right, a draft list and editor, plus mailbox glance facts. Editing the draft
+form writes the real local draft through afmail and the view refreshes from the
+workspace; remote mail still follows the ordinary
+explicit push rules.
+
+Message and draft records expose a single `#` control. It sends the stable inert
+reference to the Host-owned termail companion so a directing agent can operate
+on that object. It does not click an afmail operation, execute a command, or
+submit Enter. Use `afmail ui --no-termail` when only the review/editor surface is
+wanted. `afmail ui snapshot` remains the data-only integration output; its AFUI
+message is carried in the standard AFDATA `kind: "result"` envelope.
 
 ## Adopt it: hand afmail to your agent
 
@@ -210,6 +291,13 @@ afmail skill status --agent codex --scope workspace
 Then it's **one workspace directory per mailbox**: run `afmail init` in a fresh
 folder or `afmail init email-a` from your agent root, connect the account, and
 your agent works that mailbox from its files.
+`init` creates only mailbox-workspace files; it never installs a Skill or edits
+the Agent root's `AGENTS.md`. Its structured `created_files`, `changed_files`,
+and `next_steps` fields drive setup without guessing config keys. After applying
+those steps, use `afmail status` for local readiness and `afmail remote test`
+for IMAP plus configured SMTP handshake/authentication. The remote test sends no
+mail. `status.readiness.afui_host_available` also tells source installs whether
+the separate `afui` executable is available.
 See the [Workspace Model](docs/workspace.md).
 
 ## Docs

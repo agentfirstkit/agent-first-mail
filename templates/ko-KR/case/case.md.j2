@@ -3,16 +3,7 @@
 케이스: {{ case.collection_uid }} · 메시지: {{ view.message_count }}
 
 {% if items | length == 0 %}_메시지가 없습니다._
-{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.action_kind == 'received' %}받음{% elif item.view.action_kind == 'received_reply' %}답장 받음{% elif item.view.action_kind == 'received_forward' %}전달 받음{% elif item.view.action_kind == 'sent' %}보냄{% elif item.view.action_kind == 'sent_reply' %}답장 보냄{% else %}전달 보냄{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
-
-{% if item.view.display_contact %}- {% if item.view.contact_kind == 'from' %}보낸 사람{% else %}받는 사람{% endif %}: {{ item.view.display_contact }}
-{% endif %}- 메시지: [{{ item.message.message_id }}]({{ item.view.link }})
-{% if item.view.time.datetime %}- 시간: {{ item.view.time.datetime }}
-{% endif %}
-
-{% endfor %}{% endif %}
-{% if view.conversation %}
-## 대화
+{% elif view.conversation %}## 대화
 
 <!-- afmail:conversation:start -->
 

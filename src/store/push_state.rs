@@ -33,7 +33,7 @@ impl Workspace {
         let Some(outbound) = item.outbound() else {
             return Ok(());
         };
-        let (_, case_path) = self.resolve_active_case(&outbound.case_uid)?;
+        let (_, case_path) = self.resolve_queued_outbound_case(&outbound.case_uid)?;
         self.refresh_case_message_views(&case_path)
     }
 

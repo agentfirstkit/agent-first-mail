@@ -1,6 +1,6 @@
 use super::lock::{command_lock, workspace_progress_command};
-use super::purge::{resolve_purge_action, ResolvedPurgeAction};
-use super::push::push_confirmed;
+use super::purge::{ResolvedPurgeAction, resolve_purge_action};
+use super::push::push_plan_confirmation;
 use crate::cli::{
     CaseCommand, CaseDraftAction, CaseNotesAction, Command, ConfigAction, ContactCommand,
     ContactEmailAction, ContactNotesAction, ContactPhoneAction, DoctorAction, LogAction,
@@ -10,27 +10,33 @@ use crate::cli::{
 use crate::error::{AppError, Result};
 use crate::progress::{ProgressCallback, WorkspaceProgressSink};
 use crate::store::{DraftChange, NewDraft, Workspace};
+use crate::types::CommandResult;
 use crate::workspace_lock::{LockMode, WorkspaceLock};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 
-pub fn execute_command(command: Command) -> Result<Value> {
-    execute_command_with_progress(command, None)
+pub fn execute_command(command: Command) -> Result<CommandResult> {
+    execute_command_with_progress(command, None, None)
 }
 
 pub(super) fn execute_command_with_progress(
     command: Command,
+    request_id: Option<&str>,
     progress: Option<&mut ProgressCallback<'_>>,
-) -> Result<Value> {
+) -> Result<CommandResult> {
+    if request_id.is_some() && !request_id_supported(&command) {
+        return Err(AppError::new(
+            "request_id_not_supported",
+            "--request-id is only supported for selected non-idempotent local mutations",
+        ));
+    }
     match command {
-        Command::Skill { action } => crate::skill_admin::handle_action(action),
+        Command::Skill { action } => {
+            crate::skill_admin::handle_action(action).map(CommandResult::succeeded)
+        }
         Command::Status => {
             let cwd = std::env::current_dir().map_err(|e| AppError::io("current dir", &e))?;
-            execute_status(&cwd)
-        }
-        Command::Init { .. } => {
-            let cwd = std::env::current_dir().map_err(|e| AppError::io("current dir", &e))?;
-            execute_command_unlocked(command, &cwd, progress)
+            execute_status(&cwd).map(CommandResult::succeeded)
         }
         command => {
             let cwd = std::env::current_dir().map_err(|e| AppError::io("current dir", &e))?;
@@ -40,13 +46,12 @@ pub(super) fn execute_command_with_progress(
                 .map(|name| WorkspaceProgressSink::start(&lock.root, name));
             if lock.mode == LockMode::Exclusive
                 && !matches!(command, Command::Init { .. } | Command::Doctor { .. })
+                && let Err(err) = Workspace::at(&lock.root).ensure_no_incomplete_transactions()
             {
-                if let Err(err) = Workspace::at(&lock.root).ensure_no_incomplete_transactions() {
-                    if let Some(sink) = &mut workspace_progress {
-                        sink.finish_failure(&err);
-                    }
-                    return Err(err);
+                if let Some(sink) = &mut workspace_progress {
+                    sink.finish_failure(&err);
                 }
+                return Err(err);
             }
             let mut progress = progress;
             let should_emit_progress = progress.is_some() || workspace_progress.is_some();
@@ -64,27 +69,92 @@ pub(super) fn execute_command_with_progress(
                 } else {
                     None
                 };
-                execute_command_unlocked(command, &cwd, progress)
+                execute_command_unlocked(command, request_id, &cwd, progress)
             };
             if let Some(sink) = &mut workspace_progress {
                 match &result {
-                    Ok(value) => sink.finish_success(value),
+                    Ok(result) => sink.finish_result(result),
                     Err(err) => sink.finish_failure(err),
                 }
             }
-            result
+            match workspace_progress {
+                Some(mut sink) => attach_progress_warnings(result, sink.take_write_warnings()),
+                None => result,
+            }
         }
     }
 }
 
+fn attach_progress_warnings(
+    result: Result<CommandResult>,
+    warnings: Vec<Value>,
+) -> Result<CommandResult> {
+    if warnings.is_empty() {
+        return result;
+    }
+    match result {
+        Ok(result) => Ok(command_result_with_progress_warnings(result, warnings)),
+        Err(err) => Err(error_with_progress_warnings(err, warnings)),
+    }
+}
+
+fn command_result_with_progress_warnings(
+    result: CommandResult,
+    warnings: Vec<Value>,
+) -> CommandResult {
+    let warning_count = warnings.len();
+    let mut value = result.value().clone();
+    if let Value::Object(map) = &mut value {
+        map.insert("progress_warning_count".to_string(), json!(warning_count));
+        map.insert("progress_warnings".to_string(), Value::Array(warnings));
+    }
+    CommandResult::aggregate(value, usize::from(result.is_success()), warning_count)
+}
+
+fn error_with_progress_warnings(mut err: AppError, warnings: Vec<Value>) -> AppError {
+    let warning_count = warnings.len();
+    let mut details = match err.details.take() {
+        Some(Value::Object(map)) => map,
+        Some(value) => {
+            let mut map = serde_json::Map::new();
+            map.insert("details".to_string(), value);
+            map
+        }
+        None => serde_json::Map::new(),
+    };
+    details.insert("progress_warning_count".to_string(), json!(warning_count));
+    details.insert("progress_warnings".to_string(), Value::Array(warnings));
+    err.details = Some(Value::Object(details));
+    err
+}
+
 fn execute_command_unlocked(
     command: Command,
+    request_id: Option<&str>,
     cwd: &Path,
     progress: Option<&mut ProgressCallback<'_>>,
-) -> Result<Value> {
-    match command {
+) -> Result<CommandResult> {
+    let mut counts = (1usize, 0usize);
+    let value = match command {
         Command::Init { path } => Workspace::init_command(cwd, path.as_deref()),
-        Command::Pull { ids } => Workspace::discover(cwd)?.pull_with_progress(&ids, progress),
+        Command::Pull {
+            ids,
+            dry_run,
+            since_days,
+            max_new_messages,
+            max_total_bytes,
+            all_history,
+        } => Workspace::discover(cwd)?.pull_with_progress(
+            &ids,
+            crate::imap_pull::PullOptions::new(
+                since_days,
+                max_new_messages,
+                max_total_bytes,
+                all_history,
+                dry_run,
+            ),
+            progress,
+        ),
         Command::Config { action } => {
             let ws = Workspace::discover(cwd)?;
             match action {
@@ -111,8 +181,11 @@ fn execute_command_unlocked(
             match action {
                 Some(PushAction::List) => ws.push_list(),
                 None => {
-                    let confirmed = push_confirmed(dry_run, confirm)?;
-                    ws.push_with_progress(confirmed, progress)
+                    let confirm_plan_id = push_plan_confirmation(dry_run, confirm.as_deref())?;
+                    take_command_result(
+                        ws.push_with_progress(confirm_plan_id, progress),
+                        &mut counts,
+                    )
                 }
             }
         }
@@ -120,48 +193,166 @@ fn execute_command_unlocked(
         Command::Doctor { action } => {
             let ws = Workspace::discover(cwd)?;
             match action {
-                None => ws.doctor(),
-                Some(DoctorAction::Repair { confirm }) => ws.doctor_repair(confirm),
+                None => take_command_result(ws.doctor(), &mut counts),
+                Some(DoctorAction::Repair { confirm }) => {
+                    take_command_result(ws.doctor_repair(confirm), &mut counts)
+                }
             }
         }
         Command::Purge {
             action,
             older_than_days,
+            confirm,
         } => {
             let ws = Workspace::discover(cwd)?;
-            match resolve_purge_action(action, older_than_days)? {
-                ResolvedPurgeAction::Spam { older_than_days } => ws.purge_spam(older_than_days),
-                ResolvedPurgeAction::Trash { older_than_days } => ws.purge_trash(older_than_days),
-                ResolvedPurgeAction::Deleted { older_than_days } => {
-                    ws.purge_deleted(older_than_days)
-                }
-                ResolvedPurgeAction::Discards { older_than_days } => {
-                    ws.purge_discards(older_than_days)
-                }
+            match resolve_purge_action(action, older_than_days, confirm)? {
+                ResolvedPurgeAction::Spam {
+                    older_than_days,
+                    confirm,
+                } => ws.purge_spam(older_than_days, confirm.as_deref()),
+                ResolvedPurgeAction::Trash {
+                    older_than_days,
+                    confirm,
+                } => ws.purge_trash(older_than_days, confirm.as_deref()),
+                ResolvedPurgeAction::Deleted {
+                    older_than_days,
+                    confirm,
+                } => ws.purge_deleted(older_than_days, confirm.as_deref()),
+                ResolvedPurgeAction::Discards {
+                    older_than_days,
+                    confirm,
+                } => ws.purge_discards(older_than_days, confirm.as_deref()),
             }
         }
         Command::Skill { action } => crate::skill_admin::handle_action(action),
         Command::Triage { action } => {
             let ws = Workspace::discover(cwd)?;
             match action {
-                TriageAction::List => ws.triage_list(),
+                TriageAction::List { limit, details } => ws.triage_list(limit, details),
             }
         }
         Command::Message { action } => {
             let ws = Workspace::discover(cwd)?;
             match action {
-                MessageAction::Show { message_id } => ws.message_show(&message_id),
+                MessageAction::Show { message_id, meta } => ws.message_show(&message_id, meta),
+                MessageAction::List {
+                    sender,
+                    subject_contains,
+                    since,
+                    scope,
+                } => ws.message_list(
+                    sender.as_deref(),
+                    subject_contains.as_deref(),
+                    since.as_deref(),
+                    scope.as_str(),
+                ),
                 MessageAction::Spam { message_id, reason } => {
-                    ws.spam_message(&message_id, reason.as_deref())
+                    if request_id.is_some() {
+                        let Some(single_message_id) = message_id.first() else {
+                            return Err(AppError::new(
+                                "invalid_request",
+                                "message disposition requires at least one message id",
+                            ));
+                        };
+                        idempotent_value(
+                            &ws,
+                            request_id,
+                            "message_spam",
+                            json!({"message_id": single_message_id, "reason": reason}),
+                            || ws.spam_message(single_message_id, reason.as_deref()),
+                        )
+                    } else {
+                        take_command_result(
+                            batch_message_disposition(
+                                "message_spam_batch",
+                                &message_id,
+                                reason.as_deref(),
+                                |id| ws.spam_message(id, reason.as_deref()),
+                            ),
+                            &mut counts,
+                        )
+                    }
                 }
                 MessageAction::Trash { message_id, reason } => {
-                    ws.trash_message(&message_id, reason.as_deref())
+                    if request_id.is_some() {
+                        let Some(single_message_id) = message_id.first() else {
+                            return Err(AppError::new(
+                                "invalid_request",
+                                "message disposition requires at least one message id",
+                            ));
+                        };
+                        idempotent_value(
+                            &ws,
+                            request_id,
+                            "message_trash",
+                            json!({"message_id": single_message_id, "reason": reason}),
+                            || ws.trash_message(single_message_id, reason.as_deref()),
+                        )
+                    } else {
+                        take_command_result(
+                            batch_message_disposition(
+                                "message_trash_batch",
+                                &message_id,
+                                reason.as_deref(),
+                                |id| ws.trash_message(id, reason.as_deref()),
+                            ),
+                            &mut counts,
+                        )
+                    }
                 }
                 MessageAction::Unspam { message_id, reason } => {
-                    ws.unspam_message(&message_id, reason.as_deref())
+                    if request_id.is_some() {
+                        let Some(single_message_id) = message_id.first() else {
+                            return Err(AppError::new(
+                                "invalid_request",
+                                "message disposition requires at least one message id",
+                            ));
+                        };
+                        idempotent_value(
+                            &ws,
+                            request_id,
+                            "message_unspam",
+                            json!({"message_id": single_message_id, "reason": reason}),
+                            || ws.unspam_message(single_message_id, reason.as_deref()),
+                        )
+                    } else {
+                        take_command_result(
+                            batch_message_disposition(
+                                "message_unspam_batch",
+                                &message_id,
+                                reason.as_deref(),
+                                |id| ws.unspam_message(id, reason.as_deref()),
+                            ),
+                            &mut counts,
+                        )
+                    }
                 }
                 MessageAction::Untrash { message_id, reason } => {
-                    ws.untrash_message(&message_id, reason.as_deref())
+                    if request_id.is_some() {
+                        let Some(single_message_id) = message_id.first() else {
+                            return Err(AppError::new(
+                                "invalid_request",
+                                "message disposition requires at least one message id",
+                            ));
+                        };
+                        idempotent_value(
+                            &ws,
+                            request_id,
+                            "message_untrash",
+                            json!({"message_id": single_message_id, "reason": reason}),
+                            || ws.untrash_message(single_message_id, reason.as_deref()),
+                        )
+                    } else {
+                        take_command_result(
+                            batch_message_disposition(
+                                "message_untrash_batch",
+                                &message_id,
+                                reason.as_deref(),
+                                |id| ws.untrash_message(id, reason.as_deref()),
+                            ),
+                            &mut counts,
+                        )
+                    }
                 }
                 MessageAction::Attachment { action } => match action {
                     MessageAttachmentAction::Fetch {
@@ -174,12 +365,26 @@ fn execute_command_unlocked(
         Command::Case { action } => {
             let ws = Workspace::discover(cwd)?;
             match action {
-                CaseCommand::Create(args) => ws.create_case(
-                    &args.name,
-                    args.group.as_deref(),
-                    args.message.as_deref(),
-                    args.summary.as_deref(),
-                    args.reason.as_deref(),
+                CaseCommand::Create(args) => idempotent_value(
+                    &ws,
+                    request_id,
+                    "case_create",
+                    json!({
+                        "name": args.name,
+                        "group": args.group,
+                        "message": args.message,
+                        "summary": args.summary,
+                        "reason": args.reason,
+                    }),
+                    || {
+                        ws.create_case(
+                            &args.name,
+                            args.group.as_deref(),
+                            args.message.as_deref(),
+                            args.summary.as_deref(),
+                            args.reason.as_deref(),
+                        )
+                    },
                 ),
                 CaseCommand::List { archived, all } => ws.case_list(archived, all),
                 CaseCommand::Show { case_ref } => ws.case_show(&case_ref),
@@ -188,62 +393,177 @@ fn execute_command_unlocked(
                     message_id,
                     summary,
                     reason,
-                } => ws.add_message_to_case(
-                    &case_ref,
-                    &message_id,
-                    summary.as_deref(),
-                    reason.as_deref(),
+                } => {
+                    if request_id.is_some() {
+                        let Some(single_message_id) = message_id.first() else {
+                            return Err(AppError::new(
+                                "invalid_request",
+                                "message disposition requires at least one message id",
+                            ));
+                        };
+                        idempotent_value(
+                            &ws,
+                            request_id,
+                            "case_add",
+                            json!({
+                                "case_ref": case_ref,
+                                "message_id": single_message_id,
+                                "summary": summary,
+                                "reason": reason,
+                            }),
+                            || {
+                                ws.add_message_to_case(
+                                    &case_ref,
+                                    single_message_id,
+                                    summary.as_deref(),
+                                    reason.as_deref(),
+                                )
+                            },
+                        )
+                    } else {
+                        take_command_result(
+                            batch_message_disposition(
+                                "case_message_added_batch",
+                                &message_id,
+                                reason.as_deref(),
+                                |id| {
+                                    ws.add_message_to_case(
+                                        &case_ref,
+                                        id,
+                                        summary.as_deref(),
+                                        reason.as_deref(),
+                                    )
+                                },
+                            ),
+                            &mut counts,
+                        )
+                    }
+                }
+                CaseCommand::SetSummary {
+                    case_ref,
+                    message_id,
+                    summary,
+                    reason,
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "case_set_summary",
+                    json!({
+                        "case_ref": case_ref,
+                        "message_id": message_id,
+                        "summary": summary,
+                        "reason": reason,
+                    }),
+                    || ws.case_set_summary(&case_ref, &message_id, &summary, reason.as_deref()),
                 ),
                 CaseCommand::Remove {
                     case_ref,
                     message_id,
                     reason,
-                } => ws.remove_message_from_case(&case_ref, &message_id, reason.as_deref()),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "case_remove",
+                    json!({"case_ref": case_ref, "message_id": message_id, "reason": reason}),
+                    || ws.remove_message_from_case(&case_ref, &message_id, reason.as_deref()),
+                ),
                 CaseCommand::Move {
                     case_ref,
                     group,
                     reason,
-                } => ws.move_case(&case_ref, &group, reason.as_deref()),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "case_move",
+                    json!({"case_ref": case_ref, "group": group, "reason": reason}),
+                    || ws.move_case(&case_ref, &group, reason.as_deref()),
+                ),
                 CaseCommand::Rename {
                     case_ref,
                     name,
                     reason,
-                } => ws.rename_case(&case_ref, &name, reason.as_deref()),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "case_rename",
+                    json!({"case_ref": case_ref, "name": name, "reason": reason}),
+                    || ws.rename_case(&case_ref, &name, reason.as_deref()),
+                ),
                 CaseCommand::Notes { action } => match action {
                     CaseNotesAction::Show { case_ref } => ws.case_notes_show(&case_ref),
-                    CaseNotesAction::Append { case_ref, text } => {
-                        ws.case_notes_append(&case_ref, &text)
-                    }
-                    CaseNotesAction::Replace { case_ref, text } => {
-                        ws.case_notes_replace(&case_ref, &text)
-                    }
+                    CaseNotesAction::Append { case_ref, text } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "case_notes_append",
+                        json!({"case_ref": case_ref, "text": text}),
+                        || ws.case_notes_append(&case_ref, &text),
+                    ),
+                    CaseNotesAction::Replace { case_ref, text } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "case_notes_replace",
+                        json!({"case_ref": case_ref, "text": text}),
+                        || ws.case_notes_replace(&case_ref, &text),
+                    ),
                 },
-                CaseCommand::Archive { case_ref, reason } => {
-                    ws.archive_case(&case_ref, reason.as_deref())
-                }
+                CaseCommand::Archive { case_ref, reason } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "case_archive",
+                    json!({"case_ref": case_ref, "reason": reason}),
+                    || ws.archive_case(&case_ref, reason.as_deref()),
+                ),
                 CaseCommand::Unarchive {
                     case_ref,
                     group,
                     reason,
-                } => ws.unarchive_case(&case_ref, &group, reason.as_deref()),
-                CaseCommand::Trash { case_ref, reason } => {
-                    ws.trash_case(&case_ref, reason.as_deref())
-                }
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "case_unarchive",
+                    json!({"case_ref": case_ref, "group": group, "reason": reason}),
+                    || ws.unarchive_case(&case_ref, &group, reason.as_deref()),
+                ),
+                CaseCommand::Trash { case_ref, reason } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "case_trash",
+                    json!({"case_ref": case_ref, "reason": reason}),
+                    || ws.trash_case(&case_ref, reason.as_deref()),
+                ),
                 CaseCommand::Delete {
                     case_ref,
                     allow_notes,
                     reason,
-                } => ws.delete_case(&case_ref, allow_notes, reason.as_deref()),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "case_delete",
+                    json!({"case_ref": case_ref, "allow_notes": allow_notes, "reason": reason}),
+                    || ws.delete_case(&case_ref, allow_notes, reason.as_deref()),
+                ),
                 CaseCommand::Tag {
                     case_ref,
                     tag,
                     reason,
-                } => ws.tag_case(&case_ref, &tag, reason.as_deref()),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "case_tag",
+                    json!({"case_ref": case_ref, "tag": tag, "reason": reason}),
+                    || ws.tag_case(&case_ref, &tag, reason.as_deref()),
+                ),
                 CaseCommand::Untag {
                     case_ref,
                     tag,
                     reason,
-                } => ws.untag_case(&case_ref, &tag, reason.as_deref()),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "case_untag",
+                    json!({"case_ref": case_ref, "tag": tag, "reason": reason}),
+                    || ws.untag_case(&case_ref, &tag, reason.as_deref()),
+                ),
                 CaseCommand::Draft { action } => match action {
                     CaseDraftAction::New {
                         case_ref,
@@ -253,15 +573,31 @@ fn execute_command_unlocked(
                         identity,
                         body,
                         body_file,
-                    } => ws.create_draft(
-                        &case_ref,
-                        NewDraft {
-                            to: &to,
-                            cc: &cc,
-                            subject: &subject,
-                            identity: identity.as_deref(),
-                            body: body.as_deref(),
-                            body_file: body_file.as_deref(),
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "case_draft_new",
+                        json!({
+                            "case_ref": case_ref,
+                            "to": to,
+                            "cc": cc,
+                            "subject": subject,
+                            "identity": identity,
+                            "body": body,
+                            "body_file": body_file,
+                        }),
+                        || {
+                            ws.create_draft(
+                                &case_ref,
+                                NewDraft {
+                                    to: &to,
+                                    cc: &cc,
+                                    subject: &subject,
+                                    identity: identity.as_deref(),
+                                    body: body.as_deref(),
+                                    body_file: body_file.as_deref(),
+                                },
+                            )
                         },
                     ),
                     CaseDraftAction::Reply {
@@ -271,13 +607,28 @@ fn execute_command_unlocked(
                         body,
                         body_file,
                         all,
-                    } => ws.reply_to_message(
-                        &case_ref,
-                        &message_id,
-                        all,
-                        identity.as_deref(),
-                        body.as_deref(),
-                        body_file.as_deref(),
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "case_draft_reply",
+                        json!({
+                            "case_ref": case_ref,
+                            "message_id": message_id,
+                            "all": all,
+                            "identity": identity,
+                            "body": body,
+                            "body_file": body_file,
+                        }),
+                        || {
+                            ws.reply_to_message(
+                                &case_ref,
+                                &message_id,
+                                all,
+                                identity.as_deref(),
+                                body.as_deref(),
+                                body_file.as_deref(),
+                            )
+                        },
                     ),
                     CaseDraftAction::Change {
                         case_ref,
@@ -289,31 +640,50 @@ fn execute_command_unlocked(
                         identity,
                         body,
                         body_file,
-                    } => ws.change_draft(
-                        &case_ref,
-                        &draft_name,
-                        DraftChange {
-                            subject: subject.as_deref(),
-                            to: &to,
-                            cc: &cc,
-                            clear_cc,
-                            identity: identity.as_deref(),
-                            body: body.as_deref(),
-                            body_file: body_file.as_deref(),
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "case_draft_change",
+                        json!({
+                            "case_ref": case_ref,
+                            "draft_name": draft_name,
+                            "subject": subject,
+                            "to": to,
+                            "cc": cc,
+                            "clear_cc": clear_cc,
+                            "identity": identity,
+                            "body": body,
+                            "body_file": body_file,
+                        }),
+                        || {
+                            ws.change_draft(
+                                &case_ref,
+                                &draft_name,
+                                DraftChange {
+                                    subject: subject.as_deref(),
+                                    to: &to,
+                                    cc: &cc,
+                                    clear_cc,
+                                    identity: identity.as_deref(),
+                                    body: body.as_deref(),
+                                    body_file: body_file.as_deref(),
+                                },
+                            )
                         },
                     ),
                     CaseDraftAction::Show {
                         case_ref,
                         draft_name,
                     } => ws.show_draft(&case_ref, &draft_name),
+                    CaseDraftAction::List { case_ref } => ws.list_drafts(&case_ref),
                     CaseDraftAction::Validate {
                         case_ref,
                         draft_name,
                     } => ws.validate_draft(&case_ref, &draft_name),
-                    CaseDraftAction::Save {
+                    CaseDraftAction::Upload {
                         case_ref,
                         draft_name,
-                    } => ws.save_draft(&case_ref, &draft_name),
+                    } => ws.upload_draft(&case_ref, &draft_name),
                     CaseDraftAction::Send {
                         case_ref,
                         draft_name,
@@ -322,12 +692,24 @@ fn execute_command_unlocked(
                         case_ref,
                         draft_name,
                         path,
-                    } => ws.attach_file_to_draft(&case_ref, &draft_name, &path),
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "case_draft_attach",
+                        json!({"case_ref": case_ref, "draft_name": draft_name, "path": path}),
+                        || ws.attach_file_to_draft(&case_ref, &draft_name, &path),
+                    ),
                     CaseDraftAction::Remove {
                         case_ref,
                         draft_name,
                         reason,
-                    } => ws.remove_draft(&case_ref, &draft_name, reason.as_deref()),
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "case_draft_remove",
+                        json!({"case_ref": case_ref, "draft_name": draft_name, "reason": reason}),
+                        || ws.remove_draft(&case_ref, &draft_name, reason.as_deref()),
+                    ),
                 },
                 CaseCommand::Merge {
                     case_ref,
@@ -340,15 +722,33 @@ fn execute_command_unlocked(
             use crate::store::contacts::{ContactExtractSource, NewContact};
             let ws = Workspace::discover(cwd)?;
             match action {
-                ContactCommand::Create(args) => ws.contact_create(NewContact {
-                    name: &args.name,
-                    group: args.group.as_deref(),
-                    emails: &args.emails,
-                    phones: &args.phones,
-                    org: args.org.as_deref(),
-                    role: args.role.as_deref(),
-                    tags: &args.tags,
-                }),
+                ContactCommand::Create(args) => idempotent_value(
+                    &ws,
+                    request_id,
+                    "contact_create",
+                    json!({
+                        "name": args.name,
+                        "group": args.group,
+                        "emails": args.emails,
+                        "phones": args.phones,
+                        "org": args.org,
+                        "role": args.role,
+                        "tags": args.tags,
+                        "reason": args.reason,
+                    }),
+                    || {
+                        ws.contact_create(NewContact {
+                            name: &args.name,
+                            group: args.group.as_deref(),
+                            emails: &args.emails,
+                            phones: &args.phones,
+                            org: args.org.as_deref(),
+                            role: args.role.as_deref(),
+                            tags: &args.tags,
+                            reason: args.reason.as_deref(),
+                        })
+                    },
+                ),
                 ContactCommand::List {
                     group,
                     tag,
@@ -361,44 +761,126 @@ fn execute_command_unlocked(
                     role.as_deref(),
                 ),
                 ContactCommand::Show { contact_ref } => ws.contact_show(&contact_ref),
-                ContactCommand::Move { contact_ref, group } => {
-                    ws.contact_move(&contact_ref, &group)
-                }
-                ContactCommand::Rename { contact_ref, name } => {
-                    ws.contact_rename(&contact_ref, &name)
-                }
+                ContactCommand::Move {
+                    contact_ref,
+                    group,
+                    reason,
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "contact_move",
+                    json!({"contact_ref": contact_ref, "group": group, "reason": reason}),
+                    || ws.contact_move(&contact_ref, &group, reason.as_deref()),
+                ),
+                ContactCommand::Rename {
+                    contact_ref,
+                    name,
+                    reason,
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "contact_rename",
+                    json!({"contact_ref": contact_ref, "name": name, "reason": reason}),
+                    || ws.contact_rename(&contact_ref, &name, reason.as_deref()),
+                ),
                 ContactCommand::Email { action } => match action {
-                    ContactEmailAction::Add { contact_ref, email } => {
-                        ws.contact_email_add(&contact_ref, &email)
-                    }
-                    ContactEmailAction::Remove { contact_ref, email } => {
-                        ws.contact_email_remove(&contact_ref, &email)
-                    }
+                    ContactEmailAction::Add {
+                        contact_ref,
+                        email,
+                        reason,
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "contact_email_add",
+                        json!({"contact_ref": contact_ref, "email": email, "reason": reason}),
+                        || ws.contact_email_add(&contact_ref, &email, reason.as_deref()),
+                    ),
+                    ContactEmailAction::Remove {
+                        contact_ref,
+                        email,
+                        reason,
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "contact_email_remove",
+                        json!({"contact_ref": contact_ref, "email": email, "reason": reason}),
+                        || ws.contact_email_remove(&contact_ref, &email, reason.as_deref()),
+                    ),
                 },
                 ContactCommand::Phone { action } => match action {
-                    ContactPhoneAction::Add { contact_ref, phone } => {
-                        ws.contact_phone_add(&contact_ref, &phone)
-                    }
-                    ContactPhoneAction::Remove { contact_ref, phone } => {
-                        ws.contact_phone_remove(&contact_ref, &phone)
-                    }
+                    ContactPhoneAction::Add {
+                        contact_ref,
+                        phone,
+                        reason,
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "contact_phone_add",
+                        json!({"contact_ref": contact_ref, "phone": phone, "reason": reason}),
+                        || ws.contact_phone_add(&contact_ref, &phone, reason.as_deref()),
+                    ),
+                    ContactPhoneAction::Remove {
+                        contact_ref,
+                        phone,
+                        reason,
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "contact_phone_remove",
+                        json!({"contact_ref": contact_ref, "phone": phone, "reason": reason}),
+                        || ws.contact_phone_remove(&contact_ref, &phone, reason.as_deref()),
+                    ),
                 },
-                ContactCommand::Tag { contact_ref, tag } => ws.contact_tag(&contact_ref, &tag),
-                ContactCommand::Untag { contact_ref, tag } => ws.contact_untag(&contact_ref, &tag),
+                ContactCommand::Tag {
+                    contact_ref,
+                    tag,
+                    reason,
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "contact_tag",
+                    json!({"contact_ref": contact_ref, "tag": tag, "reason": reason}),
+                    || ws.contact_tag(&contact_ref, &tag, reason.as_deref()),
+                ),
+                ContactCommand::Untag {
+                    contact_ref,
+                    tag,
+                    reason,
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "contact_untag",
+                    json!({"contact_ref": contact_ref, "tag": tag, "reason": reason}),
+                    || ws.contact_untag(&contact_ref, &tag, reason.as_deref()),
+                ),
                 ContactCommand::Notes { action } => match action {
                     ContactNotesAction::Show { contact_ref } => ws.contact_notes_show(&contact_ref),
-                    ContactNotesAction::Append { contact_ref, text } => {
-                        ws.contact_notes_append(&contact_ref, &text)
-                    }
-                    ContactNotesAction::Replace { contact_ref, text } => {
-                        ws.contact_notes_replace(&contact_ref, &text)
-                    }
+                    ContactNotesAction::Append { contact_ref, text } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "contact_notes_append",
+                        json!({"contact_ref": contact_ref, "text": text}),
+                        || ws.contact_notes_append(&contact_ref, &text),
+                    ),
+                    ContactNotesAction::Replace { contact_ref, text } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "contact_notes_replace",
+                        json!({"contact_ref": contact_ref, "text": text}),
+                        || ws.contact_notes_replace(&contact_ref, &text),
+                    ),
                 },
                 ContactCommand::Delete {
                     contact_ref,
                     allow_notes,
                     reason,
-                } => ws.contact_delete(&contact_ref, allow_notes, reason.as_deref()),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "contact_delete",
+                    json!({"contact_ref": contact_ref, "allow_notes": allow_notes, "reason": reason}),
+                    || ws.contact_delete(&contact_ref, allow_notes, reason.as_deref()),
+                ),
                 ContactCommand::Extract {
                     from_triage,
                     from_case,
@@ -421,23 +903,76 @@ fn execute_command_unlocked(
         Command::Notification { action } => {
             let ws = Workspace::discover(cwd)?;
             match action {
-                NotificationCommand::Create(args) => ws.create_notification(
-                    &args.name,
-                    args.message.as_deref(),
-                    args.summary.as_deref(),
-                    args.reason.as_deref(),
+                NotificationCommand::Create(args) => idempotent_value(
+                    &ws,
+                    request_id,
+                    "notification_create",
+                    json!({
+                        "name": args.name,
+                        "message": args.message,
+                        "summary": args.summary,
+                        "reason": args.reason,
+                    }),
+                    || {
+                        ws.create_notification(
+                            &args.name,
+                            args.message.as_deref(),
+                            args.summary.as_deref(),
+                            args.reason.as_deref(),
+                        )
+                    },
                 ),
                 NotificationCommand::Add {
                     notification_ref,
                     message_id,
                     summary,
                     reason,
-                } => ws.notification_add_message(
-                    &message_id,
-                    &notification_ref,
-                    Some(summary.as_str()),
-                    reason.as_deref(),
-                ),
+                } => {
+                    if request_id.is_some() {
+                        let Some(single_message_id) = message_id.first() else {
+                            return Err(AppError::new(
+                                "invalid_request",
+                                "message disposition requires at least one message id",
+                            ));
+                        };
+                        idempotent_value(
+                            &ws,
+                            request_id,
+                            "notification_add",
+                            json!({
+                                "notification_ref": notification_ref,
+                                "message_id": single_message_id,
+                                "summary": summary,
+                                "reason": reason,
+                            }),
+                            || {
+                                ws.notification_add_message(
+                                    single_message_id,
+                                    &notification_ref,
+                                    Some(summary.as_str()),
+                                    reason.as_deref(),
+                                )
+                            },
+                        )
+                    } else {
+                        take_command_result(
+                            batch_message_disposition(
+                                "notification_message_added_batch",
+                                &message_id,
+                                reason.as_deref(),
+                                |id| {
+                                    ws.notification_add_message(
+                                        id,
+                                        &notification_ref,
+                                        Some(summary.as_str()),
+                                        reason.as_deref(),
+                                    )
+                                },
+                            ),
+                            &mut counts,
+                        )
+                    }
+                }
                 NotificationCommand::List => ws.notification_list(),
                 NotificationCommand::Show { notification_ref } => {
                     ws.notification_show(&notification_ref)
@@ -446,38 +981,82 @@ fn execute_command_unlocked(
                     notification_ref,
                     message_id,
                     reason,
-                } => ws.notification_remove(&notification_ref, &message_id, reason.as_deref()),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "notification_remove",
+                    json!({"notification_ref": notification_ref, "message_id": message_id, "reason": reason}),
+                    || ws.notification_remove(&notification_ref, &message_id, reason.as_deref()),
+                ),
                 NotificationCommand::Move {
                     notification_ref,
                     message_id,
                     new_notification_ref,
                     reason,
-                } => ws.notification_move(
-                    &notification_ref,
-                    &message_id,
-                    &new_notification_ref,
-                    reason.as_deref(),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "notification_move",
+                    json!({
+                        "notification_ref": notification_ref,
+                        "message_id": message_id,
+                        "new_notification_ref": new_notification_ref,
+                        "reason": reason,
+                    }),
+                    || {
+                        ws.notification_move(
+                            &notification_ref,
+                            &message_id,
+                            &new_notification_ref,
+                            reason.as_deref(),
+                        )
+                    },
                 ),
                 NotificationCommand::Rename {
                     notification_ref,
                     name,
                     reason,
-                } => ws.notification_rename(&notification_ref, &name, reason.as_deref()),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "notification_rename",
+                    json!({"notification_ref": notification_ref, "name": name, "reason": reason}),
+                    || ws.notification_rename(&notification_ref, &name, reason.as_deref()),
+                ),
                 NotificationCommand::Delete {
                     notification_ref,
                     allow_notes,
                     reason,
-                } => ws.notification_delete(&notification_ref, allow_notes, reason.as_deref()),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "notification_delete",
+                    json!({"notification_ref": notification_ref, "allow_notes": allow_notes, "reason": reason}),
+                    || ws.notification_delete(&notification_ref, allow_notes, reason.as_deref()),
+                ),
                 NotificationCommand::SetSummary {
                     notification_ref,
                     message_id,
                     summary,
                     reason,
-                } => ws.notification_set_summary(
-                    &notification_ref,
-                    &message_id,
-                    &summary,
-                    reason.as_deref(),
+                } => idempotent_value(
+                    &ws,
+                    request_id,
+                    "notification_set_summary",
+                    json!({
+                        "notification_ref": notification_ref,
+                        "message_id": message_id,
+                        "summary": summary,
+                        "reason": reason,
+                    }),
+                    || {
+                        ws.notification_set_summary(
+                            &notification_ref,
+                            &message_id,
+                            &summary,
+                            reason.as_deref(),
+                        )
+                    },
                 ),
                 NotificationCommand::Notes { action } => match action {
                     NotificationNotesAction::Show { notification_ref } => {
@@ -486,11 +1065,23 @@ fn execute_command_unlocked(
                     NotificationNotesAction::Append {
                         notification_ref,
                         text,
-                    } => ws.notification_notes_append(&notification_ref, &text),
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "notification_notes_append",
+                        json!({"notification_ref": notification_ref, "text": text}),
+                        || ws.notification_notes_append(&notification_ref, &text),
+                    ),
                     NotificationNotesAction::Replace {
                         notification_ref,
                         text,
-                    } => ws.notification_notes_replace(&notification_ref, &text),
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "notification_notes_replace",
+                        json!({"notification_ref": notification_ref, "text": text}),
+                        || ws.notification_notes_replace(&notification_ref, &text),
+                    ),
                 },
             }
         }
@@ -503,7 +1094,7 @@ fn execute_command_unlocked(
         }
         Command::Log { action } => {
             let ws = Workspace::discover(cwd)?;
-            match action {
+            let result = match action {
                 LogAction::List { limit } => ws.log_list(limit),
                 LogAction::Tail => ws.log_tail(),
                 LogAction::Message { message_id } => ws.log_message(&message_id),
@@ -511,7 +1102,8 @@ fn execute_command_unlocked(
                 LogAction::Notification { notification_uid } => {
                     ws.log_notification(&notification_uid)
                 }
-            }
+            };
+            take_command_result(command_result_from_warnings(result), &mut counts)
         }
         #[cfg(feature = "ui")]
         Command::Ui(_) => {
@@ -519,6 +1111,92 @@ fn execute_command_unlocked(
             let message = crate::ui::workspace_snapshot(&ws)?;
             serde_json::to_value(message).map_err(|e| AppError::json("serialize AFUI snapshot", &e))
         }
+    }?;
+    Ok(CommandResult::aggregate(value, counts.0, counts.1))
+}
+
+fn idempotent_value<F>(
+    workspace: &Workspace,
+    request_id: Option<&str>,
+    command: &str,
+    input: Value,
+    operation: F,
+) -> Result<Value>
+where
+    F: FnOnce() -> Result<Value>,
+{
+    match request_id {
+        Some(request_id) => workspace.run_idempotent_request(request_id, command, input, operation),
+        None => operation(),
+    }
+}
+
+fn request_id_supported(command: &Command) -> bool {
+    match command {
+        Command::Message {
+            action:
+                MessageAction::Spam { message_id, .. }
+                | MessageAction::Trash { message_id, .. }
+                | MessageAction::Unspam { message_id, .. }
+                | MessageAction::Untrash { message_id, .. },
+        } => message_id.len() == 1,
+        Command::Case { action } => match action {
+            CaseCommand::Create(_) => true,
+            CaseCommand::Add { message_id, .. } if message_id.len() == 1 => true,
+            CaseCommand::Move { .. }
+            | CaseCommand::Rename { .. }
+            | CaseCommand::SetSummary { .. }
+            | CaseCommand::Remove { .. }
+            | CaseCommand::Delete { .. }
+            | CaseCommand::Archive { .. }
+            | CaseCommand::Unarchive { .. }
+            | CaseCommand::Trash { .. }
+            | CaseCommand::Tag { .. }
+            | CaseCommand::Untag { .. } => true,
+            CaseCommand::Notes {
+                action: CaseNotesAction::Append { .. } | CaseNotesAction::Replace { .. },
+            } => true,
+            CaseCommand::Draft { action } => {
+                matches!(
+                    action,
+                    CaseDraftAction::New { .. }
+                        | CaseDraftAction::Reply { .. }
+                        | CaseDraftAction::Change { .. }
+                        | CaseDraftAction::Attach { .. }
+                        | CaseDraftAction::Remove { .. }
+                )
+            }
+            _ => false,
+        },
+        Command::Contact { action } => matches!(
+            action,
+            ContactCommand::Create(_)
+                | ContactCommand::Move { .. }
+                | ContactCommand::Rename { .. }
+                | ContactCommand::Email { .. }
+                | ContactCommand::Phone { .. }
+                | ContactCommand::Tag { .. }
+                | ContactCommand::Untag { .. }
+                | ContactCommand::Delete { .. }
+                | ContactCommand::Notes {
+                    action: ContactNotesAction::Append { .. } | ContactNotesAction::Replace { .. },
+                }
+        ),
+        Command::Notification { action } => match action {
+            NotificationCommand::Create(_) => true,
+            NotificationCommand::Add { message_id, .. } => message_id.len() == 1,
+            NotificationCommand::Remove { .. }
+            | NotificationCommand::Move { .. }
+            | NotificationCommand::Rename { .. }
+            | NotificationCommand::SetSummary { .. }
+            | NotificationCommand::Delete { .. } => true,
+            NotificationCommand::Notes {
+                action:
+                    NotificationNotesAction::Append { .. } | NotificationNotesAction::Replace { .. },
+            } => true,
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -549,4 +1227,78 @@ fn mark_unlocked_running_progress_stale(progress: &mut Value) {
         return;
     }
     map.insert("status".to_string(), json!("stale"));
+}
+
+fn batch_message_disposition<F>(
+    _code: &'static str,
+    message_ids: &[String],
+    reason: Option<&str>,
+    mut op: F,
+) -> Result<CommandResult>
+where
+    F: FnMut(&str) -> Result<Value>,
+{
+    if message_ids.is_empty() {
+        return Err(AppError::new(
+            "invalid_request",
+            "message disposition requires at least one message id",
+        ));
+    }
+    let mut results = Vec::with_capacity(message_ids.len());
+    let mut succeeded_count = 0usize;
+    let mut failed_count = 0usize;
+    for message_id in message_ids {
+        match op(message_id) {
+            Ok(value) => {
+                succeeded_count += 1;
+                results.push(value);
+            }
+            Err(err) => {
+                failed_count += 1;
+                let mut value = err.to_error_value();
+                if let Value::Object(map) = &mut value {
+                    map.insert("message_id".to_string(), json!(message_id));
+                }
+                results.push(value);
+            }
+        }
+    }
+    Ok(CommandResult::aggregate(
+        json!({
+            "message_ids": message_ids,
+            "reason": reason,
+            "count": message_ids.len(),
+            "succeeded_count": succeeded_count,
+            "failed_count": failed_count,
+            "results": results,
+        }),
+        succeeded_count,
+        failed_count,
+    ))
+}
+
+fn take_command_result(
+    result: Result<CommandResult>,
+    counts: &mut (usize, usize),
+) -> Result<Value> {
+    result.map(|result| {
+        *counts = if result.is_success() {
+            (1, 0)
+        } else if result.is_partial() {
+            (1, 1)
+        } else {
+            (0, 1)
+        };
+        result.into_value()
+    })
+}
+
+fn command_result_from_warnings(result: Result<Value>) -> Result<CommandResult> {
+    result.map(|value| {
+        let warning_count = value
+            .get("warning_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        CommandResult::aggregate(value, 1, warning_count as usize)
+    })
 }

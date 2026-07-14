@@ -9,16 +9,16 @@ use special_use::*;
 pub use special_use::resolve_special_use_from_mailboxes;
 
 use crate::config::{
-    ImapConfig, MailConfig, MailDirection, PullImportAs, SpecialUseKind, SpecialUseSource,
-    SpecialUseTarget,
+    ImapConfig, MailConfig, MailDirection, PullImportAs, ResolvedIdentity, SpecialUseKind,
+    SpecialUseSource, SpecialUseTarget, match_message_identity_with_profiles,
 };
 use crate::error::{AppError, Result};
+pub use crate::imap_client::{MailboxInfo, MoveOutcome};
 use crate::imap_client::{
     append_draft_and_find_uid_session, append_message_session, capability_move, capability_uidplus,
-    create_folder, list_mailboxes, login_plain, login_tls, require_move, uid_mark_and_move_session,
+    list_mailboxes, login_plain, login_tls, require_move, uid_mark_and_move_session,
     uid_move_session,
 };
-pub use crate::imap_client::{MailboxInfo, MoveOutcome};
 use crate::mail::parse_inbound_message;
 use crate::progress::ProgressCallback;
 use crate::types::{ImapRef, MessageFile, MessageStatus, RemoteLocation, RemoteState};
@@ -27,11 +27,128 @@ use crate::util::write_json_pretty;
 use crate::util::{canonical_flags, write_bytes_atomic, write_string_atomic};
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Utc};
 use mail_parser::{HeaderValue, MessageParser};
-use serde_json::{json, Map, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
+
+const DEFAULT_INITIAL_SINCE_DAYS: u32 = 90;
+const DEFAULT_MAX_NEW_MESSAGES: usize = 500;
+const DEFAULT_MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PullOptions {
+    pub(crate) since_days: Option<u32>,
+    pub(crate) max_new_messages: usize,
+    pub(crate) max_total_bytes: u64,
+    pub(crate) all_history: bool,
+    pub(crate) dry_run: bool,
+}
+
+impl PullOptions {
+    pub(crate) fn new(
+        since_days: Option<u32>,
+        max_new_messages: Option<usize>,
+        max_total_bytes: Option<u64>,
+        all_history: bool,
+        dry_run: bool,
+    ) -> Self {
+        Self {
+            since_days,
+            max_new_messages: max_new_messages.unwrap_or(DEFAULT_MAX_NEW_MESSAGES),
+            max_total_bytes: max_total_bytes.unwrap_or(DEFAULT_MAX_TOTAL_BYTES),
+            all_history,
+            dry_run,
+        }
+    }
+
+    fn effective_since_days(self) -> Option<u32> {
+        if self.all_history {
+            None
+        } else {
+            Some(self.since_days.unwrap_or(DEFAULT_INITIAL_SINCE_DAYS))
+        }
+    }
+}
+
+impl Default for PullOptions {
+    fn default() -> Self {
+        Self::new(None, None, None, false, false)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyFetchMode {
+    BoundedPartial,
+    CompatibilityFull,
+}
+
+fn body_fetch_mode(
+    config: &ImapConfig,
+    targets: &[PullTarget],
+    options: PullOptions,
+) -> Result<BodyFetchMode> {
+    if config.allow_unbounded_body_fetch {
+        return Ok(BodyFetchMode::CompatibilityFull);
+    }
+    let Some(target) = targets.first() else {
+        return Ok(BodyFetchMode::BoundedPartial);
+    };
+    let probe = if config.tls {
+        let mut session = login_tls(config)?;
+        let result = probe_partial_body_fetch(&mut session, &target.mailbox, options);
+        let _ = session.logout();
+        result
+    } else {
+        let mut session = login_plain(config)?;
+        let result = probe_partial_body_fetch(&mut session, &target.mailbox, options);
+        let _ = session.logout();
+        result
+    };
+    match probe {
+        Ok(()) => Ok(BodyFetchMode::BoundedPartial),
+        Err(error) => Err(AppError::new(
+            "imap_partial_fetch_unsupported",
+            format!(
+                "IMAP server does not support bounded partial BODY fetch: {error}"
+            ),
+        )
+        .with_hint(
+            "Use a server with RFC partial BODY fetch support. Only if this server is trusted, set imap.allow_unbounded_body_fetch=true to permit one full literal at a time.",
+        )
+        .with_details(json!({
+            "mailbox_name": target.mailbox,
+            "allow_unbounded_body_fetch": false,
+            "message_writes_started": false,
+        }))),
+    }
+}
+
+fn probe_partial_body_fetch<T: std::io::Read + std::io::Write>(
+    session: &mut imap::Session<T>,
+    mailbox: &str,
+    options: PullOptions,
+) -> Result<()> {
+    session
+        .examine(mailbox)
+        .map_err(|error| AppError::new("imap_select_failed", error.to_string()))?;
+    let sequence = mailbox_uid_sequence(session, options.effective_since_days(), None)?;
+    if sequence.is_empty() {
+        return Ok(());
+    }
+    let uid = session
+        .uid_search("ALL")
+        .map_err(|error| AppError::new("imap_search_failed", error.to_string()))?
+        .into_iter()
+        .min();
+    let Some(uid) = uid else { return Ok(()) };
+    session
+        .uid_fetch(uid.to_string(), "(UID BODY.PEEK[]<0.1>)")
+        .map_err(|error| AppError::new("imap_fetch_failed", error.to_string()))?;
+    Ok(())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullTarget {
@@ -104,7 +221,9 @@ pub(crate) fn resolve_configured_mailbox(
                 _ => {
                     return Err(AppError::new(
                         "imap_mailbox_ambiguous",
-                        format!("mailboxes.{id}.resolve[{index}].mailbox_name {name} matched multiple remote mailboxes"),
+                        format!(
+                            "mailboxes.{id}.resolve[{index}].mailbox_name {name} matched multiple remote mailboxes"
+                        ),
                     ));
                 }
             }
@@ -125,7 +244,9 @@ pub(crate) fn resolve_configured_mailbox(
                 _ => {
                     return Err(AppError::new(
                         "imap_mailbox_ambiguous",
-                        format!("mailboxes.{id}.resolve[{index}].special_use {special_use} matched multiple remote mailboxes"),
+                        format!(
+                            "mailboxes.{id}.resolve[{index}].special_use {special_use} matched multiple remote mailboxes"
+                        ),
                     ));
                 }
             }
@@ -137,27 +258,74 @@ pub(crate) fn resolve_configured_mailbox(
     ))
 }
 
-pub fn pull_workspace(
+pub(crate) fn pull_workspace(
     root: &Path,
     mail_config: &MailConfig,
     config: &ImapConfig,
     targets: &[PullTarget],
+    options: PullOptions,
     progress: Option<&mut ProgressCallback<'_>>,
 ) -> Result<Value> {
     let mut progress = progress;
+    let body_fetch_mode = if options.dry_run {
+        BodyFetchMode::BoundedPartial
+    } else {
+        body_fetch_mode(config, targets, options)?
+    };
     if config.tls {
         let mut session = login_tls(config)?;
-        let result =
-            pull_workspace_session(root, mail_config, targets, &mut session, &mut progress);
+        let result = if options.dry_run {
+            estimate_pull_workspace_session(root, targets, options, &mut session)
+        } else {
+            pull_workspace_session(
+                root,
+                mail_config,
+                targets,
+                options,
+                body_fetch_mode,
+                &mut session,
+                &mut progress,
+            )
+        };
         let _ = session.logout();
         result
     } else {
         let mut session = login_plain(config)?;
-        let result =
-            pull_workspace_session(root, mail_config, targets, &mut session, &mut progress);
+        let result = if options.dry_run {
+            estimate_pull_workspace_session(root, targets, options, &mut session)
+        } else {
+            pull_workspace_session(
+                root,
+                mail_config,
+                targets,
+                options,
+                body_fetch_mode,
+                &mut session,
+                &mut progress,
+            )
+        };
         let _ = session.logout();
         result
     }
+}
+
+pub(crate) fn pull_used_incremental_cursors(result: &Value) -> bool {
+    result
+        .get("__afmail_pull_all_incremental")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+pub(crate) fn remove_internal_pull_fields(result: &mut Value) {
+    let Some(map) = result.as_object_mut() else {
+        return;
+    };
+    map.remove("__afmail_pull_all_incremental");
+    map.remove("__afmail_pull_cursor_updates");
+}
+
+pub(crate) fn commit_pull_cursors(root: &Path, result: &Value, full_reconcile: bool) -> Result<()> {
+    commit_pull_cursor_updates(root, result, full_reconcile)
 }
 
 pub fn remote_test(config: &ImapConfig) -> Result<Value> {
@@ -180,7 +348,6 @@ pub fn remote_test(config: &ImapConfig) -> Result<Value> {
         (move_supported, uidplus_supported)
     };
     Ok(json!({
-        "code": "remote_test_result",
         "ok": true,
         "host": config.host,
         "port": config.port,
@@ -207,27 +374,8 @@ pub fn remote_folders(config: &MailConfig, imap: &ImapConfig) -> Result<Value> {
         result?
     };
     Ok(json!({
-        "code": "remote_mailboxes",
         "mailboxes": mailboxes,
         "special_use_targets": targets,
-        "duration_ms": started.elapsed().as_millis() as u64
-    }))
-}
-
-pub fn remote_mkdir(config: &ImapConfig, folder: &str) -> Result<Value> {
-    let started = Instant::now();
-    if config.tls {
-        let mut session = login_tls(config)?;
-        create_folder(&mut session, folder)?;
-        let _ = session.logout();
-    } else {
-        let mut session = login_plain(config)?;
-        create_folder(&mut session, folder)?;
-        let _ = session.logout();
-    }
-    Ok(json!({
-        "code": "remote_mailbox_created",
-        "mailbox_name": folder,
         "duration_ms": started.elapsed().as_millis() as u64
     }))
 }
@@ -295,7 +443,6 @@ pub fn append_message(
         let _ = session.logout();
     }
     Ok(json!({
-        "code": "remote_append_result",
         "mailbox_name": folder,
         "draft": draft,
         "size_bytes": raw_eml.len(),
@@ -442,6 +589,7 @@ struct RemoteEnvelope {
     uid_validity: u64,
     uid: u64,
     flags: Vec<String>,
+    size_bytes: Option<u64>,
     header: Vec<u8>,
 }
 
@@ -559,11 +707,13 @@ mod tests {
     }
 
     #[test]
-    fn save_remote_message_writes_three_files_and_triage() {
+    fn save_remote_message_writes_three_files_and_triage() -> Result<()> {
         let root = temp_root("save");
         let _ = fs::create_dir_all(root.join(".afmail/messages"));
         let _ = fs::create_dir_all(root.join("triage"));
         let raw = b"Message-ID: <m1@example.com>\r\nFrom: Alice <alice@example.com>\r\nTo: Me <me@example.com>\r\nSubject: Hello\r\nContent-Type: text/plain\r\n\r\nHello";
+        let config = MailConfig::default();
+        let render_context = PullIngestRenderContext::new(&root, &config, &RemoteIndex::default())?;
         let result = save_remote_message(
             &root,
             RemoteMessage {
@@ -581,22 +731,27 @@ mod tests {
                 direction: MailDirection::Inbound,
             },
             chrono::Offset::fix(&chrono::Utc),
-            &MailConfig::default(),
+            &config,
+            &render_context,
         );
         assert!(result.is_ok());
         let id = result.map(|saved| saved.message_id).unwrap_or_default();
         assert!(root.join(format!(".afmail/messages/{id}.eml")).exists());
-        assert!(!root
-            .join(format!(".afmail/messages/{id}.state.json"))
-            .exists());
-        assert!(root
-            .join(format!(".afmail/messages/{id}.remote.json"))
-            .exists());
+        assert!(
+            !root
+                .join(format!(".afmail/messages/{id}.state.json"))
+                .exists()
+        );
+        assert!(
+            root.join(format!(".afmail/messages/{id}.remote.json"))
+                .exists()
+        );
         assert!(!root.join(format!(".afmail/messages/{id}.txt")).exists());
         assert!(!root.join(format!(".afmail/messages/{id}.json")).exists());
         assert!(root.join(format!("messages/{id}.json")).exists());
         assert!(root.join(format!("triage/{id}.md")).exists());
         let _ = fs::remove_dir_all(root);
+        Ok(())
     }
 
     #[test]
@@ -677,6 +832,10 @@ mod tests {
     fn reply_headers_match_suggested_case_uids() {
         let root = temp_root("suggest");
         let _ = fs::create_dir_all(root.join(".afmail/messages"));
+        let _ = write_json_pretty(
+            &root.join(".afmail/config.json"),
+            &crate::config::MailConfig::default(),
+        );
         let existing = MessageFile {
             schema_name: "message".to_string(),
             schema_version: 1,
@@ -753,7 +912,7 @@ mod tests {
             &case_collection("case-two", "Case Two", "message_case_2"),
         );
         let index = load_existing_remote_index(&root);
-        assert!(index.is_ok());
+        assert!(index.is_ok(), "{:?}", index.as_ref().err());
         let raw = concat!(
             "Message-ID: <reply@example.com>\r\n",
             "In-Reply-To: <case-one@example.com>\r\n",

@@ -7,10 +7,10 @@ pub enum CaseCommand {
     /// List compact case locators.
     List {
         /// List archived cases instead of active cases.
-        #[arg(long, conflicts_with = "all")]
+        #[arg(long, conflicts_with_all = ["all"])]
         archived: bool,
         /// List active and archived cases together.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["archived"])]
         all: bool,
     },
     /// Show a case's case.md without changing workspace state.
@@ -22,12 +22,26 @@ pub enum CaseCommand {
     Add {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Message id to add.
-        message_id: String,
+        /// Message ids to add.
+        #[arg(required = true)]
+        message_id: Vec<String>,
         /// Short summary for this message in the case.
         #[arg(long)]
         summary: Option<String>,
         /// Why this message belongs in this case; required by default.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Set or replace one case entry summary.
+    SetSummary {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Message id whose summary should be changed.
+        message_id: String,
+        /// New summary text.
+        #[arg(long)]
+        summary: String,
+        /// Why this summary is useful; required by default.
         #[arg(long)]
         reason: Option<String>,
     },
@@ -46,6 +60,7 @@ pub enum CaseCommand {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
         /// Destination group.
+        #[arg(long)]
         group: String,
         /// Why this group better represents the case; required by default.
         #[arg(long)]
@@ -272,8 +287,13 @@ pub enum CaseDraftAction {
         /// Draft markdown file under the case drafts directory.
         draft_name: String,
     },
-    /// Queue this draft to be saved to the remote Drafts mailbox.
-    Save {
+    /// List local drafts with their current status.
+    List {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+    },
+    /// Queue this draft to be uploaded to the remote Drafts mailbox.
+    Upload {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
         /// Draft markdown file under the case drafts directory.

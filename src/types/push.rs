@@ -2,18 +2,19 @@ use crate::config::ActionStep;
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PushKind {
-    Outbound,
-    MessageAction,
+    Draft,
+    Message,
 }
 
 impl PushKind {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
-            "outbound" => Ok(Self::Outbound),
-            "message_action" => Ok(Self::MessageAction),
+            "draft" => Ok(Self::Draft),
+            "message" => Ok(Self::Message),
             other => Err(AppError::new(
                 "push_item_invalid",
                 format!("unsupported push item kind: {other}"),
@@ -23,8 +24,8 @@ impl PushKind {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Outbound => "outbound",
-            Self::MessageAction => "message_action",
+            Self::Draft => "draft",
+            Self::Message => "message",
         }
     }
 }
@@ -34,8 +35,17 @@ pub struct PushItem {
     pub schema_name: String,
     pub schema_version: u64,
     pub push_id: String,
+    pub enqueue_seq: u64,
     #[serde(flatten)]
     pub payload: PushPayload,
+    #[serde(skip)]
+    pub planned_outbound: Option<OutboundPush>,
+    #[serde(skip)]
+    pub planned_outbound_message: Option<PreparedOutbound>,
+    #[serde(skip)]
+    pub planned_message_action: Option<MessageActionPush>,
+    #[serde(skip)]
+    pub planned_message_rfc822: BTreeMap<String, Vec<u8>>,
     pub created_rfc3339: String,
     pub updated_rfc3339: String,
     #[serde(default)]
@@ -43,6 +53,8 @@ pub struct PushItem {
     pub step_states: Vec<PushStepState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_stage: Option<PushLocalStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_pending: Option<PushAuditPending>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
@@ -73,6 +85,7 @@ pub enum PushStepStatus {
     Pending,
     Succeeded,
     Failed,
+    RemoteOutcomeUnknown,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -82,6 +95,27 @@ pub enum PushLocalStage {
     OutboundRecorded,
     DraftRemoved,
     PendingCleared,
+    AuditPending,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PushAuditPending {
+    pub event_id: String,
+    pub created_rfc3339: String,
+    pub push_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub case_uid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_ids: Vec<String>,
+    pub succeeded_step_count: usize,
+    pub attempt_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 impl PushItem {
@@ -94,8 +128,8 @@ impl PushItem {
 
     pub fn push_kind(&self) -> PushKind {
         match &self.payload {
-            PushPayload::Outbound(_) => PushKind::Outbound,
-            PushPayload::MessageAction(_) => PushKind::MessageAction,
+            PushPayload::Draft(_) => PushKind::Draft,
+            PushPayload::Message(_) => PushKind::Message,
         }
     }
 
@@ -104,44 +138,55 @@ impl PushItem {
     }
 
     pub fn display_kind(&self) -> String {
+        if let Some(outbound) = &self.planned_outbound {
+            return outbound.action.as_str().to_string();
+        }
+        if let Some(action) = &self.planned_message_action {
+            return action.action.kind().to_string();
+        }
         match &self.payload {
-            PushPayload::Outbound(_) => "outbound".to_string(),
-            PushPayload::MessageAction(action) => action.action.kind().to_string(),
+            PushPayload::Draft(_) => "draft".to_string(),
+            PushPayload::Message(_) => "message".to_string(),
+        }
+    }
+
+    pub fn draft(&self) -> Option<&DraftPush> {
+        match &self.payload {
+            PushPayload::Draft(draft) => Some(draft.as_ref()),
+            PushPayload::Message(_) => None,
+        }
+    }
+
+    pub fn draft_mut(&mut self) -> Option<&mut DraftPush> {
+        match &mut self.payload {
+            PushPayload::Draft(draft) => Some(draft.as_mut()),
+            PushPayload::Message(_) => None,
+        }
+    }
+
+    pub fn message(&self) -> Option<&MessagePush> {
+        match &self.payload {
+            PushPayload::Message(message) => Some(message),
+            PushPayload::Draft(_) => None,
         }
     }
 
     pub fn outbound(&self) -> Option<&OutboundPush> {
-        match &self.payload {
-            PushPayload::Outbound(outbound) => Some(outbound.as_ref()),
-            PushPayload::MessageAction(_) => None,
-        }
-    }
-
-    pub fn outbound_mut(&mut self) -> Option<&mut OutboundPush> {
-        match &mut self.payload {
-            PushPayload::Outbound(outbound) => Some(outbound.as_mut()),
-            PushPayload::MessageAction(_) => None,
-        }
+        self.planned_outbound.as_ref()
     }
 
     pub fn message_action(&self) -> Option<&MessageActionPush> {
-        match &self.payload {
-            PushPayload::MessageAction(action) => Some(action),
-            PushPayload::Outbound(_) => None,
-        }
-    }
-
-    pub fn message_action_mut(&mut self) -> Option<&mut MessageActionPush> {
-        match &mut self.payload {
-            PushPayload::MessageAction(action) => Some(action),
-            PushPayload::Outbound(_) => None,
-        }
+        self.planned_message_action.as_ref()
     }
 
     pub fn message_ids(&self) -> &[String] {
-        self.message_action()
-            .map(|action| action.message_ids.as_slice())
-            .unwrap_or(&[])
+        if let Some(action) = self.message_action() {
+            return action.message_ids.as_slice();
+        }
+        match &self.payload {
+            PushPayload::Message(message) => std::slice::from_ref(&message.message_id),
+            PushPayload::Draft(_) => &[],
+        }
     }
 
     pub fn locations(&self) -> &[PushLocation] {
@@ -157,10 +202,12 @@ impl PushItem {
     }
 
     pub fn reply_to_message_id(&self) -> Option<&str> {
-        match &self.payload {
-            PushPayload::Outbound(_) => None,
-            PushPayload::MessageAction(action) => action.reply_to_message_id.as_deref(),
-        }
+        self.message_action()
+            .and_then(|action| action.reply_to_message_id.as_deref())
+            .or_else(|| {
+                self.outbound()
+                    .and_then(|outbound| outbound.reply_to_message_id.as_deref())
+            })
     }
 
     pub fn succeeded_step_count(&self) -> usize {
@@ -208,12 +255,14 @@ fn validate_push_item_keys(value: &Value) -> Result<()> {
         "schema_name",
         "schema_version",
         "push_id",
+        "enqueue_seq",
         "kind",
         "created_rfc3339",
         "updated_rfc3339",
         "attempt_count",
         "step_states",
         "local_stage",
+        "audit_pending",
         "last_error",
     ];
     for key in obj.keys() {
@@ -229,14 +278,11 @@ fn validate_push_item_keys(value: &Value) -> Result<()> {
 
 fn push_payload_key_allowed(kind: &str, key: &str) -> bool {
     match kind {
-        "outbound" => matches!(
+        "draft" => matches!(
             key,
-            "case_uid" | "action" | "draft_name" | "draft_uid_validity" | "draft_uid"
+            "case_uid" | "draft_name" | "draft_uid_validity" | "draft_uid"
         ),
-        "message_action" => matches!(
-            key,
-            "action" | "message_ids" | "locations" | "steps" | "reply_to_message_id"
-        ),
+        "message" => key == "message_id",
         _ => false,
     }
 }
@@ -244,8 +290,8 @@ fn push_payload_key_allowed(kind: &str, key: &str) -> bool {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PushPayload {
-    Outbound(Box<OutboundPush>),
-    MessageAction(MessageActionPush),
+    Draft(Box<DraftPush>),
+    Message(MessagePush),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -266,14 +312,38 @@ impl OutboundAction {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct OutboundPush {
-    pub action: OutboundAction,
+pub struct DraftPush {
     pub case_uid: String,
     pub draft_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_uid_validity: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_uid: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MessagePush {
+    pub message_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutboundPush {
+    pub action: OutboundAction,
+    pub case_uid: String,
+    pub draft_name: String,
+    pub draft_uid_validity: Option<u64>,
+    pub draft_uid: Option<u64>,
+    pub steps: Vec<ActionStep>,
+    pub reply_to_message_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedOutbound {
+    pub message_id: String,
+    pub raw: Vec<u8>,
+    pub envelope_from: String,
+    pub envelope_to: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -356,11 +426,9 @@ mod tests {
           "schema_name": "push_item",
           "schema_version": 1,
           "push_id": "push_20260609T000000Z",
-          "kind": "message_action",
-          "action": "spam",
-          "message_ids": ["message_1"],
-          "locations": [],
-          "steps": [],
+          "enqueue_seq": 1,
+          "kind": "message",
+          "message_id": "message_1",
           "created_rfc3339": "2026-06-09T00:00:00Z",
           "updated_rfc3339": "2026-06-09T00:00:00Z",
           "attempt_count": 1

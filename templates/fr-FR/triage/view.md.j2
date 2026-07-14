@@ -10,7 +10,7 @@ attachment_count: {{ frontmatter.attachment_count }}
 {% endfor %}{% if frontmatter.suggested_reason %}suggested_reason: "{{ frontmatter.suggested_reason_yaml }}"
 {% endif %}{% endif %}---
 
-# {% if view.title %}{{ view.title }}{% else %}Courrier entrant{% endif %}
+# {% if view.display_title %}{{ view.display_title }}{% else %}Courrier entrant{% endif %}
 {% if view.suggested_case_uids | length > 0 %}
 
 UID de dossier suggérés: {% for case_uid in view.suggested_case_uids %}{% if not loop.first %}, {% endif %}`{{ case_uid }}`{% endfor %}
@@ -22,7 +22,7 @@ Ces messages sont liés par des en-têtes RFC (`In-Reply-To` / `References`). Aj
 
 | Message | Direction | De | Objet | Heure | Statut du workspace |
 | --- | --- | --- | --- | --- | --- |
-{% for item in view.related_messages %}| `{{ item.message.message_id }}` | {{ item.view.direction }} | {{ item.view.from }} | {{ item.view.subject }} | {{ item.view.time }} | {{ item.view.status }} |
+{% for item in view.related_messages %}| `{{ item.message.message_id }}` | {{ item.view.direction }} | {{ item.view.display_contact }} | {{ item.view.display_subject }} | {{ item.view.time }} | {{ item.view.status }} |
 {% endfor %}{% endif %}
 
 <!-- afmail:conversation:start -->

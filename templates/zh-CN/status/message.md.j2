@@ -4,7 +4,7 @@ message_id: {{ frontmatter.message_id }}
 status: {{ frontmatter.status }}
 ---
 
-# {% if view.title %}{{ view.title }}{% else %}{% if view.status == 'spam' %}垃圾邮件{% elif view.status == 'trashed' %}废弃邮件{% else %}远端已删除邮件{% endif %}{% endif %}
+# {% if view.display_title %}{{ view.display_title }}{% else %}{% if view.status == 'spam' %}垃圾邮件{% elif view.status == 'trashed' %}废弃邮件{% else %}远端已删除邮件{% endif %}{% endif %}
 
 工作区状态: {% if view.status == 'spam' %}垃圾邮件{% elif view.status == 'trashed' %}废弃邮件{% else %}远端已删除{% endif %} (`{{ view.status }}`)
 

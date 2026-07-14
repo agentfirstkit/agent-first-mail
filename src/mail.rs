@@ -568,10 +568,12 @@ mod tests {
             parsed.as_ref().map(|p| p.message.attachments.len()),
             Some(1)
         );
-        assert!(parsed
-            .as_ref()
-            .map(|p| p.conversation.contains("```text"))
-            .unwrap_or(false));
+        assert!(
+            parsed
+                .as_ref()
+                .map(|p| p.conversation.contains("```text"))
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -750,6 +752,43 @@ mod tests {
             .unwrap_or_default();
         let bytes = attachment_bytes(raw.as_bytes(), &part_id);
         assert_eq!(bytes, Ok(b"Attached".to_vec()));
+    }
+
+    #[test]
+    fn rich_multipart_fixture_decodes_body_and_attachment() {
+        let raw = include_str!("../tests/fixtures/mail-batch/eml/004_pricing_attachment.eml");
+        let parsed = parse_inbound_message(
+            "message_inbox_1_rich".to_string(),
+            raw.as_bytes(),
+            ImapRef {
+                mailbox_name: "INBOX".to_string(),
+                uid_validity: 1,
+                uid: 4,
+            },
+        );
+        assert!(parsed.is_ok());
+        let Some(parsed) = parsed.ok() else {
+            return;
+        };
+        assert!(
+            parsed.body_text.contains("Bonjour"),
+            "{:?}",
+            parsed.body_text
+        );
+        assert!(
+            parsed.body_text.contains("proposition"),
+            "{:?}",
+            parsed.body_text
+        );
+        assert_eq!(parsed.message.attachments.len(), 1);
+        assert_eq!(
+            parsed
+                .message
+                .attachments
+                .first()
+                .map(|attachment| attachment.filename.as_str()),
+            Some("logo.png")
+        );
     }
 
     #[test]

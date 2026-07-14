@@ -25,7 +25,7 @@ mailbox workspace. Network-facing code stays outside the store in `imap_pull/`,
 src/
   main.rs            early CLI bootstrap and exit handling
   cli/               Clap argument model, parsing, and invalid-command hints
-  runner/            command dispatch, output formatting, locks, push, and purge orchestration
+  runner/            command dispatch, output, locks, push/purge, and trusted AFUI owner bridge
   config/            typed config schema, defaults, key access, and validation
   store/             workspace file model and local state transitions
   imap_pull/         read-only IMAP pull sessions, remote identity, special-use folders
@@ -34,15 +34,19 @@ src/
   remote.rs          MailRemote trait over IMAP/SMTP side effects, plus the test fake
   push_queue/        durable local push items plus preview/execute helpers
   types/             stable ids, message/case/archive/push DTOs
+  types/command_result.rs item counts, terminal-event selection, and process-exit mapping
   mail.rs            MIME parsing into message DTOs
   markdown.rs        Markdown frontmatter split/parse/render and conversation extraction
   frontmatter.rs     draft/triage/case-message frontmatter types
+  draft_content.rs   typed compose/quote boundaries, completeness, and outbound projection
   templates.rs       built-in and workspace MiniJinja template loading
   skill_admin.rs     skill install/status backing `afmail skill`
   progress.rs        workspace progress snapshot sink and status projection
   error.rs           AppError type with structured error codes and hints
   util.rs            crate-wide atomic-write, hashing, and flag helpers
-  workspace_lock.rs  workspace lock-file guard
+  workspace_identity.rs  immutable workspace UID file
+  workspace_lock.rs      external runtime lock-file guard
+  plan_id.rs             canonical workspace-bound plan digest
 ```
 
 ## Store Modules
@@ -50,12 +54,12 @@ src/
 `store/mod.rs` keeps the `Workspace` type, workspace discovery/init/status, and
 high-level wiring. Sibling modules add focused `impl Workspace` blocks:
 
-- `archive.rs` handles notification collections and archived case IO.
+- `notification.rs` handles notification collections and their generated views.
 - `cases.rs` handles active case CRUD, membership, notes, tags, and moves.
 - `contacts.rs` handles contact-card CRUD, emails/phones/tags/notes, deletion,
   sender extraction, the ephemeral email→contact map, and the view refresh that
   materializes the contact link onto messages.
-- `messages.rs` handles message cache materialization, reads, local status
+- `messages.rs` handles explicit message cache materialization, pure in-memory reads, local status
   transitions, attachments, related-message discovery, relocation, and stamping
   each message's materialized `contact` link.
 - `refs.rs` builds the case->message reference index (`CaseIndex`) used to decide
@@ -68,8 +72,10 @@ high-level wiring. Sibling modules add focused `impl Workspace` blocks:
   execution. The IMAP I/O it drives lives in `imap_pull/`.
 - `triage.rs`, `render.rs`, and `view_model.rs` build generated Markdown read
   views and shared message rendering context.
-- `drafts.rs` owns draft creation, validation, composition, and attachment
-  bookkeeping for cases.
+- `drafts.rs` owns draft creation, queue validation, and attachment bookkeeping
+  for cases. `draft_content.rs` owns the body schema and authored/outbound
+  projections; `types/draft.rs` owns intent/status/completeness enums shared by
+  CLI and AFUI.
 - `push_state.rs`, `purge.rs`, `doctor.rs`, and `transactions.rs` own narrower
   maintenance concerns.
 - `util.rs` contains store-private filesystem, id, path, timestamp, and audit
@@ -77,6 +83,12 @@ high-level wiring. Sibling modules add focused `impl Workspace` blocks:
 
 Keep new store behavior near the durable state it changes. Prefer another small
 module only when a concern has its own file format, lifecycle, or command group.
+
+`runner/ui.rs` launches the generic AFUI Host with afmail's pack, default termail
+companion, and trusted sidecar configuration. `runner/ui_bridge.rs` is the JSONL
+owner process: it accepts only afmail's declared local-mutation draft contract,
+takes the workspace lock, calls `Workspace::change_draft`, and returns a fresh
+producer snapshot. It is transport glue, not a second draft implementation.
 
 ## File-State Boundaries
 
@@ -93,6 +105,13 @@ The workspace keeps durable state in a few canonical places:
   message enters that disposition.
 - Push items live in `.afmail/push/`; audit events live in
   `.afmail/logs/events.jsonl`.
+- Immutable workspace identity lives in `.afmail/workspace.json`; process locks
+  deliberately live outside the workspace.
+
+`push_queue/plan.rs` is the pure `Plan` boundary: it resolves queue items,
+draft/MIME/attachment bytes, action steps, and content hashes without writing.
+Only a matching `--confirm PLAN_ID` enters exclusive reconcile/apply; audit-only
+recovery remains explicitly `effect_scope: local_recovery`.
 
 Generated Markdown views (`triage/`, `case.md`, `notification.md`, `views/`,
 `spam/*.md`, `trash/*.md`, and `deleted/*.md`) should be rebuildable from those
@@ -113,17 +132,41 @@ canonical files with `afmail render refresh`.
 
 ## Validation Loop
 
-For behavior-preserving cleanup, run from `spores/agent-first-mail/`:
+Run every validation through the repository-owned project entry point from the
+repository root:
 
 ```bash
-cargo fmt
-cargo check
-cargo test
+./scripts/projects/agent-first-mail/test.sh static
+./scripts/projects/agent-first-mail/test.sh unit
 ```
 
-Use `cargo clippy --all-targets --all-features -- -D warnings` before release or
-when changing shared helpers. Docker/container tests remain gated by the existing
-integration-test environment flags.
+`static` covers formatting, default and no-default-feature Clippy, generated CLI
+documentation drift, and manifest JSON validity. `unit` runs default-feature
+tests; `minimal` runs the same crate without the optional UI feature. `all` runs
+all three. Do not replace these entry points with hand-written Cargo command
+sequences.
+
+Use focused modes for large integration targets instead of ad hoc Cargo command
+lines:
+
+```bash
+./scripts/projects/agent-first-mail/test.sh cli [FILTER]
+./scripts/projects/agent-first-mail/test.sh request-id [FILTER]
+./scripts/projects/agent-first-mail/test.sh workspace [FILTER]
+./scripts/projects/agent-first-mail/test.sh config [FILTER]
+./scripts/projects/agent-first-mail/test.sh surface [FILTER]
+./scripts/projects/agent-first-mail/test.sh draft [FILTER]
+./scripts/projects/agent-first-mail/test.sh push [FILTER]
+```
+
+`request-id` runs the split-out request-id retry/audit integration target
+(`tests/request_id_field_edits.rs`). `workspace` runs the split-out workspace
+identity integration target (`tests/workspace_identity.rs`). `config` runs the
+split-out config and dependency contract target (`tests/config_contract.rs`).
+`surface` runs the split-out CLI surface contract target
+(`tests/cli_surface_contract.rs`). `draft` runs the split-out draft contract
+target (`tests/draft_contract.rs`). `push` runs the split-out push contract
+target (`tests/push_contract.rs`).
 
 ## Fixture Batch, Docker E2E, and Demo
 
@@ -131,11 +174,12 @@ The reusable mailbox story lives under `tests/fixtures/mail-batch/`: a
 `manifest.json` plus 30 realistic `.eml` files. Tests should load that manifest
 instead of inventing new one-off EML strings when they need a realistic inbox.
 
-Run the GreenMail-backed E2E locally with `--ignored`; no extra environment
-gate is required:
+Run all ignored GreenMail/Dovecot container tests through the fixed E2E mode, or
+pass one Rust test-name filter as the second argument:
 
 ```bash
-cargo test --test container_e2e -- --ignored --nocapture
+./scripts/projects/agent-first-mail/test.sh e2e
+./scripts/projects/agent-first-mail/test.sh e2e docker_greenmail_pull_reply_send_e2e
 ```
 
 The same fixture batch powers a real agent-operation workspace. This prepares a
@@ -143,7 +187,7 @@ live GreenMail mailbox and configured afmail workspace, but does not pull or
 process mail; the agent must actually operate the inbox:
 
 ```bash
-bash scripts/demo-greenmail-fixtures.sh prepare
+./scripts/projects/agent-first-mail/test.sh demo-prepare
 ```
 
 After it prints the workspace path, open your agent there and say:
@@ -177,5 +221,5 @@ hint; the normal mailbox workflow instructions come from `afmail init`.
 For an automated scripted demo pass, use:
 
 ```bash
-bash scripts/demo-greenmail-fixtures.sh run
+./scripts/projects/agent-first-mail/test.sh demo
 ```

@@ -35,6 +35,49 @@ pub(super) struct CaseSuggestion {
     pub(super) reason: Option<String>,
 }
 
+pub(super) struct PullIngestRenderContext {
+    resolved_identities: Vec<ResolvedIdentity>,
+    rfc822_ids: HashMap<String, String>,
+}
+
+impl PullIngestRenderContext {
+    pub(super) fn new(
+        root: &Path,
+        config: &MailConfig,
+        remote_index: &RemoteIndex,
+    ) -> Result<Self> {
+        Ok(Self {
+            resolved_identities: config.identity_profiles(root)?,
+            rfc822_ids: remote_index.rfc822_ids.clone(),
+        })
+    }
+
+    fn apply_identity(&self, message: &mut MessageFile) {
+        let matched = match_message_identity_with_profiles(&self.resolved_identities, message);
+        message.identity = matched.identity;
+        message.identity_email = matched.identity_email;
+        message.identity_match = Some(matched.identity_match);
+        message.identity_candidates = matched.identity_candidates;
+        message.observed_recipient_emails = matched.observed_recipient_emails;
+    }
+
+    fn quoted_message_id(&self, raw_eml: &[u8]) -> Option<&str> {
+        reply_header_message_ids(raw_eml)
+            .into_iter()
+            .rev()
+            .find_map(|id| self.rfc822_ids.get(&normalize_message_id(&id)))
+            .map(String::as_str)
+    }
+
+    pub(super) fn observe(&mut self, message: &SavedMessage) {
+        if let Some(rfc822_message_id) = message.rfc822_message_id.as_deref() {
+            self.rfc822_ids
+                .entry(normalize_message_id(rfc822_message_id))
+                .or_insert_with(|| message.message_id.clone());
+        }
+    }
+}
+
 impl RemoteIndex {
     pub(super) fn suggest_case(&self, raw_eml: &[u8]) -> CaseSuggestion {
         let mut case_uids = BTreeSet::new();
@@ -60,6 +103,7 @@ pub(super) fn save_remote_message(
     target: &PullTarget,
     offset: FixedOffset,
     mail_config: &MailConfig,
+    render_context: &PullIngestRenderContext,
 ) -> Result<SavedMessage> {
     let message_id = stable_message_id(root, &remote, offset);
     let mut parsed = parse_inbound_message(
@@ -71,19 +115,20 @@ pub(super) fn save_remote_message(
             uid: remote.uid,
         },
     )?;
-    if let Some(state) = parsed.message.remote.as_mut() {
-        if let Some(location) = state.locations.first_mut() {
-            location.mailbox_id = Some(target.id.clone());
-            location.flags = remote.flags.clone();
-        }
+    if let Some(state) = parsed.message.remote.as_mut()
+        && let Some(location) = state.locations.first_mut()
+    {
+        location.mailbox_id = Some(target.id.clone());
+        location.flags = remote.flags.clone();
     }
     apply_pull_target(&mut parsed.message, target);
-    crate::store::Workspace::at(root).apply_identity_match(&mut parsed.message, mail_config)?;
-    parsed.conversation = crate::store::render_message_section_with_config(
+    render_context.apply_identity(&mut parsed.message);
+    parsed.conversation = crate::store::render_message_section_with_resolved_quote(
         root,
         &parsed.message,
         &parsed.body_text,
         mail_config,
+        render_context.quoted_message_id(&remote.raw_eml),
     )?;
     let messages_dir = root.join(".afmail/messages");
     create_dir_all(&messages_dir)?;
@@ -107,15 +152,15 @@ pub(super) fn save_remote_message(
         &remote.raw_eml,
         "write eml",
     )?;
-    if let Ok(status) = MessageStatus::parse(target.import_as.as_str()) {
-        if matches!(status, MessageStatus::Spam | MessageStatus::Trashed) {
-            workspace.set_message_disposition(
-                status,
-                &message_id,
-                None,
-                &crate::store::now_rfc3339(),
-            )?;
-        }
+    if let Ok(status) = MessageStatus::parse(target.import_as.as_str())
+        && matches!(status, MessageStatus::Spam | MessageStatus::Trashed)
+    {
+        workspace.set_message_disposition(
+            status,
+            &message_id,
+            None,
+            &crate::store::now_rfc3339(),
+        )?;
     }
     workspace.write_message_artifacts(&parsed.message)?;
     if target.import_as == PullImportAs::Triage {
@@ -554,10 +599,10 @@ fn parse_message_datetime(value: &str) -> Option<DateTime<FixedOffset>> {
 
 fn trim_trailing_parenthetical(value: &str) -> &str {
     let trimmed = value.trim();
-    if trimmed.ends_with(')') {
-        if let Some(start) = trimmed.rfind(" (") {
-            return trimmed[..start].trim_end();
-        }
+    if trimmed.ends_with(')')
+        && let Some(start) = trimmed.rfind(" (")
+    {
+        return trimmed[..start].trim_end();
     }
     trimmed
 }

@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Map, Value};
 use std::fmt::{Display, Formatter};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,61 +49,123 @@ impl AppError {
         Self::new("store_error", format!("{context}: {err}"))
     }
 
-    pub fn to_value(&self) -> serde_json::Value {
-        let mut value = json!({
-            "code": "error",
-            "error_code": self.error_code,
-            "error": self.message,
-            "retryable": self.retryable,
-            "trace": {"duration_ms": 0}
-        });
-        if let Value::Object(map) = &mut value {
-            if let Some(hint) = self
-                .hint
-                .as_deref()
-                .or_else(|| default_hint(self.error_code))
-            {
-                map.insert("hint".to_string(), json!(hint));
-            }
-            if let Some(details) = &self.details {
-                map.insert("details".to_string(), details.clone());
+    pub fn to_protocol_value(&self, duration_ms: u64) -> Value {
+        let mut builder = agent_first_data::json_error(self.error_code, &self.message)
+            .retryable_if(self.retryable)
+            .trace(serde_json::json!({"duration_ms": duration_ms}));
+        if let Some(hint) = self.resolved_hint() {
+            builder = builder.hint(hint);
+        }
+        if let Value::Object(fields) = self.protocol_fields() {
+            for (name, value) in fields {
+                if name != "retryable" {
+                    builder = builder.field(&name, value);
+                }
             }
         }
-        value
+        builder
+            .build()
+            .map(Into::into)
+            .unwrap_or_else(|_| serde_json::json!({}))
+    }
+
+    pub(crate) fn protocol_fields(&self) -> Value {
+        let fields = match &self.details {
+            Some(Value::Object(details)) => details.clone(),
+            Some(details) => {
+                let mut fields = Map::new();
+                fields.insert("details".to_string(), details.clone());
+                fields
+            }
+            None => Map::new(),
+        };
+        Value::Object(fields)
+    }
+
+    pub(crate) fn resolved_hint(&self) -> Option<&str> {
+        self.hint
+            .as_deref()
+            .or_else(|| default_hint(self.error_code))
+    }
+
+    pub fn to_error_value(&self) -> Value {
+        let mut fields = Map::new();
+        fields.insert(
+            "code".to_string(),
+            Value::String(self.error_code.to_string()),
+        );
+        fields.insert("message".to_string(), Value::String(self.message.clone()));
+        fields.insert("retryable".to_string(), Value::Bool(self.retryable));
+        if let Some(hint) = self.resolved_hint() {
+            fields.insert("hint".to_string(), Value::String(hint.to_string()));
+        }
+        if let Value::Object(details) = self.protocol_fields() {
+            fields.extend(details);
+        }
+        let mut item = Map::new();
+        item.insert("error".to_string(), Value::Object(fields));
+        Value::Object(item)
     }
 }
 
 fn default_hint(error_code: &str) -> Option<&'static str> {
     match error_code {
-        "invalid_request" => {
-            Some("Run the nearest `afmail ... --help` command and retry with the documented action-first syntax.")
+        "invalid_request" => Some(
+            "Run the nearest `afmail ... --help` command and retry with the documented action-first syntax.",
+        ),
+        "reason_required" => Some("Repeat the command with `--reason TEXT`."),
+        "confirm_required" => Some(
+            "Review the dry-run or status output, then rerun with `--confirm` when you want to apply changes.",
+        ),
+        "transaction_incomplete" => Some(
+            "Run `afmail doctor` to inspect incomplete transactions before making more workspace changes.",
+        ),
+        "config_missing" => {
+            Some("Run `afmail config show` and set the missing config key before retrying.")
         }
-        "reason_required" => Some("Repeat the command with `--reason TEXT`, or change `audit.reason_mode` if this workspace should not require reasons."),
-        "confirm_required" => Some("Review the dry-run or status output, then rerun with `--confirm` when you want to apply changes."),
-        "transaction_incomplete" => Some("Run `afmail doctor` to inspect incomplete transactions before making more workspace changes."),
-        "config_missing" => Some("Run `afmail config show` and set the missing config key before retrying."),
-        "config_invalid" => Some("Run `afmail config show`, fix `.afmail/config.json`, or update the key with `afmail config set`."),
-        "unknown_mailbox_id" => Some("Run `afmail config show` to inspect configured mailbox ids, then retry with one of those ids."),
+        "config_invalid" => Some(
+            "Run `afmail config show`, fix `.afmail/config.json`, or update the key with `afmail config set`.",
+        ),
+        "unknown_mailbox_id" => Some(
+            "Run `afmail config show` to inspect configured mailbox ids, then retry with one of those ids.",
+        ),
         "workspace_locked" => Some("Wait for the running afmail command to finish, then retry."),
-        "case_not_found" => Some("Check the case ref and whether it is active or archived with `afmail status` and `afmail case list --all`."),
-        "archive_not_found" | "archive_entry_not_found" => {
-            Some("Check notification refs with `afmail notification list`, then retry with the correct ref and message id.")
-        }
-        "draft_not_found" => Some("List the case drafts directory or recreate the draft with `afmail case draft reply` / `afmail case draft new`."),
-        "draft_invalid" => Some("Fix the draft markdown/frontmatter, then run `afmail case draft validate CASE_REF DRAFT_NAME`."),
-        "imap_connect_failed" | "imap_greeting_failed" | "imap_login_failed" | "imap_tls_failed"
-        | "imap_select_failed" | "imap_fetch_failed" | "imap_search_failed" | "imap_list_failed"
-        | "imap_capability_failed" | "imap_create_failed" | "imap_append_failed"
-        | "imap_copy_failed" | "imap_expunge_failed" | "imap_move_failed"
-        | "imap_store_failed" | "imap_uid_missing" => {
-            Some("Check IMAP config with `afmail config show`; use `afmail remote test` and `afmail remote folders` to diagnose.")
-        }
-        "imap_uidplus_required" => {
-            Some("This IMAP server does not support MOVE or UIDPLUS. Manually archive the message or use a server with one of those capabilities before retrying.")
-        }
-        "smtp_connect_failed" | "smtp_send_failed" => {
-            Some("Check SMTP config with `afmail config show`; preview queued mail with `afmail push --dry-run` before retrying.")
-        }
+        "case_not_found" => Some(
+            "Check the case ref and whether it is active or archived with `afmail status` and `afmail case list --all`.",
+        ),
+        "notification_not_found" | "notification_entry_not_found" => Some(
+            "Check notification refs with `afmail notification list`, then retry with the correct ref and message id.",
+        ),
+        "draft_not_found" => Some(
+            "List the case drafts directory or recreate the draft with `afmail case draft reply` / `afmail case draft new`.",
+        ),
+        "draft_invalid" => Some(
+            "Fix the draft markdown/frontmatter, then run `afmail case draft validate CASE_REF DRAFT_NAME`.",
+        ),
+        "imap_connect_failed"
+        | "imap_greeting_failed"
+        | "imap_login_failed"
+        | "imap_tls_failed"
+        | "imap_select_failed"
+        | "imap_fetch_failed"
+        | "imap_search_failed"
+        | "imap_list_failed"
+        | "imap_capability_failed"
+        | "imap_create_failed"
+        | "imap_append_failed"
+        | "imap_copy_failed"
+        | "imap_expunge_failed"
+        | "imap_move_failed"
+        | "imap_store_failed"
+        | "imap_uid_missing" => Some(
+            "Check IMAP config with `afmail config show`; use `afmail remote test` and `afmail remote folders` to diagnose.",
+        ),
+        "imap_uidplus_required" => Some(
+            "This IMAP server does not support MOVE or UIDPLUS. Manually archive the message or use a server with one of those capabilities before retrying.",
+        ),
+        "smtp_connect_failed" | "smtp_send_failed" => Some(
+            "Check SMTP config with `afmail config show`; preview queued mail with `afmail push --dry-run` before retrying.",
+        ),
         _ => None,
     }
 }
@@ -117,3 +179,31 @@ impl Display for AppError {
 impl std::error::Error for AppError {}
 
 pub type Result<T> = std::result::Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::AppError;
+
+    #[test]
+    fn protocol_error_flattens_object_details() {
+        let value = AppError::retryable("case_archived", "archived")
+            .with_details(serde_json::json!({
+                "archived_group": "support",
+                "suggested_command": "afmail case unarchive c1 --group support --reason TEXT"
+            }))
+            .to_protocol_value(12);
+        assert_eq!(value["error"]["archived_group"], "support");
+        assert_eq!(value["error"]["retryable"], true);
+        assert!(value["error"].get("details").is_none());
+        assert_eq!(value["trace"]["duration_ms"], 12);
+    }
+
+    #[test]
+    fn protocol_error_keeps_non_object_details_as_named_field() {
+        let value = AppError::new("invalid_request", "invalid")
+            .with_details(serde_json::json!("specific detail"))
+            .to_protocol_value(1);
+        assert_eq!(value["error"]["details"], "specific detail");
+        assert!(value["error"]["hint"].is_string());
+    }
+}

@@ -1,6 +1,6 @@
 use crate::error::{AppError, Result};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 pub const CONVERSATION_START: &str = "<!-- afmail:conversation:start -->";
 pub const CONVERSATION_END: &str = "<!-- afmail:conversation:end -->";
@@ -116,10 +116,12 @@ mod tests {
         let case_md = format!("a\n{CONVERSATION_START}\nold\n{CONVERSATION_END}\nz");
         let updated = append_conversation(&case_md, "new");
         assert!(updated.is_ok());
-        assert!(updated
-            .as_ref()
-            .map(|s| s.contains("old\n\nnew"))
-            .unwrap_or(false));
+        assert!(
+            updated
+                .as_ref()
+                .map(|s| s.contains("old\n\nnew"))
+                .unwrap_or(false)
+        );
         let replaced = replace_conversation(&case_md, "new");
         assert_eq!(
             replaced,

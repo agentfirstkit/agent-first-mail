@@ -1,7 +1,7 @@
 use crate::error::{AppError, Result};
 use fs4::{FileExt, TryLockError};
 use std::fs::{File, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LockMode {
@@ -23,9 +23,14 @@ impl WorkspaceLock {
     }
 
     pub(crate) fn try_acquire(root: &Path, mode: LockMode) -> Result<Option<Self>> {
-        let dir = root.join(".afmail");
-        std::fs::create_dir_all(&dir).map_err(|e| AppError::io("create lock directory", &e))?;
-        let path = dir.join("workspace.lock");
+        let path = workspace_lock_path(root);
+        let dir = path.parent().ok_or_else(|| {
+            AppError::new(
+                "workspace_lock_invalid",
+                "runtime workspace lock path has no parent directory",
+            )
+        })?;
+        std::fs::create_dir_all(dir).map_err(|e| AppError::io("create lock directory", &e))?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -43,6 +48,14 @@ impl WorkspaceLock {
         acquired.map_err(|e| AppError::io("lock workspace", &std::io::Error::from(e)))?;
         Ok(Some(Self { file }))
     }
+}
+
+pub(crate) fn workspace_lock_path(root: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let digest = blake3::hash(canonical.as_os_str().as_encoded_bytes()).to_hex();
+    std::env::temp_dir()
+        .join("afmail-workspace-locks")
+        .join(format!("{digest}.lock"))
 }
 
 fn workspace_locked_error() -> AppError {

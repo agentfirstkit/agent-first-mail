@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::types::DraftSyncIntent;
+
 pub use crate::types::MessageCollection as CaseFrontmatter;
 
 /// Deserialize a sequence that may be written as YAML `null` (a bare `key:`
@@ -28,6 +30,8 @@ pub struct DraftFrontmatter {
     pub case_uid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_intent: Option<DraftSyncIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,6 +124,20 @@ mod tests {
             assert!(fm.cc.is_empty());
             assert!(fm.attachments.is_empty());
             assert_eq!(body.trim(), "body");
+        }
+    }
+
+    #[test]
+    fn draft_sync_intent_requires_the_canonical_one_time_upgrade_value() {
+        let legacy = "---\nkind: draft\ncase_uid: c20260521001\nsync_intent: save\n---\nbody";
+        assert!(read_doc::<DraftFrontmatter>(legacy).is_err());
+
+        let canonical =
+            "---\nkind: draft\ncase_uid: c20260521001\nsync_intent: save_draft\n---\nbody";
+        let parsed = read_doc::<DraftFrontmatter>(canonical);
+        assert!(parsed.is_ok());
+        if let Ok((frontmatter, _)) = parsed {
+            assert_eq!(frontmatter.sync_intent, Some(DraftSyncIntent::SaveDraft));
         }
     }
 

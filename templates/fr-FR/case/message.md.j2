@@ -5,7 +5,7 @@ case_name: {{ frontmatter.case_name }}
 message_id: {{ frontmatter.message_id }}
 ---
 
-# {% if view.title %}{{ view.title }}{% else %}Message du dossier{% endif %}
+# {% if view.display_title %}{{ view.display_title }}{% else %}Message du dossier{% endif %}
 
 Dossier: {{ case.case_name }} (`{{ case.case_uid }}`)
 Message: `{{ message.message_id }}`

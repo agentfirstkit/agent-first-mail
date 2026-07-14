@@ -50,8 +50,7 @@ pub(super) fn message_time_datetime(message: &MessageFile, offset: &FixedOffset)
         .map(|value| {
             value
                 .with_timezone(offset)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
+                .to_rfc3339_opts(SecondsFormat::Secs, true)
         })
 }
 
@@ -67,7 +66,7 @@ pub(super) fn time_context(original: &str, offset: &FixedOffset) -> Value {
             "local_rfc3339": local.to_rfc3339_opts(SecondsFormat::Secs, true),
             "date": local.format("%Y-%m-%d").to_string(),
             "time": local.format("%H:%M").to_string(),
-            "datetime": local.format("%Y-%m-%d %H:%M").to_string(),
+            "datetime": local.to_rfc3339_opts(SecondsFormat::Secs, true),
             "year": local.year(),
             "month": local.month(),
             "day": local.day(),
@@ -281,10 +280,9 @@ fn decode_numeric_html_entity(entity: &str) -> Option<char> {
         .or_else(|| entity.strip_prefix("#X"))
     {
         u32::from_str_radix(hex, 16).ok()?
-    } else if let Some(decimal) = entity.strip_prefix('#') {
-        decimal.parse::<u32>().ok()?
     } else {
-        return None;
+        let decimal = entity.strip_prefix('#')?;
+        decimal.parse::<u32>().ok()?
     };
     char::from_u32(value)
 }
@@ -299,16 +297,30 @@ pub fn render_message_section_with_config(
     body_text: &str,
     config: &MailConfig,
 ) -> Result<String> {
-    render_message_section_with_root(
-        Some(root),
-        message,
-        body_text,
-        config.template_language(),
-        config
-            .default_identity()
-            .ok()
-            .map(|identity| identity.email.as_str()),
-        None,
+    let display_offset = config.resolved_timezone_offset();
+    let relations = MessageRelationIndex::build(&Workspace::at(root))?;
+    let quoted_message_id = message_body_has_visible_quote(body_text)
+        .then(|| relations.quoted_message_id(&message.message_id))
+        .flatten();
+    let mut renderer = MarkdownTemplateRenderer::new(root, config.template_language());
+    renderer.render(
+        TemplateKey::MessageSection,
+        &message_section_context_with_options(
+            Some(root),
+            message,
+            body_text,
+            config.template_language(),
+            config
+                .default_identity()
+                .ok()
+                .map(|identity| identity.email.as_str()),
+            MessageSectionRenderOptions {
+                display_offset: Some(&display_offset),
+                output_dir: None,
+                message_link: None,
+                quoted_message_id,
+            },
+        )?,
     )
 }
 
@@ -318,7 +330,47 @@ pub fn render_message_section_with_options(
     language: TemplateLanguage,
     account_email: Option<&str>,
 ) -> Result<String> {
-    render_message_section_with_root(None, message, body_text, language, account_email, None)
+    render_message_section_with_root(
+        None,
+        message,
+        body_text,
+        language,
+        account_email,
+        None,
+        None,
+    )
+}
+
+pub(crate) fn render_message_section_with_resolved_quote(
+    root: &Path,
+    message: &MessageFile,
+    body_text: &str,
+    config: &MailConfig,
+    quoted_message_id: Option<&str>,
+) -> Result<String> {
+    let display_offset = config.resolved_timezone_offset();
+    let mut renderer = MarkdownTemplateRenderer::new(root, config.template_language());
+    renderer.render(
+        TemplateKey::MessageSection,
+        &message_section_context_with_options(
+            Some(root),
+            message,
+            body_text,
+            config.template_language(),
+            config
+                .default_identity()
+                .ok()
+                .map(|identity| identity.email.as_str()),
+            MessageSectionRenderOptions {
+                display_offset: Some(&display_offset),
+                output_dir: None,
+                message_link: None,
+                quoted_message_id: message_body_has_visible_quote(body_text)
+                    .then_some(quoted_message_id)
+                    .flatten(),
+            },
+        )?,
+    )
 }
 
 pub(super) fn render_message_section_with_root(
@@ -327,6 +379,7 @@ pub(super) fn render_message_section_with_root(
     body_text: &str,
     language: TemplateLanguage,
     account_email: Option<&str>,
+    display_offset: Option<&FixedOffset>,
     output_dir: Option<&Path>,
 ) -> Result<String> {
     let mut renderer = root.map_or_else(
@@ -341,9 +394,18 @@ pub(super) fn render_message_section_with_root(
             body_text,
             language,
             account_email,
+            display_offset,
             output_dir,
         )?,
     )
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct MessageSectionRenderOptions<'a> {
+    pub display_offset: Option<&'a FixedOffset>,
+    pub output_dir: Option<&'a Path>,
+    pub message_link: Option<&'a str>,
+    pub quoted_message_id: Option<&'a str>,
 }
 
 pub(super) fn message_section_context(
@@ -352,7 +414,31 @@ pub(super) fn message_section_context(
     body_text: &str,
     language: TemplateLanguage,
     account_email: Option<&str>,
+    display_offset: Option<&FixedOffset>,
     output_dir: Option<&Path>,
+) -> Result<Value> {
+    message_section_context_with_options(
+        root,
+        message,
+        body_text,
+        language,
+        account_email,
+        MessageSectionRenderOptions {
+            display_offset,
+            output_dir,
+            message_link: None,
+            quoted_message_id: None,
+        },
+    )
+}
+
+pub(super) fn message_section_context_with_options(
+    root: Option<&Path>,
+    message: &MessageFile,
+    body_text: &str,
+    language: TemplateLanguage,
+    account_email: Option<&str>,
+    options: MessageSectionRenderOptions<'_>,
 ) -> Result<Value> {
     let timestamp_rfc3339 = message
         .received_rfc3339
@@ -360,11 +446,17 @@ pub(super) fn message_section_context(
         .or(message.sent_rfc3339.as_deref())
         .unwrap_or("");
     let direction = message_thread_direction(message);
-    let display_time = message
-        .received_rfc3339
-        .as_deref()
-        .or(message.sent_rfc3339.as_deref())
-        .unwrap_or("unknown-time");
+    let display_time = options
+        .display_offset
+        .and_then(|offset| message_time_datetime(message, offset))
+        .or_else(|| {
+            message
+                .received_rfc3339
+                .as_deref()
+                .or(message.sent_rfc3339.as_deref())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| "unknown-time".to_string());
     let counterparty = match direction {
         ThreadDirection::Received => message.from.clone().unwrap_or_default(),
         ThreadDirection::Sent => message.to.join(", "),
@@ -411,11 +503,11 @@ pub(super) fn message_section_context(
     }
     let mut sender_differs = false;
     let sender = message.sender.as_deref().unwrap_or("");
-    if let Some(sender) = &message.sender {
-        if email_address(sender) != email_address(from) {
-            sender_differs = true;
-            hints.push(json!({"kind": "sender_differs", "sender": sender}));
-        }
+    if let Some(sender) = &message.sender
+        && email_address(sender) != email_address(from)
+    {
+        sender_differs = true;
+        hints.push(json!({"kind": "sender_differs", "sender": sender}));
     }
     let mailing_list = message.list_id.as_deref().unwrap_or("");
     let mailing_list_headers = message.mailing_list_headers.join(" | ");
@@ -460,7 +552,7 @@ pub(super) fn message_section_context(
     }
     let body_text_fence = markdown_fence_for(&body_text_visible_block);
     let quoted_message_id = if visible_body.has_quoted_reply {
-        quoted_local_message_id(root, message)?.unwrap_or_default()
+        options.quoted_message_id.unwrap_or_default().to_string()
     } else {
         String::new()
     };
@@ -473,7 +565,7 @@ pub(super) fn message_section_context(
                 && !file_path.is_empty()
                 && is_image_content_type(&attachment.content_type)
             {
-                attachment_markdown_path(root, output_dir, file_path)
+                attachment_markdown_path(root, options.output_dir, file_path)
             } else {
                 String::new()
             };
@@ -501,6 +593,7 @@ pub(super) fn message_section_context(
             "display_time": display_time,
             "message_action": message_action,
             "display_counterparty": display_counterparty,
+            "message_link": options.message_link.unwrap_or(""),
             "body_text": body_text,
             "body_text_block": body_text_block,
             "body_text_visible": visible_body.visible,
@@ -592,29 +685,36 @@ fn trailing_quote_block_start(lines: &[&str]) -> Option<usize> {
     None
 }
 
-fn quoted_local_message_id(root: Option<&Path>, message: &MessageFile) -> Result<Option<String>> {
-    let Some(root) = root else {
-        return Ok(None);
-    };
-    let candidates = message_reply_header_ids(message);
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-    let index = Workspace::at(root).rfc822_message_id_index()?;
-    for candidate in candidates.into_iter().rev() {
-        if let Some(message_id) = index.get(&candidate) {
-            return Ok(Some(message_id.clone()));
-        }
-    }
-    Ok(None)
+pub(super) fn message_body_has_visible_quote(body_text: &str) -> bool {
+    body_text_visible(body_text).has_quoted_reply
 }
 
 pub(super) fn message_template_value(message: &MessageFile) -> Result<Value> {
-    serde_json::to_value(message).map_err(|e| AppError::json("serialize message", &e))
+    let mut value =
+        serde_json::to_value(message).map_err(|e| AppError::json("serialize message", &e))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("content_trust".to_string(), json!("untrusted_remote"));
+        object.insert(
+            "content_provenance".to_string(),
+            json!({ "source": "remote_mail", "message_id": message.message_id }),
+        );
+    }
+    Ok(value)
 }
 
 pub(super) fn markdown_inline(value: &str) -> String {
-    value.replace(['\r', '\n'], " ").trim().to_string()
+    let inline = value.replace(['\r', '\n'], " ");
+    let mut out = String::new();
+    for ch in inline.trim().chars() {
+        if matches!(
+            ch,
+            '\\' | '`' | '[' | ']' | '(' | ')' | '<' | '>' | '!' | '|'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Sanitize a value rendered inside a backtick code span (e.g. attachment
@@ -622,7 +722,7 @@ pub(super) fn markdown_inline(value: &str) -> String {
 /// crafted filename cannot close the span and smuggle imperative Markdown after
 /// it.
 pub(super) fn markdown_code_span(value: &str) -> String {
-    markdown_inline(value).replace('`', "'")
+    value.replace(['\r', '\n'], " ").trim().replace('`', "'")
 }
 
 pub(super) fn markdown_image_alt(value: &str) -> String {

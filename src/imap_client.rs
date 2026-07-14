@@ -3,6 +3,9 @@ use crate::error::{AppError, Result};
 use crate::types::RemoteLocation;
 use mail_parser::MessageParser;
 use rustls_connector::RustlsConnector;
+use rustls_pemfile::certs;
+use serde_json::json;
+use std::fs;
 use std::net::TcpStream;
 use std::time::Duration as StdDuration;
 
@@ -158,13 +161,14 @@ pub(crate) fn login_plain(config: &ImapConfig) -> Result<imap::Session<TcpStream
         &config.host,
         !config.password_secret.is_empty(),
     )?;
-    let stream = TcpStream::connect((config.host.as_str(), config.port))
-        .map_err(|e| AppError::new("imap_connect_failed", e.to_string()))?;
+    let stream = TcpStream::connect((config.host.as_str(), config.port)).map_err(|e| {
+        retryable_imap_network_error(config, "imap_connect_failed", "connect", e.to_string())
+    })?;
     configure_stream_timeout(&stream)?;
     let mut client = imap::Client::new(stream);
-    client
-        .read_greeting()
-        .map_err(|e| AppError::new("imap_greeting_failed", e.to_string()))?;
+    client.read_greeting().map_err(|e| {
+        retryable_imap_network_error(config, "imap_greeting_failed", "greeting", e.to_string())
+    })?;
     client
         .login(&config.username, &config.password_secret)
         .map_err(|e| AppError::new("imap_login_failed", e.0.to_string()))
@@ -173,21 +177,57 @@ pub(crate) fn login_plain(config: &ImapConfig) -> Result<imap::Session<TcpStream
 pub(crate) fn login_tls(
     config: &ImapConfig,
 ) -> Result<imap::Session<rustls_connector::TlsStream<TcpStream>>> {
-    let stream = TcpStream::connect((config.host.as_str(), config.port))
-        .map_err(|e| AppError::new("imap_connect_failed", e.to_string()))?;
+    let stream = TcpStream::connect((config.host.as_str(), config.port)).map_err(|e| {
+        retryable_imap_network_error(config, "imap_connect_failed", "connect", e.to_string())
+    })?;
     configure_stream_timeout(&stream)?;
-    let connector = RustlsConnector::new_with_webpki_root_certs()
-        .map_err(|e| AppError::new("imap_tls_failed", e.to_string()))?;
+    let connector = tls_connector(config)?;
     let tls_stream = connector
         .connect(&config.host, stream)
         .map_err(|e| AppError::new("imap_tls_failed", e.to_string()))?;
     let mut client = imap::Client::new(tls_stream);
-    client
-        .read_greeting()
-        .map_err(|e| AppError::new("imap_greeting_failed", e.to_string()))?;
+    client.read_greeting().map_err(|e| {
+        retryable_imap_network_error(config, "imap_greeting_failed", "greeting", e.to_string())
+    })?;
     client
         .login(&config.username, &config.password_secret)
         .map_err(|e| AppError::new("imap_login_failed", e.0.to_string()))
+}
+
+fn retryable_imap_network_error(
+    config: &ImapConfig,
+    code: &'static str,
+    phase: &'static str,
+    message: String,
+) -> AppError {
+    AppError::retryable(code, message).with_details(json!({
+        "protocol": "imap",
+        "phase": phase,
+        "host": config.host,
+        "port": config.port,
+        "tls": config.tls
+    }))
+}
+
+fn tls_connector(config: &ImapConfig) -> Result<RustlsConnector> {
+    let mut tls = rustls_connector::RustlsConnectorConfig::new_with_webpki_root_certs();
+    if let Some(path) = &config.tls_root_cert_path {
+        let pem = fs::read(path)
+            .map_err(|e| AppError::io(&format!("read IMAP TLS root cert {path}"), &e))?;
+        let mut slice = pem.as_slice();
+        let certs = certs(&mut slice)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| AppError::new("imap_tls_failed", e.to_string()))?;
+        if certs.is_empty() {
+            return Err(AppError::new(
+                "imap_tls_failed",
+                format!("no certificates found in IMAP TLS root cert {path}"),
+            ));
+        }
+        tls = tls.with_parsable_certificates(certs);
+    }
+    tls.connector_with_no_client_auth()
+        .map_err(|e| AppError::new("imap_tls_failed", e.to_string()))
 }
 
 fn configure_stream_timeout(stream: &TcpStream) -> Result<()> {
@@ -258,15 +298,6 @@ fn format_name_attribute(attribute: &imap_proto::NameAttribute<'_>) -> String {
         imap_proto::NameAttribute::Extension(value) => value.to_string(),
         other => format!("{other:?}"),
     }
-}
-
-pub(crate) fn create_folder<T: std::io::Read + std::io::Write>(
-    session: &mut imap::Session<T>,
-    folder: &str,
-) -> Result<()> {
-    session
-        .create(folder)
-        .map_err(|e| AppError::new("imap_create_failed", e.to_string()))
 }
 
 pub(crate) fn append_message_session<T: std::io::Read + std::io::Write>(
@@ -543,10 +574,10 @@ pub(crate) fn fetch_uid_by_message_id_session<T: std::io::Read + std::io::Write>
 }
 
 fn header_body_contains_message_id(body: &[u8], target: &str) -> bool {
-    if let Some(message_id) = rfc822_message_id(body) {
-        if normalize_message_id(&message_id) == target {
-            return true;
-        }
+    if let Some(message_id) = rfc822_message_id(body)
+        && normalize_message_id(&message_id) == target
+    {
+        return true;
     }
     String::from_utf8_lossy(body)
         .split(['<', '>', ',', ';', ' ', '\t', '\r', '\n'])

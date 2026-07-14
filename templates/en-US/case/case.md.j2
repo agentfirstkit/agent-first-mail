@@ -3,16 +3,7 @@
 Case: {{ case.collection_uid }} · Messages: {{ view.message_count }}
 
 {% if items | length == 0 %}_No messages._
-{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.direction_kind == 'received' %}Received{% else %}Sent{% endif %}{% if item.view.action == 'reply' %} reply{% elif item.view.action == 'forward' %} forward{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
-
-{% if item.view.display_contact %}- {% if item.view.contact_kind == 'from' %}From{% else %}To{% endif %}: {{ item.view.display_contact }}
-{% endif %}- Message: [{{ item.message.message_id }}]({{ item.view.link }})
-{% if item.view.time.datetime %}- Time: {{ item.view.time.datetime }}
-{% endif %}
-
-{% endfor %}{% endif %}
-{% if view.conversation %}
-## Conversation
+{% elif view.conversation %}## Conversation
 
 <!-- afmail:conversation:start -->
 

@@ -2,28 +2,45 @@ use crate::cli::PurgeAction;
 use crate::error::{AppError, Result};
 
 pub(super) enum ResolvedPurgeAction {
-    Spam { older_than_days: u64 },
-    Trash { older_than_days: u64 },
-    Deleted { older_than_days: u64 },
-    Discards { older_than_days: u64 },
+    Spam {
+        older_than_days: u64,
+        confirm: Option<String>,
+    },
+    Trash {
+        older_than_days: u64,
+        confirm: Option<String>,
+    },
+    Deleted {
+        older_than_days: u64,
+        confirm: Option<String>,
+    },
+    Discards {
+        older_than_days: u64,
+        confirm: Option<String>,
+    },
 }
 
 pub(super) fn resolve_purge_action(
     action: Option<PurgeAction>,
     root_older_than_days: Option<u64>,
+    confirm: Option<String>,
 ) -> Result<ResolvedPurgeAction> {
     match action {
         Some(PurgeAction::Spam { older_than_days }) => Ok(ResolvedPurgeAction::Spam {
             older_than_days: resolve_purge_older_than_days(root_older_than_days, older_than_days)?,
+            confirm,
         }),
         Some(PurgeAction::Trash { older_than_days }) => Ok(ResolvedPurgeAction::Trash {
             older_than_days: resolve_purge_older_than_days(root_older_than_days, older_than_days)?,
+            confirm,
         }),
         Some(PurgeAction::Deleted { older_than_days }) => Ok(ResolvedPurgeAction::Deleted {
             older_than_days: resolve_purge_older_than_days(root_older_than_days, older_than_days)?,
+            confirm,
         }),
         None => Ok(ResolvedPurgeAction::Discards {
             older_than_days: root_older_than_days.unwrap_or(30),
+            confirm,
         }),
     }
 }

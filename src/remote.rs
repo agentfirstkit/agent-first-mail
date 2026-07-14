@@ -156,6 +156,8 @@ pub struct FakeMailRemote {
     pub move_results: std::cell::RefCell<std::collections::VecDeque<Result<MoveOutcome>>>,
     pub add_flags_results: std::cell::RefCell<std::collections::VecDeque<Result<()>>>,
     pub send_results: std::cell::RefCell<std::collections::VecDeque<Result<()>>>,
+    pub find_results:
+        std::cell::RefCell<std::collections::VecDeque<Result<Option<RemoteLocation>>>>,
 }
 
 #[cfg(test)]
@@ -217,5 +219,24 @@ impl MailRemote for FakeMailRemote {
         _raw: &[u8],
     ) -> Result<()> {
         self.send_results.borrow_mut().pop_front().unwrap_or(Ok(()))
+    }
+
+    fn find_by_message_id(
+        &self,
+        folder: &str,
+        _rfc822_message_id: &str,
+    ) -> Result<Option<RemoteLocation>> {
+        self.find_results
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(Ok(Some(RemoteLocation {
+                mailbox_id: None,
+                mailbox_name: folder.to_string(),
+                uid_validity: Some(1),
+                uid: Some(1),
+                flags: Vec::new(),
+                observed_rfc3339: crate::store::now_rfc3339(),
+                missing_rfc3339: None,
+            })))
     }
 }

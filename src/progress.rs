@@ -1,5 +1,6 @@
 use crate::error::{AppError, Result};
-use serde_json::{json, Map, Value};
+use crate::types::CommandResult;
+use serde_json::{Map, Value, json};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -29,6 +30,7 @@ pub(crate) struct WorkspaceProgressSink {
     started_rfc3339: String,
     last_phase: String,
     last_fields: Value,
+    write_warnings: Vec<Value>,
 }
 
 impl WorkspaceProgressSink {
@@ -40,6 +42,7 @@ impl WorkspaceProgressSink {
             started_rfc3339: crate::store::now_rfc3339(),
             last_phase: "start".to_string(),
             last_fields: json!({}),
+            write_warnings: Vec::new(),
         };
         sink.write("running", "start", json!({}), None, None);
         sink
@@ -51,14 +54,34 @@ impl WorkspaceProgressSink {
         self.write("running", phase, fields, None, None);
     }
 
-    pub(crate) fn finish_success(&mut self, result: &Value) {
-        let summary = scalar_summary(result);
+    pub(crate) fn finish_result(&mut self, result: &CommandResult) {
+        let summary = scalar_summary(result.value());
+        if result.is_success() {
+            self.write(
+                "succeeded",
+                "finish",
+                json!({
+                    "success": true,
+                }),
+                Some(summary),
+                None,
+            );
+            return;
+        }
         self.write(
-            "succeeded",
+            if result.is_partial() {
+                "partial"
+            } else {
+                "failed"
+            },
             "finish",
-            json!({"success": true}),
+            json!({
+                "success": false,
+                "failed_phase": self.last_phase.as_str(),
+                "failed_fields": self.last_fields.clone(),
+            }),
             Some(summary),
-            None,
+            Some(aggregate_error_summary(result)),
         );
     }
 
@@ -73,11 +96,15 @@ impl WorkspaceProgressSink {
             }),
             None,
             Some(json!({
-                "error_code": err.error_code,
-                "error": err.message.as_str(),
+                "code": err.error_code,
+                "message": err.message.as_str(),
                 "retryable": err.retryable,
             })),
         );
+    }
+
+    pub(crate) fn take_write_warnings(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.write_warnings)
     }
 
     fn write(
@@ -102,8 +129,62 @@ impl WorkspaceProgressSink {
             "result": result,
             "error": error,
         });
-        let _ = crate::util::write_json_pretty(&self.path, &value);
+        if let Err(err) = crate::util::write_json_pretty(&self.path, &value) {
+            self.record_write_warning(err, status, phase);
+        }
     }
+
+    fn record_write_warning(&mut self, err: AppError, status: &str, phase: &str) {
+        self.write_warnings.push(json!({
+            "code": "progress_write_failed",
+            "error_code": err.error_code,
+            "error": err.message,
+            "path": path_to_string(&self.path),
+            "status": status,
+            "phase": phase,
+        }));
+    }
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn aggregate_error_summary(result: &CommandResult) -> Value {
+    let candidate = result
+        .value()
+        .get("failures")
+        .and_then(Value::as_array)
+        .and_then(|failures| failures.first())
+        .or_else(|| {
+            result
+                .value()
+                .get("results")
+                .and_then(Value::as_array)
+                .and_then(|results| results.iter().find(|value| value.get("error").is_some()))
+        });
+    let mut error = candidate
+        .and_then(|value| value.get("error"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let code = error.remove("code").unwrap_or_else(|| {
+        json!(if result.is_partial() {
+            "partial"
+        } else {
+            "command_failed"
+        })
+    });
+    let message = error.remove("message").unwrap_or_else(|| {
+        json!(if result.is_partial() {
+            "command completed partially"
+        } else {
+            "command failed"
+        })
+    });
+    error.insert("code".to_string(), code);
+    error.insert("message".to_string(), message);
+    Value::Object(error)
 }
 
 pub(crate) fn workspace_status_progress(root: &Path) -> Result<Value> {
@@ -113,17 +194,45 @@ pub(crate) fn workspace_status_progress(root: &Path) -> Result<Value> {
         Err(err) if err.kind() == ErrorKind::NotFound => {
             return Ok(json!({"status": "idle"}));
         }
-        Err(err) => return Err(AppError::io("read workspace progress", &err)),
+        Err(err) => {
+            return Ok(progress_unavailable(
+                "progress_unavailable",
+                format!("read workspace progress: {err}"),
+                &path,
+            ));
+        }
     };
-    let value: Value =
-        serde_json::from_str(&data).map_err(|e| AppError::json("parse workspace progress", &e))?;
+    let value: Value = match serde_json::from_str(&data) {
+        Ok(value) => value,
+        Err(err) => {
+            return Ok(progress_unavailable(
+                "progress_invalid",
+                format!("parse workspace progress: {err}"),
+                &path,
+            ));
+        }
+    };
     let Value::Object(snapshot) = &value else {
-        return Err(AppError::new(
+        return Ok(progress_unavailable(
             "progress_invalid",
-            "workspace progress snapshot must be a JSON object",
+            "workspace progress snapshot must be a JSON object".to_string(),
+            &path,
         ));
     };
     Ok(status_progress_from_snapshot(snapshot))
+}
+
+fn progress_unavailable(error_code: &str, error: String, path: &Path) -> Value {
+    json!({
+        "status": "unavailable",
+        "summary": "workspace progress snapshot is unavailable",
+        "error": {
+            "code": error_code,
+            "message": error,
+            "path": path_to_string(path),
+        },
+        "fields": {},
+    })
 }
 
 fn status_progress_from_snapshot(snapshot: &Map<String, Value>) -> Value {
@@ -144,13 +253,13 @@ fn status_progress_from_snapshot(snapshot: &Map<String, Value>) -> Value {
             status, command, phase, &fields, &result, &error
         )),
     );
-    let computed_fields = if status == "failed" {
+    let computed_fields = if matches!(status, "failed" | "partial") {
         failed_fields(&fields)
     } else {
         &fields
     };
     insert_progress_counts(&mut out, command, computed_fields);
-    if status == "failed" {
+    if matches!(status, "failed" | "partial") {
         insert_failed_progress_fields(&mut out, &fields);
     }
     out.insert("fields".to_string(), fields);
@@ -173,11 +282,10 @@ fn insert_progress_counts(out: &mut Map<String, Value>, command: Option<&str>, f
     let total_count =
         value_u64(fields.get("uid_count")).or_else(|| value_u64(fields.get("total_count")));
     if let (Some(processed), Some(total)) = (value_u64(fields.get("processed_count")), total_count)
+        && total > 0
     {
-        if total > 0 {
-            let percent = ((processed as f64 / total as f64) * 10000.0).round() / 100.0;
-            out.insert("progress_percent".to_string(), json!(percent));
-        }
+        let percent = ((processed as f64 / total as f64) * 10000.0).round() / 100.0;
+        out.insert("progress_percent".to_string(), json!(percent));
     }
     for key in ["batch_index", "batch_count"] {
         if let Some(value) = fields.get(key).cloned() {
@@ -197,8 +305,11 @@ fn insert_render_progress_fields(out: &mut Map<String, Value>, fields: &Map<Stri
         "render_stage",
         "elapsed_ms",
         "total_count",
+        "processed_count",
         "message_cache_rebuilt_count",
         "text_cache_removed_count",
+        "validated_eml_count",
+        "materialized_cache_written_count",
         "triage_count",
         "triage_written_count",
         "triage_unchanged_count",
@@ -236,6 +347,11 @@ fn insert_pull_progress_fields(out: &mut Map<String, Value>, fields: &Map<String
         "render_stage",
         "elapsed_ms",
         "total_count",
+        "processed_count",
+        "message_cache_rebuilt_count",
+        "text_cache_removed_count",
+        "validated_eml_count",
+        "materialized_cache_written_count",
         "triage_count",
         "triage_written_count",
         "triage_unchanged_count",
@@ -282,10 +398,10 @@ fn insert_push_progress_fields(out: &mut Map<String, Value>, fields: &Map<String
             out.insert(key.to_string(), value);
         }
     }
-    if !out.contains_key("item_index") {
-        if let Some(value) = fields.get("index").cloned() {
-            out.insert("item_index".to_string(), value);
-        }
+    if !out.contains_key("item_index")
+        && let Some(value) = fields.get("index").cloned()
+    {
+        out.insert("item_index".to_string(), value);
     }
 }
 
@@ -328,6 +444,17 @@ fn progress_summary(
             .strip_prefix(&format!("{command}: "))
             .unwrap_or(during.as_str());
         return format!("{command} failed: {error_code} during {during}");
+    }
+    if status == "partial" {
+        let result = result.as_object();
+        let succeeded = result
+            .and_then(|result| value_u64(result.get("pushed_count")))
+            .or_else(|| result.and_then(|result| value_u64(result.get("succeeded_count"))))
+            .unwrap_or(0);
+        let failed = result
+            .and_then(|result| value_u64(result.get("failed_count")))
+            .unwrap_or(0);
+        return format!("{command} partially completed: {succeeded} succeeded, {failed} failed");
     }
     if status == "succeeded" {
         return success_summary(command, result);
@@ -401,8 +528,12 @@ fn render_phase_summary(phase: Option<&str>, fields: &Value) -> String {
             render_done_summary("spam, trash, and deleted views", fields)
         }
         Some("render_cases_start") => "render: refreshing case views".to_string(),
+        Some("render_cases_progress") => render_progress_summary("case views", fields),
         Some("render_cases_done") => render_done_summary("case views", fields),
         Some("render_notifications_start") => "render: refreshing notification views".to_string(),
+        Some("render_notifications_progress") => {
+            render_progress_summary("notification views", fields)
+        }
         Some("render_notifications_done") => render_done_summary("notification views", fields),
         Some("render_cache_write_start") => "render: writing render cache".to_string(),
         Some("render_cache_write_done") => render_done_summary("render cache", fields),
@@ -435,6 +566,8 @@ fn pull_phase_summary(phase: Option<&str>, fields: &Value) -> String {
         Some("pull_reconcile_start") => "pull: reconciling local remote state".to_string(),
         Some("pull_reconcile_done") => "pull: reconciled local remote state".to_string(),
         Some("pull_render_start") => "pull: refreshing generated views".to_string(),
+        Some("pull_render_prepare_start") => "pull: preparing render snapshot".to_string(),
+        Some("pull_render_prepare_done") => render_done_summary("render snapshot", fields),
         Some("pull_render_triage_start") => "pull: rendering triage views".to_string(),
         Some("pull_render_triage_progress") => render_progress_summary("triage views", fields),
         Some("pull_render_triage_done") => render_done_summary("triage views", fields),
@@ -445,8 +578,12 @@ fn pull_phase_summary(phase: Option<&str>, fields: &Value) -> String {
             render_done_summary("spam, trash, and deleted views", fields)
         }
         Some("pull_render_cases_start") => "pull: rendering case views".to_string(),
+        Some("pull_render_cases_progress") => render_progress_summary("case views", fields),
         Some("pull_render_cases_done") => render_done_summary("case views", fields),
         Some("pull_render_notifications_start") => "pull: rendering notification views".to_string(),
+        Some("pull_render_notifications_progress") => {
+            render_progress_summary("notification views", fields)
+        }
         Some("pull_render_notifications_done") => render_done_summary("notification views", fields),
         Some("pull_render_cache_write_start") => "pull: writing render cache".to_string(),
         Some("pull_render_cache_write_done") => render_done_summary("render cache", fields),
@@ -569,7 +706,7 @@ fn value_u64(value: Option<&Value>) -> Option<u64> {
 }
 
 fn workspace_progress_path(root: &Path) -> PathBuf {
-    root.join(".afmail/workspace.progress.json")
+    root.join(crate::layout::afmail_path(crate::layout::AFMAIL_PROGRESS))
 }
 
 fn scalar_summary(value: &Value) -> Value {

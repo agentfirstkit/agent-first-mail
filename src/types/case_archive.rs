@@ -36,8 +36,8 @@ pub struct MessageCollection {
     pub archived_rfc3339: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub message_count: usize,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub thread_count: usize,
+    #[serde(default, rename = "thread_count", skip_serializing)]
+    pub legacy_thread_count: usize,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub attachment_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,7 +63,7 @@ impl MessageCollection {
             updated_rfc3339: None,
             archived_rfc3339: None,
             message_count: 0,
-            thread_count: 0,
+            legacy_thread_count: 0,
             attachment_count: 0,
             last_message_rfc3339: None,
             items: Vec::new(),

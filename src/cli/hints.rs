@@ -34,10 +34,10 @@ pub fn error_hint(argv: &[String]) -> String {
 }
 
 fn nested_hint(prefix: &str, action: Option<&String>, known_actions: &[&str]) -> String {
-    if let Some(action) = action {
-        if known_actions.contains(&action.as_str()) {
-            return format!("try: {prefix} {action} --help");
-        }
+    if let Some(action) = action
+        && known_actions.contains(&action.as_str())
+    {
+        return format!("try: {prefix} {action} --help");
     }
     format!("try: {prefix} --help")
 }
@@ -49,7 +49,12 @@ fn command_tokens(argv: &[String]) -> Vec<String> {
         if arg == "--" {
             break;
         }
-        if arg == "--output" || arg == "--log" || arg == "--stdout-file" || arg == "--stderr-file" {
+        if arg == "--output"
+            || arg == "--log"
+            || arg == "--stdout-file"
+            || arg == "--stderr-file"
+            || arg == "--workspace"
+        {
             let _ = iter.next();
             continue;
         }
@@ -58,6 +63,7 @@ fn command_tokens(argv: &[String]) -> Vec<String> {
             || arg.starts_with("--log=")
             || arg.starts_with("--stdout-file=")
             || arg.starts_with("--stderr-file=")
+            || arg.starts_with("--workspace=")
         {
             continue;
         }

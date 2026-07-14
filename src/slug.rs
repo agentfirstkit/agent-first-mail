@@ -1,4 +1,4 @@
-use agent_first_slug::{validate_slug, SlugValidationPolicy};
+use agent_first_slug::{SlugValidationPolicy, validate_slug};
 
 use crate::error::{AppError, Result};
 

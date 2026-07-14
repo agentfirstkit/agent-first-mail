@@ -1,19 +1,32 @@
 [package]
 name = "agent-first-mail"
-version = "0.6.0"
-edition = "2021"
+version = "0.7.0"
+edition = "2024"
 description = "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm."
 license = "MIT"
 repository = "https://github.com/agentfirstkit/agent-first-mail"
 readme = "README.md"
-exclude = [".github/"]
+include = [
+    "afui/**",
+    "src/**",
+    "tests/**",
+    "templates/**",
+    "skills/**",
+    "docs/**",
+    "build.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE",
+    "clippy.toml",
+]
 
 [[bin]]
 name = "afmail"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["ui"]
 ui = ["dep:agent-first-ui"]
 
 [dependencies]
@@ -21,18 +34,19 @@ ui = ["dep:agent-first-ui"]
 # packaging tied to the matching published crates.
 # agent-first-config lib-only: `json` gives the serde_json bridge.
 agent-first-config = { version = "0.1.0", default-features = false, features = ["json"] }
-agent-first-data = { version = "0.15.0", features = ["cli-help", "cli-help-markdown", "skill-admin", "stream-redirect"] }
+agent-first-data = { version = "0.16.0", features = ["cli-help", "cli-help-markdown", "skill-admin", "stream-redirect"] }
 agent-first-slug = "0.1.0"
-agent-first-ui = { version = "0.1.0", optional = true }
+agent-first-ui = { version = "0.2.0", optional = true }
 blake3 = "1.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-imap = { version = "3.0.0-alpha.15", default-features = false }
+imap = { version = "3.0.0-alpha.15", default-features = false, features = ["rustls-tls"] }
 imap-proto = "0.16"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls", "pool"] }
 mail-parser = { version = "0.11", features = ["full_encoding"] }
+rustls-pemfile = "2.2.0"
 rustls-connector = { version = "0.23", default-features = false, features = ["webpki-root-certs", "rustls--ring"] }
 serde_yaml = "0.9.34"
 minijinja = "2"

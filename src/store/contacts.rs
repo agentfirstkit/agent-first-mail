@@ -1,5 +1,6 @@
 use super::*;
 use crate::types::{ContactFrontmatter, MessageContact};
+use serde::Serialize;
 
 pub enum ContactExtractSource {
     FromTriage,
@@ -17,6 +18,25 @@ pub struct NewContact<'a> {
     pub org: Option<&'a str>,
     pub role: Option<&'a str>,
     pub tags: &'a [String],
+    pub reason: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct ContactIndexDiagnostic {
+    pub code: String,
+    pub message: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact_uid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicting_contact_uids: Vec<String>,
+}
+
+struct ContactEmailIndex {
+    map: BTreeMap<String, MessageContact>,
+    diagnostics: Vec<ContactIndexDiagnostic>,
 }
 
 fn contact_default_body(name: &str) -> String {
@@ -43,8 +63,10 @@ impl Workspace {
             org,
             role,
             tags,
+            reason,
         } = params;
         self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
         validate_name("contact_name", name)?;
         let config = MailConfig::load(&self.root)?;
         let group = group.unwrap_or(config.contact.default_group.as_str());
@@ -56,8 +78,9 @@ impl Workspace {
             .filter(|e| !e.is_empty())
             .collect();
 
+        let contact_index = self.strict_contact_email_map()?;
         for email in &normalized_emails {
-            self.assert_email_unique(email, None)?;
+            assert_email_unique_in_map(&contact_index, email, None)?;
         }
 
         let date = workspace_local_date(&config.resolved_timezone_offset());
@@ -83,7 +106,7 @@ impl Workspace {
         self.append_audit_event(
             "contact_created",
             vec![audit_target("contact", &uid)],
-            None,
+            reason,
             json!({
                 "contact_uid": uid,
                 "display_name": name,
@@ -95,7 +118,6 @@ impl Workspace {
             self.refresh_views_after_contact_change()?;
         }
         Ok(json!({
-            "code": "contact_created",
             "contact_uid": uid,
             "display_name": name,
             "group": group,
@@ -115,27 +137,27 @@ impl Workspace {
         let entries = self.all_active_contact_entries()?;
         let mut contacts = Vec::new();
         for (entry_group, uid, path) in entries {
-            if let Some(g) = group {
-                if entry_group != g {
-                    continue;
-                }
+            if let Some(g) = group
+                && entry_group != g
+            {
+                continue;
             }
             let content = read_to_string(&path, "read contact file")?;
             let (fm, _) = read_contact_md_content(&content)?;
-            if let Some(t) = tag {
-                if !fm.tags.iter().any(|x| x == t) {
-                    continue;
-                }
+            if let Some(t) = tag
+                && !fm.tags.iter().any(|x| x == t)
+            {
+                continue;
             }
-            if let Some(o) = org {
-                if fm.organization != o {
-                    continue;
-                }
+            if let Some(o) = org
+                && fm.organization != o
+            {
+                continue;
             }
-            if let Some(r) = role {
-                if fm.role != r {
-                    continue;
-                }
+            if let Some(r) = role
+                && fm.role != r
+            {
+                continue;
             }
             contacts.push(json!({
                 "contact_uid": uid,
@@ -151,7 +173,6 @@ impl Workspace {
         }
         let count = contacts.len();
         Ok(json!({
-            "code": "contact_list",
             "contacts": contacts,
             "count": count,
         }))
@@ -163,7 +184,6 @@ impl Workspace {
         let (group, path) = self.find_active_contact_path(&uid)?;
         let content = read_to_string(&path, "read contact file")?;
         Ok(json!({
-            "code": "contact_show",
             "contact_uid": uid,
             "group": group,
             "contact_path": rel_path(&self.root, &path),
@@ -171,14 +191,19 @@ impl Workspace {
         }))
     }
 
-    pub fn contact_move(&self, contact_ref: &str, new_group: &str) -> Result<Value> {
+    pub fn contact_move(
+        &self,
+        contact_ref: &str,
+        new_group: &str,
+        reason: Option<&str>,
+    ) -> Result<Value> {
         self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
         let uid = parse_contact_ref(contact_ref)?;
         validate_id("group", new_group)?;
         let (group, src_path) = self.find_active_contact_path(&uid)?;
         if group == new_group {
             return Ok(json!({
-                "code": "contact_moved",
                 "contact_uid": uid,
                 "group": new_group,
                 "contact_path": rel_path(&self.root, &src_path),
@@ -196,11 +221,15 @@ impl Workspace {
         self.append_audit_event(
             "contact_moved",
             vec![audit_target("contact", &uid)],
-            None,
-            json!({"contact_uid": uid, "from_group": group, "to_group": new_group}),
+            reason,
+            json!({
+                "contact_uid": uid,
+                "from_group": group,
+                "to_group": new_group,
+                "changed": true
+            }),
         )?;
         Ok(json!({
-            "code": "contact_moved",
             "contact_uid": uid,
             "group": new_group,
             "contact_path": rel_path(&self.root, &dest_path),
@@ -208,8 +237,14 @@ impl Workspace {
         }))
     }
 
-    pub fn contact_rename(&self, contact_ref: &str, new_name: &str) -> Result<Value> {
+    pub fn contact_rename(
+        &self,
+        contact_ref: &str,
+        new_name: &str,
+        reason: Option<&str>,
+    ) -> Result<Value> {
         self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
         let uid = parse_contact_ref(contact_ref)?;
         validate_name("contact_name", new_name)?;
         let (group, src_path) = self.find_active_contact_path(&uid)?;
@@ -228,14 +263,13 @@ impl Workspace {
         self.append_audit_event(
             "contact_renamed",
             vec![audit_target("contact", &uid)],
-            None,
+            reason,
             json!({"contact_uid": uid, "old_name": old_name, "new_name": new_name}),
         )?;
         if !fm.emails.is_empty() {
             self.refresh_views_after_contact_change()?;
         }
         Ok(json!({
-            "code": "contact_renamed",
             "contact_uid": uid,
             "display_name": new_name,
             "group": group,
@@ -243,14 +277,21 @@ impl Workspace {
         }))
     }
 
-    pub fn contact_email_add(&self, contact_ref: &str, email: &str) -> Result<Value> {
+    pub fn contact_email_add(
+        &self,
+        contact_ref: &str,
+        email: &str,
+        reason: Option<&str>,
+    ) -> Result<Value> {
         self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
         let uid = parse_contact_ref(contact_ref)?;
         let normalized = email.trim().to_ascii_lowercase();
         if normalized.is_empty() {
             return Err(AppError::new("invalid_request", "email must not be empty"));
         }
-        self.assert_email_unique(&normalized, Some(&uid))?;
+        let contact_index = self.strict_contact_email_map()?;
+        assert_email_unique_in_map(&contact_index, &normalized, Some(&uid))?;
         let (_, path) = self.find_active_contact_path(&uid)?;
         let content = read_to_string(&path, "read contact")?;
         let (mut fm, body) = read_contact_md_content(&content)?;
@@ -264,16 +305,31 @@ impl Workspace {
             write_contact_md(&path, &fm, &body)?;
             self.refresh_views_after_contact_change()?;
         }
+        self.append_audit_event(
+            "contact_email_added",
+            vec![audit_target("contact", &uid)],
+            reason,
+            json!({
+                "contact_uid": uid,
+                "email": normalized,
+                "emails": fm.emails,
+            }),
+        )?;
         Ok(json!({
-            "code": "contact_email_added",
             "contact_uid": uid,
             "email": normalized,
             "emails": fm.emails,
         }))
     }
 
-    pub fn contact_email_remove(&self, contact_ref: &str, email: &str) -> Result<Value> {
+    pub fn contact_email_remove(
+        &self,
+        contact_ref: &str,
+        email: &str,
+        reason: Option<&str>,
+    ) -> Result<Value> {
         self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
         let uid = parse_contact_ref(contact_ref)?;
         let normalized = email.trim().to_ascii_lowercase();
         let (_, path) = self.find_active_contact_path(&uid)?;
@@ -286,16 +342,31 @@ impl Workspace {
             write_contact_md(&path, &fm, &body)?;
             self.refresh_views_after_contact_change()?;
         }
+        self.append_audit_event(
+            "contact_email_removed",
+            vec![audit_target("contact", &uid)],
+            reason,
+            json!({
+                "contact_uid": uid,
+                "email": normalized,
+                "emails": fm.emails,
+            }),
+        )?;
         Ok(json!({
-            "code": "contact_email_removed",
             "contact_uid": uid,
             "email": normalized,
             "emails": fm.emails,
         }))
     }
 
-    pub fn contact_phone_add(&self, contact_ref: &str, phone: &str) -> Result<Value> {
+    pub fn contact_phone_add(
+        &self,
+        contact_ref: &str,
+        phone: &str,
+        reason: Option<&str>,
+    ) -> Result<Value> {
         self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
         let uid = parse_contact_ref(contact_ref)?;
         let phone = phone.trim().to_string();
         let (_, path) = self.find_active_contact_path(&uid)?;
@@ -306,16 +377,31 @@ impl Workspace {
             fm.updated_rfc3339 = now_rfc3339();
             write_contact_md(&path, &fm, &body)?;
         }
+        self.append_audit_event(
+            "contact_phone_added",
+            vec![audit_target("contact", &uid)],
+            reason,
+            json!({
+                "contact_uid": uid,
+                "phone": phone,
+                "phones": fm.phones,
+            }),
+        )?;
         Ok(json!({
-            "code": "contact_phone_added",
             "contact_uid": uid,
             "phone": phone,
             "phones": fm.phones,
         }))
     }
 
-    pub fn contact_phone_remove(&self, contact_ref: &str, phone: &str) -> Result<Value> {
+    pub fn contact_phone_remove(
+        &self,
+        contact_ref: &str,
+        phone: &str,
+        reason: Option<&str>,
+    ) -> Result<Value> {
         self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
         let uid = parse_contact_ref(contact_ref)?;
         let phone = phone.trim().to_string();
         let (_, path) = self.find_active_contact_path(&uid)?;
@@ -327,16 +413,26 @@ impl Workspace {
             fm.updated_rfc3339 = now_rfc3339();
             write_contact_md(&path, &fm, &body)?;
         }
+        self.append_audit_event(
+            "contact_phone_removed",
+            vec![audit_target("contact", &uid)],
+            reason,
+            json!({
+                "contact_uid": uid,
+                "phone": phone,
+                "phones": fm.phones,
+            }),
+        )?;
         Ok(json!({
-            "code": "contact_phone_removed",
             "contact_uid": uid,
             "phone": phone,
             "phones": fm.phones,
         }))
     }
 
-    pub fn contact_tag(&self, contact_ref: &str, tag: &str) -> Result<Value> {
+    pub fn contact_tag(&self, contact_ref: &str, tag: &str, reason: Option<&str>) -> Result<Value> {
         self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
         let uid = parse_contact_ref(contact_ref)?;
         let tag = tag.trim().to_string();
         let (_, path) = self.find_active_contact_path(&uid)?;
@@ -345,16 +441,31 @@ impl Workspace {
         merge_string(&mut fm.tags, &tag);
         fm.updated_rfc3339 = now_rfc3339();
         write_contact_md(&path, &fm, &body)?;
+        self.append_audit_event(
+            "contact_tagged",
+            vec![audit_target("contact", &uid)],
+            reason,
+            json!({
+                "contact_uid": uid,
+                "tag": tag,
+                "tags": fm.tags,
+            }),
+        )?;
         Ok(json!({
-            "code": "contact_tagged",
             "contact_uid": uid,
             "tag": tag,
             "tags": fm.tags,
         }))
     }
 
-    pub fn contact_untag(&self, contact_ref: &str, tag: &str) -> Result<Value> {
+    pub fn contact_untag(
+        &self,
+        contact_ref: &str,
+        tag: &str,
+        reason: Option<&str>,
+    ) -> Result<Value> {
         self.require_workspace()?;
+        let reason = self.checked_reason(reason)?;
         let uid = parse_contact_ref(contact_ref)?;
         let tag = tag.trim().to_string();
         let (_, path) = self.find_active_contact_path(&uid)?;
@@ -363,8 +474,17 @@ impl Workspace {
         fm.tags.retain(|t| t != &tag);
         fm.updated_rfc3339 = now_rfc3339();
         write_contact_md(&path, &fm, &body)?;
+        self.append_audit_event(
+            "contact_untagged",
+            vec![audit_target("contact", &uid)],
+            reason,
+            json!({
+                "contact_uid": uid,
+                "tag": tag,
+                "tags": fm.tags,
+            }),
+        )?;
         Ok(json!({
-            "code": "contact_untagged",
             "contact_uid": uid,
             "tag": tag,
             "tags": fm.tags,
@@ -378,7 +498,6 @@ impl Workspace {
         let content = read_to_string(&path, "read contact")?;
         let (_, body) = read_contact_md_content(&content)?;
         Ok(json!({
-            "code": "contact_notes_show",
             "contact_uid": uid,
             "notes": body,
         }))
@@ -397,9 +516,22 @@ impl Workspace {
         };
         fm.updated_rfc3339 = now_rfc3339();
         write_contact_md(&path, &fm, &new_body)?;
+        self.append_audit_event(
+            "contact_notes_appended",
+            vec![audit_target("contact", &uid)],
+            None,
+            json!({
+                "operation": "append",
+                "notes_path": rel_path(&self.root, &path),
+                "text_len_bytes": text.len(),
+                "text_hash": stable_text_hash(text),
+            }),
+        )?;
         Ok(json!({
-            "code": "contact_notes_appended",
             "contact_uid": uid,
+            "notes_path": rel_path(&self.root, &path),
+            "text_len_bytes": text.len(),
+            "text_hash": stable_text_hash(text),
         }))
     }
 
@@ -412,9 +544,22 @@ impl Workspace {
         let new_body = format!("{}\n", text.trim_end());
         fm.updated_rfc3339 = now_rfc3339();
         write_contact_md(&path, &fm, &new_body)?;
+        self.append_audit_event(
+            "contact_notes_replaced",
+            vec![audit_target("contact", &uid)],
+            None,
+            json!({
+                "operation": "replace",
+                "notes_path": rel_path(&self.root, &path),
+                "text_len_bytes": text.len(),
+                "text_hash": stable_text_hash(text),
+            }),
+        )?;
         Ok(json!({
-            "code": "contact_notes_replaced",
             "contact_uid": uid,
+            "notes_path": rel_path(&self.root, &path),
+            "text_len_bytes": text.len(),
+            "text_hash": stable_text_hash(text),
         }))
     }
 
@@ -472,7 +617,6 @@ impl Workspace {
             self.refresh_views_after_contact_change()?;
         }
         Ok(json!({
-            "code": "contact_deleted",
             "contact_uid": uid,
             "display_name": fm.display_name,
             "group": group,
@@ -508,12 +652,13 @@ impl Workspace {
             }
         };
 
+        let mut contact_index = self.strict_contact_email_map()?;
         let mut created_uids: Vec<String> = Vec::new();
         let mut skipped_count = 0usize;
 
         for (display_name, email) in from_headers {
             let email_lc = email.to_ascii_lowercase();
-            if self.contact_email_conflict(&email_lc)? {
+            if contact_index.contains_key(&email_lc) {
                 skipped_count += 1;
                 continue;
             }
@@ -543,6 +688,7 @@ impl Workspace {
             fm.emails = vec![email_lc.clone()];
             let default_notes = format!("## {actual_name}\n\n");
             write_contact_md(&path, &fm, &default_notes)?;
+            contact_index.insert(email_lc.clone(), message_contact_from(&fm));
             self.append_audit_event(
                 "contact_created",
                 vec![audit_target("contact", &uid)],
@@ -557,7 +703,6 @@ impl Workspace {
             self.refresh_views_after_contact_change()?;
         }
         Ok(json!({
-            "code": "contact_extract",
             "created_count": created_count,
             "skipped_count": skipped_count,
             "created_uids": created_uids,
@@ -567,19 +712,80 @@ impl Workspace {
     /// Build an ephemeral email→contact map from active contact files. Replaces
     /// the former persisted email index.
     pub(super) fn contact_email_map(&self) -> Result<BTreeMap<String, MessageContact>> {
+        self.strict_contact_email_map()
+    }
+
+    pub(super) fn contact_index_diagnostics(&self) -> Result<Vec<ContactIndexDiagnostic>> {
+        Ok(self.build_contact_email_index()?.diagnostics)
+    }
+
+    fn strict_contact_email_map(&self) -> Result<BTreeMap<String, MessageContact>> {
+        let index = self.build_contact_email_index()?;
+        if !index.diagnostics.is_empty() {
+            return Err(contact_index_invalid_error(&index.diagnostics));
+        }
+        Ok(index.map)
+    }
+
+    fn build_contact_email_index(&self) -> Result<ContactEmailIndex> {
         let mut map: BTreeMap<String, MessageContact> = BTreeMap::new();
-        for (_, _, path) in self.all_active_contact_entries()? {
+        let mut diagnostics = Vec::new();
+        for (_, entry_uid, path) in self.all_active_contact_entries()? {
+            let rel = rel_path(&self.root, &path);
             let content = read_to_string(&path, "read contact for index")?;
-            if let Ok((fm, _)) = read_contact_md_content(&content) {
-                for email in &fm.emails {
-                    let normalized = email.trim().to_ascii_lowercase();
-                    if !normalized.is_empty() {
-                        map.insert(normalized, message_contact_from(&fm));
-                    }
+            let (fm, _) = match read_contact_md_content(&content) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    diagnostics.push(ContactIndexDiagnostic {
+                        code: "contact_invalid".to_string(),
+                        message: err.message,
+                        path: rel,
+                        contact_uid: Some(entry_uid),
+                        email: None,
+                        conflicting_contact_uids: Vec::new(),
+                    });
+                    continue;
                 }
+            };
+            if fm.contact_uid != entry_uid {
+                diagnostics.push(ContactIndexDiagnostic {
+                    code: "contact_uid_mismatch".to_string(),
+                    message: format!(
+                        "contact file name uid {entry_uid} does not match frontmatter uid {}",
+                        fm.contact_uid
+                    ),
+                    path: rel.clone(),
+                    contact_uid: Some(fm.contact_uid.clone()),
+                    email: None,
+                    conflicting_contact_uids: vec![entry_uid.clone(), fm.contact_uid.clone()],
+                });
+            }
+            for email in &fm.emails {
+                let normalized = email.trim().to_ascii_lowercase();
+                if normalized.is_empty() {
+                    continue;
+                }
+                if let Some(existing) = map.get(&normalized) {
+                    diagnostics.push(ContactIndexDiagnostic {
+                        code: "contact_email_duplicate".to_string(),
+                        message: format!(
+                            "email {normalized} is assigned to contacts {} and {}",
+                            existing.contact_uid, fm.contact_uid
+                        ),
+                        path: rel.clone(),
+                        contact_uid: Some(fm.contact_uid.clone()),
+                        email: Some(normalized.clone()),
+                        conflicting_contact_uids: vec![
+                            existing.contact_uid.clone(),
+                            fm.contact_uid.clone(),
+                        ],
+                    });
+                    continue;
+                }
+                map.insert(normalized, message_contact_from(&fm));
             }
         }
-        Ok(map)
+        Ok(ContactEmailIndex { map, diagnostics })
     }
 
     /// Regenerate every read view that embeds the message section so newly
@@ -592,36 +798,6 @@ impl Workspace {
         self.refresh_all_case_message_views()?;
         self.refresh_notification_indexes()?;
         Ok(())
-    }
-
-    fn assert_email_unique(&self, email: &str, excluding_uid: Option<&str>) -> Result<()> {
-        let normalized = email.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            return Ok(());
-        }
-        if let Some(entry) = self.contact_email_map()?.get(&normalized) {
-            if excluding_uid != Some(entry.contact_uid.as_str()) {
-                return Err(AppError::new(
-                    "email_conflict",
-                    format!(
-                        "email {email} is already assigned to contact {}",
-                        entry.contact_uid
-                    ),
-                )
-                .with_details(json!({"email": email, "existing_contact_uid": entry.contact_uid})));
-            }
-        }
-        Ok(())
-    }
-
-    /// True if any active contact already holds this email. Unlike
-    /// `assert_email_unique`, IO errors propagate instead of reading as "taken".
-    fn contact_email_conflict(&self, email: &str) -> Result<bool> {
-        let normalized = email.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            return Ok(false);
-        }
-        Ok(self.contact_email_map()?.contains_key(&normalized))
     }
 
     fn next_contact_uid_for_date(&self, date: &str) -> Result<String> {
@@ -758,6 +934,42 @@ fn message_contact_from(fm: &ContactFrontmatter) -> MessageContact {
         contact_uid: fm.contact_uid.clone(),
         display_name: fm.display_name.clone(),
     }
+}
+
+fn assert_email_unique_in_map(
+    map: &BTreeMap<String, MessageContact>,
+    email: &str,
+    excluding_uid: Option<&str>,
+) -> Result<()> {
+    let normalized = email.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(());
+    }
+    if let Some(entry) = map.get(&normalized)
+        && excluding_uid != Some(entry.contact_uid.as_str())
+    {
+        return Err(AppError::new(
+            "email_conflict",
+            format!(
+                "email {email} is already assigned to contact {}",
+                entry.contact_uid
+            ),
+        )
+        .with_details(json!({"email": email, "existing_contact_uid": entry.contact_uid})));
+    }
+    Ok(())
+}
+
+fn contact_index_invalid_error(diagnostics: &[ContactIndexDiagnostic]) -> AppError {
+    AppError::new(
+        "contact_index_invalid",
+        "contact index has invalid or conflicting contact files",
+    )
+    .with_hint("Run `afmail doctor` to inspect contact file errors before changing contacts.")
+    .with_details(json!({
+        "diagnostic_count": diagnostics.len(),
+        "diagnostics": diagnostics,
+    }))
 }
 
 /// Resolve the contact whose email set includes a message's `From` header,

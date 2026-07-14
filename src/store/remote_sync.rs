@@ -2,12 +2,13 @@ use super::*;
 
 impl Workspace {
     pub fn pull(&self, ids: &[String]) -> Result<Value> {
-        self.pull_with_progress(ids, None)
+        self.pull_with_progress(ids, crate::imap_pull::PullOptions::default(), None)
     }
 
-    pub fn pull_with_progress(
+    pub(crate) fn pull_with_progress(
         &self,
         ids: &[String],
+        options: crate::imap_pull::PullOptions,
         progress: Option<&mut crate::progress::ProgressCallback<'_>>,
     ) -> Result<Value> {
         self.require_workspace()?;
@@ -33,13 +34,25 @@ impl Workspace {
                 .map(|target| target.mailbox.clone())
                 .collect(),
         )?;
+        if options.dry_run {
+            return crate::imap_pull::pull_workspace(
+                &self.root,
+                &mail_config,
+                &imap,
+                &targets,
+                options,
+                progress.as_deref_mut(),
+            );
+        }
         let mut result = crate::imap_pull::pull_workspace(
             &self.root,
             &mail_config,
             &imap,
             &targets,
+            options,
             progress.as_deref_mut(),
         )?;
+        let all_targets_used_incremental = crate::imap_pull::pull_used_incremental_cursors(&result);
         crate::progress::emit(
             &mut progress,
             "pull_reconcile_start",
@@ -48,7 +61,13 @@ impl Workspace {
                 "mailbox_count": imap.mailboxes.len(),
             }),
         );
-        let reconciliation = self.reconcile_remote_missing(&imap)?;
+        let reconciliation = if all_targets_used_incremental {
+            skipped_reconciliation()
+        } else {
+            self.reconcile_remote_missing(&imap)?
+        };
+        crate::imap_pull::commit_pull_cursors(&self.root, &result, !all_targets_used_incremental)?;
+        crate::imap_pull::remove_internal_pull_fields(&mut result);
         let mut reconcile_progress = reconciliation.clone();
         if let Some(map) = reconcile_progress.as_object_mut() {
             map.insert("mailbox_count".to_string(), json!(imap.mailboxes.len()));
@@ -56,6 +75,28 @@ impl Workspace {
         crate::progress::emit(&mut progress, "pull_reconcile_done", reconcile_progress);
         merge_reconciliation_into_pull(&mut result, &reconciliation);
         crate::progress::emit(&mut progress, "pull_render_start", json!({}));
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_prepare_start",
+            json!({"render_stage": "prepare"}),
+        );
+        let prepare_started = Instant::now();
+        let static_inputs = RenderStaticInputs::load(self, mail_config.clone())?;
+        let preparation = self.prepare_render_context(RenderInvocation::Pull, static_inputs)?;
+        crate::progress::emit(
+            &mut progress,
+            "pull_render_prepare_done",
+            render_step_done_fields(
+                "prepare",
+                prepare_started,
+                json!({
+                    "message_cache_rebuilt_count": preparation.materialization.rebuilt_count,
+                    "text_cache_removed_count": preparation.materialization.removed_text_cache_count,
+                    "validated_eml_count": preparation.materialization.validated_eml_count,
+                    "materialized_cache_written_count": preparation.materialization.materialized_cache_written_count,
+                }),
+            ),
+        );
         let mut render_cache = self.read_render_cache()?;
 
         crate::progress::emit(
@@ -68,6 +109,7 @@ impl Workspace {
             &mut render_cache,
             progress.as_deref_mut(),
             "pull_render_triage_progress",
+            &preparation.context,
         )?;
         crate::progress::emit(
             &mut progress,
@@ -81,7 +123,8 @@ impl Workspace {
             json!({"render_stage": "dispositions"}),
         );
         let render_step_started = Instant::now();
-        let dispositions = self.refresh_disposition_views_cached(&mut render_cache)?;
+        let dispositions =
+            self.refresh_disposition_views_cached(&mut render_cache, &preparation.context)?;
         crate::progress::emit(
             &mut progress,
             "pull_render_dispositions_done",
@@ -96,7 +139,11 @@ impl Workspace {
             json!({"render_stage": "cases"}),
         );
         let render_step_started = Instant::now();
-        let case_refresh = self.refresh_all_case_message_views_cached(&mut render_cache)?;
+        let case_refresh = self.refresh_all_case_message_views_cached(
+            &mut render_cache,
+            &preparation.context,
+            progress.as_deref_mut(),
+        )?;
         crate::progress::emit(
             &mut progress,
             "pull_render_cases_done",
@@ -113,7 +160,12 @@ impl Workspace {
             json!({"render_stage": "notifications"}),
         );
         let render_step_started = Instant::now();
-        let notification_refresh = self.refresh_notification_indexes_cached(&mut render_cache)?;
+        let notification_refresh = self.refresh_notification_indexes_cached(
+            &mut render_cache,
+            false,
+            &preparation.context,
+            progress.as_deref_mut(),
+        )?;
         crate::progress::emit(
             &mut progress,
             "pull_render_notifications_done",
@@ -350,6 +402,20 @@ fn notification_refresh_progress_fields(refresh: &NotificationViewRefresh) -> Va
     })
 }
 
+fn skipped_reconciliation() -> Value {
+    json!({
+        "checked_location_count": 0,
+        "missing_location_count": 0,
+        "deleted_remote_message_count": 0,
+        "deleted_remote_message_ids": [],
+        "tombstoned_message_count": 0,
+        "tombstoned_message_ids": [],
+        "kept_message_count": 0,
+        "kept_message_ids": [],
+        "duration_ms": 0
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct LocalRemoteLocation {
     mailbox: String,
@@ -522,18 +588,18 @@ pub(super) struct ArchiveEligibility {
 
 #[derive(Debug, Clone)]
 pub(super) struct MailboxIdLocation {
-    mailbox_id: Option<String>,
-    push: PushLocation,
+    pub(super) mailbox_id: Option<String>,
+    pub(super) push: PushLocation,
 }
 
 pub(super) fn resolve_location_mailbox_id(
     config: &crate::config::MailConfig,
     location: &MailboxIdLocation,
 ) -> Result<Option<String>> {
-    if let Some(id) = &location.mailbox_id {
-        if config.mailboxes.contains_key(id) {
-            return Ok(Some(id.clone()));
-        }
+    if let Some(id) = &location.mailbox_id
+        && config.mailboxes.contains_key(id)
+    {
+        return Ok(Some(id.clone()));
     }
     let matches = config.matching_mailbox_ids_offline(&location.push.mailbox_name);
     match matches.as_slice() {
@@ -565,7 +631,10 @@ fn mailbox_id_matches_special_use(
 pub(super) fn add_queue_fields(value: &mut Value, location_count: usize, item: Option<&PushItem>) {
     if let Value::Object(map) = value {
         map.insert("location_count".to_string(), json!(location_count));
-        map.insert("queued_location_count".to_string(), json!(location_count));
+        map.insert(
+            "queued_location_count".to_string(),
+            json!(if item.is_some() { location_count } else { 0 }),
+        );
         map.insert("queued".to_string(), json!(item.is_some()));
         map.insert(
             "push_id".to_string(),
@@ -575,14 +644,138 @@ pub(super) fn add_queue_fields(value: &mut Value, location_count: usize, item: O
 }
 
 impl Workspace {
+    pub(crate) fn plan_message_push(
+        &self,
+        message_id: &str,
+        config: &crate::config::MailConfig,
+    ) -> Result<Option<MessageActionPush>> {
+        validate_id("message_id", message_id)?;
+        let message = self.read_message_by_id(message_id)?;
+        let status = MessageStatus::parse(&message.workspace.status)?;
+        let message_ids = vec![message_id.to_string()];
+        match status {
+            MessageStatus::Spam => {
+                let locations = self.message_remote_locations_except_mailbox_kinds(
+                    &message_ids,
+                    &[SpecialUseKind::Junk],
+                )?;
+                Ok(message_action_plan(
+                    MessagePushAction::Spam,
+                    message_ids,
+                    locations,
+                    config.actions.message_spam.steps.clone(),
+                ))
+            }
+            MessageStatus::Trashed => {
+                let locations = self.message_remote_locations_except_mailbox_kinds(
+                    &message_ids,
+                    &[SpecialUseKind::Trash],
+                )?;
+                Ok(message_action_plan(
+                    MessagePushAction::Trash,
+                    message_ids,
+                    locations,
+                    config.actions.message_trash.steps.clone(),
+                ))
+            }
+            MessageStatus::Triage => {
+                let junk_locations = self.message_remote_locations_for_mailbox_kinds(
+                    &message_ids,
+                    &[SpecialUseKind::Junk],
+                )?;
+                if !junk_locations.is_empty() {
+                    return Ok(message_action_plan(
+                        MessagePushAction::Unspam,
+                        message_ids,
+                        junk_locations,
+                        config.actions.message_unspam.steps.clone(),
+                    ));
+                }
+                let trash_locations = self.message_remote_locations_for_mailbox_kinds(
+                    &message_ids,
+                    &[SpecialUseKind::Trash],
+                )?;
+                Ok(message_action_plan(
+                    MessagePushAction::Untrash,
+                    message_ids,
+                    trash_locations,
+                    config.actions.message_untrash.steps.clone(),
+                ))
+            }
+            MessageStatus::Case => {
+                let locations = self.message_remote_locations_any(&message_ids)?;
+                Ok(message_action_plan(
+                    MessagePushAction::CaseAdd,
+                    message_ids,
+                    locations,
+                    config.actions.case_add.steps.clone(),
+                ))
+            }
+            MessageStatus::Notification | MessageStatus::Archived => {
+                self.plan_archive_message_push(message_id, config)
+            }
+            MessageStatus::DeletedRemote | MessageStatus::PushQueued => Ok(None),
+        }
+    }
+
+    fn plan_archive_message_push(
+        &self,
+        message_id: &str,
+        config: &crate::config::MailConfig,
+    ) -> Result<Option<MessageActionPush>> {
+        let message_ids = vec![message_id.to_string()];
+        let archiving_case_uid = self.archiving_case_uid_for_message(message_id)?;
+        let eligibility =
+            self.archive_eligibility_inner(message_id, None, archiving_case_uid.as_deref())?;
+        if !eligibility.eligible {
+            return Ok(None);
+        }
+        let locations = self.message_remote_locations_with_mailbox_ids(&message_ids)?;
+        let mut selected_source_id: Option<String> = None;
+        let mut selected_locations = Vec::new();
+        let mut selected_steps = Vec::new();
+        for location in &locations {
+            let Some(source_id) = resolve_location_mailbox_id(config, location)? else {
+                continue;
+            };
+            let Some(rule) = config
+                .actions
+                .message_notification
+                .by_source_mailbox_id
+                .get(&source_id)
+            else {
+                continue;
+            };
+            if rule.steps.is_empty() {
+                continue;
+            }
+            if selected_source_id
+                .as_deref()
+                .is_none_or(|id| id == source_id)
+            {
+                selected_source_id = Some(source_id);
+                selected_steps = rule.steps.clone();
+                selected_locations.push(location.push.clone());
+            }
+        }
+        Ok(message_action_plan(
+            MessagePushAction::Notification,
+            message_ids,
+            selected_locations,
+            selected_steps,
+        ))
+    }
+
     pub(super) fn queue_archive_for_archived_messages(
         &self,
         message_ids: &[String],
         allowed_push_path: Option<&Path>,
+        archiving_case_uid: Option<&str>,
     ) -> Result<ArchiveQueue> {
         let mut eligible_message_ids = Vec::new();
         for message_id in message_ids {
-            let eligibility = self.archive_eligibility(message_id, allowed_push_path)?;
+            let eligibility =
+                self.archive_eligibility_inner(message_id, allowed_push_path, archiving_case_uid)?;
             self.write_archive_sync_state(message_id, eligibility.eligible)?;
             if eligibility.eligible {
                 eligible_message_ids.push(message_id.clone());
@@ -708,6 +901,31 @@ impl Workspace {
         Ok(locations)
     }
 
+    pub(super) fn message_remote_locations_except_mailbox_kinds(
+        &self,
+        message_ids: &[String],
+        kinds: &[SpecialUseKind],
+    ) -> Result<Vec<PushLocation>> {
+        if kinds.is_empty() {
+            return self.message_remote_locations(message_ids);
+        }
+        let config = crate::config::MailConfig::load(&self.root)?;
+        let mut locations = Vec::new();
+        for location in self.message_remote_locations_with_mailbox_ids(message_ids)? {
+            let Some(source_id) = resolve_location_mailbox_id(&config, &location)? else {
+                locations.push(location.push);
+                continue;
+            };
+            if !kinds
+                .iter()
+                .any(|kind| mailbox_id_matches_special_use(&config, &source_id, *kind))
+            {
+                locations.push(location.push);
+            }
+        }
+        Ok(locations)
+    }
+
     pub(crate) fn ensure_archive_eligible(
         &self,
         message_ids: &[String],
@@ -760,6 +978,15 @@ impl Workspace {
         message_id: &str,
         allowed_push_path: Option<&Path>,
     ) -> Result<ArchiveEligibility> {
+        self.archive_eligibility_inner(message_id, allowed_push_path, None)
+    }
+
+    fn archive_eligibility_inner(
+        &self,
+        message_id: &str,
+        allowed_push_path: Option<&Path>,
+        archiving_case_uid: Option<&str>,
+    ) -> Result<ArchiveEligibility> {
         validate_id("message_id", message_id)?;
         let message = self.read_message_by_id(message_id)?;
         let cases = CaseIndex::build(self)?;
@@ -774,12 +1001,27 @@ impl Workspace {
             .into_iter()
             .collect::<BTreeSet<_>>();
         self.collect_active_case_references(&ids, &mut blockers)?;
-        self.collect_draft_references(&ids, &mut blockers)?;
-        self.collect_push_references(&ids, allowed_push_path, &mut blockers)?;
+        self.collect_draft_references_except_case(&ids, archiving_case_uid, &mut blockers)?;
+        self.collect_push_references_except_case(
+            &ids,
+            allowed_push_path,
+            archiving_case_uid,
+            &mut blockers,
+        )?;
         Ok(ArchiveEligibility {
             eligible: blockers.is_empty(),
             blockers,
         })
+    }
+
+    fn archiving_case_uid_for_message(&self, message_id: &str) -> Result<Option<String>> {
+        for entry in self.archived_case_entries()? {
+            let case = read_case_file(&entry.path)?;
+            if case.status == "archiving" && case.contains_message(message_id) {
+                return Ok(Some(entry.case_uid));
+            }
+        }
+        Ok(None)
     }
 
     pub(crate) fn message_remote_locations(
@@ -894,10 +1136,28 @@ impl Workspace {
         message_ids: &[String],
         allowed_push_path: Option<&Path>,
     ) -> Result<()> {
+        self.ensure_message_ids_unreferenced_except_message_pushes(
+            message_ids,
+            allowed_push_path,
+            &[],
+        )
+    }
+
+    pub(crate) fn ensure_message_ids_unreferenced_except_message_pushes(
+        &self,
+        message_ids: &[String],
+        allowed_push_path: Option<&Path>,
+        allowed_push_actions: &[crate::types::MessagePushAction],
+    ) -> Result<()> {
         let ids = message_ids.iter().cloned().collect::<BTreeSet<_>>();
         let mut references = Vec::new();
         self.collect_case_references(&ids, &mut references)?;
-        self.collect_push_references(&ids, allowed_push_path, &mut references)?;
+        self.collect_push_references_except_message_pushes(
+            &ids,
+            allowed_push_path,
+            allowed_push_actions,
+            &mut references,
+        )?;
         self.collect_notification_references(&ids, &mut references)?;
         if references.is_empty() {
             Ok(())
@@ -979,7 +1239,19 @@ impl Workspace {
         ids: &BTreeSet<String>,
         references: &mut Vec<String>,
     ) -> Result<()> {
-        for (_, case_path) in self.all_case_entries()? {
+        self.collect_draft_references_except_case(ids, None, references)
+    }
+
+    fn collect_draft_references_except_case(
+        &self,
+        ids: &BTreeSet<String>,
+        ignored_case_uid: Option<&str>,
+        references: &mut Vec<String>,
+    ) -> Result<()> {
+        for (case_uid, case_path) in self.all_case_entries()? {
+            if ignored_case_uid.is_some_and(|ignored| ignored == case_uid) {
+                continue;
+            }
             let drafts_dir = case_path.join("drafts");
             if drafts_dir.exists() {
                 for entry in read_dir(&drafts_dir, "read drafts directory")? {
@@ -1002,13 +1274,61 @@ impl Workspace {
         Ok(())
     }
 
+    fn collect_push_references_except_case(
+        &self,
+        ids: &BTreeSet<String>,
+        allowed_push_path: Option<&Path>,
+        ignored_case_uid: Option<&str>,
+        references: &mut Vec<String>,
+    ) -> Result<()> {
+        let push_dir = self
+            .root
+            .join(crate::layout::afmail_path(crate::layout::AFMAIL_PUSH));
+        if !push_dir.exists() {
+            return Ok(());
+        }
+        for entry in read_dir(&push_dir, "read push queue")? {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json")
+                || allowed_push_path.is_some_and(|allowed| allowed == path)
+            {
+                continue;
+            }
+            let item = PushItem::parse_json(&read_to_string(&path, "read push item")?)?;
+            if item.message().is_some() {
+                continue;
+            }
+            if ignored_case_uid
+                .is_some_and(|ignored| item.draft().is_some_and(|draft| draft.case_uid == ignored))
+            {
+                continue;
+            }
+            if item.message_ids().iter().any(|id| ids.contains(id)) {
+                references.push(rel_path(&self.root, &path));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn collect_push_references(
         &self,
         ids: &BTreeSet<String>,
         allowed_push_path: Option<&Path>,
         references: &mut Vec<String>,
     ) -> Result<()> {
-        let push_dir = self.root.join(".afmail/push");
+        self.collect_push_references_except_message_pushes(ids, allowed_push_path, &[], references)
+    }
+
+    pub(super) fn collect_push_references_except_message_pushes(
+        &self,
+        ids: &BTreeSet<String>,
+        allowed_push_path: Option<&Path>,
+        allowed_push_actions: &[crate::types::MessagePushAction],
+        references: &mut Vec<String>,
+    ) -> Result<()> {
+        let push_dir = self
+            .root
+            .join(crate::layout::afmail_path(crate::layout::AFMAIL_PUSH));
         if !push_dir.exists() {
             return Ok(());
         }
@@ -1020,7 +1340,13 @@ impl Workspace {
                 continue;
             }
             let data = read_to_string(&path, "read push item")?;
-            PushItem::parse_json(&data)?;
+            let item = PushItem::parse_json(&data)?;
+            if item.message().is_some() {
+                continue;
+            }
+            if message_push_action_is_allowed(&item, ids, allowed_push_actions) {
+                continue;
+            }
             let value = serde_json::from_str::<Value>(&data)
                 .map_err(|e| AppError::json("parse push item", &e))?;
             if json_contains_any_id(&value, ids) {
@@ -1045,5 +1371,133 @@ impl Workspace {
             }
         }
         Ok(())
+    }
+}
+
+fn message_action_plan(
+    action: MessagePushAction,
+    message_ids: Vec<String>,
+    locations: Vec<PushLocation>,
+    steps: Vec<crate::config::ActionStep>,
+) -> Option<MessageActionPush> {
+    if locations.is_empty() || steps.is_empty() {
+        return None;
+    }
+    Some(MessageActionPush {
+        action,
+        message_ids,
+        locations,
+        steps,
+        reply_to_message_id: None,
+    })
+}
+
+fn message_push_action_is_allowed(
+    item: &PushItem,
+    ids: &BTreeSet<String>,
+    allowed_push_actions: &[crate::types::MessagePushAction],
+) -> bool {
+    if allowed_push_actions.is_empty() {
+        return false;
+    }
+    if item.has_started_steps() {
+        return false;
+    }
+    item.message_action().is_some_and(|payload| {
+        allowed_push_actions.contains(&payload.action)
+            && (payload.message_ids.iter().any(|id| ids.contains(id))
+                || payload
+                    .locations
+                    .iter()
+                    .any(|location| ids.contains(&location.message_id)))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::MessageAuthentication;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn uidvalidity_mismatch_marks_remote_location_missing() {
+        let snapshot = crate::imap_pull::FolderUidSnapshot {
+            mailbox: "INBOX".to_string(),
+            uid_validity: 99,
+            uids: BTreeSet::from([7u64]),
+        };
+        let mut snapshots = BTreeMap::new();
+        snapshots.insert("INBOX".to_string(), &snapshot);
+
+        let location = LocalRemoteLocation {
+            mailbox: "INBOX".to_string(),
+            uid_validity: 44,
+            uid: 7,
+        };
+        assert!(remote_location_missing(&location, &snapshots));
+
+        let mut message = MessageFile {
+            schema_name: "message".to_string(),
+            schema_version: 1,
+            message_id: "message_uidvalidity".to_string(),
+            rfc822_message_id: Some("<message_uidvalidity@example.com>".to_string()),
+            in_reply_to: None,
+            references: Vec::new(),
+            remote: Some(RemoteState {
+                locations: vec![RemoteLocation {
+                    mailbox_name: "INBOX".to_string(),
+                    mailbox_id: Some("inbox".to_string()),
+                    uid_validity: Some(44),
+                    uid: Some(7),
+                    flags: Vec::new(),
+                    observed_rfc3339: "2026-05-21T10:00:00Z".to_string(),
+                    missing_rfc3339: None,
+                }],
+            }),
+            direction: Some("inbound".to_string()),
+            subject: Some("UIDVALIDITY".to_string()),
+            from: Some("alice@example.com".to_string()),
+            to: vec!["me@example.com".to_string()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            reply_to: Vec::new(),
+            sender: None,
+            delivered_to: Vec::new(),
+            x_original_to: Vec::new(),
+            envelope_to: Vec::new(),
+            list_id: None,
+            mailing_list_headers: Vec::new(),
+            authentication: MessageAuthentication::default(),
+            received_rfc3339: Some("2026-05-21T10:00:00Z".to_string()),
+            sent_rfc3339: None,
+            body_text: "Body".to_string(),
+            eml_path: Some(".afmail/messages/message_uidvalidity.eml".to_string()),
+            attachments: Vec::new(),
+            contact: None,
+            identity: None,
+            identity_email: None,
+            identity_match: None,
+            identity_candidates: Vec::new(),
+            observed_recipient_emails: Vec::new(),
+            workspace: WorkspaceState {
+                status: "triage".to_string(),
+                notification_uid: None,
+                notification_rfc3339: None,
+                origin: None,
+                remote_sync: None,
+                push: None,
+            },
+        };
+
+        mark_remote_locations_missing(&mut message, &[location]);
+        assert!(message_remote_missing(&message));
+        assert!(
+            message
+                .remote
+                .as_ref()
+                .and_then(|remote| remote.locations.first())
+                .and_then(|remote| remote.missing_rfc3339.as_ref())
+                .is_some()
+        );
     }
 }

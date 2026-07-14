@@ -10,6 +10,9 @@ pub struct ImapSection {
     pub port: u16,
     #[serde(default = "default_true")]
     pub tls: bool,
+    pub tls_root_cert_path: Option<String>,
+    #[serde(default)]
+    pub allow_unbounded_body_fetch: bool,
     pub username: Option<String>,
     pub password_secret: Option<String>,
     pub password_secret_env: Option<String>,
@@ -21,6 +24,8 @@ impl Default for ImapSection {
             host: None,
             port: default_imap_port(),
             tls: true,
+            tls_root_cert_path: None,
+            allow_unbounded_body_fetch: false,
             username: None,
             password_secret: None,
             password_secret_env: None,
@@ -282,6 +287,8 @@ pub struct ImapConfig {
     pub host: String,
     pub port: u16,
     pub tls: bool,
+    pub tls_root_cert_path: Option<String>,
+    pub allow_unbounded_body_fetch: bool,
     pub username: String,
     pub password_secret: String,
     pub mailboxes: Vec<String>,

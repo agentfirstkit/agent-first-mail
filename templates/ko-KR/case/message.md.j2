@@ -5,7 +5,7 @@ case_name: {{ frontmatter.case_name }}
 message_id: {{ frontmatter.message_id }}
 ---
 
-# {% if view.title %}{{ view.title }}{% else %}케이스 메시지{% endif %}
+# {% if view.display_title %}{{ view.display_title }}{% else %}케이스 메시지{% endif %}
 
 케이스: {{ case.case_name }} (`{{ case.case_uid }}`)
 메시지: `{{ message.message_id }}`

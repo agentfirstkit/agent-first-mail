@@ -201,22 +201,32 @@ impl Workspace {
     }
 
     pub(super) fn refresh_disposition_views(&self) -> Result<Value> {
-        self.refresh_disposition_views_inner(None)
+        self.refresh_disposition_views_inner(None, None)
     }
 
     pub(super) fn refresh_disposition_views_cached(
         &self,
         cache: &mut RenderCache,
+        render_context: &RenderContext,
     ) -> Result<Value> {
-        self.refresh_disposition_views_inner(Some(cache))
+        self.refresh_disposition_views_inner(Some(cache), Some(render_context))
     }
 
     fn refresh_disposition_views_inner(
         &self,
         mut cache: Option<&mut RenderCache>,
+        render_context: Option<&RenderContext>,
     ) -> Result<Value> {
         self.require_workspace()?;
-        let config = MailConfig::load(&self.root)?;
+        let owned_config = if render_context.is_none() {
+            Some(MailConfig::load(&self.root)?)
+        } else {
+            None
+        };
+        let config = render_context
+            .map(RenderContext::config)
+            .or(owned_config.as_ref())
+            .ok_or_else(|| AppError::new("internal", "render config was not initialized"))?;
         let language = config.template_language();
         let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
         let mut groups: BTreeMap<&'static str, Vec<MessageFile>> = BTreeMap::new();
@@ -234,12 +244,17 @@ impl Workspace {
         for spec in DISPOSITION_VIEW_SPECS {
             let data = self.read_disposition_messages(spec)?;
             for item in data.items {
-                let mut message = self.read_message_by_id(&item.message_id)?;
+                let mut message = match render_context {
+                    Some(context) => context.read_message(self, &item.message_id)?,
+                    None => self.read_message_by_id(&item.message_id)?,
+                };
                 message.workspace.status = spec.status.as_str().to_string();
                 message.workspace.notification_uid = None;
                 message.workspace.notification_rfc3339 = None;
                 message.workspace.origin = None;
-                self.apply_identity_match(&mut message, &config)?;
+                if render_context.is_none() {
+                    self.apply_identity_match(&mut message, config)?;
+                }
                 desired
                     .entry(spec.dir)
                     .or_default()
@@ -247,9 +262,10 @@ impl Workspace {
                 let outcome = self.write_disposition_message_view_inner(
                     spec,
                     &message,
-                    &config,
+                    config,
                     &mut renderer,
                     cache.as_deref_mut(),
+                    render_context,
                 )?;
                 match outcome {
                     FileWriteOutcome::Written => *written.entry(spec.dir).or_default() += 1,
@@ -280,7 +296,7 @@ impl Workspace {
             let outcome = self.write_disposition_index_inner(
                 spec,
                 &mut messages,
-                &config,
+                config,
                 &mut renderer,
                 cache.as_deref_mut(),
             )?;
@@ -297,7 +313,6 @@ impl Workspace {
         let trash_unchanged_count = unchanged.get("trash").copied().unwrap_or_default();
         let deleted_unchanged_count = unchanged.get("deleted").copied().unwrap_or_default();
         Ok(json!({
-            "code": "disposition_views_refreshed",
             "spam_count": spam_written_count + spam_unchanged_count,
             "spam_written_count": spam_written_count,
             "spam_unchanged_count": spam_unchanged_count,
@@ -324,6 +339,7 @@ impl Workspace {
         config: &MailConfig,
         renderer: &mut MarkdownTemplateRenderer<'_>,
         cache: Option<&mut RenderCache>,
+        render_context: Option<&RenderContext>,
     ) -> Result<FileWriteOutcome> {
         let path = self.disposition_message_view_path(spec, &message.message_id);
         let context = json!({
@@ -337,6 +353,7 @@ impl Workspace {
                 "language": config.resolved_language_bcp47(),
                 "status": message.workspace.status.as_str(),
                 "title": message.subject.as_deref().unwrap_or(""),
+                "display_title": markdown_inline(message.subject.as_deref().unwrap_or("")),
             },
         });
         if let Some(cache) = cache {
@@ -346,7 +363,12 @@ impl Workspace {
                 &path,
                 &[TemplateKey::StatusMessage, TemplateKey::MessageSection],
                 json!({
-                    "message_hash": blake3_json_fingerprint(message)?,
+                    "message_hash": render_context
+                        .and_then(|context| context.snapshot(&message.message_id))
+                        .map(|snapshot| snapshot.hash.clone())
+                        .unwrap_or(blake3_json_fingerprint(message)?),
+                    "quoted_message_id": render_context
+                        .and_then(|context| context.quoted_message_id(&message.message_id)),
                     "context": context.clone(),
                 }),
             )?;
@@ -356,29 +378,35 @@ impl Workspace {
                 spec.frontmatter_kind,
                 input_hash,
                 || {
-                    let conversation = self.message_conversation_with_renderer(
+                    let conversation = self.message_conversation_with_renderer_context(
                         message,
                         config,
                         renderer,
                         path.parent(),
+                        render_context,
                     )?;
                     let mut context = context.clone();
-                    if let Value::Object(root) = &mut context {
-                        if let Some(Value::Object(view)) = root.get_mut("view") {
-                            view.insert("conversation".to_string(), json!(conversation.trim()));
-                        }
+                    if let Value::Object(root) = &mut context
+                        && let Some(Value::Object(view)) = root.get_mut("view")
+                    {
+                        view.insert("conversation".to_string(), json!(conversation.trim()));
                     }
                     renderer.render(TemplateKey::StatusMessage, &context)
                 },
             );
         }
-        let conversation =
-            self.message_conversation_with_renderer(message, config, renderer, path.parent())?;
+        let conversation = self.message_conversation_with_renderer_context(
+            message,
+            config,
+            renderer,
+            path.parent(),
+            render_context,
+        )?;
         let mut context = context;
-        if let Value::Object(root) = &mut context {
-            if let Some(Value::Object(view)) = root.get_mut("view") {
-                view.insert("conversation".to_string(), json!(conversation.trim()));
-            }
+        if let Value::Object(root) = &mut context
+            && let Some(Value::Object(view)) = root.get_mut("view")
+        {
+            view.insert("conversation".to_string(), json!(conversation.trim()));
         }
         let rendered = renderer.render(TemplateKey::StatusMessage, &context)?;
         write_string(&path, &rendered)?;

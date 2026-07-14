@@ -9,6 +9,9 @@ pub(super) fn actions_for(
         return Ok(payload.steps.iter().map(step_label).collect());
     }
     if let Some(outbound) = item.outbound() {
+        if !outbound.steps.is_empty() {
+            return Ok(outbound.steps.iter().map(step_label).collect());
+        }
         let steps = match outbound.action {
             OutboundAction::SaveDraft => &config.actions.draft_save.steps,
             OutboundAction::Send => &config.actions.draft_send.steps,
@@ -34,9 +37,15 @@ pub(super) fn actions_for(
 }
 
 pub(super) fn item_summary_label(item: &PushItem) -> &str {
+    if item.outbound().is_some() {
+        return "drafts";
+    }
+    if let Some(payload) = item.message_action() {
+        return payload.action.mode_label();
+    }
     match &item.payload {
-        PushPayload::Outbound(_) => "drafts",
-        PushPayload::MessageAction(payload) => payload.action.mode_label(),
+        PushPayload::Draft(_) => "drafts",
+        PushPayload::Message(_) => "message",
     }
 }
 

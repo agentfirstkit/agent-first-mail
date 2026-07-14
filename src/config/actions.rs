@@ -1,5 +1,5 @@
-use super::validation::{validate_config_id, validate_steps};
 use super::MailConfig;
+use super::validation::{validate_config_id, validate_steps};
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -148,7 +148,9 @@ impl ActionsSection {
             if !config.mailboxes.contains_key(id) {
                 return Err(AppError::new(
                     "config_invalid",
-                    format!("actions.message.notification.by_source_mailbox_id.{id} references unknown mailbox id"),
+                    format!(
+                        "actions.message.notification.by_source_mailbox_id.{id} references unknown mailbox id"
+                    ),
                 ));
             }
             validate_steps(

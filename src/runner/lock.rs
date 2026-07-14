@@ -1,7 +1,7 @@
 use crate::cli::{
-    CaseCommand, CaseNotesAction, Command, ConfigAction, ContactCommand, ContactNotesAction,
-    DoctorAction, MessageAction, NotificationCommand, NotificationNotesAction, PushAction,
-    RemoteAction, RenderAction, TriageAction,
+    CaseCommand, CaseDraftAction, CaseNotesAction, Command, ConfigAction, ContactCommand,
+    ContactNotesAction, DoctorAction, MessageAction, NotificationCommand, NotificationNotesAction,
+    PushAction, RemoteAction, RenderAction, TriageAction,
 };
 use crate::error::Result;
 use crate::store::Workspace;
@@ -25,9 +25,23 @@ pub(super) fn command_lock(command: &Command, cwd: &Path) -> Result<CommandLock>
 
 fn lock_mode(command: &Command) -> LockMode {
     match command {
-        Command::Init { .. } | Command::Pull { .. } | Command::Purge { .. } => LockMode::Exclusive,
+        Command::Init { .. } => LockMode::Exclusive,
+        Command::Pull { dry_run, .. } => {
+            if *dry_run {
+                LockMode::Shared
+            } else {
+                LockMode::Exclusive
+            }
+        }
+        Command::Purge { confirm, .. } => {
+            if confirm.is_some() {
+                LockMode::Exclusive
+            } else {
+                LockMode::Shared
+            }
+        }
         Command::Message { action } => match action {
-            MessageAction::Show { .. } => LockMode::Shared,
+            MessageAction::Show { .. } | MessageAction::List { .. } => LockMode::Shared,
             _ => LockMode::Exclusive,
         },
         Command::Config { action } => match action {
@@ -45,7 +59,7 @@ fn lock_mode(command: &Command) -> LockMode {
             action,
         } => match action {
             Some(PushAction::List) => LockMode::Shared,
-            None if *confirm => LockMode::Exclusive,
+            None if confirm.is_some() => LockMode::Exclusive,
             None => LockMode::Shared,
         },
         Command::Status => LockMode::Shared,
@@ -55,7 +69,7 @@ fn lock_mode(command: &Command) -> LockMode {
         },
         Command::Skill { .. } => LockMode::Shared,
         Command::Triage { action } => match action {
-            TriageAction::List => LockMode::Shared,
+            TriageAction::List { .. } => LockMode::Shared,
         },
         Command::Case { action } => match action {
             CaseCommand::Create(_) => LockMode::Exclusive,
@@ -63,6 +77,9 @@ fn lock_mode(command: &Command) -> LockMode {
             | CaseCommand::List { .. }
             | CaseCommand::Notes {
                 action: CaseNotesAction::Show { .. },
+            }
+            | CaseCommand::Draft {
+                action: CaseDraftAction::List { .. },
             } => LockMode::Shared,
             _ => LockMode::Exclusive,
         },
@@ -94,7 +111,7 @@ fn lock_mode(command: &Command) -> LockMode {
 
 pub(super) fn workspace_progress_command(command: &Command) -> Option<&'static str> {
     match command {
-        Command::Pull { .. } => Some("pull"),
+        Command::Pull { dry_run: false, .. } => Some("pull"),
         Command::Render {
             action: RenderAction::Refresh,
         } => Some("render"),
@@ -102,7 +119,7 @@ pub(super) fn workspace_progress_command(command: &Command) -> Option<&'static s
             dry_run,
             confirm,
             action: None,
-        } if *confirm && !*dry_run => Some("push"),
+        } if confirm.is_some() && !*dry_run => Some("push"),
         _ => None,
     }
 }

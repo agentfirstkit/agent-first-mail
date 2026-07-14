@@ -10,12 +10,14 @@
 )]
 
 use agent_first_data::{
-    build_cli_error, cli_output, cli_parse_output, OutputFormat, VersionConfig,
+    OutputFormat, VersionConfig, build_cli_error, cli_output, cli_parse_output,
 };
 use agent_first_mail::cli;
+use agent_first_mail::runner::output_write_failed_exit_code;
 use agent_first_mail::runner::run_command;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 fn main() {
@@ -29,27 +31,62 @@ fn main() {
             let hint = cli::error_hint(&argv);
             let value = cli_error_with_trace(&err, Some(hint.as_str()), elapsed_ms(&started));
             let output = requested_output_format().unwrap_or(OutputFormat::Json);
-            let _ = writeln!(std::io::stdout(), "{}", cli_output(&value, output));
-            std::process::exit(2);
+            match writeln!(std::io::stdout(), "{}", cli_output(&value, output)) {
+                Ok(()) => std::process::exit(2),
+                Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
+            }
         }
     };
     let cli::ParsedArgs {
         command,
         output,
         log,
+        workspace,
+        request_id,
     } = parsed;
-    std::process::exit(run_command(command, output, &log, &argv));
+    if let Err(err) = apply_explicit_workspace(workspace.as_deref()) {
+        let value = cli_error_with_trace(&err, None, elapsed_ms(&started));
+        match writeln!(std::io::stdout(), "{}", cli_output(&value, output)) {
+            Ok(()) => std::process::exit(1),
+            Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
+        }
+    }
+    std::process::exit(run_command(command, request_id, output, &log, &argv));
 }
 
-fn install_stream_redirect_or_exit(
-) -> Option<agent_first_data::stream_redirect::InstalledStreamRedirect> {
+fn apply_explicit_workspace(workspace: Option<&str>) -> Result<(), String> {
+    let Some(workspace) = workspace else {
+        return Ok(());
+    };
+    let path = PathBuf::from(workspace);
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|err| format!("canonicalize --workspace {}: {err}", display_path(&path)))?;
+    if !canonical.join(".afmail").is_dir() {
+        return Err(format!(
+            "--workspace {} is not an afmail workspace root: missing .afmail directory",
+            display_path(&canonical)
+        ));
+    }
+    std::env::set_current_dir(&canonical)
+        .map_err(|err| format!("enter --workspace {}: {err}", display_path(&canonical)))
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn install_stream_redirect_or_exit()
+-> Option<agent_first_data::stream_redirect::InstalledStreamRedirect> {
     match agent_first_data::stream_redirect::install_from_raw_args(std::env::args()) {
         Ok(redirect) => redirect,
         Err(err) => {
-            let value = build_cli_error(&err.to_string(), None);
-            let rendered = cli_output(&value, OutputFormat::Json);
-            let _ = writeln!(std::io::stdout(), "{rendered}");
-            std::process::exit(2);
+            let stdout = std::io::stdout();
+            let mut emitter = agent_first_data::CliEmitter::new(stdout.lock(), OutputFormat::Json)
+                .with_strict_protocol();
+            match emitter.emit_error("cli_error", &err.to_string()) {
+                Ok(()) => std::process::exit(2),
+                Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
+            }
         }
     }
 }
@@ -60,40 +97,44 @@ fn handle_help_and_version(started: &Instant) {
         &raw,
         "afmail",
         env!("CARGO_PKG_VERSION"),
-        &VersionConfig::conventional_default(),
+        &VersionConfig::conventional_default().with_protocol_v1(),
     ) {
-        Ok(Some(version)) => {
-            let _ = write!(std::io::stdout(), "{version}");
-            std::process::exit(0);
-        }
+        Ok(Some(version)) => match write!(std::io::stdout(), "{version}") {
+            Ok(()) => std::process::exit(0),
+            Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
+        },
         Ok(None) => {}
         Err(err) => {
-            let mut err = err;
+            let mut err: Value = err.into();
             attach_trace(&mut err, elapsed_ms(started));
-            let _ = writeln!(
+            match writeln!(
                 std::io::stdout(),
                 "{}",
                 cli_output(&err, OutputFormat::Json)
-            );
-            std::process::exit(2);
+            ) {
+                Ok(()) => std::process::exit(2),
+                Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
+            }
         }
     }
     match agent_first_data::cli_handle_help_or_continue(
         &raw,
         &cli::command(),
-        &agent_first_data::HelpConfig::human_cli_default(),
+        &agent_first_data::HelpConfig::human_cli_default().with_protocol_v1(),
     ) {
-        Ok(Some(help)) => {
-            let _ = write!(std::io::stdout(), "{help}");
-            std::process::exit(0);
-        }
+        Ok(Some(help)) => match write!(std::io::stdout(), "{help}") {
+            Ok(()) => std::process::exit(0),
+            Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
+        },
         Ok(None) => {}
         Err(err) => {
-            let mut err = err;
+            let mut err: Value = err;
             attach_trace(&mut err, elapsed_ms(started));
             let output = requested_output_format().unwrap_or(OutputFormat::Json);
-            let _ = writeln!(std::io::stdout(), "{}", cli_output(&err, output));
-            std::process::exit(2);
+            match writeln!(std::io::stdout(), "{}", cli_output(&err, output)) {
+                Ok(()) => std::process::exit(2),
+                Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
+            }
         }
     }
 }
@@ -126,7 +167,7 @@ fn requested_output_format_result() -> Result<Option<OutputFormat>, String> {
 }
 
 fn cli_error_with_trace(message: &str, hint: Option<&str>, duration_ms: u64) -> Value {
-    let mut value = build_cli_error(message, hint);
+    let mut value: Value = build_cli_error(message, hint).into();
     attach_trace(&mut value, duration_ms);
     value
 }
@@ -135,6 +176,11 @@ fn attach_trace(value: &mut Value, duration_ms: u64) {
     let Value::Object(map) = value else {
         return;
     };
+    if let Some(Value::Object(error)) = map.get_mut("error") {
+        error
+            .entry("retryable".to_string())
+            .or_insert_with(|| json!(false));
+    }
     let trace = map.entry("trace").or_insert_with(|| json!({}));
     if !trace.is_object() {
         *trace = json!({});

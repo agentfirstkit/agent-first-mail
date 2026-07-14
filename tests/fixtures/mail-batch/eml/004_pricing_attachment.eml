@@ -1,5 +1,5 @@
 Message-ID: <pricing_attachment@fixtures.afmail.local>
-From: Victor Sales <victor@example.net>
+From: Pricing Team <pricing@acme.example>
 To: Me <me@localhost>
 Date: Thu, 21 May 2026 09:28:00 +0000
 Subject: Q3 pricing proposal
@@ -7,15 +7,24 @@ MIME-Version: 1.0
 Content-Type: multipart/mixed; boundary="afmail-fixture-pricing_attachment"
 
 --afmail-fixture-pricing_attachment
-Content-Type: text/plain; charset=utf-8
+Content-Type: multipart/alternative; boundary="afmail-fixture-pricing_attachment-alt"
+
+--afmail-fixture-pricing_attachment-alt
+Content-Type: text/plain; charset=iso-8859-1
+Content-Transfer-Encoding: quoted-printable
 
 Attached is the Q3 pricing proposal we discussed.
---afmail-fixture-pricing_attachment
-Content-Type: text/csv; name="q3-pricing.csv"
-Content-Disposition: attachment; filename="q3-pricing.csv"
+Bonjour, voici la proposition =E9conomique.
+--afmail-fixture-pricing_attachment-alt
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: base64
 
-plan,price
-starter,29
-pro,99
-enterprise,499
+PGh0bWw+PGJvZHk+PHA+Qm9uam91ciwgaXZvaWNpIGxhIDxiPnByb3Bvc2l0aW9uPC9iPi48L3A+PC9ib2R5PjwvaHRtbD4=
+--afmail-fixture-pricing_attachment-alt--
+--afmail-fixture-pricing_attachment
+Content-Type: image/png; name="logo.png"
+Content-Disposition: attachment; filename="logo.png"
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2fL0kAAAAASUVORK5CYII=
 --afmail-fixture-pricing_attachment--

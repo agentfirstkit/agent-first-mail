@@ -218,70 +218,77 @@ fn config_set_and_get_key() {
     assert!(cfg.set_key("schema_version", &["1".to_string()]).is_ok());
     assert!(cfg.set_key("imap.tls", &["false".to_string()]).is_ok());
     assert_eq!(cfg.get_key("imap.tls"), Ok(json!(false)));
-    assert!(cfg
-        .set_key(
+    assert!(
+        cfg.set_key(
             "mailboxes.extra.resolve",
             &[r#"[{"mailbox_name":"Extra"}]"#.to_string()]
         )
-        .is_ok());
-    assert!(cfg
-        .set_key(
+        .is_ok()
+    );
+    assert!(
+        cfg.set_key(
             "actions.pull.by_mailbox_id.extra.direction",
             &["outbound".to_string()]
         )
-        .is_ok());
+        .is_ok()
+    );
     assert_eq!(
         cfg.get_key("actions.pull.by_mailbox_id.extra.direction"),
         Ok(json!("outbound"))
     );
-    assert!(cfg
-        .set_key(
+    assert!(
+        cfg.set_key(
             "actions.pull.by_mailbox_id.junk.import_as",
             &["spam".to_string()]
         )
-        .is_ok());
+        .is_ok()
+    );
     assert_eq!(
         cfg.get_key("actions.pull.by_mailbox_id.junk.import_as"),
         Ok(json!("spam"))
     );
-    assert!(cfg
-        .set_key(
+    assert!(
+        cfg.set_key(
             "actions.message.notification.by_source_mailbox_id.inbox.steps.0.move_to_mailbox_id",
             &["archive".to_string()]
         )
-        .is_ok());
+        .is_ok()
+    );
     assert_eq!(
         cfg.get_key(
             "actions.message.notification.by_source_mailbox_id.inbox.steps.0.move_to_mailbox_id"
         ),
         Ok(json!("archive"))
     );
-    assert!(cfg
-        .set_key(
+    assert!(
+        cfg.set_key(
             "notification.message_index.item_fields",
             &["summary".to_string(), "link".to_string()]
         )
-        .is_ok());
+        .is_ok()
+    );
     assert_eq!(
         cfg.get_key("notification.message_index.item_fields"),
         Ok(json!(["summary", "link"]))
     );
-    assert!(cfg
-        .set_key(
+    assert!(
+        cfg.set_key(
             "actions.case.add.steps",
             &[r#"[{"append_to_mailbox_id":"drafts"}]"#.to_string()]
         )
-        .is_ok());
+        .is_ok()
+    );
     assert_eq!(
         cfg.get_key("actions.case.add.steps"),
         Ok(json!([{"append_to_mailbox_id": "drafts"}]))
     );
-    assert!(cfg
-        .set_key(
+    assert!(
+        cfg.set_key(
             "actions.message.notification.by_source_mailbox_id.inbox.steps",
             &[r#"[{"move_to_mailbox_id":"archive"}]"#.to_string()]
         )
-        .is_ok());
+        .is_ok()
+    );
     assert_eq!(
         cfg.get_key("actions.message.notification.by_source_mailbox_id.inbox.steps"),
         Ok(json!([{"move_to_mailbox_id": "archive"}]))
@@ -292,35 +299,42 @@ fn config_set_and_get_key() {
     assert!(cfg.set_key("actions", &[actions_json]).is_ok());
     let notification_json = serde_json::to_string(&cfg.notification).unwrap_or_default();
     assert!(cfg.set_key("notification", &[notification_json]).is_ok());
-    assert!(cfg
-        .set_key("audit.reason_mode", &["optional".to_string()])
-        .is_ok());
+    assert!(
+        cfg.set_key("audit.reason_mode", &["optional".to_string()])
+            .is_ok()
+    );
     assert_eq!(cfg.get_key("audit.reason_mode"), Ok(json!("optional")));
-    assert!(cfg
-        .set_key("workspace.language_bcp47", &["zh-CN".to_string()])
-        .is_ok());
+    assert!(
+        cfg.set_key("workspace.language_bcp47", &["zh-CN".to_string()])
+            .is_ok()
+    );
     assert_eq!(cfg.get_key("workspace.language_bcp47"), Ok(json!("zh-CN")));
-    assert!(cfg
-        .set_key("workspace.language_bcp47", &["fr-FR".to_string()])
-        .is_ok());
+    assert!(
+        cfg.set_key("workspace.language_bcp47", &["fr-FR".to_string()])
+            .is_ok()
+    );
     assert_eq!(cfg.template_language(), TemplateLanguage::FrFr);
-    assert!(cfg
-        .set_key("workspace.language_bcp47", &["not a tag".to_string()])
-        .is_err());
-    assert!(cfg
-        .set_key("workspace.language_bcp47", &["null".to_string()])
-        .is_ok());
+    assert!(
+        cfg.set_key("workspace.language_bcp47", &["not a tag".to_string()])
+            .is_err()
+    );
+    assert!(
+        cfg.set_key("workspace.language_bcp47", &["null".to_string()])
+            .is_ok()
+    );
     assert_eq!(cfg.get_key("workspace.language_bcp47"), Ok(Value::Null));
-    assert!(cfg
-        .set_key("imap.password_secret", &["secret".to_string()])
-        .is_ok());
+    assert!(
+        cfg.set_key("imap.password_secret", &["secret".to_string()])
+            .is_ok()
+    );
     assert_eq!(cfg.get_key("imap.password_secret"), Ok(json!("secret")));
-    assert!(cfg
-        .set_key(
+    assert!(
+        cfg.set_key(
             "imap.password_secret_env",
             &["AFMAIL_IMAP_PASSWORD_SECRET".to_string()]
         )
-        .is_ok());
+        .is_ok()
+    );
     assert_eq!(
         cfg.get_key("imap.password_secret_env"),
         Ok(json!("AFMAIL_IMAP_PASSWORD_SECRET"))
@@ -354,33 +368,37 @@ fn workspace_timezone_parses_sets_and_resolves() {
     );
     cfg.workspace.timezone_utc_offset = Some("UTC".to_string());
     assert_eq!(cfg.resolved_timezone_offset().local_minus_utc(), 0);
-    assert!(cfg
-        .set_key("workspace.timezone_utc_offset", &["+0530".to_string()])
-        .is_ok());
+    assert!(
+        cfg.set_key("workspace.timezone_utc_offset", &["+0530".to_string()])
+            .is_ok()
+    );
     assert_eq!(
         cfg.get_key("workspace.timezone_utc_offset"),
         Ok(json!("+05:30"))
     );
-    assert!(cfg
-        .set_key("workspace.timezone_utc_offset", &["+00:00".to_string()])
-        .is_ok());
+    assert!(
+        cfg.set_key("workspace.timezone_utc_offset", &["+00:00".to_string()])
+            .is_ok()
+    );
     assert_eq!(
         cfg.get_key("workspace.timezone_utc_offset"),
         Ok(json!("UTC"))
     );
-    assert!(cfg
-        .set_key("workspace.timezone_utc_offset", &["null".to_string()])
-        .is_ok());
+    assert!(
+        cfg.set_key("workspace.timezone_utc_offset", &["null".to_string()])
+            .is_ok()
+    );
     assert_eq!(
         cfg.get_key("workspace.timezone_utc_offset"),
         Ok(Value::Null)
     );
-    assert!(cfg
-        .set_key(
+    assert!(
+        cfg.set_key(
             "workspace.timezone_utc_offset",
             &["Asia/Shanghai".to_string()]
         )
-        .is_err());
+        .is_err()
+    );
     cfg.workspace.timezone_utc_offset = Some("+0530".to_string());
     assert!(cfg.validate().is_err());
 }
@@ -388,18 +406,20 @@ fn workspace_timezone_parses_sets_and_resolves() {
 #[test]
 fn invalid_mailbox_config_fails() {
     let mut cfg = MailConfig::default();
-    assert!(cfg
-        .set_key(
+    assert!(
+        cfg.set_key(
             "actions.pull.by_mailbox_id.junk.import_as",
             &["bogus".to_string()]
         )
-        .is_err());
-    assert!(cfg
-        .set_key(
+        .is_err()
+    );
+    assert!(
+        cfg.set_key(
             "actions.pull.by_mailbox_id.sent.direction",
             &["sideways".to_string()]
         )
-        .is_err());
+        .is_err()
+    );
     if let Some(entry) = cfg
         .actions
         .message_notification
@@ -416,27 +436,31 @@ fn invalid_mailbox_config_fails() {
 #[test]
 fn invalid_mailbox_resolve_config_fails() {
     let mut cfg = MailConfig::default();
-    assert!(cfg
-        .set_key("mailboxes.archive.resolve", &[r#"[]"#.to_string()])
-        .is_err());
-    assert!(cfg
-        .set_key(
+    assert!(
+        cfg.set_key("mailboxes.archive.resolve", &[r#"[]"#.to_string()])
+            .is_err()
+    );
+    assert!(
+        cfg.set_key(
             "mailboxes.archive.resolve",
             &[r#"[{"mailbox_name":"Archive","special_use":"\\Archive"}]"#.to_string()]
         )
-        .is_err());
-    assert!(cfg
-        .set_key(
+        .is_err()
+    );
+    assert!(
+        cfg.set_key(
             "mailboxes.archive.resolve",
             &[r#"[{"mailbox_name":""}]"#.to_string()]
         )
-        .is_err());
-    assert!(cfg
-        .set_key(
+        .is_err()
+    );
+    assert!(
+        cfg.set_key(
             "mailboxes.archive.resolve",
             &[r#"[{"unknown":"Archive"}]"#.to_string()]
         )
-        .is_err());
+        .is_err()
+    );
 }
 
 #[test]
@@ -452,41 +476,51 @@ fn empty_mailboxes_cannot_default_pull() {
 
 #[test]
 fn password_secret_sources_are_explicit_by_field() {
-    assert!(validate_password_secret_source(
-        "imap.password_secret",
-        Some("secret"),
-        "imap.password_secret_env",
-        None
-    )
-    .is_ok());
-    assert!(validate_password_secret_source(
-        "imap.password_secret",
-        None,
-        "imap.password_secret_env",
-        Some("AFMAIL_IMAP_PASSWORD_SECRET")
-    )
-    .is_ok());
-    assert!(validate_password_secret_source(
-        "imap.password_secret",
-        Some("secret"),
-        "imap.password_secret_env",
-        Some("AFMAIL_IMAP_PASSWORD_SECRET")
-    )
-    .is_err());
-    assert!(validate_password_secret_source(
-        "imap.password_secret",
-        Some("literal:secret"),
-        "imap.password_secret_env",
-        None
-    )
-    .is_err());
-    assert!(validate_password_secret_source(
-        "imap.password_secret",
-        None,
-        "imap.password_secret_env",
-        Some("IMAP_PASSWORD")
-    )
-    .is_err());
+    assert!(
+        validate_password_secret_source(
+            "imap.password_secret",
+            Some("secret"),
+            "imap.password_secret_env",
+            None
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_password_secret_source(
+            "imap.password_secret",
+            None,
+            "imap.password_secret_env",
+            Some("AFMAIL_IMAP_PASSWORD_SECRET")
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_password_secret_source(
+            "imap.password_secret",
+            Some("secret"),
+            "imap.password_secret_env",
+            Some("AFMAIL_IMAP_PASSWORD_SECRET")
+        )
+        .is_err()
+    );
+    assert!(
+        validate_password_secret_source(
+            "imap.password_secret",
+            Some("literal:secret"),
+            "imap.password_secret_env",
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        validate_password_secret_source(
+            "imap.password_secret",
+            None,
+            "imap.password_secret_env",
+            Some("IMAP_PASSWORD")
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -568,10 +602,11 @@ fn config_add_and_remove_keyed_identity() {
         cfg.get_key("identities.support.email"),
         Ok(json!("support@example.com"))
     );
-    assert!(cfg
-        .identities
-        .iter()
-        .any(|i| i.identity == "support" && !i.default));
+    assert!(
+        cfg.identities
+            .iter()
+            .any(|i| i.identity == "support" && !i.default)
+    );
 
     cfg.add_key(
         "identities",
@@ -587,8 +622,8 @@ fn config_add_and_remove_keyed_identity() {
         Ok(json!("support@flfgsc.cn"))
     );
 
-    assert!(cfg
-        .add_key(
+    assert!(
+        cfg.add_key(
             "identities",
             "support@flfgsc.cn",
             &[
@@ -596,7 +631,8 @@ fn config_add_and_remove_keyed_identity() {
                 ("email".to_string(), "dot@example.com".to_string()),
             ],
         )
-        .is_err());
+        .is_err()
+    );
 
     // Removing by slug shrinks the list; removing a missing slug is a no-op so
     // setup scripts can be idempotent after a clean init.
@@ -623,12 +659,14 @@ fn config_add_and_remove_keyed_identity() {
     )
     .expect("add replacement default identity");
     assert_eq!(cfg.identities.iter().filter(|i| i.default).count(), 1);
-    assert!(cfg
-        .identities
-        .iter()
-        .any(|i| i.identity == "me" && !i.default));
-    assert!(cfg
-        .identities
-        .iter()
-        .any(|i| i.identity == "support" && i.default));
+    assert!(
+        cfg.identities
+            .iter()
+            .any(|i| i.identity == "me" && !i.default)
+    );
+    assert!(
+        cfg.identities
+            .iter()
+            .any(|i| i.identity == "support" && i.default)
+    );
 }

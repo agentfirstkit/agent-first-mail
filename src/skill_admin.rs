@@ -9,7 +9,7 @@ use agent_first_data::skill::{
     SkillReport, SkillScope as AfScope, SkillSpec,
 };
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The embedded skill this binary installs.
 const SPEC: SkillSpec = SkillSpec {
@@ -37,24 +37,6 @@ pub fn handle_action(action: SkillAction) -> Result<Value> {
     })
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct WorkspaceSkillInstall {
-    pub(crate) skill_dir: PathBuf,
-    pub(crate) skill_path: PathBuf,
-}
-
-pub(crate) fn install_codex_workspace_skill(skills_dir: &Path) -> Result<WorkspaceSkillInstall> {
-    let options = SkillOptions {
-        agent: AfSelection::Codex,
-        scope: AfScope::Workspace,
-        skills_dir: Some(skills_dir.to_string_lossy().to_string()),
-        force: false,
-    };
-    let report =
-        skill::run_skill_admin(&SPEC, AfAction::Install, &options).map_err(to_app_error)?;
-    workspace_skill_install_from_report(&report)
-}
-
 fn update_gitignore_for_workspace_install(report: &SkillReport) -> Result<()> {
     let SkillReport::Install { targets, .. } = report else {
         return Ok(());
@@ -66,34 +48,6 @@ fn update_gitignore_for_workspace_install(report: &SkillReport) -> Result<()> {
     let agent_root =
         std::env::current_dir().map_err(|e| AppError::io("resolve current directory", &e))?;
     crate::store::ensure_agent_gitignore_ignores_skill_dirs(&agent_root, &skill_dirs)
-}
-
-fn workspace_skill_install_from_report(report: &SkillReport) -> Result<WorkspaceSkillInstall> {
-    let SkillReport::Install { targets, .. } = report else {
-        return Err(AppError::new(
-            "internal_error",
-            "unexpected skill report kind after install",
-        ));
-    };
-    let Some(target) = targets.first() else {
-        return Err(AppError::new(
-            "internal_error",
-            "skill install returned no targets",
-        ));
-    };
-    Ok(WorkspaceSkillInstall {
-        skill_dir: target
-            .skill_path
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| {
-                AppError::new(
-                    "internal_error",
-                    "skill install returned a path without a parent",
-                )
-            })?,
-        skill_path: target.skill_path.clone(),
-    })
 }
 
 fn split_action(action: SkillAction) -> (AfAction, SkillOptions) {
@@ -170,6 +124,22 @@ mod tests {
             target: target_args(dir, agent),
             force,
         }
+    }
+
+    #[test]
+    fn embedded_skill_is_auto_discoverable_and_carries_authorization_boundaries() {
+        assert!(!SPEC.source.contains("disable-model-invocation: true"));
+        for boundary in [
+            "Local read:",
+            "Remote read:",
+            "Local mutation:",
+            "Remote mutation:",
+            "Permanent local deletion:",
+        ] {
+            assert!(SPEC.source.contains(boundary), "missing {boundary}");
+        }
+        assert!(SPEC.source.contains("push --confirm PLAN_ID"));
+        assert!(SPEC.source.contains("purge --confirm PLAN_ID"));
     }
 
     #[test]

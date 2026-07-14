@@ -99,6 +99,7 @@ impl MailBatch {
         let mut fixture_ids = BTreeSet::new();
         let mut message_ids = BTreeSet::new();
         let mut tags = BTreeSet::new();
+        let mut mime_traits = BTreeSet::new();
         for message in &self.messages {
             if !fixture_ids.insert(message.fixture_id.as_str()) {
                 problems.push(format!("duplicate fixture_id {}", message.fixture_id));
@@ -113,6 +114,30 @@ impl MailBatch {
             if !path.is_file() {
                 problems.push(format!("missing EML for {}", message.fixture_id));
                 continue;
+            }
+            match fs::read_to_string(&path) {
+                Ok(text) => {
+                    let lower = text.to_ascii_lowercase();
+                    for (needle, marker) in [
+                        (
+                            "content-type: multipart/alternative",
+                            "multipart/alternative",
+                        ),
+                        ("content-type: text/html", "text/html"),
+                        (
+                            "content-transfer-encoding: quoted-printable",
+                            "quoted-printable",
+                        ),
+                        ("content-transfer-encoding: base64", "base64"),
+                        ("charset=iso-8859-1", "charset=iso-8859-1"),
+                        ("content-type: image/png", "image/png"),
+                    ] {
+                        if lower.contains(needle) {
+                            mime_traits.insert(marker);
+                        }
+                    }
+                }
+                Err(err) => problems.push(format!("read fixture MIME {}: {err}", path.display())),
             }
             match read_rfc822_message_id(&path) {
                 Ok(Some(actual)) => {
@@ -172,6 +197,18 @@ impl MailBatch {
                     .any(|tag| tag == "trash_candidate")
         }) {
             problems.push("missing INBOX trash candidate".to_string());
+        }
+        for required in [
+            "multipart/alternative",
+            "text/html",
+            "quoted-printable",
+            "base64",
+            "charset=iso-8859-1",
+            "image/png",
+        ] {
+            if !mime_traits.contains(required) {
+                problems.push(format!("missing required MIME diversity marker {required}"));
+            }
         }
         problems
     }

@@ -22,7 +22,7 @@ pub use contacts::{
 pub use hints::error_hint;
 pub use message::{MessageAction, MessageAttachmentAction};
 pub use notification::{NotificationCommand, NotificationCreateArgs, NotificationNotesAction};
-pub use parse::{command, parse_args, ParsedArgs};
+pub use parse::{ParsedArgs, command, parse_args};
 pub use root::{Cli, Command};
 pub use skill::{SkillAction, SkillAgentSelection, SkillScope, SkillTargetArgs, SkillWriteArgs};
 #[cfg(feature = "ui")]

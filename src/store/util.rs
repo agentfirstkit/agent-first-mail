@@ -72,6 +72,11 @@ pub(super) fn take_last<T>(mut values: Vec<T>, limit: usize) -> Vec<T> {
     values.split_off(values.len() - limit)
 }
 
+pub(super) struct AuditLogRead {
+    pub(super) events: Vec<Value>,
+    pub(super) warnings: Vec<Value>,
+}
+
 pub(super) fn stable_text_hash(text: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in text.as_bytes() {
@@ -91,19 +96,25 @@ pub(super) fn new_event_id() -> String {
     )
 }
 
-pub(super) fn case_archived_error(case_uid: &str) -> AppError {
+pub(super) fn case_archived_error(case_uid: &str, group: Option<&str>) -> AppError {
+    let unarchive_command = match group {
+        Some(group) => format!("afmail case unarchive {case_uid} --group {group} --reason TEXT"),
+        None => format!("afmail case unarchive {case_uid} --group GROUP --reason TEXT"),
+    };
     AppError::new(
         "case_archived",
         format!("case {case_uid} is archived"),
     )
     .with_hint(format!(
-        "Use `afmail case show {case_uid}` to inspect it, or `afmail case unarchive {case_uid} --group GROUP --reason TEXT` before active-only edits."
+        "Use `afmail case show {case_uid}` to inspect it, or `{unarchive_command}` before active-only edits."
     ))
     .with_details(json!({
         "case_uid": case_uid,
+        "archived_group": group,
+        "suggested_command": unarchive_command.as_str(),
         "suggested_commands": [
             format!("afmail case show {case_uid}"),
-            format!("afmail case unarchive {case_uid} --group GROUP --reason TEXT")
+            unarchive_command
         ]
     }))
 }
@@ -199,38 +210,6 @@ pub(super) fn ensure_managed_block_file(
     })
 }
 
-pub(super) fn managed_block_template_parts(
-    rendered: &str,
-    begin_marker: &str,
-    end_marker: &str,
-    path: &Path,
-) -> Result<(String, String)> {
-    let begin_pos = rendered.find(begin_marker).ok_or_else(|| {
-        AppError::new(
-            "managed_block_missing",
-            format!(
-                "{} template is missing the afmail managed BEGIN marker",
-                path_to_string(path)
-            ),
-        )
-    })?;
-    let after_begin = begin_pos + begin_marker.len();
-    let end_rel = rendered[after_begin..].find(end_marker).ok_or_else(|| {
-        AppError::new(
-            "managed_block_missing",
-            format!(
-                "{} template is missing the afmail managed END marker",
-                path_to_string(path)
-            ),
-        )
-    })?;
-    let end_pos = after_begin + end_rel;
-    Ok((
-        rendered[..begin_pos].to_string(),
-        trim_surrounding_line_endings(&rendered[after_begin..end_pos]).to_string(),
-    ))
-}
-
 pub(super) fn compose_managed_block_file(default_prefix: &str, block: &str) -> String {
     let mut out = default_prefix.to_string();
     if !out.is_empty() {
@@ -312,6 +291,22 @@ pub(super) fn consume_one_line_ending(value: &str, index: usize) -> usize {
 
 pub(super) fn read_to_string(path: &Path, context: &str) -> Result<String> {
     fs::read_to_string(path).map_err(|e| AppError::io(context, &e))
+}
+
+pub(super) fn read_generated_view(root: &Path, path: &Path, view_kind: &str) -> Result<String> {
+    fs::read_to_string(path).map_err(|error| {
+        let view_path = rel_path(root, path);
+        AppError::new(
+            "generated_view_unavailable",
+            format!("generated {view_kind} view is unavailable at {view_path}: {error}"),
+        )
+        .with_hint("Run `afmail render refresh` to rebuild generated views, then retry.")
+        .with_details(json!({
+            "view_kind": view_kind,
+            "view_path": view_path,
+            "suggested_command": "afmail render refresh",
+        }))
+    })
 }
 
 pub(super) fn read_existing_notes(root: &Path, path: &Path) -> Result<String> {
@@ -474,7 +469,6 @@ pub(super) fn write_case_file(case_path: &Path, case: &CaseFrontmatter) -> Resul
     let uid = normalized.collection_uid.clone();
     let name = normalized.collection_name.clone();
     normalized.normalize(CASE_SCHEMA_NAME, &uid, &name);
-    normalized.status.clear();
     write_json_pretty(&case_json_path(case_path), &normalized)
 }
 
@@ -517,10 +511,10 @@ pub(super) fn json_contains_any_id(value: &Value, ids: &BTreeSet<String>) -> boo
 
 pub(super) fn email_address(value: &str) -> String {
     let trimmed = value.trim();
-    if let (Some(start), Some(end)) = (trimmed.rfind('<'), trimmed.rfind('>')) {
-        if start < end {
-            return trimmed[start + 1..end].trim().to_ascii_lowercase();
-        }
+    if let (Some(start), Some(end)) = (trimmed.rfind('<'), trimmed.rfind('>'))
+        && start < end
+    {
+        return trimmed[start + 1..end].trim().to_ascii_lowercase();
     }
     trimmed.to_ascii_lowercase()
 }
@@ -773,9 +767,109 @@ pub(super) fn redact_config_secrets(value: Value) -> Value {
     }
 }
 
+fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|index| index + 1)
+        .unwrap_or(start);
+    &value[start..end]
+}
+
+fn parse_audit_line(line: &[u8], line_number: usize) -> Result<Value> {
+    let text = std::str::from_utf8(line).map_err(|e| {
+        AppError::new(
+            "store_error",
+            format!("parse audit event line {line_number}: invalid UTF-8: {e}"),
+        )
+    })?;
+    serde_json::from_str::<Value>(text).map_err(|e| {
+        AppError::new(
+            "store_error",
+            format!("parse audit event line {line_number}: {e}"),
+        )
+    })
+}
+
+fn audit_log_warning(path: &Path, line_number: usize, err: &AppError) -> Value {
+    json!({
+        "code": "audit_log_warning",
+        "warning_code": "audit_log_truncated_tail",
+        "path": path_to_string(path),
+        "line_number": line_number,
+        "skipped_line_count": 1,
+        "error_code": err.error_code,
+        "error": err.message.as_str(),
+    })
+}
+
 impl Workspace {
     pub(crate) fn append_audit_event(
         &self,
+        kind: &str,
+        targets: Vec<Value>,
+        reason: Option<&str>,
+        fields: Value,
+    ) -> Result<()> {
+        self.append_audit_event_record(
+            &new_event_id(),
+            &now_rfc3339(),
+            kind,
+            targets,
+            reason,
+            fields,
+        )
+    }
+
+    pub(crate) fn append_audit_event_with_identity(
+        &self,
+        event_id: &str,
+        created_rfc3339: &str,
+        kind: &str,
+        targets: Vec<Value>,
+        reason: Option<&str>,
+        fields: Value,
+    ) -> Result<bool> {
+        let existing = self.read_audit_log()?;
+        if !existing.warnings.is_empty() {
+            return Err(AppError::new(
+                "audit_log_recovery_required",
+                "audit log has a truncated tail; refusing to append after damaged bytes",
+            )
+            .with_hint("Inspect `afmail log tail` and repair the audit log before retrying the pending push audit.")
+            .with_details(json!({
+                "event_id": event_id,
+                "warning_count": existing.warnings.len(),
+                "warnings": existing.warnings,
+            })));
+        }
+        if existing
+            .events
+            .iter()
+            .any(|event| event.get("event_id").and_then(Value::as_str) == Some(event_id))
+        {
+            return Ok(false);
+        }
+        self.append_audit_event_record(event_id, created_rfc3339, kind, targets, reason, fields)?;
+        if std::env::var("AFMAIL_TEST_FAIL_PUSH_AUDIT_AFTER_APPEND")
+            .is_ok_and(|value| value == kind)
+        {
+            return Err(AppError::new(
+                "push_audit_after_append_test_failure",
+                format!("test failure after appending {kind} audit event"),
+            ));
+        }
+        Ok(true)
+    }
+
+    fn append_audit_event_record(
+        &self,
+        event_id: &str,
+        created_rfc3339: &str,
         kind: &str,
         targets: Vec<Value>,
         reason: Option<&str>,
@@ -786,8 +880,8 @@ impl Workspace {
             _ => Map::new(),
         };
         obj.insert("code".to_string(), json!("afmail_event"));
-        obj.insert("event_id".to_string(), json!(new_event_id()));
-        obj.insert("created_rfc3339".to_string(), json!(now_rfc3339()));
+        obj.insert("event_id".to_string(), json!(event_id));
+        obj.insert("created_rfc3339".to_string(), json!(created_rfc3339));
         obj.insert("actor".to_string(), json!("cli"));
         obj.insert("kind".to_string(), json!(kind));
         obj.insert("targets".to_string(), Value::Array(targets));
@@ -796,7 +890,9 @@ impl Workspace {
         }
         let line = serde_json::to_string(&Value::Object(obj))
             .map_err(|e| AppError::json("serialize audit event", &e))?;
-        let log_path = self.root.join(".afmail/logs/events.jsonl");
+        let log_path = self
+            .root
+            .join(crate::layout::afmail_path(crate::layout::AFMAIL_AUDIT_LOG));
         if let Some(parent) = log_path.parent() {
             create_dir_all(parent)?;
         }
@@ -807,29 +903,45 @@ impl Workspace {
             .map_err(|e| AppError::io("open audit log", &e))?;
         file.write_all(line.as_bytes())
             .and_then(|_| file.write_all(b"\n"))
+            .and_then(|_| file.sync_data())
             .map_err(|e| AppError::io("append audit log", &e))
     }
 
-    pub(super) fn read_audit_events(&self) -> Result<Vec<Value>> {
+    pub(super) fn read_audit_log(&self) -> Result<AuditLogRead> {
         self.require_workspace()?;
-        let path = self.root.join(".afmail/logs/events.jsonl");
+        let path = self
+            .root
+            .join(crate::layout::afmail_path(crate::layout::AFMAIL_AUDIT_LOG));
         if !path.exists() {
-            return Ok(Vec::new());
+            return Ok(AuditLogRead {
+                events: Vec::new(),
+                warnings: Vec::new(),
+            });
         }
-        let file = fs::File::open(&path).map_err(|e| AppError::io("open audit log", &e))?;
-        let reader = BufReader::new(file);
+        let data = fs::read(&path).map_err(|e| AppError::io("read audit log", &e))?;
+        let lines = data.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+        let last_non_empty_index = lines
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, line)| !trim_ascii_whitespace(line).is_empty())
+            .map(|(index, _)| index);
         let mut events = Vec::new();
-        for line in reader.lines() {
-            let line = line.map_err(|e| AppError::io("read audit log", &e))?;
-            if line.trim().is_empty() {
+        let mut warnings = Vec::new();
+        for (index, raw_line) in lines.iter().enumerate() {
+            let line = trim_ascii_whitespace(raw_line);
+            if line.is_empty() {
                 continue;
             }
-            events.push(
-                serde_json::from_str::<Value>(&line)
-                    .map_err(|e| AppError::json("parse audit event", &e))?,
-            );
+            match parse_audit_line(line, index + 1) {
+                Ok(event) => events.push(event),
+                Err(err) if Some(index) == last_non_empty_index => {
+                    warnings.push(audit_log_warning(&path, index + 1, &err));
+                }
+                Err(err) => return Err(err),
+            }
         }
-        Ok(events)
+        Ok(AuditLogRead { events, warnings })
     }
 
     pub(super) fn checked_reason<'a>(&self, reason: Option<&'a str>) -> Result<Option<&'a str>> {
@@ -838,12 +950,12 @@ impl Workspace {
         match (config.audit.reason_mode, reason) {
             (ReasonMode::Required, None) => Err(AppError::new(
                 "reason_required",
-                "add --reason \"<why>\" or set audit.reason_mode=optional in config to skip",
+                "add --reason \"<why>\" to record why this mutation is needed",
             )
-            .with_hint("Repeat the command with `--reason TEXT`, or set `audit.reason_mode` to `optional` for this workspace.")
+            .with_hint("Repeat the command with `--reason TEXT`.")
             .with_details(json!({
                 "required_option": "--reason",
-                "config_key": "audit.reason_mode"
+                "suggested_args": ["--reason", "TEXT"]
             }))),
             (_, reason) => Ok(reason),
         }
@@ -858,14 +970,37 @@ impl Workspace {
     }
 
     pub(super) fn require_workspace(&self) -> Result<()> {
-        if self.root.join(".afmail").is_dir() {
-            Ok(())
-        } else {
-            Err(AppError::new(
+        let afmail = self.root.join(layout::AFMAIL);
+        if !afmail.is_dir() {
+            return Err(AppError::new(
                 "workspace_not_found",
                 "no .afmail directory found at workspace root",
-            ))
+            ));
         }
+        let legacy = layout::LEGACY_AFMAIL_FILES
+            .iter()
+            .filter(|name| afmail.join(name).exists())
+            .copied()
+            .collect::<Vec<_>>();
+        if legacy.is_empty() {
+            return Ok(());
+        }
+        Err(AppError::new(
+            "workspace_layout_outdated",
+            "workspace uses the obsolete flat .afmail state layout",
+        )
+        .with_hint(
+            "Create .afmail/pull and .afmail/cache, move pull-cursors.json to pull/cursors.json, remove the other reported legacy files, then run `afmail render refresh`.",
+        )
+        .with_details(json!({
+            "legacy_paths": legacy.iter().map(|name| format!(".afmail/{name}")).collect::<Vec<_>>(),
+            "migration": [
+                "mkdir -p .afmail/pull .afmail/cache",
+                "git mv .afmail/pull-cursors.json .afmail/pull/cursors.json",
+                "rm -f .afmail/workspace.lock .afmail/workspace.progress.json .afmail/render-cache.json .afmail/config.example.json",
+                "afmail render refresh"
+            ]
+        })))
     }
 
     pub(super) fn first_related_message_date(&self, message_id: &str) -> Result<String> {
@@ -874,10 +1009,10 @@ impl Workspace {
         let mut times = Vec::new();
         for id in message_ids {
             let message = self.read_message_by_id(&id)?;
-            if let Some(time) = message_time(&message) {
-                if let Ok(parsed) = DateTime::parse_from_rfc3339(&time) {
-                    times.push(parsed);
-                }
+            if let Some(time) = message_time(&message)
+                && let Ok(parsed) = DateTime::parse_from_rfc3339(&time)
+            {
+                times.push(parsed);
             }
         }
         times.sort();

@@ -24,13 +24,17 @@ pub struct UiCommand {
     #[arg(long)]
     pub afui_bin: Option<PathBuf>,
 
-    /// Enable the host-owned local terminal capability (off by default).
+    /// Do not open the host-owned termail companion.
     #[arg(long)]
-    pub terminal: bool,
+    pub no_termail: bool,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum UiAction {
     /// Emit a complete AFUI snapshot for this workspace.
     Snapshot,
+
+    /// Serve the trusted AFUI owner bridge over JSONL stdio.
+    #[command(hide = true)]
+    Bridge,
 }

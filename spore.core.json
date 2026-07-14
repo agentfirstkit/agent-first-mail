@@ -2,30 +2,34 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-mail",
   "name": "Agent-First Mail",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.",
   "intent": [
     "Give AI agents a local-first email workspace where pulled messages become editable case files rather than a traditional inbox app",
     "Preserve raw RFC822 mail while exposing mechanically cleaned text, message metadata, active cases, archived cases, contacts, notification collections, send identities, drafts, notes, and files through stable filesystem conventions, with human-readable Markdown rendered in the workspace language",
-    "Keep the CLI focused on side effects such as read-only pull with case suggestions, explicit triage assignment, case moves, case archive/unarchive operations, attachment fetches, contact record management, reply draft scaffolding, draft validation, local push queuing, explicit push operations including read/unread flag work, audit log inspection, and local push queue cleanup"
+    "Keep the CLI focused on read-only remote inspection and pull, explicit local triage/case/notification/contact organization, attachment fetches, reply draft scaffolding and validation, local push queuing, confirmed remote push effects, audit log inspection, and push queue visibility"
   ],
   "license": "MIT",
   "mutations": [
-    "Add notification delete command to remove an empty notification collection, with --allow-notes to permit deletion when user-authored notes are present",
-    "Split message restore into message unspam and message untrash with semantics specific to each disposition, queuing the appropriate remote move when needed",
-    "Replace contact archive/reopen lifecycle with a single contact delete command; remove case reopen in favor of case delete for empty active cases; add case remove to extract one message back to triage",
-    "Collapse the archive top-level subcommand into case — archived case list, show, restore, remove, and move are now available directly under case",
-    "Add case move support for archived cases, enabling reordering within the archive without requiring a full restore-and-re-archive cycle",
-    "Fall back to COPY+EXPUNGE when the IMAP server does not advertise the MOVE capability, requiring UIDPLUS for precise single-message targeting",
-    "Centralize all on-disk workspace directory names into a single layout module, eliminating scattered string literals across the codebase",
-    "Integrate afdata stream file redirection, allowing stdout/stderr to be redirected to a file via CLI args before any output is written"
+    "Adopt afdata protocol v1 end-to-end: commands emit typed, structured command results with flattened error fields via a semantic CLI emitter, replacing serialized output bags",
+    "Add request-idempotency across every state-changing command via a global --request-id key that records and replays outcomes so retries are deduplicated (message dispositions, case lifecycle, draft edits, contact edits/renames, membership, notes, summaries, local deletes, field edits)",
+    "Bind remote effects to reviewed plans: push and purge require a reviewed plan id before any remote effect runs, and case-archive lifecycle finalizes only after a successful push",
+    "Support explicit workspace selection via --workspace with a stable workspace identity, and make onboarding readiness an explicit reported state in afmail status",
+    "Harden untrusted-mail and privacy boundaries: bound IMAP body fetches by default, enforce render boundaries on untrusted content, and redact private startup argv shape and runtime log fields",
+    "Make network failures recoverable by marking IMAP connect and SMTP remote failures retryable with explicit retry phases and reason-required safe recovery",
+    "Add incremental pull with persisted cursors, plus mailbox pull budgeting via --max-new-messages and --max-total-bytes and pre-pull size estimation via --dry-run",
+    "Report workspace storage usage in bytes through afmail status and surface partial command outcomes",
+    "Make draft intent and content states explicit with separate lifecycle states, add a draft list command, and rename draft save to upload",
+    "Add batch operations and message list filters: batch message dispositions, batch case and notification additions requiring ids, require --group for case move, require contact reasons, and add case set-summary",
+    "Redesign the AFUI mail workspace to safely render full case conversations including archived views, load web packs, and show timezone-aware rendered times",
+    "Optimize the render pipeline, reorganize the workspace state directory layout, and order the push queue by persisted enqueue sequence"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.2TyLnsC2qStf6kjYVgcno4fv2hfiVzWuzuX6bCHwez5K",
+      "uri": "cmn://agentfirstkit.com/b3.CKaSTwynqtgjQQcFJFqw7MVBPyfe2ajaMotr7oReq5qL",
       "id": "agent-first-data",
       "reason": "All structured output, field suffixes, secret handling, and JSONL events follow Agent-First Data conventions"
     },

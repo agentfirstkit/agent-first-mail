@@ -12,10 +12,11 @@ pub use actions::{
     ActionRule, ActionStep, ActionStepOn, ActionsSection, MailDirection, MessageNotificationAction,
     PullActionSection, PullImportAs, PullMailboxAction,
 };
+pub(crate) use identity::match_message_identity_with_profiles;
 pub use identity::{IdentityConfig, MessageIdentityMatch, ResolvedIdentity};
 pub use mailbox::{
-    special_use_kinds, ImapConfig, ImapMailboxConfig, ImapSection, MailboxResolveRule,
-    SpecialUseKind, SpecialUseSource, SpecialUseTarget,
+    ImapConfig, ImapMailboxConfig, ImapSection, MailboxResolveRule, SpecialUseKind,
+    SpecialUseSource, SpecialUseTarget, special_use_kinds,
 };
 pub use notification::{
     NotificationIndexField, NotificationIndexSection, NotificationIndexSort, NotificationSection,
@@ -29,7 +30,7 @@ use crate::error::{AppError, Result};
 use chrono::{FixedOffset, Offset};
 use defaults::*;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -224,6 +225,8 @@ impl MailConfig {
                 "imap.password_secret_env",
                 self.imap.password_secret_env.as_deref(),
             )?,
+            tls_root_cert_path: self.imap.tls_root_cert_path.clone(),
+            allow_unbounded_body_fetch: self.imap.allow_unbounded_body_fetch,
             mailboxes,
         })
     }

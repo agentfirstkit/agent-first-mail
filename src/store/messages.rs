@@ -24,12 +24,20 @@ struct MessageRemoteFile {
     locations: Vec<RemoteLocation>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MessageCacheReadMode {
+    Strict,
+    Repair,
+}
+
 #[derive(Debug, Serialize)]
 struct MessageDispositionResult {
     code: &'static str,
     message_id: String,
     special_use: String,
     message_ids: Vec<String>,
+    removed_push_count: usize,
+    removed_push_ids: Vec<String>,
     location_count: usize,
     queued_location_count: usize,
     queued: bool,
@@ -65,6 +73,8 @@ struct UnmarkDiscardedMessageContext<'a> {
 pub(super) struct MessageCacheRebuildTotals {
     pub(super) rebuilt_count: usize,
     pub(super) removed_text_cache_count: usize,
+    pub(super) validated_eml_count: usize,
+    pub(super) materialized_cache_written_count: usize,
 }
 
 impl MessageRemoteFile {
@@ -108,9 +118,18 @@ fn read_message_remote_file(root: &Path, message_id: &str) -> Result<Option<Mess
     if !path.exists() {
         return Ok(None);
     }
-    let data = read_to_string(&path, "read message remote")?;
-    let remote: MessageRemoteFile =
-        serde_json::from_str(&data).map_err(|e| AppError::json("parse message remote", &e))?;
+    let data = fs::read_to_string(&path).map_err(|e| {
+        AppError::new(
+            "store_error",
+            format!("read message remote {}: {e}", rel_path(root, &path)),
+        )
+    })?;
+    let remote: MessageRemoteFile = serde_json::from_str(&data).map_err(|e| {
+        AppError::new(
+            "store_error",
+            format!("parse message remote {}: {e}", rel_path(root, &path)),
+        )
+    })?;
     if remote.schema_name != "message_remote"
         || remote.schema_version != 1
         || remote.message_id != message_id
@@ -148,14 +167,14 @@ fn default_message_workspace() -> WorkspaceState {
 pub(super) fn purge_message_artifacts(root: &Path, message_id: &str) -> Result<()> {
     validate_id("message_id", message_id)?;
     let message_dir = root.join(".afmail/messages");
+    // Keep the canonical materialized message until every auxiliary artifact is
+    // gone. A failed purge can then rediscover the disposition and resume.
     for path in [
-        root.join(layout::MESSAGES)
-            .join(format!("{message_id}.json")),
-        message_dir.join(format!("{message_id}.json")),
         message_dir.join(format!("{message_id}.eml")),
         message_dir.join(format!("{message_id}.state.json")),
         message_dir.join(format!("{message_id}.remote.json")),
         message_dir.join(format!("{message_id}.txt")),
+        message_dir.join(format!("{message_id}.json")),
     ] {
         if path.exists() {
             remove_file(&path)?;
@@ -164,6 +183,12 @@ pub(super) fn purge_message_artifacts(root: &Path, message_id: &str) -> Result<(
     let files_dir = message_dir.join(format!("{message_id}.files"));
     if files_dir.exists() {
         remove_dir_all(&files_dir)?;
+    }
+    let materialized = root
+        .join(layout::MESSAGES)
+        .join(format!("{message_id}.json"));
+    if materialized.exists() {
+        remove_file(&materialized)?;
     }
     Ok(())
 }
@@ -187,9 +212,18 @@ pub(super) fn attachment_metadata_values(attachments: &[AttachmentRef]) -> Vec<V
 }
 
 pub(super) fn read_message(path: &Path) -> Result<MessageFile> {
-    let data = read_to_string(path, "read message json")?;
-    let message: MessageFile =
-        serde_json::from_str(&data).map_err(|e| AppError::json("parse message json", &e))?;
+    let data = fs::read_to_string(path).map_err(|e| {
+        AppError::new(
+            "store_error",
+            format!("read message json {}: {e}", path_to_string(path)),
+        )
+    })?;
+    let message: MessageFile = serde_json::from_str(&data).map_err(|e| {
+        AppError::new(
+            "store_error",
+            format!("parse message json {}: {e}", path_to_string(path)),
+        )
+    })?;
     if message.schema_name != "message" || message.schema_version != 1 {
         return Err(AppError::new(
             "message_cache_invalid",
@@ -257,7 +291,8 @@ pub(super) fn message_reply_header_ids(message: &MessageFile) -> Vec<String> {
 #[derive(Clone, Debug, Default)]
 pub(super) struct MessageRelationIndex {
     rfc822_ids: BTreeMap<String, String>,
-    replies_by_parent: BTreeMap<String, BTreeSet<String>>,
+    quoted_by_message: BTreeMap<String, String>,
+    related_by_message: BTreeMap<String, Vec<String>>,
 }
 
 pub(super) struct MaterializedOverlayIndex {
@@ -267,11 +302,48 @@ pub(super) struct MaterializedOverlayIndex {
     pending_push: BTreeMap<String, Vec<WorkspacePendingPush>>,
 }
 
+pub(super) struct RenderStaticInputs {
+    config: MailConfig,
+    resolved_identities: Vec<ResolvedIdentity>,
+    contact_map: BTreeMap<String, MessageContact>,
+}
+
+pub(super) struct MaterializationContext {
+    static_inputs: Arc<RenderStaticInputs>,
+    overlays: MaterializedOverlayIndex,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ProjectedMessageSnapshot {
+    pub(super) hash: String,
+    pub(super) has_visible_quote: bool,
+}
+
+pub(super) struct RenderContext {
+    materialization: MaterializationContext,
+    message_relations: MessageRelationIndex,
+    message_snapshots: BTreeMap<String, ProjectedMessageSnapshot>,
+}
+
+pub(super) struct RenderPreparation {
+    pub(super) context: RenderContext,
+    pub(super) materialization: MessageCacheRebuildTotals,
+}
+
 impl MessageRelationIndex {
     pub(super) fn build(workspace: &Workspace) -> Result<Self> {
+        let messages = message_json_paths(&workspace.root)?
+            .into_iter()
+            .map(|path| read_message(&path))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self::from_messages(&messages))
+    }
+
+    pub(super) fn from_messages(messages: &[MessageFile]) -> Self {
         let mut index = Self::default();
-        for path in message_json_paths(&workspace.root)? {
-            let message = read_message(&path)?;
+        let mut replies_by_parent: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut reply_headers = BTreeMap::new();
+        for message in messages {
             if let Some(normalized) = message
                 .rfc822_message_id
                 .as_deref()
@@ -282,43 +354,149 @@ impl MessageRelationIndex {
                     .entry(normalized)
                     .or_insert_with(|| message.message_id.clone());
             }
-            for header_id in message_reply_header_ids(&message) {
-                index
-                    .replies_by_parent
-                    .entry(header_id)
+            let headers = message_reply_header_ids(message);
+            for header_id in &headers {
+                replies_by_parent
+                    .entry(header_id.clone())
                     .or_default()
                     .insert(message.message_id.clone());
             }
+            reply_headers.insert(message.message_id.clone(), headers);
         }
-        Ok(index)
+        for message in messages {
+            let mut related = BTreeSet::new();
+            let headers = reply_headers
+                .get(&message.message_id)
+                .cloned()
+                .unwrap_or_default();
+            for header_id in headers.iter().rev() {
+                if let Some(local_message_id) = index.rfc822_ids.get(header_id) {
+                    if local_message_id != &message.message_id {
+                        related.insert(local_message_id.clone());
+                    }
+                    index
+                        .quoted_by_message
+                        .entry(message.message_id.clone())
+                        .or_insert_with(|| local_message_id.clone());
+                }
+            }
+            if let Some(current_rfc822_id) = message
+                .rfc822_message_id
+                .as_deref()
+                .and_then(normalize_rfc822_message_id)
+                && let Some(reply_ids) = replies_by_parent.get(&current_rfc822_id)
+            {
+                for reply_id in reply_ids {
+                    if reply_id != &message.message_id {
+                        related.insert(reply_id.clone());
+                    }
+                }
+            }
+            index
+                .related_by_message
+                .insert(message.message_id.clone(), related.into_iter().collect());
+        }
+        index
     }
 
-    pub(super) fn related_message_ids(&self, message: &MessageFile) -> Vec<String> {
-        let mut related = BTreeSet::new();
-        for header_id in message_reply_header_ids(message) {
-            if let Some(local_message_id) = self.rfc822_ids.get(&header_id) {
-                if local_message_id != &message.message_id {
-                    related.insert(local_message_id.clone());
-                }
-            }
-        }
+    pub(super) fn quoted_message_id(&self, message_id: &str) -> Option<&str> {
+        self.quoted_by_message.get(message_id).map(String::as_str)
+    }
 
-        let Some(current_rfc822_id) = message
-            .rfc822_message_id
-            .as_deref()
-            .and_then(normalize_rfc822_message_id)
-        else {
-            return related.into_iter().collect();
-        };
+    pub(super) fn related_message_ids(&self, message_id: &str) -> &[String] {
+        self.related_by_message
+            .get(message_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
 
-        if let Some(reply_ids) = self.replies_by_parent.get(&current_rfc822_id) {
-            for reply_id in reply_ids {
-                if reply_id != &message.message_id {
-                    related.insert(reply_id.clone());
-                }
-            }
-        }
-        related.into_iter().collect()
+impl RenderStaticInputs {
+    pub(super) fn load(workspace: &Workspace, config: MailConfig) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            resolved_identities: config.identity_profiles(&workspace.root)?,
+            contact_map: workspace.contact_email_map()?,
+            config,
+        }))
+    }
+}
+
+impl RenderContext {
+    pub(super) fn config(&self) -> &MailConfig {
+        &self.materialization.static_inputs.config
+    }
+
+    pub(super) fn relation_index(&self) -> &MessageRelationIndex {
+        &self.message_relations
+    }
+
+    pub(super) fn quoted_message_id(&self, message_id: &str) -> Option<&str> {
+        self.message_snapshots
+            .get(message_id)
+            .filter(|snapshot| snapshot.has_visible_quote)
+            .and_then(|_| self.message_relations.quoted_message_id(message_id))
+    }
+
+    pub(super) fn related_message_ids(&self, message_id: &str) -> &[String] {
+        self.message_relations.related_message_ids(message_id)
+    }
+
+    pub(super) fn snapshot(&self, message_id: &str) -> Option<&ProjectedMessageSnapshot> {
+        self.message_snapshots.get(message_id)
+    }
+
+    pub(super) fn related_message_dependencies(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<(&str, &str)>> {
+        self.related_message_ids(message_id)
+            .iter()
+            .map(|related_id| {
+                let snapshot = self.message_snapshots.get(related_id).ok_or_else(|| {
+                    AppError::new(
+                        "internal",
+                        format!("missing render snapshot for related message {related_id}"),
+                    )
+                })?;
+                Ok((related_id.as_str(), snapshot.hash.as_str()))
+            })
+            .collect()
+    }
+
+    pub(super) fn message_section_dependency(&self, message_id: &str) -> Result<Value> {
+        let snapshot = self.message_snapshots.get(message_id).ok_or_else(|| {
+            AppError::new(
+                "internal",
+                format!("missing render snapshot for message {message_id}"),
+            )
+        })?;
+        Ok(json!({
+            "message_id": message_id,
+            "projected_message_hash": snapshot.hash,
+            "quoted_message_id": self.quoted_message_id(message_id),
+        }))
+    }
+
+    pub(super) fn read_message(
+        &self,
+        workspace: &Workspace,
+        message_id: &str,
+    ) -> Result<MessageFile> {
+        validate_id("message_id", message_id)?;
+        let mut message = read_message(&workspace.message_path(message_id))?;
+        workspace.apply_materialized_workspace_overlays_with_index(
+            &mut message,
+            &self.materialization.overlays,
+        )?;
+        workspace.apply_identity_match_with_profiles(
+            &mut message,
+            &self.materialization.static_inputs.resolved_identities,
+        )?;
+        workspace.apply_contact_link(
+            &mut message,
+            &self.materialization.static_inputs.contact_map,
+        );
+        Ok(message)
     }
 }
 
@@ -335,6 +513,14 @@ impl Workspace {
     }
 
     pub(crate) fn write_message_materialized_cache(&self, message: &MessageFile) -> Result<()> {
+        self.write_message_materialized_cache_with_outcome(message)?;
+        Ok(())
+    }
+
+    fn write_message_materialized_cache_with_outcome(
+        &self,
+        message: &MessageFile,
+    ) -> Result<FileWriteOutcome> {
         let mut message = message.clone();
         message.schema_name = "message".to_string();
         message.schema_version = 1;
@@ -349,8 +535,7 @@ impl Workspace {
         if let Some(parent) = path.parent() {
             create_dir_all(parent)?;
         }
-        write_json_pretty_if_changed(&path, &message)?;
-        Ok(())
+        write_json_pretty_if_changed(&path, &message)
     }
 
     pub(super) fn write_message_cache(&self, message: &MessageFile) -> Result<()> {
@@ -362,28 +547,97 @@ impl Workspace {
         self.write_message_materialized_cache(message)
     }
 
-    fn materialize_message_cache_if_needed(&self, message_id: &str) -> Result<bool> {
+    fn materialize_message_cache_if_needed_with_context(
+        &self,
+        message_id: &str,
+        context: &MaterializationContext,
+    ) -> Result<bool> {
         if !self.message_cache_needs_materialize(message_id)? {
             return Ok(false);
         }
-        self.materialize_message_cache(message_id)?;
+        self.materialize_message_cache_with_context(message_id, context)?;
         Ok(true)
     }
 
-    fn materialize_message_cache(&self, message_id: &str) -> Result<MessageFile> {
+    fn materialize_message_cache_with_context(
+        &self,
+        message_id: &str,
+        context: &MaterializationContext,
+    ) -> Result<MessageFile> {
+        let message = self.read_message_from_eml_with_context(
+            message_id,
+            MessageCacheReadMode::Repair,
+            context,
+        )?;
+        self.write_message_materialized_cache(&message)?;
+        Ok(message)
+    }
+
+    fn materialization_context(&self) -> Result<MaterializationContext> {
+        let static_inputs = RenderStaticInputs::load(self, MailConfig::load(&self.root)?)?;
+        self.materialization_context_with_static_inputs(static_inputs)
+    }
+
+    fn materialization_context_with_static_inputs(
+        &self,
+        static_inputs: Arc<RenderStaticInputs>,
+    ) -> Result<MaterializationContext> {
+        Ok(MaterializationContext {
+            static_inputs,
+            overlays: self.materialized_overlay_index()?,
+        })
+    }
+
+    fn read_message_from_eml(
+        &self,
+        message_id: &str,
+        cache_read_mode: MessageCacheReadMode,
+    ) -> Result<MessageFile> {
+        let context = self.materialization_context()?;
+        self.read_message_from_eml_with_context(message_id, cache_read_mode, &context)
+    }
+
+    fn read_message_from_eml_with_context(
+        &self,
+        message_id: &str,
+        cache_read_mode: MessageCacheReadMode,
+        context: &MaterializationContext,
+    ) -> Result<MessageFile> {
         validate_id("message_id", message_id)?;
         let eml_path = message_eml_path(&self.root, message_id);
-        let raw = fs::read(&eml_path).map_err(|e| AppError::io("read message eml", &e))?;
-        let prior = read_message(&self.message_path(message_id)).ok();
+        let raw = fs::read(&eml_path).map_err(|e| {
+            AppError::new(
+                "store_error",
+                format!("read message eml {}: {e}", rel_path(&self.root, &eml_path)),
+            )
+        })?;
+        let cache_path = self.message_path(message_id);
+        let prior = if cache_path.is_file() {
+            match read_message(&cache_path) {
+                Ok(message) => Some(message),
+                Err(_) if cache_read_mode == MessageCacheReadMode::Repair => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
         let remote =
             read_message_remote_file(&self.root, message_id)?.map(|file| file.remote_state());
-        let direction = self.infer_materialized_direction(&raw, prior.as_ref(), remote.as_ref());
+        let direction = self.infer_materialized_direction(
+            &raw,
+            prior.as_ref(),
+            remote.as_ref(),
+            &context.static_inputs.config,
+        );
         let mut parsed = crate::mail::parse_message_with_options(
             message_id.to_string(),
             &raw,
             crate::mail::MessageParseOptions {
                 direction,
-                workspace: default_message_workspace(),
+                workspace: prior
+                    .as_ref()
+                    .map(|message| message.workspace.clone())
+                    .unwrap_or_else(default_message_workspace),
                 remote,
                 received_rfc3339: prior
                     .as_ref()
@@ -396,14 +650,25 @@ impl Workspace {
                     .map(|message| message.attachments.clone())
                     .unwrap_or_default(),
             },
-        )?;
+        )
+        .map_err(|mut error| {
+            error.message = format!(
+                "parse message eml {}: {}",
+                rel_path(&self.root, &eml_path),
+                error.message
+            );
+            error
+        })?;
         self.apply_fetched_attachment_files(message_id, &mut parsed.message.attachments);
-        self.apply_materialized_workspace_overlays(&mut parsed.message)?;
-        let config = MailConfig::load(&self.root)?;
-        self.apply_identity_match(&mut parsed.message, &config)?;
-        let contact_map = self.contact_email_map()?;
-        self.apply_contact_link(&mut parsed.message, &contact_map);
-        self.write_message_materialized_cache(&parsed.message)?;
+        self.apply_materialized_workspace_overlays_with_index(
+            &mut parsed.message,
+            &context.overlays,
+        )?;
+        self.apply_identity_match_with_profiles(
+            &mut parsed.message,
+            &context.static_inputs.resolved_identities,
+        )?;
+        self.apply_contact_link(&mut parsed.message, &context.static_inputs.contact_map);
         Ok(parsed.message)
     }
 
@@ -436,10 +701,10 @@ impl Workspace {
             if !input.exists() {
                 continue;
             }
-            if let Ok(input_modified) = fs::metadata(&input).and_then(|meta| meta.modified()) {
-                if input_modified > cache_modified {
-                    return Ok(true);
-                }
+            if let Ok(input_modified) = fs::metadata(&input).and_then(|meta| meta.modified())
+                && input_modified > cache_modified
+            {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -450,18 +715,17 @@ impl Workspace {
         raw: &[u8],
         prior: Option<&MessageFile>,
         remote: Option<&RemoteState>,
+        config: &MailConfig,
     ) -> Option<String> {
         if let Some(direction) = prior.and_then(|message| message.direction.clone()) {
             return Some(direction);
         }
         if let Some(remote) = remote {
-            if let Ok(config) = MailConfig::load(&self.root) {
-                for location in &remote.locations {
-                    if let Some(mailbox_id) = location.mailbox_id.as_deref() {
-                        if let Ok(action) = config.pull_action(mailbox_id) {
-                            return Some(action.direction.as_str().to_string());
-                        }
-                    }
+            for location in &remote.locations {
+                if let Some(mailbox_id) = location.mailbox_id.as_deref()
+                    && let Ok(action) = config.pull_action(mailbox_id)
+                {
+                    return Some(action.direction.as_str().to_string());
                 }
             }
         }
@@ -517,6 +781,41 @@ impl Workspace {
         self.apply_materialized_workspace_overlays_with_index(message, &index)
     }
 
+    fn pending_push_kind_for_overlay(&self, item: &PushItem, message_id: &str) -> String {
+        if item.message().is_none() {
+            return item.display_kind();
+        }
+        let Ok(message) = read_message(&self.message_path(message_id)) else {
+            return item.display_kind();
+        };
+        match message.workspace.status.as_str() {
+            "spam" => "message.spam".to_string(),
+            "trashed" => "message.trash".to_string(),
+            "case" => "case.add".to_string(),
+            "notification" | "archived" => "message.notification".to_string(),
+            "triage" => message
+                .remote
+                .as_ref()
+                .and_then(|remote| {
+                    remote.locations.iter().find_map(|location| {
+                        let mailbox_id = location.mailbox_id.as_deref().unwrap_or_default();
+                        let mailbox_name = location.mailbox_name.as_str();
+                        if mailbox_id == "junk" || mailbox_name.eq_ignore_ascii_case("junk") {
+                            Some("message.unspam".to_string())
+                        } else if mailbox_id == "trash"
+                            || mailbox_name.eq_ignore_ascii_case("trash")
+                        {
+                            Some("message.untrash".to_string())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or_else(|| item.display_kind()),
+            _ => item.display_kind(),
+        }
+    }
+
     pub(super) fn materialized_overlay_index(&self) -> Result<MaterializedOverlayIndex> {
         let mut pending_push: BTreeMap<String, Vec<WorkspacePendingPush>> = BTreeMap::new();
         for item in crate::push_queue::pending_items(&self.root)? {
@@ -527,12 +826,13 @@ impl Workspace {
                 continue;
             }
             for message_id in item.message_ids() {
+                let kind = self.pending_push_kind_for_overlay(&item, message_id);
                 pending_push
                     .entry(message_id.clone())
                     .or_default()
                     .push(WorkspacePendingPush {
                         push_id: item.push_id.clone(),
-                        kind: item.display_kind(),
+                        kind,
                         queued_rfc3339: item.created_rfc3339.clone(),
                         last_error: item.last_error.clone(),
                     });
@@ -566,9 +866,11 @@ impl Workspace {
             message.workspace.notification_uid = Some(notification_uid.clone());
             message.workspace.notification_rfc3339 = Some(notification_rfc3339.clone());
             message.workspace.origin = None;
-        } else if index.cases.has_any_reference(&message.message_id) {
+        } else if index.cases.has_active_reference(&message.message_id) {
             message.workspace.status = MessageStatus::Case.as_str().to_string();
-        } else if message.workspace.origin.is_some() {
+        } else if index.cases.has_archived_reference(&message.message_id)
+            || message.workspace.origin.is_some()
+        {
             message.workspace.status = MessageStatus::Archived.as_str().to_string();
         } else {
             message.workspace.status = MessageStatus::Triage.as_str().to_string();
@@ -595,21 +897,12 @@ impl Workspace {
                 push.last_completed_rfc3339 = Some(last_completed_rfc3339);
             }
         }
-        if message
-            .workspace
-            .push
-            .as_ref()
-            .is_some_and(|push| !push.pending.is_empty())
-            && MessageStatus::parse(&message.workspace.status)? == MessageStatus::Triage
-        {
-            message.workspace.status = MessageStatus::PushQueued.as_str().to_string();
-        }
         Ok(())
     }
 
     /// Set `message.contact` from the sender address using a prebuilt
-    /// email→contact map. Called only from materialize/render paths so plain
-    /// `message show` reads the stored field without scanning contacts.
+    /// email→contact map. Shared reads apply this in memory; explicit
+    /// materialize/render paths may persist the projection in generated cache.
     pub(super) fn apply_contact_link(
         &self,
         message: &mut MessageFile,
@@ -626,6 +919,15 @@ impl Workspace {
         message: &mut MessageFile,
         config: &MailConfig,
     ) -> Result<()> {
+        let profiles = config.identity_profiles(&self.root)?;
+        self.apply_identity_match_with_profiles(message, &profiles)
+    }
+
+    pub(super) fn apply_identity_match_with_profiles(
+        &self,
+        message: &mut MessageFile,
+        profiles: &[ResolvedIdentity],
+    ) -> Result<()> {
         if message
             .direction
             .as_deref()
@@ -639,7 +941,7 @@ impl Workspace {
             message.observed_recipient_emails.clear();
             return Ok(());
         }
-        let matched = config.match_message_identity(&self.root, message)?;
+        let matched = match_message_identity_with_profiles(profiles, message);
         message.identity = matched.identity;
         message.identity_email = matched.identity_email;
         message.identity_match = Some(matched.identity_match);
@@ -660,17 +962,139 @@ impl Workspace {
             .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("eml"))
             .collect::<Vec<_>>();
         eml_paths.sort();
+        let context = if eml_paths.is_empty() {
+            None
+        } else {
+            Some(self.materialization_context()?)
+        };
 
         for eml_path in eml_paths {
             let Some(message_id) = eml_path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
             validate_id("message_id", message_id)?;
-            if self.materialize_message_cache_if_needed(message_id)? {
+            let Some(context) = context.as_ref() else {
+                continue;
+            };
+            if self.materialize_message_cache_if_needed_with_context(message_id, context)? {
                 totals.rebuilt_count += 1;
             }
         }
 
+        for entry in read_dir(&messages_dir, "read message cache")? {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("txt") {
+                remove_file(&path)?;
+                totals.removed_text_cache_count += 1;
+            }
+        }
+        Ok(totals)
+    }
+
+    pub(super) fn prepare_render_context(
+        &self,
+        invocation: RenderInvocation,
+        static_inputs: Arc<RenderStaticInputs>,
+    ) -> Result<RenderPreparation> {
+        if invocation == RenderInvocation::Pull {
+            self.synchronize_notification_membership()?;
+        }
+        let materialization_context =
+            self.materialization_context_with_static_inputs(static_inputs)?;
+        let materialization =
+            self.validate_and_materialize_messages_with_context(&materialization_context)?;
+        let mut messages = Vec::new();
+        let mut message_snapshots = BTreeMap::new();
+        for path in message_json_paths(&self.root)? {
+            let mut message = read_message(&path)?;
+            self.apply_materialized_workspace_overlays_with_index(
+                &mut message,
+                &materialization_context.overlays,
+            )?;
+            self.apply_identity_match_with_profiles(
+                &mut message,
+                &materialization_context.static_inputs.resolved_identities,
+            )?;
+            self.apply_contact_link(
+                &mut message,
+                &materialization_context.static_inputs.contact_map,
+            );
+            message_snapshots.insert(
+                message.message_id.clone(),
+                ProjectedMessageSnapshot {
+                    hash: blake3_json_fingerprint(&message)?,
+                    has_visible_quote: message_body_has_visible_quote(&message.body_text),
+                },
+            );
+            messages.push(message);
+        }
+        let message_relations = MessageRelationIndex::from_messages(&messages);
+        Ok(RenderPreparation {
+            context: RenderContext {
+                materialization: materialization_context,
+                message_relations,
+                message_snapshots,
+            },
+            materialization,
+        })
+    }
+
+    fn validate_and_materialize_messages_with_context(
+        &self,
+        context: &MaterializationContext,
+    ) -> Result<MessageCacheRebuildTotals> {
+        let messages_dir = self.root.join(".afmail/messages");
+        if !messages_dir.exists() {
+            return Ok(MessageCacheRebuildTotals::default());
+        }
+        let mut totals = MessageCacheRebuildTotals::default();
+        let mut eml_paths = read_dir(&messages_dir, "read message eml cache")?
+            .into_iter()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("eml"))
+            .collect::<Vec<_>>();
+        eml_paths.sort();
+        for eml_path in eml_paths {
+            let Some(message_id) = eml_path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            validate_id("message_id", message_id)?;
+            let needs_materialize = self.message_cache_needs_materialize(message_id)?;
+            let message = self.read_message_from_eml_with_context(
+                message_id,
+                MessageCacheReadMode::Repair,
+                context,
+            )?;
+            totals.validated_eml_count += 1;
+            if self.write_message_materialized_cache_with_outcome(&message)?
+                == FileWriteOutcome::Written
+            {
+                totals.materialized_cache_written_count += 1;
+            }
+            if needs_materialize {
+                totals.rebuilt_count += 1;
+            }
+        }
+        for path in message_json_paths(&self.root)? {
+            let Some(message_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if message_eml_path(&self.root, message_id).is_file() {
+                continue;
+            }
+            let mut message = read_message(&path)?;
+            self.apply_materialized_workspace_overlays_with_index(&mut message, &context.overlays)?;
+            self.apply_identity_match_with_profiles(
+                &mut message,
+                &context.static_inputs.resolved_identities,
+            )?;
+            self.apply_contact_link(&mut message, &context.static_inputs.contact_map);
+            if self.write_message_materialized_cache_with_outcome(&message)?
+                == FileWriteOutcome::Written
+            {
+                totals.materialized_cache_written_count += 1;
+            }
+        }
         for entry in read_dir(&messages_dir, "read message cache")? {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("txt") {
@@ -695,12 +1119,101 @@ impl Workspace {
         Ok(out)
     }
 
-    pub fn message_show(&self, message_id: &str) -> Result<Value> {
+    pub fn message_list(
+        &self,
+        sender: Option<&str>,
+        subject_contains: Option<&str>,
+        since: Option<&str>,
+        scope: &str,
+    ) -> Result<Value> {
+        self.require_workspace()?;
+        let since_cutoff = match since {
+            Some(value) => Some(parse_message_list_since(value)?),
+            None => None,
+        };
+        let cases = Some(CaseIndex::build(self)?);
+        let mut items = Vec::new();
+        for path in message_json_paths(&self.root)? {
+            let message = read_message(&path)?;
+            if !message_list_scope_matches(&message.workspace.status, scope) {
+                continue;
+            }
+            if let Some(sender_filter) = sender {
+                let sender_text = message_list_sender_text(&message);
+                if !sender_text
+                    .to_ascii_lowercase()
+                    .contains(&sender_filter.to_ascii_lowercase())
+                {
+                    continue;
+                }
+            }
+            if let Some(subject_filter) = subject_contains {
+                let Some(subject) = message.subject.as_deref() else {
+                    continue;
+                };
+                if !subject
+                    .to_ascii_lowercase()
+                    .contains(&subject_filter.to_ascii_lowercase())
+                {
+                    continue;
+                }
+            }
+            if let Some(cutoff) = since_cutoff {
+                let Some(message_time) = message_list_message_time(&message) else {
+                    continue;
+                };
+                if message_time < cutoff {
+                    continue;
+                }
+            }
+            let case_refs = cases
+                .as_ref()
+                .map(|index| index.case_refs_for_message(&message.message_id))
+                .unwrap_or_default();
+            let sort_key = message_list_message_time(&message);
+            items.push((
+                sort_key,
+                json!({
+                    "message_id": message.message_id,
+                    "from": message.from.as_deref().unwrap_or(""),
+                    "sender": message.sender.as_deref().unwrap_or(""),
+                    "subject": message.subject.as_deref().unwrap_or(""),
+                    "direction": message.direction.as_deref().unwrap_or(""),
+                    "received_rfc3339": message.received_rfc3339.as_deref().unwrap_or(""),
+                    "sent_rfc3339": message.sent_rfc3339.as_deref().unwrap_or(""),
+                    "workspace_status": message.workspace.status.as_str(),
+                    "notification_uid": message.workspace.notification_uid.as_deref(),
+                    "case_refs": case_refs,
+                    "json_path": format!("messages/{}.json", message.message_id),
+                    "view_path": self.message_existing_view_path(&message)?,
+                }),
+            ));
+        }
+        items.sort_by(|(a_key, a_item), (b_key, b_item)| {
+            b_key.cmp(a_key).then(
+                a_item["message_id"]
+                    .as_str()
+                    .cmp(&b_item["message_id"].as_str()),
+            )
+        });
+        let items = items.into_iter().map(|(_, item)| item).collect::<Vec<_>>();
+        Ok(json!({
+            "count": items.len(),
+            "filters": {
+                "sender": sender,
+                "subject_contains": subject_contains,
+                "since": since,
+                "scope": scope,
+            },
+            "items": items,
+        }))
+    }
+
+    pub fn message_show(&self, message_id: &str, meta: bool) -> Result<Value> {
         self.require_workspace()?;
         validate_id("message_id", message_id)?;
         let config = MailConfig::load(&self.root)?;
         let message = self.read_message_by_id(message_id)?;
-        let body_text = self.message_body_text(&message)?;
         let flags = message_remote_flags(&message);
         let unread = !flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
         let flagged = flags
@@ -708,8 +1221,13 @@ impl Workspace {
             .any(|flag| flag.eq_ignore_ascii_case("\\Flagged"));
         let push = message.workspace.push.clone();
         let contact = message.contact.clone();
-        Ok(json!({
-            "code": "message_show",
+        let related_message_ids = self.related_message_ids(message_id)?;
+        let cases = CaseIndex::build(self)?;
+        let related_messages =
+            self.related_message_meta_rows(&related_message_ids, Some(&cases))?;
+        let mut value = json!({
+            "content_trust": "untrusted_remote",
+            "content_provenance": { "source": "remote_mail", "message_id": message.message_id.as_str() },
             "message_id": message.message_id.as_str(),
             "from": message.from.as_deref().unwrap_or(""),
             "to": &message.to,
@@ -721,13 +1239,19 @@ impl Workspace {
             "direction": message.direction.as_deref().unwrap_or(""),
             "received_rfc3339": message.received_rfc3339.as_deref().unwrap_or(""),
             "sent_rfc3339": message.sent_rfc3339.as_deref().unwrap_or(""),
-            "body_text": body_text,
             "attachment_count": message.attachments.len(),
             "attachments": attachment_metadata_values(&message.attachments),
             "mailbox_ids": message_mailbox_ids(&message, &config),
             "flags": flags,
             "unread": unread,
             "flagged": flagged,
+            "workspace_status": message.workspace.status.as_str(),
+            "notification_uid": message.workspace.notification_uid.as_deref(),
+            "authentication_warning": message.authentication.is_warning(),
+            "authentication": &message.authentication,
+            "related_message_ids": related_message_ids,
+            "related_messages": related_messages,
+            "case_refs": cases.case_refs_for_message(message_id),
             "remote_missing": message_remote_missing(&message),
             "remote_missing_since_rfc3339": message_remote_missing_since_rfc3339(&message),
             "remote_effect_pending": message_remote_effect_pending(&message),
@@ -739,9 +1263,16 @@ impl Workspace {
             "observed_recipient_emails": &message.observed_recipient_emails,
             "view_path": self.message_existing_view_path(&message)?,
             "json_path": format!("messages/{message_id}.json"),
-            "message": message_template_value(&message)?,
             "contact": contact,
-        }))
+        });
+        if !meta {
+            let body_text = self.message_body_text(&message)?;
+            if let Value::Object(map) = &mut value {
+                map.insert("body_text".to_string(), json!(body_text));
+                map.insert("message".to_string(), message_template_value(&message)?);
+            }
+        }
+        Ok(value)
     }
 
     pub fn spam_message(&self, message_id: &str, reason: Option<&str>) -> Result<Value> {
@@ -751,14 +1282,27 @@ impl Workspace {
         validate_id("message_id", message_id)?;
         self.ensure_no_related_conversation(message_id)?;
         let message_ids = vec![message_id.to_string()];
-        self.ensure_message_ids_unreferenced(&message_ids, None)?;
-        let locations = self.message_remote_locations(&message_ids)?;
+        self.ensure_message_ids_unreferenced_except_message_pushes(
+            &message_ids,
+            None,
+            &[
+                crate::types::MessagePushAction::Trash,
+                crate::types::MessagePushAction::Unspam,
+                crate::types::MessagePushAction::Untrash,
+            ],
+        )?;
+        let locations = self
+            .message_remote_locations_except_mailbox_kinds(&message_ids, &[SpecialUseKind::Junk])?;
         let transaction = self.begin_transaction(
             "message_spam",
             vec![
                 format!("messages/{message_id}.json"),
                 ".afmail/push".to_string(),
             ],
+        )?;
+        let removed_push_ids = self.remove_pending_message_push_kinds(
+            &message_ids,
+            &["message.trash", "message.unspam", "message.untrash"],
         )?;
         let item = crate::push_queue::queue_action_steps(
             &self.root,
@@ -778,15 +1322,21 @@ impl Workspace {
             "message_spam_marked",
             vec![audit_target("message", message_id)],
             reason,
-            json!({"message_id": message_id, "special_use": SpecialUseKind::Junk.as_str()}),
+            json!({
+                "message_id": message_id,
+                "special_use": SpecialUseKind::Junk.as_str(),
+                "removed_push_ids": removed_push_ids.clone(),
+            }),
         )?;
         serde_json::to_value(MessageDispositionResult {
             code: "message_spam_marked",
             message_id: message_id.to_string(),
             special_use: SpecialUseKind::Junk.as_str().to_string(),
             message_ids,
+            removed_push_count: removed_push_ids.len(),
+            removed_push_ids,
             location_count: locations.len(),
-            queued_location_count: locations.len(),
+            queued_location_count: if item.is_some() { locations.len() } else { 0 },
             queued: item.is_some(),
             push_id: item.as_ref().map(|item| item.push_id.clone()),
         })
@@ -856,7 +1406,8 @@ impl Workspace {
             &notification_rfc3339,
         )?;
         self.refresh_notification(&notification_uid)?;
-        let queue = self.queue_archive_for_archived_messages(&[message_id.to_string()], None)?;
+        let queue =
+            self.queue_archive_for_archived_messages(&[message_id.to_string()], None, None)?;
         transaction.commit()?;
         self.append_audit_event(
             "notification_message_added",
@@ -899,14 +1450,29 @@ impl Workspace {
         validate_id("message_id", message_id)?;
         self.ensure_no_related_conversation(message_id)?;
         let message_ids = vec![message_id.to_string()];
-        self.ensure_message_ids_unreferenced(&message_ids, None)?;
-        let locations = self.message_remote_locations(&message_ids)?;
+        self.ensure_message_ids_unreferenced_except_message_pushes(
+            &message_ids,
+            None,
+            &[
+                crate::types::MessagePushAction::Spam,
+                crate::types::MessagePushAction::Unspam,
+                crate::types::MessagePushAction::Untrash,
+            ],
+        )?;
+        let locations = self.message_remote_locations_except_mailbox_kinds(
+            &message_ids,
+            &[SpecialUseKind::Trash],
+        )?;
         let transaction = self.begin_transaction(
             "message_trash",
             vec![
                 format!("messages/{message_id}.json"),
                 ".afmail/push".to_string(),
             ],
+        )?;
+        let removed_push_ids = self.remove_pending_message_push_kinds(
+            &message_ids,
+            &["message.spam", "message.unspam", "message.untrash"],
         )?;
         let item = crate::push_queue::queue_action_steps(
             &self.root,
@@ -926,15 +1492,21 @@ impl Workspace {
             "message_trashed",
             vec![audit_target("message", message_id)],
             reason,
-            json!({"message_id": message_id, "special_use": SpecialUseKind::Trash.as_str()}),
+            json!({
+                "message_id": message_id,
+                "special_use": SpecialUseKind::Trash.as_str(),
+                "removed_push_ids": removed_push_ids.clone(),
+            }),
         )?;
         serde_json::to_value(MessageDispositionResult {
             code: "message_trashed",
             message_id: message_id.to_string(),
             special_use: SpecialUseKind::Trash.as_str().to_string(),
             message_ids,
+            removed_push_count: removed_push_ids.len(),
+            removed_push_ids,
             location_count: locations.len(),
-            queued_location_count: locations.len(),
+            queued_location_count: if item.is_some() { locations.len() } else { 0 },
             queued: item.is_some(),
             push_id: item.as_ref().map(|item| item.push_id.clone()),
         })
@@ -989,17 +1561,19 @@ impl Workspace {
         Ok(message.body_text.clone())
     }
 
-    pub(super) fn message_conversation_with_renderer(
+    pub(super) fn message_conversation_with_renderer_context(
         &self,
         message: &MessageFile,
         config: &MailConfig,
         renderer: &mut MarkdownTemplateRenderer<'_>,
         output_dir: Option<&Path>,
+        render_context: Option<&RenderContext>,
     ) -> Result<String> {
         let body_text = self.message_body_text(message)?;
+        let display_offset = config.resolved_timezone_offset();
         renderer.render(
             TemplateKey::MessageSection,
-            &message_section_context(
+            &message_section_context_with_options(
                 Some(&self.root),
                 message,
                 &body_text,
@@ -1008,34 +1582,55 @@ impl Workspace {
                     .default_identity()
                     .ok()
                     .map(|identity| identity.email.as_str()),
-                output_dir,
+                MessageSectionRenderOptions {
+                    display_offset: Some(&display_offset),
+                    output_dir,
+                    message_link: None,
+                    quoted_message_id: render_context
+                        .and_then(|context| context.quoted_message_id(&message.message_id)),
+                },
             )?,
         )
     }
 
-    pub(super) fn rfc822_message_id_index(&self) -> Result<BTreeMap<String, String>> {
-        self.rebuild_message_cache_from_eml()?;
-        let mut index = BTreeMap::new();
-        for path in message_json_paths(&self.root)? {
-            let message = read_message(&path)?;
-            if let Some(normalized) = message
-                .rfc822_message_id
-                .as_deref()
-                .and_then(normalize_rfc822_message_id)
-            {
-                index
-                    .entry(normalized)
-                    .or_insert_with(|| message.message_id.clone());
-            }
-        }
-        Ok(index)
+    pub(super) fn message_conversation_with_link_with_renderer_context(
+        &self,
+        message: &MessageFile,
+        config: &MailConfig,
+        renderer: &mut MarkdownTemplateRenderer<'_>,
+        output_dir: Option<&Path>,
+        message_link: &str,
+        render_context: Option<&RenderContext>,
+    ) -> Result<String> {
+        let body_text = self.message_body_text(message)?;
+        let display_offset = config.resolved_timezone_offset();
+        renderer.render(
+            TemplateKey::MessageSection,
+            &message_section_context_with_options(
+                Some(&self.root),
+                message,
+                &body_text,
+                config.template_language(),
+                config
+                    .default_identity()
+                    .ok()
+                    .map(|identity| identity.email.as_str()),
+                MessageSectionRenderOptions {
+                    display_offset: Some(&display_offset),
+                    output_dir,
+                    message_link: Some(message_link),
+                    quoted_message_id: render_context
+                        .and_then(|context| context.quoted_message_id(&message.message_id)),
+                },
+            )?,
+        )
     }
 
     pub(super) fn related_message_ids(&self, message_id: &str) -> Result<Vec<String>> {
         validate_id("message_id", message_id)?;
         let current = self.read_message_by_id(message_id)?;
         let index = MessageRelationIndex::build(self)?;
-        Ok(index.related_message_ids(&current))
+        Ok(index.related_message_ids(&current.message_id).to_vec())
     }
 
     pub(super) fn ensure_no_related_conversation(&self, message_id: &str) -> Result<()> {
@@ -1129,6 +1724,20 @@ impl Workspace {
         Ok(())
     }
 
+    fn remove_pending_message_push_kinds(
+        &self,
+        message_ids: &[String],
+        push_kinds: &[&str],
+    ) -> Result<Vec<String>> {
+        let mut push_ids = BTreeSet::new();
+        for push_kind in push_kinds {
+            let removed =
+                self.remove_pending_message_pushes_for_messages(message_ids, push_kind)?;
+            push_ids.extend(removed);
+        }
+        Ok(push_ids.into_iter().collect())
+    }
+
     fn unmark_discarded_message(
         &self,
         message_id: &str,
@@ -1207,7 +1816,6 @@ impl Workspace {
             }),
         )?;
         Ok(json!({
-            "code": context.result_code,
             "message_id": message_id,
             "from_status": from_status,
             "status": "triage",
@@ -1215,7 +1823,7 @@ impl Workspace {
             "removed_push_count": push_ids.len(),
             "removed_push_ids": push_ids,
             "location_count": source_locations.len(),
-            "queued_location_count": source_locations.len(),
+            "queued_location_count": if item.is_some() { source_locations.len() } else { 0 },
             "queued": item.is_some(),
             "push_id": item.as_ref().map(|item| item.push_id.clone()),
         }))
@@ -1234,16 +1842,16 @@ impl Workspace {
 
     pub(crate) fn read_message_by_id(&self, message_id: &str) -> Result<MessageFile> {
         validate_id("message_id", message_id)?;
-        if message_eml_path(&self.root, message_id).is_file() {
-            self.materialize_message_cache_if_needed(message_id)?;
+        let eml_path = message_eml_path(&self.root, message_id);
+        if eml_path.is_file() {
+            return self.read_message_from_eml(message_id, MessageCacheReadMode::Strict);
         }
-        let path = self.message_path(message_id);
-        let mut message = read_message(&path)?;
-        let original_workspace = message.workspace.clone();
+        let mut message = read_message(&self.message_path(message_id))?;
         self.apply_materialized_workspace_overlays(&mut message)?;
-        if message.workspace != original_workspace {
-            self.write_message_materialized_cache(&message)?;
-        }
+        let config = MailConfig::load(&self.root)?;
+        self.apply_identity_match(&mut message, &config)?;
+        let contact_map = self.contact_email_map()?;
+        self.apply_contact_link(&mut message, &contact_map);
         Ok(message)
     }
 
@@ -1272,4 +1880,54 @@ impl Workspace {
         self.write_message_materialized_cache(&message)?;
         Ok(())
     }
+}
+
+fn parse_message_list_since(value: &str) -> Result<DateTime<FixedOffset>> {
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Ok(parsed);
+    }
+    let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|e| {
+        AppError::new(
+            "invalid_request",
+            format!("invalid since filter {value}: {e}"),
+        )
+    })?;
+    DateTime::parse_from_rfc3339(&format!("{date}T00:00:00Z")).map_err(|e| {
+        AppError::new(
+            "invalid_request",
+            format!("invalid since filter {value}: {e}"),
+        )
+    })
+}
+
+fn message_list_message_time(message: &MessageFile) -> Option<DateTime<FixedOffset>> {
+    message
+        .received_rfc3339
+        .as_deref()
+        .or(message.sent_rfc3339.as_deref())
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+}
+
+fn message_list_scope_matches(status: &str, scope: &str) -> bool {
+    match scope {
+        "triage" => status == "triage",
+        "case" => matches!(status, "case" | "archived"),
+        "notification" => status == "notification",
+        "all" => true,
+        _ => false,
+    }
+}
+
+fn message_list_sender_text(message: &MessageFile) -> String {
+    let mut parts = Vec::new();
+    if let Some(from) = message.from.as_deref() {
+        parts.push(from);
+    }
+    if let Some(sender) = message.sender.as_deref() {
+        parts.push(sender);
+    }
+    if let Some(contact) = message.contact.as_ref() {
+        parts.push(contact.display_name.as_str());
+    }
+    parts.join(" ")
 }

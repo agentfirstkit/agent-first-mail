@@ -3,16 +3,7 @@
 事项: {{ case.collection_uid }} · 消息: {{ view.message_count }}
 
 {% if items | length == 0 %}_没有消息。_
-{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.direction_kind == 'received' %}收到{% else %}发送{% endif %}{% if item.view.action == 'reply' %}回复{% elif item.view.action == 'forward' %}转发{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
-
-{% if item.view.display_contact %}- {% if item.view.contact_kind == 'from' %}发件人{% else %}收件人{% endif %}: {{ item.view.display_contact }}
-{% endif %}- 消息: [{{ item.message.message_id }}]({{ item.view.link }})
-{% if item.view.time.datetime %}- 时间: {{ item.view.time.datetime }}
-{% endif %}
-
-{% endfor %}{% endif %}
-{% if view.conversation %}
-## 正文
+{% elif view.conversation %}## 正文
 
 <!-- afmail:conversation:start -->
 

@@ -1,0 +1,28 @@
+{
+  "afui_pack": "0.1",
+  "name": "afmail split reader and drafts",
+  "match": {
+    "owner": "afmail",
+    "genre": "triage"
+  },
+  "genre": "triage",
+  "slots": {
+    "mail_queue": "queue",
+    "draft_list": "drafts",
+    "draft_editor": "editor",
+    "mailbox_glance": "glance"
+  },
+  "zoom": {
+    "mail_queue": "full",
+    "draft_list": "compact",
+    "draft_editor": "compact",
+    "mailbox_glance": "glance"
+  },
+  "order": [
+    "draft_list",
+    "draft_editor",
+    "mail_queue",
+    "mailbox_glance"
+  ],
+  "accent": "green"
+}

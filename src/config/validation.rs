@@ -104,7 +104,9 @@ pub(super) fn validate_inline_secret(label: &str, value: &str, env_label: &str) 
     if value.starts_with("env:") || value.starts_with("literal:") {
         Err(AppError::new(
             "config_invalid",
-            format!("{label} stores the literal secret; remove env:/literal: prefixes or use {env_label}"),
+            format!(
+                "{label} stores the literal secret; remove env:/literal: prefixes or use {env_label}"
+            ),
         ))
     } else {
         Ok(())
@@ -150,13 +152,13 @@ pub(super) fn validate_steps(config: &MailConfig, label: &str, steps: &[ActionSt
                 format!("{label}[{index}] must define exactly one operation"),
             ));
         }
-        if let Some(params) = &step.smtp_send {
-            if !params.is_empty() {
-                return Err(AppError::new(
-                    "config_invalid",
-                    format!("{label}[{index}].smtp_send must be an empty object"),
-                ));
-            }
+        if let Some(params) = &step.smtp_send
+            && !params.is_empty()
+        {
+            return Err(AppError::new(
+                "config_invalid",
+                format!("{label}[{index}].smtp_send must be an empty object"),
+            ));
         }
         for flag in &step.add_flags {
             if flag.trim().is_empty() {
@@ -178,13 +180,14 @@ pub(super) fn validate_steps(config: &MailConfig, label: &str, steps: &[ActionSt
                     format!("{label}[{index}] references unknown mailbox id: {target}"),
                 )
             })?;
-            if let Some(kind) = mailbox.first_special_use_kind() {
-                if step.move_to_mailbox_id.is_some() && !kind.can_move_to() {
-                    return Err(AppError::new(
-                        "config_invalid",
-                        format!("{label}[{index}].move_to_mailbox_id cannot target {target}"),
-                    ));
-                }
+            if let Some(kind) = mailbox.first_special_use_kind()
+                && step.move_to_mailbox_id.is_some()
+                && !kind.can_move_to()
+            {
+                return Err(AppError::new(
+                    "config_invalid",
+                    format!("{label}[{index}].move_to_mailbox_id cannot target {target}"),
+                ));
             }
         }
     }

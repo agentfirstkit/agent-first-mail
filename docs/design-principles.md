@@ -6,30 +6,44 @@ Agents and humans should read Markdown and JSON files directly. The CLI exists
 for effects: moving local attention state, queueing remote work, composing mail,
 fetching attachments, and writing audit events.
 
-## 2. Active Attention Is Separate From Archived Cases
+Commands assigned a shared lock are strict `Read` or `Plan` operations: they may
+project EML, sidecars, object state, identities, contacts, and push effects in
+memory, but they do not change workspace files, directories, bytes, or mtimes.
+Generated caches and views are materialized only by explicit write paths such as
+pull, mutation, repair, or `afmail render refresh`.
+
+## 2. Active Attention Is Separate From Archiving And Archived Cases
 
 `triage/` is for unprocessed message views. `cases/` is for active case work.
-`archived-cases/` is for completed cases:
+`archived-cases/` holds both cases waiting on queued sends/archive effects and
+completed cases:
 
-- `archived-cases/<group>/<case_uid>-<name>/` is an archived case workspace; its
+- `archived-cases/<group>/<case_uid>-<name>/` with `status: archiving` and no
+  `archived_rfc3339` is an archiving case workspace.
+- The same path with lifecycle `archived` is a finalized case workspace; its
   `<group>` segment is the case group carried forward from active work, not an
   archive category.
 - `notifications/<notification_uid>-<name>/` is a notification collection.
 
-Case identity is stable across both directories. `afmail case show`,
+Case identity is stable across these directories. `afmail case show`,
 `afmail case notes`, `afmail case remove`, `afmail case move`, `afmail case trash`,
-`afmail case delete`, and `afmail case rename` operate on active or archived
-cases by ref. Active-work commands such as `case add`, `case tag`, and
+`afmail case delete`, and `afmail case rename` operate on active, archiving, or
+archived cases by ref. Active-work commands such as `case add`, `case tag`, and
 `case draft ...` require `afmail case unarchive REF --group GROUP --reason TEXT`
 first.
 
 ## 3. Identity Is Stable
 
 `message_id` is the stable local identity for mail. `case_uid` is a stable
-`cYYYYMMDDNNN` identity across active and archived cases, and
+`cYYYYMMDDNNN` identity across active, archiving, and archived cases, and
 `notification_uid` is a stable `nYYYYMMDDNNN` identity for notification
 collections. Remote IMAP moves update recorded locations but do not rename local
 message ids.
+
+Each workspace also has an immutable `.afmail/workspace.json` identity. Its
+`workspace_uid` survives directory moves and private-Git clone/restore and is
+included in destructive plan digests, so approval from one workspace cannot be
+reused in another.
 
 Human names are separate labels. Directories use `<uid>-<name>`, and
 `rename --name` changes the label and suffix without changing the UID. Commands
@@ -43,14 +57,16 @@ dot-only segments are not valid names.
 A notification message may belong to exactly one notification collection. If a
 message needs multiple classifications, use cases instead of placing one message
 into multiple notification collections. A message may be referenced by multiple
-active or archived cases.
+active, archiving, or archived cases.
 
 ## 5. Archive Is Local First, Remote Explicit
 
 Notification and archive commands change local attention/archive state and may
 queue configured remote moves. They do not create IMAP notification/category folders and they do not
-mutate remote mail until `afmail push --confirm` runs. Bare `afmail push`
-previews the whole queue; `--confirm` applies all of it.
+mutate remote mail until `afmail push --confirm PLAN_ID` runs. Bare `afmail push`
+previews the whole resolved queue and returns a workspace-bound `plan_id`; confirm
+applies only that exact snapshot. Changes to the queue, drafts, attachments,
+identities, or action configuration invalidate the old ID before remote access.
 
 Remote archive moves are rule-driven by recorded source mailbox id via
 `actions.message.notification.by_source_mailbox_id.<id>.steps`. Default `inbox` moves to
@@ -72,9 +88,11 @@ intentionally customizing generated read-view templates.
 
 Drafts remain ordinary Markdown, and files under `drafts/` are the only
 editable source. afmail records validation metadata in case-local
-`data/drafts.json`, but queued `draft save` / `draft send` items only reference
+`data/drafts.json`, but queued `draft upload` / `draft send` items only reference
 the draft by case and filename. Do not edit machine state directly; change the
-Markdown (or use `draft change`) and push will use the latest valid content.
+Markdown (or use `draft change`) and the next preview will use the latest valid
+content. Once previewed, any further relevant edit requires a new plan and
+approval.
 
 ## 8. Safety Comes From Reference Checks
 
@@ -95,9 +113,10 @@ may point at one account; coordination between them happens through IMAP itself
 through afmail. Nothing prevents two such workspaces from independently drafting
 and sending, so concurrent operators on one account is out of scope by design.
 
-`.afmail/workspace.lock` only serializes concurrent afmail processes against one
-local workspace directory to prevent corruption. It is not cross-host
-coordination. `.afmail/workspace.progress.json` is only the latest local
+The runtime workspace lock is stored outside the workspace under the current
+user's temporary runtime directory and keyed by the canonical workspace path.
+It serializes local afmail processes without making shared reads dirty the
+workspace; it is not cross-host coordination. `.afmail/cache/progress.json` is only the latest local
 push/pull progress snapshot for observers; it is not durable coordination or an
 audit log.
 

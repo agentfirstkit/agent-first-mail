@@ -17,10 +17,11 @@
 
 ```text
 .afmail/messages/        raw .eml plus durable remote sidecars
+.afmail/workspace.json   immutable workspace identity used by plan digests
 messages/               rebuildable parsed message cache
 .afmail/logs/events.jsonl append-only audit log
 .afmail/transactions/    transient local write transaction sentinels
-.afmail/workspace.progress.json latest push/pull runtime snapshot
+.afmail/cache/progress.json latest push/pull runtime snapshot
 templates/               user-editable generated Markdown templates
 triage/message_*.md      active unprocessed message views
 spam/*.md                generated spam review views
@@ -50,46 +51,59 @@ afmail pull sent archive
 afmail remote folders
 afmail case create --name 应用反馈-肥料登记 --group support --message message_inbox_607146690_21 --reason "new feedback thread"
 afmail case show c20260603001
-afmail case add c20260603001 message_inbox_607146690_22 --reason "follow-up belongs to same feedback case"
+afmail case add c20260603001 message_inbox_607146690_22 message_inbox_607146690_23 --reason "follow-up belongs to same feedback case"
 afmail notification create --name 服务通知 --message message_inbox_607146690_23 --summary "billing notification" --reason "billing notification"
+afmail notification add n20260603001 message_inbox_607146690_24 message_inbox_607146690_25 --summary "billing notification" --reason "billing notification"
 afmail notification show n20260603001
 afmail notification remove n20260603001 message_inbox_607146690_23 --reason "does not belong in this notification"
-afmail message spam message_inbox_607146690_23 --reason "phishing attempt"
-afmail message trash message_inbox_607146690_24 --reason "duplicate no longer needed"
+afmail message spam message_inbox_607146690_23 message_inbox_607146690_24 --reason "phishing attempt"
+afmail message trash message_inbox_607146690_25 message_inbox_607146690_26 --reason "duplicate no longer needed"
 afmail render refresh
 afmail doctor repair --confirm
-afmail case move c20260603001 waiting --reason "better category"
+afmail case move c20260603001 --group waiting --reason "better category"
 afmail case archive c20260603001 --reason "feedback handled"
 afmail case unarchive c20260603001 --group support --reason "customer replied"
 afmail case tag c20260603001 legal --reason "legal review needed"
-afmail contact create --name "Zhang San" --email zhang@example.com --org Acme --role Buyer
+afmail contact create --name "Zhang San" --email zhang@example.com --org Acme --role Buyer --reason "new contact"
 afmail contact list --group people
-afmail contact email add p20260603001 zhang-alt@example.com
-afmail contact rename p20260603001 --name "Zhang Sanfeng"
+afmail contact email add p20260603001 zhang-alt@example.com --reason "alternate email"
+afmail contact rename p20260603001 --name "Zhang Sanfeng" --reason "better display name"
 afmail contact extract --from-triage
 afmail contact delete p20260603001 --reason "duplicate contact"
 afmail case draft reply c20260603001 message_inbox_607146690_22
 afmail case draft attach c20260603001 reply-message_inbox_607146690_22.md ./screenshot.png
 afmail case draft change c20260603001 reply-message_inbox_607146690_22.md --body "Thanks, I will check this."
 afmail case draft validate c20260603001 reply-message_inbox_607146690_22.md
+afmail case draft list c20260603001
 afmail case draft send c20260603001 reply-message_inbox_607146690_22.md
 afmail case draft remove c20260603001 reply-message_inbox_607146690_22.md --reason "mistaken draft"
 afmail push list
 afmail push
-afmail push --confirm
+afmail push --confirm push_plan_<REVIEWED_PLAN_ID>
 afmail purge
 afmail purge spam --older-than-days 30
 afmail purge deleted
 afmail log list --limit 20
+afmail triage list --limit 10 --details
 afmail message show message_inbox_607146690_21
+afmail message show message_inbox_607146690_21 --meta
+afmail message list --sender alice@example.com --subject-contains invoice --since 2026-05-21 --in all
 afmail message attachment fetch message_inbox_607146690_21 2
 ```
 
 ### Exit Codes
 
 - `0`: command completed successfully
-- `1`: runtime/store/protocol error
+- `1`: command failed, including an aggregate command where no item completed successfully
 - `2`: invalid CLI arguments
+- `3`: command completed partially; inspect the canonical error for successful and failed items
+- `4`: canonical stdout output was not fully written
+
+Only completely successful commands emit `kind: result`; their payload has no generic `code`, `ok`,
+or `outcome` field. Any item failure emits `kind: error`. Partial failures use `error.code: partial`,
+and the complete item list is carried in `error.items`; a failed item has an `error` child object.
+Exit code `4` means the command could not deliver a complete stdout protocol event; inspect stderr
+for the non-protocol fallback diagnostic.
 
 ```text
 Usage: afmail [OPTIONS] [COMMAND]
@@ -111,6 +125,7 @@ Commands:
   notification  Inspect and manage notification collections
   render        Rebuild generated read views from local workspace state
   log           Inspect the workspace audit log
+  ui            Emit or open an Agent-First UI operation surface for this workspace
   help          Print this message or the help of the given subcommand(s)
 
 Options:
@@ -123,13 +138,19 @@ Options:
           Log categories (comma-separated): startup, request, progress, retry
 
       --verbose
-          Enable all log categories
+          Enable all log categories. Startup argv redacts values and non-command positional tokens
 
       --stdout-file <PATH>
           Redirect stdout bytes to this file
 
       --stderr-file <PATH>
           Redirect stderr bytes to this file
+
+      --workspace <PATH>
+          Operate on this existing afmail workspace instead of discovering from cwd
+
+      --request-id <ID>
+          Idempotency key for supported non-idempotent local mutations
 
   -V, --version
           Print structured version event
@@ -155,13 +176,28 @@ Options:
 ## Agent-First Mail pull - Read configured IMAP mailbox ids into local message files without changing remote mail
 
 ```text
-Usage: pull [IDS]...
+Usage: pull [OPTIONS] [IDS]...
 
 Arguments:
   [IDS]...
           Configured mailbox ids to pull. With none, pulls actions.pull.default_mailbox_ids
 
 Options:
+      --dry-run
+          Estimate remote candidates and budgets without downloading or writing locally
+
+      --since-days <DAYS>
+          Limit the remote candidate range to messages from the last DAYS days
+
+      --max-new-messages <COUNT>
+          Maximum number of new messages stored across all selected mailboxes
+
+      --max-total-bytes <BYTES>
+          Maximum new raw message bytes stored across all selected mailboxes
+
+      --all-history
+          Explicitly include all remote history instead of the default initial window
+
   -h, --help
           Print help
 ```
@@ -268,7 +304,7 @@ Options:
 Usage: remote <COMMAND>
 
 Commands:
-  test     Test IMAP login using local config
+  test     Test configured IMAP and SMTP access without sending mail
   folders  List IMAP folders/mailboxes
   help     Print this message or the help of the given subcommand(s)
 
@@ -277,7 +313,7 @@ Options:
           Print help
 ```
 
-### Agent-First Mail remote test - Test IMAP login using local config
+### Agent-First Mail remote test - Test configured IMAP and SMTP access without sending mail
 
 ```text
 Usage: test
@@ -303,21 +339,21 @@ Options:
 Usage: push [OPTIONS] [COMMAND]
 
 Commands:
-  list  List queued local push items
+  list  Preview the complete resolved push plan without writing
   help  Print this message or the help of the given subcommand(s)
 
 Options:
       --dry-run
           Show planned push actions without IMAP/SMTP writes. This is the default
 
-      --confirm
-          Apply queued IMAP/SMTP effects
+      --confirm <PLAN_ID>
+          Apply exactly the reviewed plan returned by push preview
 
   -h, --help
           Print help
 ```
 
-### Agent-First Mail push list - List queued local push items
+### Agent-First Mail push list - Preview the complete resolved push plan without writing
 
 ```text
 Usage: list
@@ -378,6 +414,9 @@ Commands:
 Options:
       --older-than-days <DAYS>
           Only purge messages in a discard state at least this many days ago. Defaults to 30
+
+      --confirm <PLAN_ID>
+          Permanently delete exactly the reviewed purge plan
 
   -h, --help
           Print help
@@ -563,9 +602,15 @@ Options:
 ### Agent-First Mail triage list - List compact untriaged message locators
 
 ```text
-Usage: list
+Usage: list [OPTIONS]
 
 Options:
+      --limit <LIMIT>
+          Maximum number of newest triage messages to return
+
+      --details
+          Include message metadata, related message ids, and case refs
+
   -h, --help
           Print help
 ```
@@ -577,6 +622,7 @@ Usage: message <COMMAND>
 
 Commands:
   show        Show the full local message metadata, body text, and attachment metadata
+  list        List messages by sender, subject, date, or workspace scope
   spam        Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
   trash       Explicitly discard this message locally, show it under trash/, and queue a Trash move
   unspam      Mark a spam false positive as triage and queue a move out of Junk when needed
@@ -592,13 +638,41 @@ Options:
 ### Agent-First Mail message show - Show the full local message metadata, body text, and attachment metadata
 
 ```text
-Usage: show <MESSAGE_ID>
+Usage: show [OPTIONS] <MESSAGE_ID>
 
 Arguments:
   <MESSAGE_ID>
           Message id, for example message_inbox_607146690_22
 
 Options:
+      --meta
+          Show metadata only and omit large body/conversation fields
+
+  -h, --help
+          Print help
+```
+
+### Agent-First Mail message list - List messages by sender, subject, date, or workspace scope
+
+```text
+Usage: list [OPTIONS]
+
+Options:
+      --sender <SENDER>
+          Only include messages whose sender or from line contains this text
+
+      --subject-contains <SUBJECT_CONTAINS>
+          Only include messages whose subject contains this text
+
+      --since <DATE>
+          Only include messages on or after this date or RFC3339 timestamp
+
+      --in <SCOPE>
+          Limit results to one workspace scope
+
+          [default: all]
+          [possible values: triage, case, notification, all]
+
   -h, --help
           Print help
 ```
@@ -606,11 +680,11 @@ Options:
 ### Agent-First Mail message spam - Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
 
 ```text
-Usage: spam [OPTIONS] <MESSAGE_ID>
+Usage: spam [OPTIONS] <MESSAGE_ID>...
 
 Arguments:
-  <MESSAGE_ID>
-          Message id, for example message_inbox_607146690_22
+  <MESSAGE_ID>...
+          Message ids, for example message_inbox_607146690_22
 
 Options:
       --reason <REASON>
@@ -623,11 +697,11 @@ Options:
 ### Agent-First Mail message trash - Explicitly discard this message locally, show it under trash/, and queue a Trash move
 
 ```text
-Usage: trash [OPTIONS] <MESSAGE_ID>
+Usage: trash [OPTIONS] <MESSAGE_ID>...
 
 Arguments:
-  <MESSAGE_ID>
-          Message id, for example message_inbox_607146690_22
+  <MESSAGE_ID>...
+          Message ids, for example message_inbox_607146690_22
 
 Options:
       --reason <REASON>
@@ -640,11 +714,11 @@ Options:
 ### Agent-First Mail message unspam - Mark a spam false positive as triage and queue a move out of Junk when needed
 
 ```text
-Usage: unspam [OPTIONS] <MESSAGE_ID>
+Usage: unspam [OPTIONS] <MESSAGE_ID>...
 
 Arguments:
-  <MESSAGE_ID>
-          Message id, for example message_inbox_607146690_22
+  <MESSAGE_ID>...
+          Message ids, for example message_inbox_607146690_22
 
 Options:
       --reason <REASON>
@@ -657,11 +731,11 @@ Options:
 ### Agent-First Mail message untrash - Mark a trash false positive as triage and queue a move out of Trash when needed
 
 ```text
-Usage: untrash [OPTIONS] <MESSAGE_ID>
+Usage: untrash [OPTIONS] <MESSAGE_ID>...
 
 Arguments:
-  <MESSAGE_ID>
-          Message id, for example message_inbox_607146690_22
+  <MESSAGE_ID>...
+          Message ids, for example message_inbox_607146690_22
 
 Options:
       --reason <REASON>
@@ -708,23 +782,24 @@ Options:
 Usage: case <COMMAND>
 
 Commands:
-  create     Create a new case and return its stable UID/ref
-  list       List compact case locators
-  show       Show a case's case.md without changing workspace state
-  add        Add a message to this existing case
-  remove     Remove one message from this case and return it to triage
-  move       Move this case to another group
-  rename     Rename this case's human-readable name without changing its UID
-  notes      Show or edit case notes
-  archive    Archive this active case
-  unarchive  Move this archived case back to an active case group
-  trash      Move every message in this case to local trash and queue Trash moves
-  delete     Delete an empty case
-  tag        Add a case organization tag
-  untag      Remove a case organization tag
-  draft      Create, edit, validate, queue, or remove local case drafts
-  merge      Merge another case into this case
-  help       Print this message or the help of the given subcommand(s)
+  create       Create a new case and return its stable UID/ref
+  list         List compact case locators
+  show         Show a case's case.md without changing workspace state
+  add          Add a message to this existing case
+  set-summary  Set or replace one case entry summary
+  remove       Remove one message from this case and return it to triage
+  move         Move this case to another group
+  rename       Rename this case's human-readable name without changing its UID
+  notes        Show or edit case notes
+  archive      Archive this active case
+  unarchive    Move this archived case back to an active case group
+  trash        Move every message in this case to local trash and queue Trash moves
+  delete       Delete an empty case
+  tag          Add a case organization tag
+  untag        Remove a case organization tag
+  draft        Create, edit, validate, queue, or remove local case drafts
+  merge        Merge another case into this case
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help
@@ -789,14 +864,14 @@ Options:
 ### Agent-First Mail case add - Add a message to this existing case
 
 ```text
-Usage: add [OPTIONS] <CASE_REF> <MESSAGE_ID>
+Usage: add [OPTIONS] <CASE_REF> <MESSAGE_ID>...
 
 Arguments:
   <CASE_REF>
           Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
 
-  <MESSAGE_ID>
-          Message id to add
+  <MESSAGE_ID>...
+          Message ids to add
 
 Options:
       --summary <SUMMARY>
@@ -804,6 +879,29 @@ Options:
 
       --reason <REASON>
           Why this message belongs in this case; required by default
+
+  -h, --help
+          Print help
+```
+
+### Agent-First Mail case set-summary - Set or replace one case entry summary
+
+```text
+Usage: set-summary [OPTIONS] --summary <SUMMARY> <CASE_REF> <MESSAGE_ID>
+
+Arguments:
+  <CASE_REF>
+          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+
+  <MESSAGE_ID>
+          Message id whose summary should be changed
+
+Options:
+      --summary <SUMMARY>
+          New summary text
+
+      --reason <REASON>
+          Why this summary is useful; required by default
 
   -h, --help
           Print help
@@ -832,16 +930,16 @@ Options:
 ### Agent-First Mail case move - Move this case to another group
 
 ```text
-Usage: move [OPTIONS] <CASE_REF> <GROUP>
+Usage: move [OPTIONS] --group <GROUP> <CASE_REF>
 
 Arguments:
   <CASE_REF>
           Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
 
-  <GROUP>
+Options:
+      --group <GROUP>
           Destination group
 
-Options:
       --reason <REASON>
           Why this group better represents the case; required by default
 
@@ -1058,7 +1156,8 @@ Commands:
   change    Change an existing editable draft in place
   show      Show an existing draft in a review-friendly JSON shape
   validate  Validate a draft under the case drafts directory
-  save      Queue this draft to be saved to the remote Drafts mailbox
+  list      List local drafts with their current status
+  upload    Queue this draft to be uploaded to the remote Drafts mailbox
   send      Queue this draft to be sent and recorded in the case after push succeeds
   attach    Copy or reference a file and add it to a draft's attachments
   remove    Remove a local draft and any queued outbound item for it
@@ -1202,10 +1301,24 @@ Options:
           Print help
 ```
 
-#### Agent-First Mail case draft save - Queue this draft to be saved to the remote Drafts mailbox
+#### Agent-First Mail case draft list - List local drafts with their current status
 
 ```text
-Usage: save <CASE_REF> <DRAFT_NAME>
+Usage: list <CASE_REF>
+
+Arguments:
+  <CASE_REF>
+          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+
+Options:
+  -h, --help
+          Print help
+```
+
+#### Agent-First Mail case draft upload - Queue this draft to be uploaded to the remote Drafts mailbox
+
+```text
+Usage: upload <CASE_REF> <DRAFT_NAME>
 
 Arguments:
   <CASE_REF>
@@ -1348,6 +1461,9 @@ Options:
       --tag <TAGS>
           Tag. Repeatable
 
+      --reason <REASON>
+          Why this contact is being created; required by default
+
   -h, --help
           Print help
 ```
@@ -1391,7 +1507,7 @@ Options:
 ### Agent-First Mail contact move - Move a contact to a different group
 
 ```text
-Usage: move --group <GROUP> <CONTACT_REF>
+Usage: move [OPTIONS] --group <GROUP> <CONTACT_REF>
 
 Arguments:
   <CONTACT_REF>
@@ -1401,6 +1517,9 @@ Options:
       --group <GROUP>
           Destination group
 
+      --reason <REASON>
+          Why this contact should move groups; required by default
+
   -h, --help
           Print help
 ```
@@ -1408,7 +1527,7 @@ Options:
 ### Agent-First Mail contact rename - Rename a contact's display name
 
 ```text
-Usage: rename --name <NAME> <CONTACT_REF>
+Usage: rename [OPTIONS] --name <NAME> <CONTACT_REF>
 
 Arguments:
   <CONTACT_REF>
@@ -1417,6 +1536,9 @@ Arguments:
 Options:
       --name <NAME>
           New display name
+
+      --reason <REASON>
+          Why this name better represents the contact; required by default
 
   -h, --help
           Print help
@@ -1440,7 +1562,7 @@ Options:
 #### Agent-First Mail contact email add - Add an email address to the contact
 
 ```text
-Usage: add <CONTACT_REF> <EMAIL>
+Usage: add [OPTIONS] <CONTACT_REF> <EMAIL>
 
 Arguments:
   <CONTACT_REF>
@@ -1450,6 +1572,9 @@ Arguments:
           Email address to add
 
 Options:
+      --reason <REASON>
+          Why this email should be associated with the contact; required by default
+
   -h, --help
           Print help
 ```
@@ -1457,7 +1582,7 @@ Options:
 #### Agent-First Mail contact email remove - Remove an email address from the contact
 
 ```text
-Usage: remove <CONTACT_REF> <EMAIL>
+Usage: remove [OPTIONS] <CONTACT_REF> <EMAIL>
 
 Arguments:
   <CONTACT_REF>
@@ -1467,6 +1592,9 @@ Arguments:
           Email address to remove
 
 Options:
+      --reason <REASON>
+          Why this email should be removed; required by default
+
   -h, --help
           Print help
 ```
@@ -1489,7 +1617,7 @@ Options:
 #### Agent-First Mail contact phone add - Add a phone number to the contact
 
 ```text
-Usage: add <CONTACT_REF> <PHONE>
+Usage: add [OPTIONS] <CONTACT_REF> <PHONE>
 
 Arguments:
   <CONTACT_REF>
@@ -1499,6 +1627,9 @@ Arguments:
           Phone number to add
 
 Options:
+      --reason <REASON>
+          Why this phone number should be associated with the contact; required by default
+
   -h, --help
           Print help
 ```
@@ -1506,7 +1637,7 @@ Options:
 #### Agent-First Mail contact phone remove - Remove a phone number from the contact
 
 ```text
-Usage: remove <CONTACT_REF> <PHONE>
+Usage: remove [OPTIONS] <CONTACT_REF> <PHONE>
 
 Arguments:
   <CONTACT_REF>
@@ -1516,6 +1647,9 @@ Arguments:
           Phone number to remove
 
 Options:
+      --reason <REASON>
+          Why this phone number should be removed; required by default
+
   -h, --help
           Print help
 ```
@@ -1523,7 +1657,7 @@ Options:
 ### Agent-First Mail contact tag - Add a tag to a contact
 
 ```text
-Usage: tag <CONTACT_REF> <TAG>
+Usage: tag [OPTIONS] <CONTACT_REF> <TAG>
 
 Arguments:
   <CONTACT_REF>
@@ -1533,6 +1667,9 @@ Arguments:
           Tag to add
 
 Options:
+      --reason <REASON>
+          Why this tag is useful; required by default
+
   -h, --help
           Print help
 ```
@@ -1540,7 +1677,7 @@ Options:
 ### Agent-First Mail contact untag - Remove a tag from a contact
 
 ```text
-Usage: untag <CONTACT_REF> <TAG>
+Usage: untag [OPTIONS] <CONTACT_REF> <TAG>
 
 Arguments:
   <CONTACT_REF>
@@ -1550,6 +1687,9 @@ Arguments:
           Tag to remove
 
 Options:
+      --reason <REASON>
+          Why this tag should be removed; required by default
+
   -h, --help
           Print help
 ```
@@ -1708,21 +1848,21 @@ Options:
 ### Agent-First Mail notification add - File an existing message into this notification collection
 
 ```text
-Usage: add [OPTIONS] --summary <SUMMARY> <NOTIFICATION_REF> <MESSAGE_ID>
+Usage: add [OPTIONS] --summary <SUMMARY> <NOTIFICATION_REF> <MESSAGE_ID>...
 
 Arguments:
   <NOTIFICATION_REF>
           Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
 
-  <MESSAGE_ID>
-          Message id to file
+  <MESSAGE_ID>...
+          Message ids to file
 
 Options:
       --summary <SUMMARY>
           Human/agent-authored summary for this notification entry
 
       --reason <REASON>
-          Why this disposition is correct; required by default
+          Why this message belongs in this notification; required by default
 
   -h, --help
           Print help
@@ -2044,3 +2184,47 @@ Options:
   -h, --help
           Print help
 ```
+
+## Agent-First Mail ui - Emit or open an Agent-First UI operation surface for this workspace
+
+```text
+Usage: ui [OPTIONS] [COMMAND]
+
+Commands:
+  snapshot  Emit a complete AFUI snapshot for this workspace
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --no-open
+          Do not open a browser when delegating to the AFUI Web Host
+
+      --port <PORT>
+          Web Host bind port. Defaults to 0, letting the OS choose a free port
+
+          [default: 0]
+
+      --host <HOST>
+          Web Host bind address
+
+          [default: 127.0.0.1]
+
+      --afui-bin <AFUI_BIN>
+          Explicit `afui` binary path or command name for `afmail ui`
+
+      --no-termail
+          Do not open the host-owned termail companion
+
+  -h, --help
+          Print help
+```
+
+### Agent-First Mail ui snapshot - Emit a complete AFUI snapshot for this workspace
+
+```text
+Usage: snapshot
+
+Options:
+  -h, --help
+          Print help
+```
+AFDATA: 0.16.0

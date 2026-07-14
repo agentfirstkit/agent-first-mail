@@ -1,15 +1,28 @@
 use super::*;
 use crate::layout;
 
-pub(super) fn find_outbound_item(
+pub(super) fn find_draft_item(
     root: &Path,
     case_uid: &str,
     draft_name: &str,
 ) -> Result<Option<PushItem>> {
     for item in read_items(root)? {
-        if item.outbound().is_some_and(|outbound| {
-            outbound.case_uid == case_uid && outbound.draft_name == draft_name
-        }) {
+        if item
+            .draft()
+            .is_some_and(|draft| draft.case_uid == case_uid && draft.draft_name == draft_name)
+        {
+            return Ok(Some(item));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn find_message_item(root: &Path, message_id: &str) -> Result<Option<PushItem>> {
+    for item in read_items(root)? {
+        if item
+            .message()
+            .is_some_and(|message| message.message_id == message_id)
+        {
             return Ok(Some(item));
         }
     }
@@ -17,7 +30,7 @@ pub(super) fn find_outbound_item(
 }
 
 pub(super) fn read_items(root: &Path) -> Result<Vec<PushItem>> {
-    let dir = root.join(".afmail/push");
+    let dir = root.join(crate::layout::afmail_path(crate::layout::AFMAIL_PUSH));
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -36,12 +49,27 @@ pub(super) fn read_items(root: &Path) -> Result<Vec<PushItem>> {
 
 pub(super) fn sorted_items(root: &Path) -> Result<Vec<PushItem>> {
     let mut items = read_items(root)?;
-    items.sort_by(|a, b| a.created_rfc3339.cmp(&b.created_rfc3339));
+    items.sort_by(|a, b| {
+        (a.enqueue_seq, a.push_id.as_str()).cmp(&(b.enqueue_seq, b.push_id.as_str()))
+    });
     Ok(items)
 }
 
+/// Allocates the next enqueue sequence number for a new push item: max(enqueue_seq
+/// over all items currently in the queue) + 1, starting at 1 for an empty queue.
+/// Enqueueing requires the exclusive workspace lock (see workspace_lock.rs); this
+/// max+1 allocation is race-free only because callers hold that lock while enqueuing.
+pub(super) fn next_enqueue_seq(root: &Path) -> Result<u64> {
+    let max = read_items(root)?
+        .into_iter()
+        .map(|item| item.enqueue_seq)
+        .max()
+        .unwrap_or(0);
+    Ok(max + 1)
+}
+
 pub(super) fn write_item(root: &Path, item: &PushItem) -> Result<()> {
-    let dir = root.join(".afmail/push");
+    let dir = root.join(crate::layout::afmail_path(crate::layout::AFMAIL_PUSH));
     create_dir_all(&dir)?;
     let data = serde_json::to_string_pretty(item)
         .map_err(|e| AppError::json("serialize push item", &e))?;
@@ -57,14 +85,16 @@ pub(super) fn delete_item(root: &Path, item: &PushItem) -> Result<()> {
 }
 
 pub(super) fn push_path(root: &Path, push_id: &str) -> PathBuf {
-    root.join(".afmail/push").join(format!("{push_id}.json"))
+    root.join(crate::layout::afmail_path(crate::layout::AFMAIL_PUSH))
+        .join(format!("{push_id}.json"))
 }
 
 pub(super) fn find_case_path(root: &Path, case_uid: &str) -> Result<PathBuf> {
-    if let Some(candidate) = find_case_path_any(root, case_uid)? {
-        if candidate.starts_with(root.join(layout::CASES)) {
-            return Ok(candidate);
-        }
+    if let Some(candidate) = find_case_path_any(root, case_uid)?
+        && (candidate.starts_with(root.join(layout::CASES))
+            || candidate.starts_with(root.join(layout::ARCHIVED_CASES)))
+    {
+        return Ok(candidate);
     }
     Err(AppError::new(
         "case_not_found",
@@ -133,22 +163,12 @@ pub(super) fn dir_case_uid(name: &str) -> Option<&str> {
     }
 }
 
-pub(super) fn unique_push_id(root: &Path) -> String {
-    let base = format!(
-        "push_{}",
-        crate::store::now_rfc3339().replace([':', '-'], "")
-    );
-    let dir = root.join(".afmail/push");
-    if !dir.join(format!("{base}.json")).exists() {
-        return base;
-    }
-    for i in 1..1000 {
-        let candidate = format!("{base}_{i}");
-        if !dir.join(format!("{candidate}.json")).exists() {
-            return candidate;
-        }
-    }
-    base
+pub(super) fn message_push_id(message_id: &str) -> String {
+    format!("push_message_{message_id}")
+}
+
+pub(super) fn draft_push_id(case_uid: &str, draft_name: &str) -> String {
+    format!("push_draft_{case_uid}_{draft_name}")
 }
 
 pub(super) fn create_dir_all(path: &Path) -> Result<()> {
