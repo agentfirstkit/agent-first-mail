@@ -262,7 +262,13 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
     let (status, stdout) = run_confirmed_push(root.path());
     assert_eq!(status, 0, "{stdout}");
     let pushed = parse_one(&stdout);
-    assert_eq!(pushed["failed_count"], 0, "{pushed}");
+    let items = pushed
+        .as_array()
+        .expect("a successful confirmed push returns per-item results");
+    assert!(
+        items.iter().all(|item| item.get("code").is_none()),
+        "{pushed}"
+    );
 
     assert!(
         wait_until(Duration::from_secs(15), || mailbox_contains(
@@ -574,7 +580,7 @@ fn docker_greenmail_pull_reply_send_e2e() {
     assert_eq!(status, 0, "{stdout}");
     let pushed = parse_one(&stdout);
     assert_eq!(pushed.as_array().map(Vec::len), Some(1));
-    assert_eq!(pushed["failed_count"], 0);
+    assert!(pushed[0].get("code").is_none(), "{pushed}");
     assert_eq!(push_json_count(root.path()), 0);
 
     assert!(
@@ -662,8 +668,8 @@ fn docker_greenmail_pull_reply_send_e2e() {
     );
     assert_eq!(status, 0, "{stdout}");
     let queued_spam = parse_one(&stdout);
-    assert_eq!(queued_spam["message_ids"][0], old_spam_message_id);
-    assert_eq!(queued_spam["queued"], true);
+    assert_eq!(queued_spam[0]["message_ids"][0], old_spam_message_id);
+    assert_eq!(queued_spam[0]["queued"], true);
     assert_eq!(push_json_count(root.path()), 1);
     assert!(
         root.path()
@@ -675,7 +681,7 @@ fn docker_greenmail_pull_reply_send_e2e() {
     assert_eq!(status, 0, "{stdout}");
     let pushed_spam = parse_one(&stdout);
     assert_eq!(pushed_spam.as_array().map(Vec::len), Some(1));
-    assert_eq!(pushed_spam["failed_count"], 0);
+    assert!(pushed_spam[0].get("code").is_none(), "{pushed_spam}");
     assert_eq!(push_json_count(root.path()), 0);
 
     assert!(
