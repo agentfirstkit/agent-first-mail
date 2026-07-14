@@ -14,6 +14,8 @@ dependencies = [
 [[package]]
 name = "agent-first-config"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bedd8dcd9467b9fd8b3fdbc062e2818413d05f1d6a13ab0c52e78019e367e25a"
 dependencies = [
  "serde",
  "serde_json",
@@ -22,6 +24,8 @@ dependencies = [
 [[package]]
 name = "agent-first-data"
 version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4dcf6445c48087e8f6f490e5799db57d7b1e256304bde8c2fa3398358f01ef4"
 dependencies = [
  "chrono",
  "clap",
@@ -67,6 +71,8 @@ dependencies = [
 [[package]]
 name = "agent-first-slug"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b034be1d1bba7567f37ff1c793d2f4c50dcf2bc851cb322b4db9e39fe5223a55"
 dependencies = [
  "unicode-general-category",
 ]
@@ -74,6 +80,8 @@ dependencies = [
 [[package]]
 name = "agent-first-ui"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77f2ab00e189eaa9ec672d050fe8176eed66e8329cfff6c911db9477ed0256ba"
 dependencies = [
  "serde",
  "serde_json",
