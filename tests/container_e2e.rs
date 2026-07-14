@@ -262,9 +262,8 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
     let (status, stdout) = run_confirmed_push(root.path());
     assert_eq!(status, 0, "{stdout}");
     let pushed = parse_one(&stdout);
-    let items = pushed
-        .as_array()
-        .expect("a successful confirmed push returns per-item results");
+    let items = pushed.as_array().cloned().unwrap_or_default();
+    assert!(!items.is_empty(), "{pushed}");
     assert!(
         items.iter().all(|item| item.get("code").is_none()),
         "{pushed}"
