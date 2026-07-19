@@ -15,10 +15,12 @@ fn local_config() -> Value {
         "schema_name": "config",
         "schema_version": 1,
         "actions": {
-            "case.add": {"steps": []},
-            "message.notification": {
-                "by_source_mailbox_id": {
-                    "inbox": {"steps": []}
+            "case": {"add": {"steps": []}},
+            "message": {
+                "notification": {
+                    "by_source_mailbox_id": {
+                        "inbox": {"steps": []}
+                    }
                 }
             }
         }
@@ -55,6 +57,69 @@ fn create_case(
     let case_path = value["case_path"].as_str().unwrap_or_default();
     assert!(!case_path.is_empty(), "{value}");
     (case_uid, root.join(case_path))
+}
+
+#[test]
+fn case_archive_validates_unrelated_drafts_before_local_writes() {
+    let root = temp_root("archive-invalid-unrelated-draft");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &local_config());
+    write_message(&root, "message_archive_preflight", 41, None);
+    write_triage(
+        &root,
+        "message_archive_preflight",
+        "archive preflight message",
+    );
+
+    let (case_uid, case_path) = create_case(
+        &root,
+        "archive-preflight",
+        "support",
+        Some("message_archive_preflight"),
+        "ready to archive",
+    );
+    let (other_case_uid, other_case_path) =
+        create_case(&root, "old-invalid-draft", "support", None, "old case");
+    assert!(
+        fs::write(
+            other_case_path.join("drafts/invalid.md"),
+            format!(
+                "---\nkind: draft\ncase_uid: {other_case_uid}\nto: [broken@example.com\n---\n\nOld draft\n"
+            ),
+        )
+        .is_ok()
+    );
+
+    let (status, stdout) = run(&root, &["case", "archive", &case_uid, "--reason", "done"]);
+
+    assert_eq!(status, 1, "{stdout}");
+    assert!(
+        case_path.is_dir(),
+        "archive failure must leave the case active"
+    );
+    let archived_path = root
+        .join("archived-cases/support")
+        .join(case_path.file_name().unwrap_or_default());
+    assert!(
+        !archived_path.exists(),
+        "archive failure must not move the case"
+    );
+    let transaction_count = fs::read_dir(root.join(".afmail/transactions"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+                })
+                .count()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        transaction_count, 0,
+        "archive preflight must not leave a sentinel"
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

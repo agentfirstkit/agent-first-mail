@@ -9,9 +9,7 @@
     )
 )]
 
-use agent_first_data::{
-    OutputFormat, VersionConfig, build_cli_error, cli_output, cli_parse_output,
-};
+use agent_first_data::{OutputFormat, OutputOptions, build_cli_error, cli_parse_output, render};
 use agent_first_mail::cli;
 use agent_first_mail::runner::output_write_failed_exit_code;
 use agent_first_mail::runner::run_command;
@@ -31,7 +29,11 @@ fn main() {
             let hint = cli::error_hint(&argv);
             let value = cli_error_with_trace(&err, Some(hint.as_str()), elapsed_ms(&started));
             let output = requested_output_format().unwrap_or(OutputFormat::Json);
-            match writeln!(std::io::stdout(), "{}", cli_output(&value, output)) {
+            match writeln!(
+                std::io::stdout(),
+                "{}",
+                render(&value, output, &OutputOptions::default())
+            ) {
                 Ok(()) => std::process::exit(2),
                 Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
             }
@@ -46,7 +48,11 @@ fn main() {
     } = parsed;
     if let Err(err) = apply_explicit_workspace(workspace.as_deref()) {
         let value = cli_error_with_trace(&err, None, elapsed_ms(&started));
-        match writeln!(std::io::stdout(), "{}", cli_output(&value, output)) {
+        match writeln!(
+            std::io::stdout(),
+            "{}",
+            render(&value, output, &OutputOptions::default())
+        ) {
             Ok(()) => std::process::exit(1),
             Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
         }
@@ -97,7 +103,6 @@ fn handle_help_and_version(started: &Instant) {
         &raw,
         "afmail",
         env!("CARGO_PKG_VERSION"),
-        &VersionConfig::conventional_default().with_protocol_v1(),
     ) {
         Ok(Some(version)) => match write!(std::io::stdout(), "{version}") {
             Ok(()) => std::process::exit(0),
@@ -110,7 +115,7 @@ fn handle_help_and_version(started: &Instant) {
             match writeln!(
                 std::io::stdout(),
                 "{}",
-                cli_output(&err, OutputFormat::Json)
+                render(&err, OutputFormat::Json, &OutputOptions::default())
             ) {
                 Ok(()) => std::process::exit(2),
                 Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
@@ -120,7 +125,7 @@ fn handle_help_and_version(started: &Instant) {
     match agent_first_data::cli_handle_help_or_continue(
         &raw,
         &cli::command(),
-        &agent_first_data::HelpConfig::human_cli_default().with_protocol_v1(),
+        &agent_first_data::HelpConfig::human_cli_default(),
     ) {
         Ok(Some(help)) => match write!(std::io::stdout(), "{help}") {
             Ok(()) => std::process::exit(0),
@@ -131,7 +136,11 @@ fn handle_help_and_version(started: &Instant) {
             let mut err: Value = err;
             attach_trace(&mut err, elapsed_ms(started));
             let output = requested_output_format().unwrap_or(OutputFormat::Json);
-            match writeln!(std::io::stdout(), "{}", cli_output(&err, output)) {
+            match writeln!(
+                std::io::stdout(),
+                "{}",
+                render(&err, output, &OutputOptions::default())
+            ) {
                 Ok(()) => std::process::exit(2),
                 Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
             }

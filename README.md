@@ -208,7 +208,7 @@ top of it:
   output stays local until you push.
 - Put your mailbox **policy in `AGENTS.md`**: priorities, reply style, escalation
   rules, labels, who gets a fast response.
-- afmail ships an embedded [Agent Skill](skills/agent-first-mail.md) that teaches
+- afmail ships an embedded [Agent Skill](skills/agent-first-mail/SKILL.md) that teaches
   an agent its safe behavior contract. Your own skill stacks on top of it, not
   against it.
 
@@ -279,7 +279,7 @@ cd agent-first-mail
 cargo install --path . --bin afmail --locked --force
 ```
 
-Then install the embedded [Agent Skill](skills/agent-first-mail.md) so the agent
+Then install the embedded [Agent Skill](skills/agent-first-mail/SKILL.md) so the agent
 follows afmail's behavior rules, and restart the agent afterward so it reloads
 them:
 
@@ -307,7 +307,7 @@ See the [Workspace Model](docs/workspace.md).
 - [File Formats](docs/file-formats.md) — the exact files a pull and your commands produce
 - [CLI Contract](docs/cli.md) — every command and flag for the `afmail` binary
 - [Code Structure](docs/code-structure.md) — where crate responsibilities live
-- [Agent Skill](skills/agent-first-mail.md) — the behavior contract agents follow
+- [Agent Skill](skills/agent-first-mail/SKILL.md) — the behavior contract agents follow
 
 ## License
 

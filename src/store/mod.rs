@@ -861,10 +861,11 @@ impl Workspace {
 
     pub fn config_set(&self, key: &str, values: &[String]) -> Result<Value> {
         self.require_workspace()?;
-        let mut config = crate::config::MailConfig::load(&self.root)?;
-        config.set_key(key, values)?;
-        config.write(&self.root)?;
-        let value = config_value_for_output(key, config.get_key(key)?);
+        let mut doc = self.open_config_document()?;
+        crate::config::MailConfig::apply_set(&mut doc, key, values)?;
+        crate::config::MailConfig::validate_document(&doc, &self.root)?;
+        doc.save().map_err(config_write_error)?;
+        let value = config_value_for_output(key, self.config_get_dense(key)?);
         Ok(json!({
             "key": key,
             "value": value
@@ -873,11 +874,12 @@ impl Workspace {
 
     pub fn config_add(&self, key: &str, slug: &str, fields: &[String]) -> Result<Value> {
         self.require_workspace()?;
-        let mut config = crate::config::MailConfig::load(&self.root)?;
         let parsed = parse_field_assignments(fields)?;
-        config.add_key(key, slug, &parsed)?;
-        config.write(&self.root)?;
-        let value = config_value_for_output(key, config.get_key(key)?);
+        let mut doc = self.open_config_document()?;
+        crate::config::MailConfig::apply_add(&mut doc, key, slug, &parsed)?;
+        crate::config::MailConfig::validate_document(&doc, &self.root)?;
+        doc.save().map_err(config_write_error)?;
+        let value = config_value_for_output(key, self.config_get_dense(key)?);
         Ok(json!({
             "key": key,
             "slug": slug,
@@ -887,15 +889,34 @@ impl Workspace {
 
     pub fn config_remove(&self, key: &str, slug: &str) -> Result<Value> {
         self.require_workspace()?;
-        let mut config = crate::config::MailConfig::load(&self.root)?;
-        config.remove_key(key, slug)?;
-        config.write(&self.root)?;
-        let value = config_value_for_output(key, config.get_key(key)?);
+        let mut doc = self.open_config_document()?;
+        crate::config::MailConfig::apply_remove(&mut doc, key, slug)?;
+        crate::config::MailConfig::validate_document(&doc, &self.root)?;
+        doc.save().map_err(config_write_error)?;
+        let value = config_value_for_output(key, self.config_get_dense(key)?);
         Ok(json!({
             "key": key,
             "slug": slug,
             "value": value
         }))
+    }
+
+    /// Open the workspace's sparse `.afmail/config.json` for source-preserving
+    /// editing. afdata's document editor grows the sparse file in place —
+    /// creating parent objects for new keys — so afmail no longer hand-writes
+    /// a re-derived sparse config.
+    fn open_config_document(&self) -> Result<agent_first_data::document::DocumentFile> {
+        agent_first_data::document::DocumentFile::open(
+            self.root.join(".afmail/config.json"),
+            Some(agent_first_data::document::Format::Json),
+        )
+        .map_err(|e| AppError::new("config_invalid", format!("open config: {e}")))
+    }
+
+    /// The dense (defaults-filled) value at `key`, for command output — mirrors
+    /// what a subsequent `config get` would report.
+    fn config_get_dense(&self, key: &str) -> Result<Value> {
+        crate::config::MailConfig::load(&self.root)?.get_key(key)
     }
 
     pub fn remote_test(&self) -> Result<Value> {

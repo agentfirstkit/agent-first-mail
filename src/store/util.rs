@@ -745,6 +745,10 @@ pub(super) fn config_key_is_secret(key: &str) -> bool {
         .is_some_and(|leaf| leaf.ends_with("_secret"))
 }
 
+pub(super) fn config_write_error(err: agent_first_data::document::DocumentError) -> AppError {
+    AppError::new("config_invalid", format!("write config: {err}"))
+}
+
 /// Recursively redact every `*_secret` field in a serialized config tree to
 /// `"***"`, leaving non-null values masked. Used so `config show` cannot leak an
 /// inline `password_secret` the way `config get`/`set` already guard single

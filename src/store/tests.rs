@@ -1854,7 +1854,7 @@ fn create_case_failure_after_local_writes_leaves_transaction_marker() -> Result<
     let ws = Workspace::at(&root);
     assert!(ws.init().is_ok());
     let mut config = MailConfig::load(&root)?;
-    config.actions.case_add.steps = vec![crate::config::ActionStep::move_to_mailbox_id("archive")];
+    config.actions.case.add.steps = vec![crate::config::ActionStep::move_to_mailbox_id("archive")];
     assert!(config.write(&root).is_ok());
     write_sample_message(&root, "message_tx");
     assert!(ws.refresh_triage_views().is_ok());
@@ -2033,8 +2033,7 @@ fn chinese_case_and_notification_uids_are_supported()
         .ok()
         .map(|doc| doc.frontmatter)
         .unwrap_or_default();
-    let notification_yaml: Value =
-        serde_yaml::from_str(&archive_frontmatter).unwrap_or(Value::Null);
+    let notification_yaml: Value = noyalib::from_str(&archive_frontmatter).unwrap_or(Value::Null);
     assert_eq!(
         notification_yaml["notification_uid"],
         json!(notification_uid)

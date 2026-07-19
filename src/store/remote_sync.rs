@@ -663,7 +663,7 @@ impl Workspace {
                     MessagePushAction::Spam,
                     message_ids,
                     locations,
-                    config.actions.message_spam.steps.clone(),
+                    config.actions.message.spam.steps.clone(),
                 ))
             }
             MessageStatus::Trashed => {
@@ -675,7 +675,7 @@ impl Workspace {
                     MessagePushAction::Trash,
                     message_ids,
                     locations,
-                    config.actions.message_trash.steps.clone(),
+                    config.actions.message.trash.steps.clone(),
                 ))
             }
             MessageStatus::Triage => {
@@ -688,7 +688,7 @@ impl Workspace {
                         MessagePushAction::Unspam,
                         message_ids,
                         junk_locations,
-                        config.actions.message_unspam.steps.clone(),
+                        config.actions.message.unspam.steps.clone(),
                     ));
                 }
                 let trash_locations = self.message_remote_locations_for_mailbox_kinds(
@@ -699,7 +699,7 @@ impl Workspace {
                     MessagePushAction::Untrash,
                     message_ids,
                     trash_locations,
-                    config.actions.message_untrash.steps.clone(),
+                    config.actions.message.untrash.steps.clone(),
                 ))
             }
             MessageStatus::Case => {
@@ -708,7 +708,7 @@ impl Workspace {
                     MessagePushAction::CaseAdd,
                     message_ids,
                     locations,
-                    config.actions.case_add.steps.clone(),
+                    config.actions.case.add.steps.clone(),
                 ))
             }
             MessageStatus::Notification | MessageStatus::Archived => {
@@ -740,7 +740,8 @@ impl Workspace {
             };
             let Some(rule) = config
                 .actions
-                .message_notification
+                .message
+                .notification
                 .by_source_mailbox_id
                 .get(&source_id)
             else {
@@ -798,7 +799,8 @@ impl Workspace {
             };
             let Some(rule) = config
                 .actions
-                .message_notification
+                .message
+                .notification
                 .by_source_mailbox_id
                 .get(&source_id)
             else {
@@ -821,7 +823,8 @@ impl Workspace {
             }
             let Some(rule) = config
                 .actions
-                .message_notification
+                .message
+                .notification
                 .by_source_mailbox_id
                 .get(&source_id)
             else {
@@ -979,6 +982,17 @@ impl Workspace {
         allowed_push_path: Option<&Path>,
     ) -> Result<ArchiveEligibility> {
         self.archive_eligibility_inner(message_id, allowed_push_path, None)
+    }
+
+    pub(super) fn preflight_archive_eligibility(
+        &self,
+        message_ids: &[String],
+        archiving_case_uid: Option<&str>,
+    ) -> Result<()> {
+        for message_id in message_ids {
+            self.archive_eligibility_inner(message_id, None, archiving_case_uid)?;
+        }
+        Ok(())
     }
 
     fn archive_eligibility_inner(

@@ -1309,7 +1309,7 @@ impl Workspace {
             "message.spam",
             &message_ids,
             &locations,
-            &config.actions.message_spam.steps,
+            &config.actions.message.spam.steps,
             None,
         )?;
         self.update_messages_workspace(&message_ids, "spam")?;
@@ -1353,7 +1353,7 @@ impl Workspace {
                 undo_push_kind: "message.spam",
                 queue_push_kind: "message.unspam",
                 source_kind: SpecialUseKind::Junk,
-                steps: &config.actions.message_unspam.steps,
+                steps: &config.actions.message.unspam.steps,
                 result_code: "message_unspammed",
             },
             reason,
@@ -1370,7 +1370,7 @@ impl Workspace {
                 undo_push_kind: "message.trash",
                 queue_push_kind: "message.untrash",
                 source_kind: SpecialUseKind::Trash,
-                steps: &config.actions.message_untrash.steps,
+                steps: &config.actions.message.untrash.steps,
                 result_code: "message_untrashed",
             },
             reason,
@@ -1479,7 +1479,7 @@ impl Workspace {
             "message.trash",
             &message_ids,
             &locations,
-            &config.actions.message_trash.steps,
+            &config.actions.message.trash.steps,
             None,
         )?;
         self.update_messages_workspace(&message_ids, "trashed")?;

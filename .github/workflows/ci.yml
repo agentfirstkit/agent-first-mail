@@ -29,25 +29,17 @@ jobs:
             target
           key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Format
-        run: cargo fmt --all --check
+      - name: Install afdata skill validator
+        run: cargo install agent-first-data --locked --features skill
 
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Validate Agent Skill
+        run: afdata skill validate skills/agent-first-mail
 
-      - name: Unit
-        run: cargo test --bin afmail
-
-      - name: Integration
-        run: |
-          cargo build
-          cargo test --tests
+      - name: Test
+        run: ./scripts/test.sh all
 
   container-e2e:
     runs-on: ubuntu-latest
-
-    env:
-      AFMAIL_E2E: "1"
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -68,4 +60,4 @@ jobs:
         run: |
           docker version
           docker pull greenmail/standalone:2.1.8
-          cargo test --test container_e2e -- --ignored --nocapture
+          ./scripts/test.sh e2e

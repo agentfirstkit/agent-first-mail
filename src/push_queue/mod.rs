@@ -1016,14 +1016,14 @@ fn hydrate_audit_pending_plan(item: &mut PushItem) -> Result<()> {
 
 fn configured_outbound_steps(config: &MailConfig, action: OutboundAction) -> Vec<ActionStep> {
     match action {
-        OutboundAction::SaveDraft if config.actions.draft_save.steps.is_empty() => {
+        OutboundAction::SaveDraft if config.actions.draft.save.steps.is_empty() => {
             vec![ActionStep::append_to_mailbox_id("drafts")]
         }
-        OutboundAction::SaveDraft => config.actions.draft_save.steps.clone(),
-        OutboundAction::Send if config.actions.draft_send.steps.is_empty() => {
+        OutboundAction::SaveDraft => config.actions.draft.save.steps.clone(),
+        OutboundAction::Send if config.actions.draft.send.steps.is_empty() => {
             crate::config::default_draft_send_steps()
         }
-        OutboundAction::Send => config.actions.draft_send.steps.clone(),
+        OutboundAction::Send => config.actions.draft.send.steps.clone(),
     }
 }
 

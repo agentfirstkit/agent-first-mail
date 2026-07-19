@@ -10,6 +10,8 @@ pub(super) struct TransactionFile {
     pub(super) created_rfc3339: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) paths: Vec<String>,
+    #[serde(skip)]
+    pub(super) path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -37,6 +39,7 @@ impl Workspace {
             kind: kind.to_string(),
             created_rfc3339: now_rfc3339(),
             paths: paths.into_iter().collect(),
+            path: path.clone(),
         };
         write_json_pretty(&path, &transaction)?;
         Ok(LocalTransaction { path })
@@ -78,7 +81,7 @@ impl Workspace {
                 continue;
             }
             let data = read_to_string(&path, "read transaction")?;
-            let transaction: TransactionFile =
+            let mut transaction: TransactionFile =
                 serde_json::from_str(&data).map_err(|e| AppError::json("parse transaction", &e))?;
             if transaction.schema_name != "local_transaction" || transaction.schema_version != 1 {
                 return Err(AppError::new(
@@ -89,10 +92,67 @@ impl Workspace {
                     ),
                 ));
             }
+            transaction.path = path;
             out.push(transaction);
         }
         out.sort_by(|a, b| a.transaction_id.cmp(&b.transaction_id));
         Ok(out)
+    }
+
+    pub(super) fn repair_incomplete_transactions(&self) -> Result<()> {
+        let transactions = self.incomplete_transactions()?;
+        let mut recoveries = Vec::new();
+        for transaction in &transactions {
+            let Some(case_uid) = transaction.repairable_case_archive_uid() else {
+                return Err(AppError::new(
+                    "transaction_incomplete",
+                    format!(
+                        "transaction {} ({}) cannot be repaired automatically",
+                        transaction.transaction_id, transaction.kind
+                    ),
+                )
+                .with_hint(
+                    "Inspect the transaction paths and restore a consistent workspace state before retrying.",
+                ));
+            };
+            recoveries.push((transaction, case_uid));
+        }
+        for (transaction, case_uid) in recoveries {
+            self.recover_case_archive_transaction(&case_uid)?;
+            if transaction.path.exists() {
+                remove_file(&transaction.path)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl TransactionFile {
+    pub(super) fn is_repairable(&self) -> bool {
+        self.repairable_case_archive_uid().is_some()
+    }
+
+    fn repairable_case_archive_uid(&self) -> Option<String> {
+        if self.kind != "case_archive" {
+            return None;
+        }
+        let case_uid_under = |root: &str| {
+            self.paths.iter().find_map(|path| {
+                let relative = Path::new(path).strip_prefix(root).ok()?;
+                if relative.components().count() != 2 {
+                    return None;
+                }
+                relative
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| parse_case_ref(name).ok())
+            })
+        };
+        let active_case_uid = case_uid_under(layout::CASES)?;
+        let archived_case_uid = case_uid_under(layout::ARCHIVED_CASES)?;
+        let push_path = layout::afmail_path(layout::AFMAIL_PUSH);
+        let includes_push = self.paths.iter().any(|path| Path::new(path) == push_path);
+        (active_case_uid == archived_case_uid && includes_push).then_some(active_case_uid)
     }
 }
 

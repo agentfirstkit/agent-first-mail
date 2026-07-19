@@ -12,10 +12,12 @@ fn local_config() -> Value {
         "schema_name": "config",
         "schema_version": 1,
         "actions": {
-            "case.add": {"steps": []},
-            "message.notification": {
-                "by_source_mailbox_id": {
-                    "inbox": {"steps": []}
+            "case": {"add": {"steps": []}},
+            "message": {
+                "notification": {
+                    "by_source_mailbox_id": {
+                        "inbox": {"steps": []}
+                    }
                 }
             }
         }

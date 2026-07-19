@@ -958,29 +958,33 @@ fn test_config(imap_port: Option<u16>, smtp_port: Option<u16>) -> Value {
                     "drafts": {"import_as": "triage", "direction": "outbound"}
                 }
             },
-            "case.add": {"steps": []},
-            "draft.save": {"steps": [{"append_to_mailbox_id": "drafts"}]},
-            "draft.send": {"steps": [
-                {"append_to_mailbox_id": "drafts"},
-                {"smtp_send": {}},
-                {"append_to_mailbox_id": "sent"},
-                {"add_flags": ["\\Seen", "\\Answered"], "on": "reply_to_message"}
-            ]},
-            "message.spam": {"steps": [
-                {"add_flags": ["\\Seen", "$Junk"]},
-                {"move_to_mailbox_id": "junk"}
-            ]},
-            "message.trash": {"steps": [{"move_to_mailbox_id": "trash"}]},
-            "message.unspam": {"steps": [{"move_to_mailbox_id": "inbox"}]},
-            "message.untrash": {"steps": [{"move_to_mailbox_id": "inbox"}]},
-            "message.notification": {"by_source_mailbox_id": {
-                "inbox": {"steps": [{"move_to_mailbox_id": "archive"}]},
-                "sent": {"steps": []},
-                "archive": {"steps": []},
-                "junk": {"steps": []},
-                "trash": {"steps": []},
-                "drafts": {"steps": []}
-            }}
+            "case": {"add": {"steps": []}},
+            "draft": {
+                "save": {"steps": [{"append_to_mailbox_id": "drafts"}]},
+                "send": {"steps": [
+                    {"append_to_mailbox_id": "drafts"},
+                    {"smtp_send": {}},
+                    {"append_to_mailbox_id": "sent"},
+                    {"add_flags": ["\\Seen", "\\Answered"], "on": "reply_to_message"}
+                ]}
+            },
+            "message": {
+                "spam": {"steps": [
+                    {"add_flags": ["\\Seen", "$Junk"]},
+                    {"move_to_mailbox_id": "junk"}
+                ]},
+                "trash": {"steps": [{"move_to_mailbox_id": "trash"}]},
+                "unspam": {"steps": [{"move_to_mailbox_id": "inbox"}]},
+                "untrash": {"steps": [{"move_to_mailbox_id": "inbox"}]},
+                "notification": {"by_source_mailbox_id": {
+                    "inbox": {"steps": [{"move_to_mailbox_id": "archive"}]},
+                    "sent": {"steps": []},
+                    "archive": {"steps": []},
+                    "junk": {"steps": []},
+                    "trash": {"steps": []},
+                    "drafts": {"steps": []}
+                }}
+            }
         },
         "identities": [
             {"identity": "me", "name": "Me", "email": "me@example.com", "default": true}
@@ -2549,7 +2553,9 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(stdout.starts_with("---\n"), "{stdout}");
     assert!(stdout.contains("kind: \"error\""), "{stdout}");
     assert!(stdout.contains("code: \"cli_error\""), "{stdout}");
-    assert!(stdout.contains("duration:"), "{stdout}");
+    // Structure-preserving YAML keeps the raw `duration_ms` key (the lossy
+    // suffix-stripped `duration` form now lives only in plain output).
+    assert!(stdout.contains("duration_ms:"), "{stdout}");
     assert!(!stdout.contains("error_code:"), "{stdout}");
     let (status, stdout) = run(&root, &["--output=plain", "nope"]);
     assert_eq!(status, 2);
@@ -2738,6 +2744,74 @@ fn incomplete_transaction_blocks_writers_and_doctor_reports_it() {
     let (status, plain) = run(&root, &["--output", "plain", "doctor"]);
     assert_eq!(status, 1, "{plain}");
     assert!(plain.contains("kind=error"), "{plain}");
+
+    let (status, stdout) = run(&root, &["doctor", "repair", "--confirm"]);
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "transaction_incomplete");
+    assert!(
+        root.join(".afmail/transactions/transaction_test.json")
+            .is_file()
+    );
+}
+
+#[test]
+fn doctor_repair_resumes_incomplete_case_archive_transaction() {
+    let root = temp_root("repair-case-archive-transaction");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_message(&root, "message_repair_case_archive", 1, None);
+    write_triage(
+        &root,
+        "message_repair_case_archive",
+        "repair archive transaction",
+    );
+    let (case_uid, active_path, _) = create_case(
+        &root,
+        "repair-case-archive",
+        Some("support"),
+        Some("message_repair_case_archive"),
+        Some("ready to archive"),
+    );
+    let archived_path = root
+        .join("archived-cases/support")
+        .join(active_path.file_name().unwrap_or_default());
+    assert!(fs::create_dir_all(archived_path.parent().unwrap_or(&root)).is_ok());
+    assert!(fs::rename(&active_path, &archived_path).is_ok());
+    let transaction_path = root.join(".afmail/transactions/transaction_test_case_archive.json");
+    write_json(
+        &transaction_path,
+        &json!({
+            "schema_name": "local_transaction",
+            "schema_version": 1,
+            "transaction_id": "transaction_test_case_archive",
+            "kind": "case_archive",
+            "created_rfc3339": "2026-07-16T08:55:03Z",
+            "paths": [
+                active_path.strip_prefix(&root).unwrap_or(&active_path),
+                format!("archived-cases/*/{case_uid}"),
+                ".afmail/push"
+            ]
+        }),
+    );
+
+    let (status, stdout) = run(&root, &["doctor"]);
+    assert_eq!(status, 1, "{stdout}");
+    let doctor = parse_one(&stdout);
+    assert_eq!(doctor["repairable_count"], 1, "{doctor}");
+
+    let (status, stdout) = run(&root, &["doctor", "repair", "--confirm"]);
+    assert_eq!(status, 0, "{stdout}");
+    let repaired = parse_one(&stdout);
+    assert_eq!(repaired["after_issue_count"], 0, "{repaired}");
+    assert!(!transaction_path.exists());
+    assert!(!active_path.exists());
+    assert!(archived_path.is_dir());
+    let case = read_json(&archived_path.join("data/case.json"));
+    assert_eq!(case["status"], "archiving");
+    assert!(case["archived_rfc3339"].is_null());
+    let pushes = parse_one(&run(&root, &["push", "list"]).1);
+    assert_eq!(pushes["count"], 1, "{pushes}");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -4713,7 +4787,8 @@ fn list_commands_return_locators_and_status_includes_counts_and_progress() {
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     let mut config = test_config(None, None);
-    config["actions"]["message.notification"]["by_source_mailbox_id"]["inbox"]["steps"] = json!([]);
+    config["actions"]["message"]["notification"]["by_source_mailbox_id"]["inbox"]["steps"] =
+        json!([]);
     write_json(&root.join(".afmail/config.json"), &config);
 
     write_message(&root, "message_case_list", 53, None);
@@ -4859,7 +4934,8 @@ fn header_related_messages_require_case_for_direct_disposition() {
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     let mut config = test_config(None, None);
-    config["actions"]["message.notification"]["by_source_mailbox_id"]["inbox"]["steps"] = json!([]);
+    config["actions"]["message"]["notification"]["by_source_mailbox_id"]["inbox"]["steps"] =
+        json!([]);
     write_json(&root.join(".afmail/config.json"), &config);
     write_message(&root, "message_health_parent", 61, None);
     write_message(&root, "message_health_reply", 62, None);

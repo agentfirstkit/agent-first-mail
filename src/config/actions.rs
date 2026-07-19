@@ -62,88 +62,42 @@ fn default_message_unmark_discard_rule() -> ActionRule {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ActionsSection {
     pub pull: PullActionSection,
-    #[serde(rename = "case.add")]
-    pub case_add: ActionRule,
-    #[serde(rename = "draft.save")]
-    pub draft_save: ActionRule,
-    #[serde(rename = "draft.send")]
-    pub draft_send: ActionRule,
-    #[serde(rename = "message.spam")]
-    pub message_spam: ActionRule,
-    #[serde(rename = "message.trash")]
-    pub message_trash: ActionRule,
-    #[serde(
-        rename = "message.unspam",
-        default = "default_message_unmark_discard_rule"
-    )]
-    pub message_unspam: ActionRule,
-    #[serde(
-        rename = "message.untrash",
-        default = "default_message_unmark_discard_rule"
-    )]
-    pub message_untrash: ActionRule,
-    #[serde(rename = "message.notification")]
-    pub message_notification: MessageNotificationAction,
-}
-
-impl Default for ActionsSection {
-    fn default() -> Self {
-        Self {
-            pull: PullActionSection::default(),
-            case_add: ActionRule { steps: Vec::new() },
-            draft_save: ActionRule {
-                steps: vec![ActionStep::append_to_mailbox_id("drafts")],
-            },
-            draft_send: ActionRule {
-                steps: default_draft_send_steps(),
-            },
-            message_spam: ActionRule {
-                steps: vec![
-                    ActionStep::add_flags(vec!["\\Seen".to_string(), "$Junk".to_string()]),
-                    ActionStep::move_to_mailbox_id("junk"),
-                ],
-            },
-            message_trash: ActionRule {
-                steps: vec![ActionStep::move_to_mailbox_id("trash")],
-            },
-            message_unspam: default_message_unmark_discard_rule(),
-            message_untrash: default_message_unmark_discard_rule(),
-            message_notification: MessageNotificationAction::default(),
-        }
-    }
+    pub case: CaseActions,
+    pub draft: DraftActions,
+    pub message: MessageActions,
 }
 
 impl ActionsSection {
     pub(super) fn validate(&self, config: &MailConfig) -> Result<()> {
         self.pull.validate(config)?;
-        validate_steps(config, "actions.case.add.steps", &self.case_add.steps)?;
-        validate_steps(config, "actions.draft.save.steps", &self.draft_save.steps)?;
-        validate_steps(config, "actions.draft.send.steps", &self.draft_send.steps)?;
+        validate_steps(config, "actions.case.add.steps", &self.case.add.steps)?;
+        validate_steps(config, "actions.draft.save.steps", &self.draft.save.steps)?;
+        validate_steps(config, "actions.draft.send.steps", &self.draft.send.steps)?;
         validate_steps(
             config,
             "actions.message.spam.steps",
-            &self.message_spam.steps,
+            &self.message.spam.steps,
         )?;
         validate_steps(
             config,
             "actions.message.trash.steps",
-            &self.message_trash.steps,
+            &self.message.trash.steps,
         )?;
         validate_steps(
             config,
             "actions.message.unspam.steps",
-            &self.message_unspam.steps,
+            &self.message.unspam.steps,
         )?;
         validate_steps(
             config,
             "actions.message.untrash.steps",
-            &self.message_untrash.steps,
+            &self.message.untrash.steps,
         )?;
-        for (id, rule) in &self.message_notification.by_source_mailbox_id {
+        for (id, rule) in &self.message.notification.by_source_mailbox_id {
             validate_config_id("actions.message.notification source id", id)?;
             if !config.mailboxes.contains_key(id) {
                 return Err(AppError::new(
@@ -160,6 +114,71 @@ impl ActionsSection {
             )?;
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CaseActions {
+    pub add: ActionRule,
+}
+
+impl Default for CaseActions {
+    fn default() -> Self {
+        Self {
+            add: ActionRule { steps: Vec::new() },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DraftActions {
+    pub save: ActionRule,
+    pub send: ActionRule,
+}
+
+impl Default for DraftActions {
+    fn default() -> Self {
+        Self {
+            save: ActionRule {
+                steps: vec![ActionStep::append_to_mailbox_id("drafts")],
+            },
+            send: ActionRule {
+                steps: default_draft_send_steps(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MessageActions {
+    pub spam: ActionRule,
+    pub trash: ActionRule,
+    #[serde(default = "default_message_unmark_discard_rule")]
+    pub unspam: ActionRule,
+    #[serde(default = "default_message_unmark_discard_rule")]
+    pub untrash: ActionRule,
+    pub notification: MessageNotificationAction,
+}
+
+impl Default for MessageActions {
+    fn default() -> Self {
+        Self {
+            spam: ActionRule {
+                steps: vec![
+                    ActionStep::add_flags(vec!["\\Seen".to_string(), "$Junk".to_string()]),
+                    ActionStep::move_to_mailbox_id("junk"),
+                ],
+            },
+            trash: ActionRule {
+                steps: vec![ActionStep::move_to_mailbox_id("trash")],
+            },
+            unspam: default_message_unmark_discard_rule(),
+            untrash: default_message_unmark_discard_rule(),
+            notification: MessageNotificationAction::default(),
+        }
     }
 }
 
@@ -261,7 +280,7 @@ impl PullActionSection {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-// `default` tolerates partial objects: afconfig's generic
+// `default` tolerates partial objects: the document layer's generic
 // `set actions.pull.by_mailbox_id.<id>.<field>` creates a new entry with only the
 // one field present, so the sibling field must fall back to Default.
 #[serde(default, deny_unknown_fields)]

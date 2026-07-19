@@ -88,8 +88,8 @@ impl Workspace {
                 ]
             })));
         }
-        self.ensure_no_incomplete_transactions()?;
         let before = self.doctor_issues()?;
+        self.repair_incomplete_transactions()?;
         let deprecated_state_removed_count = self.remove_deprecated_message_state_sidecars()?;
         let cache = self.rebuild_message_cache_from_eml()?;
         for path in message_json_paths(&self.root)? {
@@ -192,17 +192,16 @@ impl Workspace {
 
     fn check_transactions(&self, issues: &mut Vec<DoctorIssue>) -> Result<()> {
         for transaction in self.incomplete_transactions()? {
-            issues.push(DoctorIssue::error(
+            let mut issue = DoctorIssue::error(
                 "transaction_incomplete",
                 format!(
                     "incomplete local transaction {} ({})",
                     transaction.transaction_id, transaction.kind
                 ),
-                Some(format!(
-                    ".afmail/transactions/{}.json",
-                    transaction.transaction_id
-                )),
-            ));
+                Some(rel_path(&self.root, &transaction.path)),
+            );
+            issue.repairable = transaction.is_repairable();
+            issues.push(issue);
         }
         Ok(())
     }

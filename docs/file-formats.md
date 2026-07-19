@@ -569,7 +569,10 @@ final timestamp.
 Incomplete local writes are recorded under
 `.afmail/transactions/<transaction_id>.json` while afmail updates related local
 files. Successful operations remove the transaction file. If one remains,
-writers stop and `afmail doctor` reports `transaction_incomplete`.
+writers stop and `afmail doctor` reports `transaction_incomplete`. A recoverable
+`case_archive` transaction is resumed by `afmail doctor repair --confirm` after
+the underlying validation error has been corrected. Transactions that cannot be
+recovered unambiguously remain blocked for manual inspection.
 
 ## Status Storage Summary
 

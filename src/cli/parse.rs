@@ -74,7 +74,7 @@ mod tests {
     use serde_json::Value;
 
     const README: &str = include_str!("../../README.md");
-    const SKILL: &str = include_str!("../../skills/agent-first-mail.md");
+    const SKILL: &str = include_str!("../../skills/agent-first-mail/SKILL.md");
     const FILE_FORMATS: &str = include_str!("../../docs/file-formats.md");
     const SPORE_CORE: &str = include_str!("../../spore.core.json");
 
@@ -92,7 +92,7 @@ mod tests {
             commands.len() > 20,
             "expected broad skill command coverage, got {commands:?}"
         );
-        assert_commands_parse("skills/agent-first-mail.md", &commands);
+        assert_commands_parse("skills/agent-first-mail/SKILL.md", &commands);
     }
 
     #[test]

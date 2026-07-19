@@ -136,7 +136,7 @@ design.
 
 ## Skill Design: Behavior, Not Flag Reference
 
-`skills/agent-first-mail.md` is loaded by Codex and Claude Code as the agent's
+`skills/agent-first-mail/SKILL.md` is loaded by Codex and Claude Code as the agent's
 behavior contract when operating afmail. Keep behavior rules, decision rules,
 non-obvious defaults, and recovery guidance in the skill. Keep flag
 enumerations, option matrices, and full command references in `afmail --help`

@@ -35,12 +35,7 @@ fn emit_log_event<W: std::io::Write>(
     value: Value,
     trace: Value,
 ) -> Result<(), CliEmitterError> {
-    emitter.emit(
-        agent_first_data::json_log(value)
-            .trace(trace)
-            .build()
-            .map_err(|err| CliEmitterError::Validation(err.to_string()))?,
-    )
+    emitter.emit(agent_first_data::json_log(value).trace(trace).build())
 }
 
 fn emit_progress_event<W: std::io::Write>(
@@ -48,12 +43,7 @@ fn emit_progress_event<W: std::io::Write>(
     value: Value,
     trace: Value,
 ) -> Result<(), CliEmitterError> {
-    emitter.emit(
-        agent_first_data::json_progress(value)
-            .trace(trace)
-            .build()
-            .map_err(|err| CliEmitterError::Validation(err.to_string()))?,
-    )
+    emitter.emit(agent_first_data::json_progress(value).trace(trace).build())
 }
 
 pub fn run_command(

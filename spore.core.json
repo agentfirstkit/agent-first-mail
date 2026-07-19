@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-mail",
   "name": "Agent-First Mail",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.",
@@ -13,29 +13,21 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Adopt afdata protocol v1 end-to-end: commands emit typed, structured command results with flattened error fields via a semantic CLI emitter, replacing serialized output bags",
-    "Add request-idempotency across every state-changing command via a global --request-id key that records and replays outcomes so retries are deduplicated (message dispositions, case lifecycle, draft edits, contact edits/renames, membership, notes, summaries, local deletes, field edits)",
-    "Bind remote effects to reviewed plans: push and purge require a reviewed plan id before any remote effect runs, and case-archive lifecycle finalizes only after a successful push",
-    "Support explicit workspace selection via --workspace with a stable workspace identity, and make onboarding readiness an explicit reported state in afmail status",
-    "Harden untrusted-mail and privacy boundaries: bound IMAP body fetches by default, enforce render boundaries on untrusted content, and redact private startup argv shape and runtime log fields",
-    "Make network failures recoverable by marking IMAP connect and SMTP remote failures retryable with explicit retry phases and reason-required safe recovery",
-    "Add incremental pull with persisted cursors, plus mailbox pull budgeting via --max-new-messages and --max-total-bytes and pre-pull size estimation via --dry-run",
-    "Report workspace storage usage in bytes through afmail status and surface partial command outcomes",
-    "Make draft intent and content states explicit with separate lifecycle states, add a draft list command, and rename draft save to upload",
-    "Add batch operations and message list filters: batch message dispositions, batch case and notification additions requiring ids, require --group for case move, require contact reasons, and add case set-summary",
-    "Redesign the AFUI mail workspace to safely render full case conversations including archived views, load web packs, and show timezone-aware rendered times",
-    "Optimize the render pipeline, reorganize the workspace state directory layout, and order the push queue by persisted enqueue sequence"
+    "Restore numeric rendering in generated Markdown: attachment byte sizes and message and attachment counts print as numbers again, not an arbitrary-precision wrapper object, after the afdata dependency enabled that globally.",
+    "Rework config editing to change .afmail/config.json in place through afdata's DocumentFile — validate the whole config before writing, commit atomically, and preserve on-disk key order — replacing the hand-written sparse-diff writer.",
+    "Migrate onto afdata 0.20, which absorbed the retired agent-first-config, adopting its redesigned config, document, version, and help APIs.",
+    "Bump the agent-first-slug dependency to 0.3.0."
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.CKaSTwynqtgjQQcFJFqw7MVBPyfe2ajaMotr7oReq5qL",
+      "uri": "cmn://agentfirstkit.com/b3.9yMkUBVLpoqbkX39VsqEAqqmHtZ2z6QTJZPggKuhdpkB",
       "id": "agent-first-data",
       "reason": "All structured output, field suffixes, secret handling, and JSONL events follow Agent-First Data conventions"
     },
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.78EFvApdz7hgdDzzaDYA5dXGV9TMh98vBehLjeTqDwSe",
+      "uri": "cmn://agentfirstkit.com/b3.FMyZAm2jehGiTupNvD2N5YK3fN8oxf2YvWv8M9x2CANd",
       "id": "agent-first-slug",
       "reason": "Path/URL slug generation and path-segment validation use Agent-First Slug"
     }

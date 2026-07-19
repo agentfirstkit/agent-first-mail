@@ -14,7 +14,7 @@ use std::path::Path;
 /// The embedded skill this binary installs.
 const SPEC: SkillSpec = SkillSpec {
     name: "agent-first-mail",
-    source: include_str!("../skills/agent-first-mail.md"),
+    source: include_str!("../skills/agent-first-mail/SKILL.md"),
     title: "Agent-First Mail",
     marker_slug: "afmail",
 };

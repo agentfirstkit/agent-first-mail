@@ -185,6 +185,16 @@ impl<'a> MarkdownTemplateRenderer<'a> {
         let template = env
             .get_template(key.as_str())
             .map_err(|e| template_error(key, self.language, &source.label, e))?;
+        // afdata turns on serde_json's `arbitrary_precision` feature process-wide,
+        // so every serde_json::Number serializes through the
+        // `$serde_json::private::Number` newtype. minijinja's serde bridge has no
+        // special case for it and would render each numeric field as a literal map
+        // (`{"$serde_json::private::Number":"115301"}`). Normalize the context into a
+        // minijinja::Value first, mapping those numbers back to native ones, so
+        // generated Markdown keeps plain numbers regardless of the global feature.
+        let json = serde_json::to_value(context)
+            .map_err(|e| AppError::json("build template context", &e))?;
+        let context = json_value_to_minijinja(&json);
         let rendered = template
             .render(context)
             .map_err(|e| template_error(key, self.language, &source.label, e))?;
@@ -238,6 +248,39 @@ fn template_error(
 
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+/// Convert a `serde_json::Value` into a `minijinja::Value`, remapping numbers to
+/// native minijinja numbers. afdata enables serde_json's `arbitrary_precision`
+/// feature process-wide; under it `serde_json::Number` serializes through the
+/// `$serde_json::private::Number` newtype, which minijinja's serializer would
+/// otherwise turn every numeric template field into a
+/// `{"$serde_json::private::Number":"N"}` map. Structure, strings, bools, and
+/// null are preserved exactly as minijinja's serde bridge would map them.
+fn json_value_to_minijinja(value: &Value) -> minijinja::Value {
+    match value {
+        Value::Null => minijinja::Value::from(()),
+        Value::Bool(b) => minijinja::Value::from(*b),
+        Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                minijinja::Value::from(u)
+            } else if let Some(i) = n.as_i64() {
+                minijinja::Value::from(i)
+            } else if let Some(f) = n.as_f64() {
+                minijinja::Value::from(f)
+            } else {
+                // Precision beyond i64/u64/f64 has no native number; keep the exact
+                // literal as a string rather than lose or mangle it.
+                minijinja::Value::from(n.to_string())
+            }
+        }
+        Value::String(s) => minijinja::Value::from(s.as_str()),
+        Value::Array(items) => items.iter().map(json_value_to_minijinja).collect(),
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| (k.as_str(), json_value_to_minijinja(v)))
+            .collect(),
+    }
 }
 
 /// minijinja `inline` filter: collapse CR/LF to single spaces and trim, so an

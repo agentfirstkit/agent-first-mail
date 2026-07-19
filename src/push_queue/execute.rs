@@ -29,17 +29,17 @@ pub(super) fn push_outbound(
     let steps = if outbound.steps.is_empty() {
         let configured = match outbound.action {
             OutboundAction::SaveDraft => {
-                if config.actions.draft_save.steps.is_empty() {
+                if config.actions.draft.save.steps.is_empty() {
                     vec![ActionStep::append_to_mailbox_id("drafts")]
                 } else {
-                    config.actions.draft_save.steps.clone()
+                    config.actions.draft.save.steps.clone()
                 }
             }
             OutboundAction::Send => {
-                if config.actions.draft_send.steps.is_empty() {
+                if config.actions.draft.send.steps.is_empty() {
                     crate::config::default_draft_send_steps()
                 } else {
-                    config.actions.draft_send.steps.clone()
+                    config.actions.draft.send.steps.clone()
                 }
             }
         };

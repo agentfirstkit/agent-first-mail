@@ -3,6 +3,7 @@ use agent_first_ui::{
     AgentFirstUiMessage, MessagePayload, PrepareRequestSpec, PreparedStatus, find_unit,
     prepare_request, validate_space, validate_space_bindings,
 };
+use rustls_connector::{RustlsConnectorConfig, TlsStream};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -372,14 +373,14 @@ fn docker_dovecot_special_use_fixture_batch_e2e() -> Result<(), Box<dyn std::err
         std::env::set_var("SSL_CERT_FILE", &tls_root_cert_path);
     }
     assert!(
-        wait_until(Duration::from_secs(30), || imap_tls_login_works(
-            imap_port, ME_LOGIN, PASSWORD
-        )),
+        wait_until(Duration::from_secs(30), || {
+            imap_tls_login_works(imap_port, ME_LOGIN, PASSWORD, &tls_root_cert_path)
+        }),
         "Dovecot IMAP did not accept login"
     );
 
-    create_fixture_remote_folders_tls(imap_port, &batch);
-    seed_fixture_batch_tls(imap_port, &batch).map_err(fixture_error)?;
+    create_fixture_remote_folders_tls(imap_port, &tls_root_cert_path, &batch);
+    seed_fixture_batch_tls(imap_port, &tls_root_cert_path, &batch).map_err(fixture_error)?;
     assert_eq!(run(root.path(), &["init"]).0, 0);
     let mut config = test_config(
         "localhost",
@@ -781,27 +782,31 @@ fn test_config(
             // case.add queues a "case" push item that no `push` subcommand
             // drains (categories are drafts/archive/spam/trash), so keep it
             // effect-free — matching afmail's default — or the queue never empties.
-            "case.add": {"steps": []},
-            "draft.save": {"steps": [{"append_to_mailbox_id": "drafts"}]},
-            "draft.send": {"steps": [
-                {"append_to_mailbox_id": "drafts"},
-                {"smtp_send": {}},
-                {"append_to_mailbox_id": "sent"},
-                {"add_flags": ["\\Answered"], "on": "reply_to_message"}
-            ]},
-            "message.spam": {"steps": [
-                {"add_flags": ["\\Seen", "$Junk"]},
-                {"move_to_mailbox_id": "junk"}
-            ]},
-            "message.trash": {"steps": [{"move_to_mailbox_id": "trash"}]},
-            "message.notification": {"by_source_mailbox_id": {
-                "inbox": {"steps": [{"move_to_mailbox_id": "archive"}]},
-                "sent": {"steps": []},
-                "archive": {"steps": []},
-                "junk": {"steps": []},
-                "trash": {"steps": []},
-                "drafts": {"steps": []}
-            }}
+            "case": {"add": {"steps": []}},
+            "draft": {
+                "save": {"steps": [{"append_to_mailbox_id": "drafts"}]},
+                "send": {"steps": [
+                    {"append_to_mailbox_id": "drafts"},
+                    {"smtp_send": {}},
+                    {"append_to_mailbox_id": "sent"},
+                    {"add_flags": ["\\Answered"], "on": "reply_to_message"}
+                ]}
+            },
+            "message": {
+                "spam": {"steps": [
+                    {"add_flags": ["\\Seen", "$Junk"]},
+                    {"move_to_mailbox_id": "junk"}
+                ]},
+                "trash": {"steps": [{"move_to_mailbox_id": "trash"}]},
+                "notification": {"by_source_mailbox_id": {
+                    "inbox": {"steps": [{"move_to_mailbox_id": "archive"}]},
+                    "sent": {"steps": []},
+                    "archive": {"steps": []},
+                    "junk": {"steps": []},
+                    "trash": {"steps": []},
+                    "drafts": {"steps": []}
+                }}
+            }
         },
         "case": {},
         "identities": [
@@ -860,25 +865,31 @@ fn seed_fixture_batch(imap_port: u16, batch: &test_fixtures::MailBatch) -> Resul
     Ok(())
 }
 
-fn create_fixture_remote_folders_tls(imap_port: u16, batch: &test_fixtures::MailBatch) {
+fn create_fixture_remote_folders_tls(
+    imap_port: u16,
+    tls_root_cert_path: &Path,
+    batch: &test_fixtures::MailBatch,
+) {
     for mailbox in batch.mailboxes.values() {
         if mailbox.mailbox_name != "INBOX" {
-            create_remote_folder_tls(imap_port, ME_LOGIN, PASSWORD, &mailbox.mailbox_name);
+            create_remote_folder_tls(
+                imap_port,
+                tls_root_cert_path,
+                ME_LOGIN,
+                PASSWORD,
+                &mailbox.mailbox_name,
+            );
         }
     }
 }
 
-fn seed_fixture_batch_tls(imap_port: u16, batch: &test_fixtures::MailBatch) -> Result<(), String> {
-    let builder = imap::ClientBuilder::new("localhost", imap_port)
-        .mode(imap::ConnectionMode::Tls)
-        .tls_kind(imap::TlsKind::Rust)
-        .danger_skip_tls_verify(true);
-    let client = builder
-        .connect()
+fn seed_fixture_batch_tls(
+    imap_port: u16,
+    tls_root_cert_path: &Path,
+    batch: &test_fixtures::MailBatch,
+) -> Result<(), String> {
+    let mut session = imap_tls_session(imap_port, tls_root_cert_path, ME_LOGIN, PASSWORD)
         .map_err(|err| format!("connect to Dovecot IMAP for fixture seed failed: {err}"))?;
-    let mut session = client
-        .login(ME_LOGIN, PASSWORD)
-        .map_err(|err| format!("login to Dovecot IMAP for fixture seed failed: {}", err.0))?;
     for message in &batch.messages {
         let folder = batch.mailbox_name(&message.mailbox_id).ok_or_else(|| {
             format!(
@@ -900,14 +911,14 @@ fn seed_fixture_batch_tls(imap_port: u16, batch: &test_fixtures::MailBatch) -> R
     Ok(())
 }
 
-fn create_remote_folder_tls(port: u16, username: &str, password: &str, folder: &str) {
-    let builder = imap::ClientBuilder::new("localhost", port)
-        .mode(imap::ConnectionMode::Tls)
-        .tls_kind(imap::TlsKind::Rust)
-        .danger_skip_tls_verify(true);
-    if let Ok(client) = builder.connect()
-        && let Ok(mut session) = client.login(username, password)
-    {
+fn create_remote_folder_tls(
+    port: u16,
+    tls_root_cert_path: &Path,
+    username: &str,
+    password: &str,
+    folder: &str,
+) {
+    if let Ok(mut session) = imap_tls_session(port, tls_root_cert_path, username, password) {
         if folder == "Archive" {
             let _ = session
                 .run_command_and_check_ok(r#"CREATE "Archive" (USE (\Archive))"#)
@@ -1252,15 +1263,43 @@ fn imap_login_works(port: u16, username: &str, password: &str) -> bool {
     ok
 }
 
-fn imap_tls_login_works(port: u16, username: &str, password: &str) -> bool {
-    let builder = imap::ClientBuilder::new("localhost", port)
-        .mode(imap::ConnectionMode::Tls)
-        .tls_kind(imap::TlsKind::Rust)
-        .danger_skip_tls_verify(true);
-    let Ok(client) = builder.connect() else {
-        return false;
-    };
-    client.login(username, password).is_ok()
+fn imap_tls_login_works(
+    port: u16,
+    username: &str,
+    password: &str,
+    tls_root_cert_path: &Path,
+) -> bool {
+    imap_tls_session(port, tls_root_cert_path, username, password).is_ok()
+}
+
+fn imap_tls_session(
+    port: u16,
+    tls_root_cert_path: &Path,
+    username: &str,
+    password: &str,
+) -> Result<imap::Session<TlsStream<TcpStream>>, String> {
+    let pem =
+        fs::read(tls_root_cert_path).map_err(|err| format!("read Dovecot TLS root: {err}"))?;
+    let mut pem = pem.as_slice();
+    let certs = rustls_pemfile::certs(&mut pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("parse Dovecot TLS root: {err}"))?;
+    let connector = RustlsConnectorConfig::new_with_webpki_root_certs()
+        .with_parsable_certificates(certs)
+        .connector_with_no_client_auth()
+        .map_err(|err| format!("configure Dovecot TLS: {err}"))?;
+    let stream = TcpStream::connect(("localhost", port))
+        .map_err(|err| format!("connect to Dovecot IMAP: {err}"))?;
+    let tls_stream = connector
+        .connect("localhost", stream)
+        .map_err(|err| format!("TLS connect to Dovecot IMAP: {err}"))?;
+    let mut client = imap::Client::new(tls_stream);
+    client
+        .read_greeting()
+        .map_err(|err| format!("read Dovecot IMAP greeting: {err}"))?;
+    client
+        .login(username, password)
+        .map_err(|err| format!("login to Dovecot IMAP: {}", err.0))
 }
 
 fn mailbox_contains(
@@ -1620,19 +1659,23 @@ fn minimal_config() -> Value {
                     "drafts": {"import_as": "triage", "direction": "outbound"}
                 }
             },
-            "case.add": {"steps": []},
-            "draft.save": {"steps": []},
-            "draft.send": {"steps": []},
-            "message.spam": {"steps": []},
-            "message.trash": {"steps": []},
-            "message.notification": {"by_source_mailbox_id": {
-                "inbox": {"steps": []},
-                "sent": {"steps": []},
-                "archive": {"steps": []},
-                "junk": {"steps": []},
+            "case": {"add": {"steps": []}},
+            "draft": {
+                "save": {"steps": []},
+                "send": {"steps": []}
+            },
+            "message": {
+                "spam": {"steps": []},
                 "trash": {"steps": []},
-                "drafts": {"steps": []}
-            }}
+                "notification": {"by_source_mailbox_id": {
+                    "inbox": {"steps": []},
+                    "sent": {"steps": []},
+                    "archive": {"steps": []},
+                    "junk": {"steps": []},
+                    "trash": {"steps": []},
+                    "drafts": {"steps": []}
+                }}
+            }
         },
         "case": {},
         "contact": {"default_group": "people"},

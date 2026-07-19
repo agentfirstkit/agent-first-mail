@@ -208,7 +208,7 @@ fn configure_default_identity(root: &std::path::Path) {
 
 fn configure_smtp_send_only(root: &std::path::Path, smtp_port: u16) {
     let mut config = read_json(&root.join(".afmail/config.json"));
-    config["actions"]["draft.send"]["steps"] = json!([{"smtp_send": {}}]);
+    config["actions"]["draft"]["send"]["steps"] = json!([{"smtp_send": {}}]);
     config["smtp"]["host"] = json!("127.0.0.1");
     config["smtp"]["port"] = json!(smtp_port);
     config["smtp"]["starttls"] = json!(false);
@@ -222,7 +222,7 @@ fn configure_smtp_send_only(root: &std::path::Path, smtp_port: u16) {
 
 fn configure_smtp_then_sent_append(root: &std::path::Path, smtp_port: u16) {
     let mut config = read_json(&root.join(".afmail/config.json"));
-    config["actions"]["draft.send"]["steps"] = json!([
+    config["actions"]["draft"]["send"]["steps"] = json!([
         {"smtp_send": {}},
         {"append_to_mailbox_id": "sent"}
     ]);
@@ -258,7 +258,7 @@ fn configure_imap_without_smtp(root: &std::path::Path, imap_port: u16) {
 
 fn configure_spam_without_seen(root: &std::path::Path, imap_port: Option<u16>) {
     let mut config = read_json(&root.join(".afmail/config.json"));
-    config["actions"]["message.spam"]["steps"] =
+    config["actions"]["message"]["spam"]["steps"] =
         json!([{"add_flags": ["$Junk"]}, {"move_to_mailbox_id": "junk"}]);
     if let Some(port) = imap_port {
         config["imap"]["host"] = json!("127.0.0.1");
@@ -293,7 +293,7 @@ fn configure_remote(root: &std::path::Path, imap_port: u16, smtp_port: u16) {
 fn configure_remote_send_only(root: &std::path::Path, imap_port: u16, smtp_port: u16) {
     configure_remote(root, imap_port, smtp_port);
     let mut config = read_json(&root.join(".afmail/config.json"));
-    config["actions"]["draft.send"]["steps"] = json!([{"smtp_send": {}}]);
+    config["actions"]["draft"]["send"]["steps"] = json!([{"smtp_send": {}}]);
     write_json(&root.join(".afmail/config.json"), &config);
 }
 
@@ -976,7 +976,7 @@ fn push_remote_outcome_unknown_without_succeeded_steps_is_partial() {
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     let mut config = read_json(&root.join(".afmail/config.json"));
-    config["actions"]["draft.send"]["steps"] = json!([{"smtp_send": {}}]);
+    config["actions"]["draft"]["send"]["steps"] = json!([{"smtp_send": {}}]);
     write_json(&root.join(".afmail/config.json"), &config);
     let (case_uid, case_path) = create_case(&root, "unknown-outcome", "remote outcome test");
     let draft = draft_with_compose(format!(
@@ -1961,7 +1961,7 @@ fn case_archive_defers_remote_archive_until_all_case_refs_are_archived() {
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     let mut config = read_json(&root.join(".afmail/config.json"));
-    config["actions"]["case.add"]["steps"] = json!([]);
+    config["actions"]["case"]["add"]["steps"] = json!([]);
     write_json(&root.join(".afmail/config.json"), &config);
     write_message(&root, "message_shared", 42, None);
     write_triage(&root, "message_shared", "shared case");
@@ -2489,7 +2489,8 @@ fn archived_case_trash_discards_case_without_unarchive() {
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     let mut config = read_json(&root.join(".afmail/config.json"));
-    config["actions"]["message.notification"]["by_source_mailbox_id"]["inbox"]["steps"] = json!([]);
+    config["actions"]["message"]["notification"]["by_source_mailbox_id"]["inbox"]["steps"] =
+        json!([]);
     write_json(&root.join(".afmail/config.json"), &config);
     write_message(&root, "message_notification_case_trash", 81, None);
     write_triage(&root, "message_notification_case_trash", "done");
@@ -2617,7 +2618,7 @@ fn push_confirmation_rejects_changed_identity_attachment_and_draft_before_smtp()
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     let mut config = read_json(&root.join(".afmail/config.json"));
-    config["actions"]["draft.send"]["steps"] = json!([{"smtp_send": {}}]);
+    config["actions"]["draft"]["send"]["steps"] = json!([{"smtp_send": {}}]);
     config["identities"] =
         json!([{"identity": "me", "name": "Me", "email": "me@example.com", "default": true}]);
     write_json(&root.join(".afmail/config.json"), &config);
@@ -2673,7 +2674,7 @@ fn push_confirmation_rejects_changed_identity_attachment_and_draft_before_smtp()
     assert_eq!(parse_one(&stdout)["code"], "push_plan_changed");
 
     let fourth_plan_id = current_push_plan_id(&root);
-    config["actions"]["draft.send"]["steps"] =
+    config["actions"]["draft"]["send"]["steps"] =
         json!([{"smtp_send": {}}, {"append_to_mailbox_id": "sent"}]);
     write_json(&root.join(".afmail/config.json"), &config);
     let (status, stdout) = run(&root, &["push", "--confirm", &fourth_plan_id]);
@@ -2681,7 +2682,7 @@ fn push_confirmation_rejects_changed_identity_attachment_and_draft_before_smtp()
     let changed = parse_one(&stdout);
     assert_eq!(changed["code"], "push_plan_changed");
     assert_eq!(changed["remote_calls_started"], false);
-    config["actions"]["draft.send"]["steps"] = json!([{"smtp_send": {}}]);
+    config["actions"]["draft"]["send"]["steps"] = json!([{"smtp_send": {}}]);
     write_json(&root.join(".afmail/config.json"), &config);
 
     let fifth_plan_id = current_push_plan_id(&root);
@@ -3154,7 +3155,7 @@ fn push_audit_warning_is_partial_after_remote_effect_succeeds() {
     // it must not resolve or execute any new remote step.
     let mut config = read_json(&root.join(".afmail/config.json"));
     config["smtp"]["port"] = json!(1);
-    config["actions"]["draft.send"]["steps"] = json!([
+    config["actions"]["draft"]["send"]["steps"] = json!([
         {"smtp_send": {}},
         {"append_to_mailbox_id": "sent"}
     ]);

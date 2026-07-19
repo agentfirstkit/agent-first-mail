@@ -22,7 +22,8 @@ fn config_defaults_pull_and_tls() {
     assert!(cfg.workspace.timezone_utc_offset.is_some());
     assert_eq!(
         cfg.actions
-            .message_notification
+            .message
+            .notification
             .by_source_mailbox_id
             .get("inbox")
             .map(|m| {
@@ -34,7 +35,8 @@ fn config_defaults_pull_and_tls() {
     );
     assert_eq!(
         cfg.actions
-            .message_unspam
+            .message
+            .unspam
             .steps
             .first()
             .and_then(|step| step.move_to_mailbox_id.as_deref()),
@@ -42,7 +44,8 @@ fn config_defaults_pull_and_tls() {
     );
     assert_eq!(
         cfg.actions
-            .message_untrash
+            .message
+            .untrash
             .steps
             .first()
             .and_then(|step| step.move_to_mailbox_id.as_deref()),
@@ -77,11 +80,11 @@ fn default_config_serializes_explicit_mailboxes_and_actions() {
         })
     );
     assert_eq!(
-        value["actions"]["draft.save"]["steps"],
+        value["actions"]["draft"]["save"]["steps"],
         json!([{"append_to_mailbox_id": "drafts"}])
     );
     assert_eq!(
-        value["actions"]["draft.send"]["steps"],
+        value["actions"]["draft"]["send"]["steps"],
         json!([
             {"append_to_mailbox_id": "drafts"},
             {"smtp_send": {}},
@@ -90,11 +93,11 @@ fn default_config_serializes_explicit_mailboxes_and_actions() {
         ])
     );
     assert_eq!(
-        value["actions"]["message.unspam"]["steps"],
+        value["actions"]["message"]["unspam"]["steps"],
         json!([{"move_to_mailbox_id": "inbox"}])
     );
     assert_eq!(
-        value["actions"]["message.untrash"]["steps"],
+        value["actions"]["message"]["untrash"]["steps"],
         json!([{"move_to_mailbox_id": "inbox"}])
     );
     assert_eq!(
@@ -138,11 +141,13 @@ fn sparse_config_merges_with_current_defaults() {
             "host": "imap.example.com"
         },
         "actions": {
-            "draft.send": {
-                "steps": [
-                    {"smtp_send": {}},
-                    {"append_to_mailbox_id": "sent"}
-                ]
+            "draft": {
+                "send": {
+                    "steps": [
+                        {"smtp_send": {}},
+                        {"append_to_mailbox_id": "sent"}
+                    ]
+                }
             }
         }
     });
@@ -154,14 +159,15 @@ fn sparse_config_merges_with_current_defaults() {
     assert_eq!(
         config
             .actions
-            .draft_save
+            .draft
+            .save
             .steps
             .first()
             .and_then(|step| step.append_to_mailbox_id.as_deref()),
         Some("drafts")
     );
-    assert_eq!(config.actions.draft_send.steps.len(), 2);
-    assert!(config.actions.draft_send.steps[0].smtp_send.is_some());
+    assert_eq!(config.actions.draft.send.steps.len(), 2);
+    assert!(config.actions.draft.send.steps[0].smtp_send.is_some());
 }
 
 #[test]
@@ -422,7 +428,8 @@ fn invalid_mailbox_config_fails() {
     );
     if let Some(entry) = cfg
         .actions
-        .message_notification
+        .message
+        .notification
         .by_source_mailbox_id
         .get_mut("inbox")
     {

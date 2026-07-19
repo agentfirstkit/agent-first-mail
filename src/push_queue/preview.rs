@@ -13,8 +13,8 @@ pub(super) fn actions_for(
             return Ok(outbound.steps.iter().map(step_label).collect());
         }
         let steps = match outbound.action {
-            OutboundAction::SaveDraft => &config.actions.draft_save.steps,
-            OutboundAction::Send => &config.actions.draft_send.steps,
+            OutboundAction::SaveDraft => &config.actions.draft.save.steps,
+            OutboundAction::Send => &config.actions.draft.send.steps,
         };
         if !steps.is_empty() {
             return Ok(filter_reply_to_steps(root, item, steps.clone())?

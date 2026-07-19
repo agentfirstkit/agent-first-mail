@@ -436,7 +436,7 @@ impl Workspace {
                 "case.add",
                 &message_ids,
                 &locations,
-                &config.actions.case_add.steps,
+                &config.actions.case.add.steps,
                 None,
             )?;
             if let Some(item) = &item {
@@ -497,7 +497,7 @@ impl Workspace {
             "case.add",
             &message_ids,
             &locations,
-            &config.actions.case_add.steps,
+            &config.actions.case.add.steps,
             None,
         )?;
         if let Some(item) = &item {
@@ -904,6 +904,7 @@ impl Workspace {
         let messages = read_case_messages(&case_path, &case_uid)?;
         let message_ids = messages.message_ids();
         self.ensure_case_drafts_can_archive(&case_uid, &case_path)?;
+        self.preflight_archive_eligibility(&message_ids, Some(&case_uid))?;
         let transaction = self.begin_transaction(
             "case_archive",
             vec![
@@ -914,16 +915,8 @@ impl Workspace {
         )?;
         let target_path =
             self.move_active_case_workspace(&case_uid, &case_path, layout::ARCHIVED_CASES)?;
-        self.refresh_messages_after_ref_change(&message_ids)?;
-        self.refresh_case_message_views(&target_path)?;
-        let queue =
-            self.queue_archive_for_archived_messages(&message_ids, None, Some(&case_uid))?;
-        let lifecycle = if self.case_has_pending_archive_work(&case_uid, &message_ids)? {
-            update_case_archiving_state(&target_path)?;
-            "archiving"
-        } else {
-            "archived"
-        };
+        let (queue, lifecycle) =
+            self.complete_case_archive_workspace(&case_uid, &target_path, &message_ids)?;
         transaction.commit()?;
         self.append_audit_event(
             if lifecycle == "archived" {
@@ -954,6 +947,47 @@ impl Workspace {
             "from_path": from_path,
             "case_path": rel_path(&self.root, &target_path),
         }))
+    }
+
+    fn complete_case_archive_workspace(
+        &self,
+        case_uid: &str,
+        target_path: &Path,
+        message_ids: &[String],
+    ) -> Result<(ArchiveQueue, &'static str)> {
+        self.refresh_messages_after_ref_change(message_ids)?;
+        self.refresh_case_message_views(target_path)?;
+        let queue = self.queue_archive_for_archived_messages(message_ids, None, Some(case_uid))?;
+        let lifecycle = if self.case_has_pending_archive_work(case_uid, message_ids)? {
+            update_case_archiving_state(target_path)?;
+            "archiving"
+        } else {
+            update_case_archive_state(target_path, true)?;
+            "archived"
+        };
+        Ok((queue, lifecycle))
+    }
+
+    pub(super) fn recover_case_archive_transaction(&self, case_uid: &str) -> Result<()> {
+        if self.find_case_by_uid(case_uid)?.is_some() {
+            return Ok(());
+        }
+        let archived = self
+            .find_archived_case_by_uid(case_uid)?
+            .ok_or_else(|| {
+                AppError::new(
+                    "transaction_incomplete",
+                    format!(
+                        "cannot repair case archive transaction: case {case_uid} is neither active nor archived"
+                    ),
+                )
+                .with_hint(
+                    "Restore the case workspace named in the transaction, then rerun `afmail doctor repair --confirm`.",
+                )
+            })?;
+        let messages = read_case_messages(&archived.path, case_uid)?;
+        self.complete_case_archive_workspace(case_uid, &archived.path, &messages.message_ids())?;
+        Ok(())
     }
 
     pub fn trash_case(&self, case_ref: &str, reason: Option<&str>) -> Result<Value> {
@@ -1579,7 +1613,7 @@ impl Workspace {
             "message.trash",
             &eligible_message_ids,
             &locations,
-            &config.actions.message_trash.steps,
+            &config.actions.message.trash.steps,
             None,
         )?;
         self.update_messages_workspace(&message_ids, MessageStatus::Trashed.as_str())?;

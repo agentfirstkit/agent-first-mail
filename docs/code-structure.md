@@ -136,8 +136,8 @@ Run every validation through the repository-owned project entry point from the
 repository root:
 
 ```bash
-./scripts/projects/agent-first-mail/test.sh static
-./scripts/projects/agent-first-mail/test.sh unit
+./scripts/test.sh static
+./scripts/test.sh unit
 ```
 
 `static` covers formatting, default and no-default-feature Clippy, generated CLI
@@ -150,13 +150,13 @@ Use focused modes for large integration targets instead of ad hoc Cargo command
 lines:
 
 ```bash
-./scripts/projects/agent-first-mail/test.sh cli [FILTER]
-./scripts/projects/agent-first-mail/test.sh request-id [FILTER]
-./scripts/projects/agent-first-mail/test.sh workspace [FILTER]
-./scripts/projects/agent-first-mail/test.sh config [FILTER]
-./scripts/projects/agent-first-mail/test.sh surface [FILTER]
-./scripts/projects/agent-first-mail/test.sh draft [FILTER]
-./scripts/projects/agent-first-mail/test.sh push [FILTER]
+./scripts/test.sh cli [FILTER]
+./scripts/test.sh request-id [FILTER]
+./scripts/test.sh workspace [FILTER]
+./scripts/test.sh config [FILTER]
+./scripts/test.sh surface [FILTER]
+./scripts/test.sh draft [FILTER]
+./scripts/test.sh push [FILTER]
 ```
 
 `request-id` runs the split-out request-id retry/audit integration target
@@ -178,8 +178,8 @@ Run all ignored GreenMail/Dovecot container tests through the fixed E2E mode, or
 pass one Rust test-name filter as the second argument:
 
 ```bash
-./scripts/projects/agent-first-mail/test.sh e2e
-./scripts/projects/agent-first-mail/test.sh e2e docker_greenmail_pull_reply_send_e2e
+./scripts/test.sh e2e
+./scripts/test.sh e2e docker_greenmail_pull_reply_send_e2e
 ```
 
 The same fixture batch powers a real agent-operation workspace. This prepares a
@@ -187,7 +187,7 @@ live GreenMail mailbox and configured afmail workspace, but does not pull or
 process mail; the agent must actually operate the inbox:
 
 ```bash
-./scripts/projects/agent-first-mail/test.sh demo-prepare
+./scripts/test.sh demo-prepare
 ```
 
 After it prints the workspace path, open your agent there and say:
@@ -221,5 +221,5 @@ hint; the normal mailbox workflow instructions come from `afmail init`.
 For an automated scripted demo pass, use:
 
 ```bash
-./scripts/projects/agent-first-mail/test.sh demo
+./scripts/test.sh demo
 ```

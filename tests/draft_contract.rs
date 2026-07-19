@@ -629,7 +629,7 @@ fn draft_attach_copies_external_file_and_updates_frontmatter() {
     assert!(case_path.join("files/公司资料_.txt").is_file());
     let draft =
         fs::read_to_string(case_path.join(format!("drafts/{draft_name}"))).unwrap_or_default();
-    assert!(draft.contains("attachments:\n- files/公司资料_.txt"));
+    assert!(draft.contains("attachments:\n  - files/公司资料_.txt"));
 
     let (status, stdout) = run(
         &root,

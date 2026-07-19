@@ -29,12 +29,7 @@ pub fn emit_result<W: Write>(
             let payload = normalize_command_payload(result.into_value(), is_success);
             let trace = json!({"duration_ms": duration_ms});
             if is_success {
-                emitter.emit(
-                    agent_first_data::json_result(payload)
-                        .trace(trace)
-                        .build()
-                        .map_err(|err| CliEmitterError::Validation(err.to_string()))?,
-                )?;
+                emitter.emit(agent_first_data::json_result(payload).trace(trace).build())?;
             } else {
                 let code = if succeeded_count > 0 {
                     "partial"
@@ -55,11 +50,7 @@ pub fn emit_result<W: Write>(
                 let builder = agent_first_data::json_error(code, &message)
                     .fields(payload)
                     .trace(trace);
-                emitter.emit(
-                    builder
-                        .build()
-                        .map_err(|err| CliEmitterError::Validation(err.to_string()))?,
-                )?;
+                emitter.emit(builder.build().map_err(CliEmitterError::Build)?)?;
             }
             Ok(exit_code)
         }
@@ -71,11 +62,7 @@ pub fn emit_result<W: Write>(
                 builder = builder.hint(hint);
             }
             builder = builder.fields(err.protocol_fields());
-            emitter.emit(
-                builder
-                    .build()
-                    .map_err(|err| CliEmitterError::Validation(err.to_string()))?,
-            )?;
+            emitter.emit(builder.build().map_err(CliEmitterError::Build)?)?;
             Ok(1)
         }
     }

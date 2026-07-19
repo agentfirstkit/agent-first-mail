@@ -116,7 +116,7 @@ mod tests {
     fn draft_tolerates_empty_arrays() {
         let text = "---\nkind: draft\ncase_uid: c20260521001\nsubject: Hello\nto:\n  - a@example.com\ncc:\nattachments:\n---\nbody";
         let parsed = read_doc::<DraftFrontmatter>(text);
-        assert!(parsed.is_ok());
+        assert!(parsed.is_ok(), "{parsed:?}");
         if let Ok((fm, body)) = parsed {
             assert_eq!(fm.case_uid, "c20260521001");
             assert_eq!(fm.subject.as_deref(), Some("Hello"));
@@ -151,7 +151,7 @@ mod tests {
         assert!(rendered.is_ok());
         if let Ok(rendered) = rendered {
             let reparsed = read_doc::<CaseFrontmatter>(&rendered);
-            assert!(reparsed.is_ok());
+            assert!(reparsed.is_ok(), "{reparsed:?}");
             if let Ok((parsed, parsed_body)) = reparsed {
                 assert_eq!(parsed, fm);
                 assert_eq!(parsed_body, body.trim_start());

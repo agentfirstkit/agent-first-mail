@@ -9,8 +9,8 @@ mod workspace;
 
 pub(crate) use actions::default_draft_send_steps;
 pub use actions::{
-    ActionRule, ActionStep, ActionStepOn, ActionsSection, MailDirection, MessageNotificationAction,
-    PullActionSection, PullImportAs, PullMailboxAction,
+    ActionRule, ActionStep, ActionStepOn, ActionsSection, CaseActions, DraftActions, MailDirection,
+    MessageActions, MessageNotificationAction, PullActionSection, PullImportAs, PullMailboxAction,
 };
 pub(crate) use identity::match_message_identity_with_profiles;
 pub use identity::{IdentityConfig, MessageIdentityMatch, ResolvedIdentity};

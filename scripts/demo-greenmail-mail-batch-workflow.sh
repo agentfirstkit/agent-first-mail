@@ -581,6 +581,6 @@ Suggested GIF beats:
 6. Show final status and the generated workspace files.
 
 From the repository root, use
-\`./scripts/projects/agent-first-mail/test.sh demo-prepare\` when you want a live
+\`./scripts/test.sh demo-prepare\` when you want a live
 workspace where an agent can really receive and inspect the mailbox itself.
 EOF
