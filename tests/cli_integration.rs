@@ -4489,20 +4489,24 @@ fn message_batch_partial_and_failed_outcomes_preserve_all_item_results() {
 
 #[test]
 fn stdout_file_rejects_non_regular_target() {
-    if !Path::new("/dev/full").exists() {
-        return;
-    }
     let root = temp_root("stdout-file-non-regular");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
 
-    // The stream-redirect layer requires a regular file, so a character
-    // device like /dev/full is rejected before any command runs — the error
-    // is emitted on the normal stdout with a dedicated cli_error exit code.
+    // The stream-redirect layer requires a regular file, so a directory is
+    // rejected before any command runs. A directory rather than a character
+    // device keeps this case reachable on every platform the gate runs on —
+    // /dev/full exists only on some, and skipping there hid this assertion
+    // from the local gate entirely. `status` is finite, so the default split
+    // routing puts the cli_error on stderr and leaves stdout empty.
+    let target = root.join("not-a-regular-file");
+    assert!(fs::create_dir_all(&target).is_ok());
+    let target_arg = target.to_string_lossy().to_string();
     let (status, stdout, stderr) =
-        run_allow_stderr(&root, &["--stdout-file", "/dev/full", "status"]);
+        run_allow_stderr(&root, &["--stdout-file", target_arg.as_str(), "status"]);
     assert_eq!(status, 2, "stdout={stdout} stderr={stderr}");
-    let value = parse_one(&stdout);
+    assert!(stdout.is_empty(), "stdout={stdout}");
+    let value = parse_one(&stderr);
     assert_eq!(value["code"], "cli_error", "{value}");
     assert!(
         value["message"]
@@ -4510,6 +4514,16 @@ fn stdout_file_rejects_non_regular_target() {
             .is_some_and(|message| message.contains("regular file")),
         "{value}"
     );
+
+    // A character device is the same rejection through a different stat, so
+    // it stays covered where the platform provides one.
+    if Path::new("/dev/full").exists() {
+        let (status, stdout, stderr) =
+            run_allow_stderr(&root, &["--stdout-file", "/dev/full", "status"]);
+        assert_eq!(status, 2, "stdout={stdout} stderr={stderr}");
+        assert!(stdout.is_empty(), "stdout={stdout}");
+        assert_eq!(parse_one(&stderr)["code"], "cli_error");
+    }
     let _ = fs::remove_dir_all(root);
 }
 
