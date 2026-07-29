@@ -12,14 +12,14 @@ CONTAINER=${AFMAIL_DEMO_CONTAINER:-afmail-demo-greenmail-$(date +%s)-$$}
 STEP_DELAY_S=${AFMAIL_DEMO_STEP_DELAY_S:-0}
 
 case "$MODE" in
-  prepare | ui | run) ;;
+  prepare | review | run) ;;
   *)
-    printf 'usage: %s [prepare|ui|run]\n' "$0" >&2
+    printf 'usage: %s [prepare|review|run]\n' "$0" >&2
     exit 2
     ;;
 esac
 
-if [[ "$MODE" == "prepare" || "$MODE" == "ui" ]]; then
+if [[ "$MODE" == "prepare" || "$MODE" == "review" ]]; then
   KEEP_CONTAINER=1
 else
   KEEP_CONTAINER=0
@@ -151,26 +151,32 @@ write_config() {
         "drafts": {"import_as": "triage", "direction": "outbound"}
       }
     },
-    "case.add": {"steps": []},
-    "draft.save": {"steps": [{"append_to_mailbox_id": "drafts"}]},
-    "draft.send": {"steps": [
-      {"smtp_send": {}},
-      {"append_to_mailbox_id": "sent"},
-      {"add_flags": ["\\\\Answered"], "on": "reply_to_message"}
-    ]},
-    "message.spam": {"steps": [
-      {"add_flags": ["\\\\Seen", "$junk_flag"]},
-      {"move_to_mailbox_id": "junk"}
-    ]},
-    "message.trash": {"steps": [{"move_to_mailbox_id": "trash"}]},
-    "message.notification": {"by_source_mailbox_id": {
-      "inbox": {"steps": [{"move_to_mailbox_id": "archive"}]},
-      "sent": {"steps": []},
-      "archive": {"steps": []},
-      "junk": {"steps": []},
-      "trash": {"steps": []},
-      "drafts": {"steps": []}
-    }}
+    "case": {
+      "add": {"steps": []}
+    },
+    "draft": {
+      "save": {"steps": [{"append_to_mailbox_id": "drafts"}]},
+      "send": {"steps": [
+        {"smtp_send": {}},
+        {"append_to_mailbox_id": "sent"},
+        {"add_flags": ["\\\\Answered"], "on": "reply_to_message"}
+      ]}
+    },
+    "message": {
+      "spam": {"steps": [
+        {"add_flags": ["\\\\Seen", "$junk_flag"]},
+        {"move_to_mailbox_id": "junk"}
+      ]},
+      "trash": {"steps": [{"move_to_mailbox_id": "trash"}]},
+      "notification": {"by_source_mailbox_id": {
+        "inbox": {"steps": [{"move_to_mailbox_id": "archive"}]},
+        "sent": {"steps": []},
+        "archive": {"steps": []},
+        "junk": {"steps": []},
+        "trash": {"steps": []},
+        "drafts": {"steps": []}
+      }}
+    }
   },
   "identities": [
     {"identity": "me", "name": "Me", "email": "me@localhost", "default": true}
@@ -461,21 +467,26 @@ docker rm -f $CONTAINER
 EOF
 }
 
-print_ui_summary() {
+print_review_summary() {
   cat <<EOF
 
-Ready for AFUI product verification.
+Ready for local review-session verification.
 
 Workspace:  $WORKSPACE
 Mailbox:    GreenMail container=$CONTAINER imap=$IMAP_PORT smtp=$SMTP_PORT
 Draft:      case=$CASE_UID file=$DRAFT_NAME
 
-Build or locate the generic afui Host, then run inside the workspace:
+Run a review command inside the workspace. Review commands block until the
+reviewer submits, cancels, or dismisses the session:
 
-./bin/afmail ui --afui-bin /path/to/afui
+./bin/afmail case review "$CASE_UID"
+./bin/afmail case draft review "$CASE_UID" "$DRAFT_NAME"
 
-The UI workspace contains the 30-message fixture set and one editable local
-reply draft. Stop the mailbox when done:
+The workspace contains the 30-message fixture set and one local reply draft.
+Triage review returns decisions only. Case notes and draft fields autosave to
+local files through afmail, with base-hash checks; their result lists the
+saved_files field. Review never queues, pushes, or sends mail, and closing a
+session does not undo a completed autosave. Stop the mailbox when done:
 
 docker rm -f $CONTAINER
 EOF
@@ -552,8 +563,8 @@ Me
 EOF
 
 demo_cmd case draft validate "$CASE_UID" "$DRAFT_NAME"
-if [[ "$MODE" == "ui" ]]; then
-  print_ui_summary
+if [[ "$MODE" == "review" ]]; then
+  print_review_summary
   exit 0
 fi
 demo_cmd case draft send "$CASE_UID" "$DRAFT_NAME"
@@ -581,6 +592,6 @@ Suggested GIF beats:
 6. Show final status and the generated workspace files.
 
 From the repository root, use
-\`./scripts/test.sh demo-prepare\` when you want a live
+\`./scripts/test.sh greenmail-prepare\` when you want a live
 workspace where an agent can really receive and inspect the mailbox itself.
 EOF

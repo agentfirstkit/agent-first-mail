@@ -2,15 +2,19 @@ use super::lock::{command_lock, workspace_progress_command};
 use super::purge::{ResolvedPurgeAction, resolve_purge_action};
 use super::push::push_plan_confirmation;
 use crate::cli::{
-    CaseCommand, CaseDraftAction, CaseNotesAction, Command, ConfigAction, ContactCommand,
-    ContactEmailAction, ContactNotesAction, ContactPhoneAction, DoctorAction, LogAction,
-    MessageAction, MessageAttachmentAction, NotificationCommand, NotificationNotesAction,
-    PushAction, RemoteAction, RenderAction, TriageAction,
+    CaseCommand, CaseDraftAction, CaseNotesAction, CaseSuggestionAction, CaseSuggestionActionKind,
+    Command, ConfigAction, ContactCommand, ContactEmailAction, ContactNotesAction,
+    ContactPhoneAction, DemoAction, DoctorAction, LogAction, MessageAction,
+    MessageAttachmentAction, MessageSuggestionAction, NotificationCommand, NotificationNotesAction,
+    NotificationSuggestionAction, NotificationSuggestionActionKind, PushAction, RemoteAction,
+    RenderAction, TriageAction, TriageSuggestionAction,
 };
 use crate::error::{AppError, Result};
 use crate::progress::{ProgressCallback, WorkspaceProgressSink};
 use crate::store::{DraftChange, NewDraft, Workspace};
-use crate::types::CommandResult;
+use crate::types::{
+    CaseSuggestedAction, CommandResult, MessageSuggestedAction, NotificationSuggestedAction,
+};
 use crate::workspace_lock::{LockMode, WorkspaceLock};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -24,28 +28,46 @@ pub(super) fn execute_command_with_progress(
     request_id: Option<&str>,
     progress: Option<&mut ProgressCallback<'_>>,
 ) -> Result<CommandResult> {
-    if request_id.is_some() && !request_id_supported(&command) {
-        return Err(AppError::new(
-            "request_id_not_supported",
-            "--request-id is only supported for selected non-idempotent local mutations",
-        ));
-    }
+    let cwd = std::env::current_dir().map_err(|e| AppError::io("current dir", &e))?;
+    execute_command_at(command, request_id, &cwd, progress)
+}
+
+pub(crate) fn execute_command_at(
+    command: Command,
+    request_id: Option<&str>,
+    cwd: &Path,
+    progress: Option<&mut ProgressCallback<'_>>,
+) -> Result<CommandResult> {
+    validate_request_id(&command, request_id)?;
     match command {
         Command::Skill { action } => {
             crate::skill_admin::handle_action(action).map(CommandResult::succeeded)
         }
-        Command::Status => {
-            let cwd = std::env::current_dir().map_err(|e| AppError::io("current dir", &e))?;
-            execute_status(&cwd).map(CommandResult::succeeded)
-        }
+        Command::Status => execute_status(cwd).map(CommandResult::succeeded),
+        Command::Api { .. } => Err(AppError::new(
+            "api_dispatch_error",
+            "api commands must be handled by the API runner",
+        )),
+        Command::Demo {
+            action: DemoAction::Serve { .. },
+        } => Err(AppError::new(
+            "demo_dispatch_error",
+            "demo serve must be handled by the demo server runner",
+        )),
         command => {
-            let cwd = std::env::current_dir().map_err(|e| AppError::io("current dir", &e))?;
-            let lock = command_lock(&command, &cwd)?;
+            let lock = command_lock(&command, cwd)?;
             let _lock = WorkspaceLock::acquire(&lock.root, lock.mode)?;
             let mut workspace_progress = workspace_progress_command(&command)
                 .map(|name| WorkspaceProgressSink::start(&lock.root, name));
             if lock.mode == LockMode::Exclusive
-                && !matches!(command, Command::Init { .. } | Command::Doctor { .. })
+                && !matches!(
+                    command,
+                    Command::Init { .. }
+                        | Command::Demo {
+                            action: DemoAction::Init { .. }
+                        }
+                        | Command::Doctor { .. }
+                )
                 && let Err(err) = Workspace::at(&lock.root).ensure_no_incomplete_transactions()
             {
                 if let Some(sink) = &mut workspace_progress {
@@ -69,7 +91,7 @@ pub(super) fn execute_command_with_progress(
                 } else {
                     None
                 };
-                execute_command_unlocked(command, request_id, &cwd, progress)
+                execute_command_unlocked(command, request_id, cwd, progress)
             };
             if let Some(sink) = &mut workspace_progress {
                 match &result {
@@ -136,6 +158,25 @@ fn execute_command_unlocked(
 ) -> Result<CommandResult> {
     let mut counts = (1usize, 0usize);
     let value = match command {
+        Command::Api { .. } => Err(AppError::new(
+            "api_dispatch_error",
+            "api commands must be handled by the API runner",
+        )),
+        Command::Demo {
+            action: DemoAction::Serve { .. },
+        } => Err(AppError::new(
+            "demo_dispatch_error",
+            "demo serve must be handled by the demo server runner",
+        )),
+        Command::Demo {
+            action:
+                DemoAction::Init {
+                    path,
+                    scenario,
+                    imap_port,
+                    smtp_port,
+                },
+        } => crate::demo::init(cwd, &path, scenario, imap_port, smtp_port),
         Command::Init { path } => Workspace::init_command(cwd, path.as_deref()),
         Command::Pull {
             ids,
@@ -229,12 +270,55 @@ fn execute_command_unlocked(
             let ws = Workspace::discover(cwd)?;
             match action {
                 TriageAction::List { limit, details } => ws.triage_list(limit, details),
+                TriageAction::Suggestion { action } => match action {
+                    TriageSuggestionAction::Set(args) => {
+                        let suggested_action = message_suggested_action(args.action);
+                        idempotent_value(
+                            &ws,
+                            request_id,
+                            "triage_suggestion_set",
+                            json!({
+                                "message_id": args.message_id,
+                                "message_review_base_hash": args.message_review_base_hash,
+                                "suggested_action": &suggested_action,
+                                "reason": args.reason,
+                                "confidence_percent": args.confidence_percent,
+                            }),
+                            || {
+                                ws.set_message_agent_suggestion(
+                                    &args.message_id,
+                                    &args.message_review_base_hash,
+                                    suggested_action,
+                                    &args.reason,
+                                    args.confidence_percent,
+                                )
+                            },
+                        )
+                    }
+                    TriageSuggestionAction::Clear {
+                        message_id,
+                        agent_suggestion_uid,
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "triage_suggestion_clear",
+                        json!({
+                            "message_id": message_id,
+                            "agent_suggestion_uid": agent_suggestion_uid,
+                        }),
+                        || ws.clear_message_suggestion(&message_id, &agent_suggestion_uid),
+                    ),
+                },
+                TriageAction::Review { .. } => Err(AppError::new(
+                    "review_dispatch_error",
+                    "review commands must be handled by the review session runner",
+                )),
             }
         }
         Command::Message { action } => {
             let ws = Workspace::discover(cwd)?;
             match action {
-                MessageAction::Show { message_id, meta } => ws.message_show(&message_id, meta),
+                MessageAction::Show { message_id } => ws.message_show(&message_id),
                 MessageAction::List {
                     sender,
                     subject_contains,
@@ -388,6 +472,49 @@ fn execute_command_unlocked(
                 ),
                 CaseCommand::List { archived, all } => ws.case_list(archived, all),
                 CaseCommand::Show { case_ref } => ws.case_show(&case_ref),
+                CaseCommand::Review { .. } => Err(AppError::new(
+                    "review_dispatch_error",
+                    "review commands must be handled by the review session runner",
+                )),
+                CaseCommand::Suggestion { action } => match action {
+                    CaseSuggestionAction::Set(args) => {
+                        let suggested_action = case_suggested_action(args.action);
+                        idempotent_value(
+                            &ws,
+                            request_id,
+                            "case_suggestion_set",
+                            json!({
+                                "case_ref": args.case_ref,
+                                "case_review_base_hash": args.case_review_base_hash,
+                                "suggested_action": &suggested_action,
+                                "reason": args.reason,
+                                "confidence_percent": args.confidence_percent,
+                            }),
+                            || {
+                                ws.set_case_agent_suggestion(
+                                    &args.case_ref,
+                                    &args.case_review_base_hash,
+                                    suggested_action,
+                                    &args.reason,
+                                    args.confidence_percent,
+                                )
+                            },
+                        )
+                    }
+                    CaseSuggestionAction::Clear {
+                        case_ref,
+                        agent_suggestion_uid,
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "case_suggestion_clear",
+                        json!({
+                            "case_ref": case_ref,
+                            "agent_suggestion_uid": agent_suggestion_uid,
+                        }),
+                        || ws.clear_case_suggestion(&case_ref, &agent_suggestion_uid),
+                    ),
+                },
                 CaseCommand::Add {
                     case_ref,
                     message_id,
@@ -675,19 +802,41 @@ fn execute_command_unlocked(
                         case_ref,
                         draft_name,
                     } => ws.show_draft(&case_ref, &draft_name),
+                    CaseDraftAction::Review { .. } => Err(AppError::new(
+                        "review_dispatch_error",
+                        "review commands must be handled by the review session runner",
+                    )),
                     CaseDraftAction::List { case_ref } => ws.list_drafts(&case_ref),
                     CaseDraftAction::Validate {
                         case_ref,
                         draft_name,
-                    } => ws.validate_draft(&case_ref, &draft_name),
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "case_draft_validate",
+                        json!({"case_ref": case_ref, "draft_name": draft_name}),
+                        || ws.validate_draft(&case_ref, &draft_name),
+                    ),
                     CaseDraftAction::Upload {
                         case_ref,
                         draft_name,
-                    } => ws.upload_draft(&case_ref, &draft_name),
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "case_draft_upload",
+                        json!({"case_ref": case_ref, "draft_name": draft_name}),
+                        || ws.upload_draft(&case_ref, &draft_name),
+                    ),
                     CaseDraftAction::Send {
                         case_ref,
                         draft_name,
-                    } => ws.send_draft(&case_ref, &draft_name),
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "case_draft_send",
+                        json!({"case_ref": case_ref, "draft_name": draft_name}),
+                        || ws.send_draft(&case_ref, &draft_name),
+                    ),
                     CaseDraftAction::Attach {
                         case_ref,
                         draft_name,
@@ -977,6 +1126,54 @@ fn execute_command_unlocked(
                 NotificationCommand::Show { notification_ref } => {
                     ws.notification_show(&notification_ref)
                 }
+                NotificationCommand::Review { .. } => Err(AppError::new(
+                    "review_dispatch_error",
+                    "review commands must be handled by the review session runner",
+                )),
+                NotificationCommand::Suggestion { action } => match action {
+                    NotificationSuggestionAction::Set(args) => {
+                        let suggested_action = notification_suggested_action(args.action);
+                        idempotent_value(
+                            &ws,
+                            request_id,
+                            "notification_suggestion_set",
+                            json!({
+                                "notification_ref": args.notification_ref,
+                                "notification_review_base_hash": args.notification_review_base_hash,
+                                "suggested_action": &suggested_action,
+                                "reason": args.reason,
+                                "confidence_percent": args.confidence_percent,
+                            }),
+                            || {
+                                ws.set_notification_agent_suggestion(
+                                    &args.notification_ref,
+                                    &args.notification_review_base_hash,
+                                    suggested_action,
+                                    &args.reason,
+                                    args.confidence_percent,
+                                )
+                            },
+                        )
+                    }
+                    NotificationSuggestionAction::Clear {
+                        notification_ref,
+                        agent_suggestion_uid,
+                    } => idempotent_value(
+                        &ws,
+                        request_id,
+                        "notification_suggestion_clear",
+                        json!({
+                            "notification_ref": notification_ref,
+                            "agent_suggestion_uid": agent_suggestion_uid,
+                        }),
+                        || {
+                            ws.clear_notification_suggestion(
+                                &notification_ref,
+                                &agent_suggestion_uid,
+                            )
+                        },
+                    ),
+                },
                 NotificationCommand::Remove {
                     notification_ref,
                     message_id,
@@ -1105,14 +1302,69 @@ fn execute_command_unlocked(
             };
             take_command_result(command_result_from_warnings(result), &mut counts)
         }
-        #[cfg(feature = "ui")]
-        Command::Ui(_) => {
-            let ws = Workspace::discover(cwd)?;
-            let message = crate::ui::workspace_snapshot(&ws)?;
-            serde_json::to_value(message).map_err(|e| AppError::json("serialize AFUI snapshot", &e))
-        }
     }?;
     Ok(CommandResult::aggregate(value, counts.0, counts.1))
+}
+
+fn message_suggested_action(action: MessageSuggestionAction) -> MessageSuggestedAction {
+    match action {
+        MessageSuggestionAction::CaseCreate { name, group } => MessageSuggestedAction::CaseCreate {
+            case_name: name,
+            group,
+        },
+        MessageSuggestionAction::CaseAdd { case_ref } => {
+            MessageSuggestedAction::CaseAdd { case_ref }
+        }
+        MessageSuggestionAction::NotificationCreate { name, summary } => {
+            MessageSuggestedAction::NotificationCreate {
+                notification_name: name,
+                summary,
+            }
+        }
+        MessageSuggestionAction::NotificationAdd {
+            notification_ref,
+            summary,
+        } => MessageSuggestedAction::NotificationAdd {
+            notification_ref,
+            summary,
+        },
+        MessageSuggestionAction::Spam => MessageSuggestedAction::Spam,
+        MessageSuggestionAction::Trash => MessageSuggestedAction::Trash,
+    }
+}
+
+fn case_suggested_action(action: CaseSuggestionActionKind) -> CaseSuggestedAction {
+    match action {
+        CaseSuggestionActionKind::Archive => CaseSuggestedAction::CaseArchive,
+        CaseSuggestionActionKind::Unarchive { group } => {
+            CaseSuggestedAction::CaseUnarchive { group }
+        }
+        CaseSuggestionActionKind::Move { group } => CaseSuggestedAction::CaseMove { group },
+        CaseSuggestionActionKind::Rename { name } => {
+            CaseSuggestedAction::CaseRename { case_name: name }
+        }
+        CaseSuggestionActionKind::Tag { tag } => CaseSuggestedAction::CaseTag { tag },
+        CaseSuggestionActionKind::Untag { tag } => CaseSuggestedAction::CaseUntag { tag },
+        CaseSuggestionActionKind::Trash => CaseSuggestedAction::CaseTrash,
+        CaseSuggestionActionKind::Delete { allow_notes } => {
+            CaseSuggestedAction::CaseDelete { allow_notes }
+        }
+    }
+}
+
+fn notification_suggested_action(
+    action: NotificationSuggestionActionKind,
+) -> NotificationSuggestedAction {
+    match action {
+        NotificationSuggestionActionKind::Rename { name } => {
+            NotificationSuggestedAction::NotificationRename {
+                notification_name: name,
+            }
+        }
+        NotificationSuggestionActionKind::Delete { allow_notes } => {
+            NotificationSuggestedAction::NotificationDelete { allow_notes }
+        }
+    }
 }
 
 fn idempotent_value<F>(
@@ -1131,8 +1383,21 @@ where
     }
 }
 
+pub(super) fn validate_request_id(command: &Command, request_id: Option<&str>) -> Result<()> {
+    if request_id.is_some() && !request_id_supported(command) {
+        return Err(AppError::new(
+            "request_id_not_supported",
+            "--request-id is only supported for selected non-idempotent local mutations",
+        ));
+    }
+    Ok(())
+}
+
 fn request_id_supported(command: &Command) -> bool {
     match command {
+        Command::Triage {
+            action: TriageAction::Suggestion { .. },
+        } => true,
         Command::Message {
             action:
                 MessageAction::Spam { message_id, .. }
@@ -1142,6 +1407,7 @@ fn request_id_supported(command: &Command) -> bool {
         } => message_id.len() == 1,
         Command::Case { action } => match action {
             CaseCommand::Create(_) => true,
+            CaseCommand::Suggestion { .. } => true,
             CaseCommand::Add { message_id, .. } if message_id.len() == 1 => true,
             CaseCommand::Move { .. }
             | CaseCommand::Rename { .. }
@@ -1162,6 +1428,9 @@ fn request_id_supported(command: &Command) -> bool {
                     CaseDraftAction::New { .. }
                         | CaseDraftAction::Reply { .. }
                         | CaseDraftAction::Change { .. }
+                        | CaseDraftAction::Validate { .. }
+                        | CaseDraftAction::Upload { .. }
+                        | CaseDraftAction::Send { .. }
                         | CaseDraftAction::Attach { .. }
                         | CaseDraftAction::Remove { .. }
                 )
@@ -1184,6 +1453,7 @@ fn request_id_supported(command: &Command) -> bool {
         ),
         Command::Notification { action } => match action {
             NotificationCommand::Create(_) => true,
+            NotificationCommand::Suggestion { .. } => true,
             NotificationCommand::Add { message_id, .. } => message_id.len() == 1,
             NotificationCommand::Remove { .. }
             | NotificationCommand::Move { .. }

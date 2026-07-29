@@ -448,6 +448,16 @@ fn draft_save_send_queue_is_idempotent_and_switches_action() {
     let push = parse_one(&run(&root, &["push", "list"]).1);
     assert_eq!(push["count"], 1);
     assert_eq!(push["items"][0]["action"], "save_draft");
+    let push_path = root.join(".afmail/push").join(format!("{push_id}.json"));
+    let mut pending_upload = read_json(&push_path);
+    pending_upload["attempt_count"] = json!(2);
+    pending_upload["step_states"] = json!([{
+        "index": 0,
+        "label": "append_to_mailbox_id_drafts",
+        "status": "pending"
+    }]);
+    pending_upload["last_error"] = json!("old upload plan");
+    write_json(&push_path, &pending_upload);
 
     let draft_path = case_path.join(format!("drafts/{draft_name}"));
     let original = fs::read_to_string(&draft_path).unwrap_or_default();
@@ -457,6 +467,10 @@ fn draft_save_send_queue_is_idempotent_and_switches_action() {
     let sent = parse_one(&stdout);
     assert_eq!(sent["push_id"], push_id);
     assert_eq!(sent["action"], "send");
+    let replaced = read_json(&push_path);
+    assert_eq!(replaced["attempt_count"], 0);
+    assert_eq!(replaced["step_states"], json!([]));
+    assert!(replaced.get("last_error").is_none());
     let push = parse_one(&run(&root, &["push", "list"]).1);
     assert_eq!(push["count"], 1);
     assert_eq!(push["items"][0]["action"], "send");
@@ -585,6 +599,41 @@ fn draft_remove_rejects_in_progress_outbound_push() {
 }
 
 #[test]
+fn draft_action_change_rejects_started_push_without_changing_canonical_intent() {
+    let root = temp_root("draft-action-change-started");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let (case_uid, _case_path, draft_path, _push_id, push_path) = create_case_draft_and_queue_send(
+        &root,
+        "action-change-thread",
+        "action change case",
+        "Do not replace",
+        "Remote work has started",
+    );
+    let mut push_item = read_json(&push_path);
+    push_item["step_states"] = json!([{
+        "index": 0,
+        "label": "append_to_mailbox_id_drafts",
+        "status": "succeeded",
+        "started_rfc3339": "2026-07-22T00:00:00Z",
+        "completed_rfc3339": "2026-07-22T00:00:01Z",
+        "result_summary": "draft uploaded"
+    }]);
+    write_json(&push_path, &push_item);
+    let draft_before = fs::read(&draft_path).unwrap_or_default();
+    let push_before = fs::read(&push_path).unwrap_or_default();
+
+    let (status, stdout) = run(&root, &["case", "draft", "upload", &case_uid, "new.md"]);
+    assert_ne!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "push_already_started");
+    assert_eq!(fs::read(&draft_path).unwrap_or_default(), draft_before);
+    assert_eq!(fs::read(&push_path).unwrap_or_default(), push_before);
+    let draft = fs::read_to_string(&draft_path).unwrap_or_default();
+    assert!(draft.contains("sync_intent: send"), "{draft}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn draft_attach_copies_external_file_and_updates_frontmatter() {
     let root = temp_root("draft-attach");
     assert!(fs::create_dir_all(&root).is_ok());
@@ -668,26 +717,40 @@ fn draft_show_reports_content_queue_and_attachment_status() {
     let (status, stdout) = run(&root, &["case", "draft", "show", &case_uid, "show.md"]);
     assert_eq!(status, 0, "{stdout}");
     let shown = parse_one(&stdout);
-    assert_eq!(shown["subject"], "Review me");
-    assert_eq!(shown["to"][0], "bob@example.com");
-    assert_eq!(shown["cc"][0], "team@example.com");
-    assert_eq!(shown["authored_body"], "Review body");
+    assert_eq!(shown["draft"]["frontmatter"]["subject"], "Review me");
+    assert_eq!(shown["draft"]["frontmatter"]["to"][0], "bob@example.com");
+    assert_eq!(shown["draft"]["frontmatter"]["cc"][0], "team@example.com");
+    let shown_body = shown["draft"]["body_markdown"].as_str().unwrap_or_default();
+    assert!(shown.get("authored_body").is_none());
+    let authored_start = shown["analysis"]["authored_body_range"]["start_bytes"]
+        .as_u64()
+        .unwrap_or_default() as usize;
+    let authored_end = shown["analysis"]["authored_body_range"]["end_bytes"]
+        .as_u64()
+        .unwrap_or_default() as usize;
+    assert_eq!(&shown_body[authored_start..authored_end], "Review body");
     assert!(
-        shown["body"]
+        shown["draft"]["body_markdown"]
             .as_str()
             .is_some_and(|body| body.contains("<!-- afmail:compose:start -->"))
     );
-    assert_eq!(shown["completeness"], "complete");
-    assert_eq!(shown["attachments"][0]["path"], "files/present.txt");
-    assert_eq!(shown["attachments"][0]["exists"], true);
-    assert_eq!(shown["attachments"][0]["size_bytes"], 5);
-    assert_eq!(shown["attachments"][1]["path"], "files/missing.txt");
-    assert_eq!(shown["attachments"][1]["exists"], false);
-    assert!(shown["attachments"][1]["size_bytes"].is_null());
-    assert_eq!(shown["status"], "editable");
-    assert!(shown["queued_action"].is_null());
-    assert!(shown["push_id"].is_null());
-    assert_eq!(shown["remote_changed"], false);
+    assert_eq!(shown["analysis"]["completeness"], "complete");
+    assert_eq!(
+        shown["draft"]["frontmatter"]["attachments"][0],
+        "files/present.txt"
+    );
+    assert_eq!(shown["analysis"]["attachments"][0]["exists"], true);
+    assert_eq!(shown["analysis"]["attachments"][0]["size_bytes"], 5);
+    assert_eq!(
+        shown["draft"]["frontmatter"]["attachments"][1],
+        "files/missing.txt"
+    );
+    assert_eq!(shown["analysis"]["attachments"][1]["exists"], false);
+    assert!(shown["analysis"]["attachments"][1]["size_bytes"].is_null());
+    assert_eq!(shown["analysis"]["status"], "editable");
+    assert!(shown["analysis"]["push_id"].is_null());
+    assert!(shown.get("queued_action").is_none());
+    assert!(shown.get("remote_changed").is_none());
 
     let (status, stdout) = run(&root, &["case", "draft", "send", &case_uid, "show.md"]);
     assert_eq!(status, 1, "{stdout}");
@@ -699,11 +762,12 @@ fn draft_show_reports_content_queue_and_attachment_status() {
     let (status, stdout) = run(&root, &["case", "draft", "show", &case_uid, "show.md"]);
     assert_eq!(status, 0, "{stdout}");
     let queued = parse_one(&stdout);
-    assert_eq!(queued["status"], "queued_send");
-    assert_eq!(queued["queued_action"], "send");
-    assert_eq!(queued["remote_changed"], false);
+    assert_eq!(queued["analysis"]["status"], "queued_send");
+    assert_eq!(queued["draft"]["frontmatter"]["sync_intent"], "send");
+    assert!(queued.get("queued_action").is_none());
+    assert!(queued.get("remote_changed").is_none());
     assert!(
-        queued["push_id"]
+        queued["analysis"]["push_id"]
             .as_str()
             .map(|push_id| push_id.starts_with("push_"))
             .unwrap_or(false)
@@ -1023,8 +1087,15 @@ fn reply_quote_and_identity_footer_do_not_count_as_authored_text() {
     assert!(draft.ends_with("--\nMe\n"));
 
     let shown = parse_one(&run(&root, &["case", "draft", "show", &case_uid, &draft_name]).1);
-    assert_eq!(shown["authored_body"], "");
-    assert_eq!(shown["completeness"], "incomplete");
+    let shown_body = shown["draft"]["body_markdown"].as_str().unwrap_or_default();
+    let authored_start = shown["analysis"]["authored_body_range"]["start_bytes"]
+        .as_u64()
+        .unwrap_or_default() as usize;
+    let authored_end = shown["analysis"]["authored_body_range"]["end_bytes"]
+        .as_u64()
+        .unwrap_or_default() as usize;
+    assert_eq!(&shown_body[authored_start..authored_end], "");
+    assert_eq!(shown["analysis"]["completeness"], "incomplete");
     let (status, stdout) = run(&root, &["case", "draft", "send", &case_uid, &draft_name]);
     assert_eq!(status, 1, "{stdout}");
     assert_eq!(parse_one(&stdout)["code"], "draft_incomplete");

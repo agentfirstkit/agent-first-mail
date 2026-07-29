@@ -1,5 +1,5 @@
 use super::*;
-use crate::types::{ContactFrontmatter, MessageContact};
+use crate::types::ContactFrontmatter;
 use serde::Serialize;
 
 pub enum ContactExtractSource {
@@ -35,22 +35,32 @@ pub(super) struct ContactIndexDiagnostic {
 }
 
 struct ContactEmailIndex {
-    map: BTreeMap<String, MessageContact>,
+    map: BTreeMap<String, ContactFrontmatter>,
     diagnostics: Vec<ContactIndexDiagnostic>,
 }
 
-fn contact_default_body(name: &str) -> String {
-    format!("## {name}\n\n")
-}
-
-fn contact_body_has_user_notes(body: &str) -> bool {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let mut lines = trimmed.lines();
-    let first = lines.next().unwrap_or_default().trim();
-    !(first.starts_with("## ") && lines.all(|line| line.trim().is_empty()))
+fn contact_default_body(
+    root: &Path,
+    language: TemplateLanguage,
+    group: &str,
+    path: &Path,
+    frontmatter: &ContactFrontmatter,
+) -> Result<String> {
+    render_template(
+        root,
+        language,
+        TemplateKey::ContactDefault,
+        &ContactRenderDocument {
+            schema_name: "afmail_contact_render_document".to_string(),
+            schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+            locator: ContactLocator {
+                group: group.to_string(),
+                contact_path: rel_path(root, path),
+            },
+            contact: frontmatter.clone(),
+            notes_markdown: String::new(),
+        },
+    )
 }
 
 impl Workspace {
@@ -99,7 +109,8 @@ impl Workspace {
         fm.role = role.unwrap_or("").to_string();
         fm.tags = tags.to_vec();
 
-        let default_notes = contact_default_body(name);
+        let default_notes =
+            contact_default_body(&self.root, config.template_language(), group, &path, &fm)?;
         write_contact_md(&path, &fm, &default_notes)?;
 
         let contact_path = rel_path(&self.root, &path);
@@ -183,12 +194,15 @@ impl Workspace {
         let uid = parse_contact_ref(contact_ref)?;
         let (group, path) = self.find_active_contact_path(&uid)?;
         let content = read_to_string(&path, "read contact file")?;
-        Ok(json!({
-            "contact_uid": uid,
-            "group": group,
-            "contact_path": rel_path(&self.root, &path),
-            "content": content,
-        }))
+        let (contact, notes_markdown) = read_contact_md_content(&content)?;
+        serde_json::to_value(contact_render_document(
+            &self.root,
+            &group,
+            &path,
+            contact,
+            notes_markdown,
+        ))
+        .map_err(|error| AppError::json("serialize contact render document", &error))
     }
 
     pub fn contact_move(
@@ -494,13 +508,17 @@ impl Workspace {
     pub fn contact_notes_show(&self, contact_ref: &str) -> Result<Value> {
         self.require_workspace()?;
         let uid = parse_contact_ref(contact_ref)?;
-        let (_, path) = self.find_active_contact_path(&uid)?;
+        let (group, path) = self.find_active_contact_path(&uid)?;
         let content = read_to_string(&path, "read contact")?;
-        let (_, body) = read_contact_md_content(&content)?;
-        Ok(json!({
-            "contact_uid": uid,
-            "notes": body,
-        }))
+        let (contact, notes_markdown) = read_contact_md_content(&content)?;
+        serde_json::to_value(contact_render_document(
+            &self.root,
+            &group,
+            &path,
+            contact,
+            notes_markdown,
+        ))
+        .map_err(|error| AppError::json("serialize contact notes document", &error))
     }
 
     pub fn contact_notes_append(&self, contact_ref: &str, text: &str) -> Result<Value> {
@@ -575,8 +593,8 @@ impl Workspace {
         let (group, path) = self.find_active_contact_path(&uid)?;
         let content = read_to_string(&path, "read contact")?;
         let (fm, body) = read_contact_md_content(&content)?;
-        let notes_modified = contact_body_has_user_notes(&body);
-        if notes_modified && !allow_notes {
+        let notes_present = !body.trim().is_empty();
+        if notes_present && !allow_notes {
             return Err(AppError::new(
                 "contact_notes_present",
                 format!("contact {uid} has body content"),
@@ -608,7 +626,7 @@ impl Workspace {
                 "display_name": fm.display_name,
                 "group": group,
                 "contact_path": contact_path,
-                "notes_modified": notes_modified,
+                "notes_present": notes_present,
                 "notes_len_bytes": body.len(),
                 "notes_hash": stable_text_hash(&body),
             }),
@@ -622,7 +640,7 @@ impl Workspace {
             "group": group,
             "contact_path": contact_path,
             "deleted": true,
-            "notes_modified": notes_modified,
+            "notes_present": notes_present,
         }))
     }
 
@@ -686,9 +704,15 @@ impl Workspace {
             };
             let mut fm = ContactFrontmatter::new(&uid, &actual_name, &now);
             fm.emails = vec![email_lc.clone()];
-            let default_notes = format!("## {actual_name}\n\n");
+            let default_notes = contact_default_body(
+                &self.root,
+                config.template_language(),
+                target_group,
+                &path,
+                &fm,
+            )?;
             write_contact_md(&path, &fm, &default_notes)?;
-            contact_index.insert(email_lc.clone(), message_contact_from(&fm));
+            contact_index.insert(email_lc.clone(), fm.clone());
             self.append_audit_event(
                 "contact_created",
                 vec![audit_target("contact", &uid)],
@@ -711,7 +735,7 @@ impl Workspace {
 
     /// Build an ephemeral email→contact map from active contact files. Replaces
     /// the former persisted email index.
-    pub(super) fn contact_email_map(&self) -> Result<BTreeMap<String, MessageContact>> {
+    pub(super) fn contact_email_map(&self) -> Result<BTreeMap<String, ContactFrontmatter>> {
         self.strict_contact_email_map()
     }
 
@@ -719,7 +743,7 @@ impl Workspace {
         Ok(self.build_contact_email_index()?.diagnostics)
     }
 
-    fn strict_contact_email_map(&self) -> Result<BTreeMap<String, MessageContact>> {
+    fn strict_contact_email_map(&self) -> Result<BTreeMap<String, ContactFrontmatter>> {
         let index = self.build_contact_email_index()?;
         if !index.diagnostics.is_empty() {
             return Err(contact_index_invalid_error(&index.diagnostics));
@@ -728,7 +752,7 @@ impl Workspace {
     }
 
     fn build_contact_email_index(&self) -> Result<ContactEmailIndex> {
-        let mut map: BTreeMap<String, MessageContact> = BTreeMap::new();
+        let mut map: BTreeMap<String, ContactFrontmatter> = BTreeMap::new();
         let mut diagnostics = Vec::new();
         for (_, entry_uid, path) in self.all_active_contact_entries()? {
             let rel = rel_path(&self.root, &path);
@@ -782,7 +806,7 @@ impl Workspace {
                     });
                     continue;
                 }
-                map.insert(normalized, message_contact_from(&fm));
+                map.insert(normalized, fm.clone());
             }
         }
         Ok(ContactEmailIndex { map, diagnostics })
@@ -864,24 +888,10 @@ impl Workspace {
             if path.extension().and_then(|s| s.to_str()) != Some("md") {
                 continue;
             }
-            let content = match fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let Ok((fm, _)) =
-                crate::markdown::read_doc::<crate::frontmatter::TriageFrontmatter>(&content)
-            else {
+            let Some(message_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            let primary_id = if fm.message_id.is_empty() {
-                fm.message_ids.first().cloned().unwrap_or_default()
-            } else {
-                fm.message_id.clone()
-            };
-            if primary_id.is_empty() {
-                continue;
-            }
-            if let Some(pair) = self.message_sender_pair(&primary_id) {
+            if let Some(pair) = self.message_sender_pair(message_id) {
                 results.push(pair);
             }
         }
@@ -929,15 +939,8 @@ impl Workspace {
     }
 }
 
-fn message_contact_from(fm: &ContactFrontmatter) -> MessageContact {
-    MessageContact {
-        contact_uid: fm.contact_uid.clone(),
-        display_name: fm.display_name.clone(),
-    }
-}
-
 fn assert_email_unique_in_map(
-    map: &BTreeMap<String, MessageContact>,
+    map: &BTreeMap<String, ContactFrontmatter>,
     email: &str,
     excluding_uid: Option<&str>,
 ) -> Result<()> {
@@ -975,9 +978,9 @@ fn contact_index_invalid_error(diagnostics: &[ContactIndexDiagnostic]) -> AppErr
 /// Resolve the contact whose email set includes a message's `From` header,
 /// using a prebuilt email→contact map (see `contact_email_map`).
 pub(super) fn contact_for_from(
-    map: &BTreeMap<String, MessageContact>,
+    map: &BTreeMap<String, ContactFrontmatter>,
     from_header: &str,
-) -> Option<MessageContact> {
+) -> Option<ContactFrontmatter> {
     if from_header.is_empty() {
         return None;
     }
@@ -996,4 +999,23 @@ fn write_contact_md(path: &Path, fm: &ContactFrontmatter, body: &str) -> Result<
 fn read_contact_md_content(content: &str) -> Result<(ContactFrontmatter, String)> {
     crate::markdown::read_doc::<ContactFrontmatter>(content)
         .map_err(|e| AppError::new("invalid_contact", format!("parse contact file: {e}")))
+}
+
+fn contact_render_document(
+    root: &Path,
+    group: &str,
+    path: &Path,
+    contact: ContactFrontmatter,
+    notes_markdown: String,
+) -> ContactRenderDocument {
+    ContactRenderDocument {
+        schema_name: "afmail_contact_render_document".to_string(),
+        schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+        locator: ContactLocator {
+            group: group.to_string(),
+            contact_path: rel_path(root, path),
+        },
+        contact,
+        notes_markdown,
+    }
 }

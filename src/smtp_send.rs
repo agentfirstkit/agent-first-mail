@@ -1,15 +1,19 @@
 use crate::config::{MailConfig, ResolvedIdentity, SmtpConfig};
 use crate::draft_content::outbound_body;
 use crate::error::{AppError, Result};
-use crate::frontmatter::{CaseFrontmatter, DraftFrontmatter};
+use crate::frontmatter::DraftFrontmatter;
 use crate::mail::parse_outbound_message_with_status;
 use crate::markdown::read_doc;
-use crate::types::{CaseMessages, PreparedOutbound};
+use crate::types::PreparedOutbound;
 #[cfg(test)]
 use crate::types::{MessageAuthentication, MessageFile};
-use crate::util::{write_bytes_atomic, write_json_pretty};
+use crate::util::write_bytes_atomic;
+#[cfg(test)]
+use crate::util::write_json_pretty;
 use chrono::DateTime;
 use lettre::address::{Address, Envelope};
+#[cfg(feature = "review")]
+use lettre::message::Mailboxes;
 use lettre::message::{Attachment, Mailbox, Message, MultiPart, SinglePart, header};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{SmtpTransport, Transport};
@@ -96,20 +100,20 @@ pub fn mark_sent_and_append_case(
         raw,
         "write sent eml",
     )?;
-    crate::store::Workspace::at(root).write_message_artifacts(&parsed.message)?;
-    let mut case_data = read_case_messages(case_path, case_uid)?;
+    let workspace = crate::store::Workspace::at(root);
+    workspace.write_message_artifacts(&parsed.message)?;
     let added_rfc3339 = parsed
         .message
         .sent_rfc3339
         .clone()
         .unwrap_or_else(crate::store::now_rfc3339);
-    case_data.upsert_item(
+    workspace.append_sent_message_to_case(
+        case_path,
+        case_uid,
         message_id,
         parsed.message.subject.as_deref(),
         &added_rfc3339,
-    );
-    update_case_metadata_after_append(case_path, &case_data)?;
-    Ok(())
+    )
 }
 
 pub fn send_raw_message(
@@ -388,6 +392,28 @@ pub(crate) fn normalize_recipient_address(value: &str, field: &str) -> Result<St
         .ok_or_else(|| AppError::new("draft_invalid", format!("invalid {field} address")))
 }
 
+#[cfg(feature = "review")]
+pub(crate) fn normalize_recipient_list_text(value: &str, field: &str) -> Result<Vec<String>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    trimmed
+        .parse::<Mailboxes>()
+        .map(|mailboxes| {
+            mailboxes
+                .into_iter()
+                .map(|mailbox| mailbox.to_string())
+                .collect()
+        })
+        .map_err(|error| {
+            AppError::new(
+                "draft_invalid",
+                format!("invalid {field} address list: {error}"),
+            )
+        })
+}
+
 fn parse_mailbox(value: &str, field: &str) -> Result<Mailbox> {
     let trimmed = value.trim();
     match trimmed.parse::<Mailbox>() {
@@ -471,35 +497,6 @@ fn unique_outbound_id(root: &Path) -> String {
         }
     }
     base
-}
-
-fn read_case_messages(case_path: &Path, case_uid: &str) -> Result<CaseMessages> {
-    let path = case_path.join("data").join("case.json");
-    let data = fs::read_to_string(&path).map_err(|e| AppError::io("read case metadata", &e))?;
-    let messages: CaseMessages =
-        serde_json::from_str(&data).map_err(|e| AppError::json("parse case metadata", &e))?;
-    if messages.schema_name != crate::types::CASE_SCHEMA_NAME
-        || messages.schema_version != crate::types::MESSAGE_COLLECTION_SCHEMA_VERSION
-        || messages.collection_uid != case_uid
-    {
-        return Err(AppError::new(
-            "case_metadata_invalid",
-            "invalid case metadata schema",
-        ));
-    }
-    Ok(messages)
-}
-
-fn update_case_metadata_after_append(case_path: &Path, case: &CaseMessages) -> Result<()> {
-    let path = case_path.join("data").join("case.json");
-    let mut updated: CaseFrontmatter = case.clone();
-    updated.updated_rfc3339 = Some(crate::store::now_rfc3339());
-    updated.normalize(
-        crate::types::CASE_SCHEMA_NAME,
-        &case.collection_uid,
-        &case.collection_name,
-    );
-    write_json_pretty(&path, &updated)
 }
 
 #[cfg(test)]
@@ -603,12 +600,15 @@ mod tests {
         let _ = write_json_pretty(&root.join(".afmail/config.json"), &MailConfig::default());
         let msg = MessageFile {
             schema_name: "message".to_string(),
-            schema_version: 1,
+            schema_version: crate::types::MESSAGE_SCHEMA_VERSION,
             message_id: message_id.to_string(),
             rfc822_message_id: Some(rfc822_id.to_string()),
             in_reply_to: None,
             references: references.iter().map(|s| s.to_string()).collect(),
             remote: None,
+            agent_suggestion: None,
+            human_suggestion: None,
+            case_relationship_suggestion: None,
             direction: Some("inbound".to_string()),
             subject: Some("Hi".to_string()),
             from: Some("a@example.com".to_string()),

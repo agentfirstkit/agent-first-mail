@@ -24,10 +24,7 @@ fn run(cwd: &Path, args: &[&str]) -> (i32, String) {
     let Ok(output) = output else {
         return (99, String::new());
     };
-    (
-        output.status.code().unwrap_or(99),
-        String::from_utf8(output.stdout).unwrap_or_default(),
-    )
+    routed_output(output)
 }
 
 fn run_with_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> (i32, String) {
@@ -40,9 +37,20 @@ fn run_with_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> (i32, Strin
     let Ok(output) = output else {
         return (99, String::new());
     };
+    routed_output(output)
+}
+
+fn routed_output(output: std::process::Output) -> (i32, String) {
+    let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+    let stderr = String::from_utf8(output.stderr).unwrap_or_default();
+    assert!(
+        stdout.is_empty() || stderr.is_empty(),
+        "default split routing produced both streams; use --output-to stdout when the test needs \
+         one ordered event stream\nstdout: {stdout}\nstderr: {stderr}"
+    );
     (
         output.status.code().unwrap_or(99),
-        String::from_utf8(output.stdout).unwrap_or_default(),
+        if stdout.is_empty() { stderr } else { stdout },
     )
 }
 
@@ -70,7 +78,7 @@ fn write_json(path: &Path, value: &Value) {
 fn write_message(root: &Path, message_id: &str, uid: u64) {
     let message = json!({
         "schema_name": "message",
-        "schema_version": 1,
+        "schema_version": 2,
         "message_id": message_id,
         "rfc822_message_id": format!("<{message_id}@example.com>"),
         "remote": {"locations": [{
@@ -94,12 +102,12 @@ fn write_message(root: &Path, message_id: &str, uid: u64) {
     });
     write_json(&root.join(format!("messages/{message_id}.json")), &message);
     write_json(
-        &root.join(format!(".afmail/messages/{message_id}.remote.json")),
+        &root.join(format!(".afmail/messages/{message_id}.json")),
         &json!({
-            "schema_name": "message_remote",
-            "schema_version": 1,
+            "schema_name": "message_metadata",
+            "schema_version": 2,
             "message_id": message_id,
-            "locations": message["remote"]["locations"].clone()
+            "remote": message["remote"].clone()
         }),
     );
     assert!(fs::write(
@@ -1133,5 +1141,113 @@ fn request_id_replays_message_dispositions_without_duplicate_audit() {
             "{audit}"
         );
     }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn request_id_replays_suggestion_set_and_clear_without_replacing_the_review_round() {
+    let root = temp_root("request-id-suggestions");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let message_id = "message_suggestion_retry";
+    write_message(&root, message_id, 401);
+    let message_hash =
+        parse_one(&run(&root, &["message", "show", message_id]).1)["review_base_hash"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+    run_twice(
+        &root,
+        "req_triage_suggestion_set",
+        vec![
+            "triage".to_string(),
+            "suggestion".to_string(),
+            "set".to_string(),
+            message_id.to_string(),
+            "--message-review-base-hash".to_string(),
+            message_hash,
+            "--reason".to_string(),
+            "retry-safe suggestion".to_string(),
+            "spam".to_string(),
+        ],
+        "agent_suggestion_set",
+        "agent_suggestion",
+    );
+    let message = parse_one(&run(&root, &["message", "show", message_id]).1);
+    let message_suggestion_uid =
+        message["context"]["message"]["message"]["agent_suggestion"]["agent_suggestion_uid"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+    run_twice(
+        &root,
+        "req_triage_suggestion_clear",
+        vec![
+            "triage".to_string(),
+            "suggestion".to_string(),
+            "clear".to_string(),
+            message_id.to_string(),
+            "--agent-suggestion-uid".to_string(),
+            message_suggestion_uid,
+        ],
+        "suggestion_cleared",
+        "agent_suggestion_uid",
+    );
+
+    let case_uid = create_case(&root, None);
+    let case_hash = parse_one(&run(&root, &["case", "show", &case_uid]).1)["review_base_hash"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    run_twice(
+        &root,
+        "req_case_suggestion_set",
+        vec![
+            "case".to_string(),
+            "suggestion".to_string(),
+            "set".to_string(),
+            case_uid,
+            "--case-review-base-hash".to_string(),
+            case_hash,
+            "--reason".to_string(),
+            "retry-safe case suggestion".to_string(),
+            "archive".to_string(),
+        ],
+        "agent_suggestion_set",
+        "agent_suggestion",
+    );
+
+    let notification_uid = create_notification(&root, "Retry Notification", None);
+    let notification_hash = parse_one(&run(&root, &["notification", "show", &notification_uid]).1)
+        ["review_base_hash"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    run_twice(
+        &root,
+        "req_notification_suggestion_set",
+        vec![
+            "notification".to_string(),
+            "suggestion".to_string(),
+            "set".to_string(),
+            notification_uid,
+            "--notification-review-base-hash".to_string(),
+            notification_hash,
+            "--reason".to_string(),
+            "retry-safe notification suggestion".to_string(),
+            "rename".to_string(),
+            "--name".to_string(),
+            "Renamed Notification".to_string(),
+        ],
+        "agent_suggestion_set",
+        "agent_suggestion",
+    );
+
+    let audit = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
+    assert_eq!(
+        audit.matches("\"kind\":\"agent_suggestion_set\"").count(),
+        3
+    );
+    assert_eq!(audit.matches("\"kind\":\"suggestion_cleared\"").count(), 1);
     let _ = fs::remove_dir_all(root);
 }

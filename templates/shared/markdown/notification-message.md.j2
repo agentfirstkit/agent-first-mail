@@ -1,0 +1,16 @@
+{%- import "i18n/catalog.j2" as i18n -%}
+{% set notification = document.collection %}{% set message_document = document.message %}{% set mail = message_document.message %}{% set membership = notification.items | message_item(mail.message_id) %}---
+kind: notification
+message_id: {{ mail.message_id }}
+notification_uid: {{ notification.collection_uid }}
+notification_name: {{ notification.collection_name | yaml }}
+added_rfc3339: {{ membership.added_rfc3339 | yaml }}
+---
+
+# {% if mail.subject %}{{ mail.subject | inline }}{% else %}{{ i18n.t('notification') }}{% endif %}
+
+{{ i18n.t('notification') }}: {{ notification.collection_name | inline }} (`{{ notification.collection_uid }}`)
+
+{% if membership.summary %}{{ i18n.t('summary') }}: {{ membership.summary | inline }}
+
+{% endif %}{% with document = message_document %}{% include "message/section.md.j2" %}{% endwith %}

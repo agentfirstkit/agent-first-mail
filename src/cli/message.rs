@@ -2,13 +2,10 @@ use clap::{Subcommand, ValueEnum};
 
 #[derive(Subcommand, Debug)]
 pub enum MessageAction {
-    /// Show the full local message metadata, body text, and attachment metadata.
+    /// Show the exact typed message document used by Markdown and Review templates.
     Show {
         /// Message id, for example message_inbox_607146690_22.
         message_id: String,
-        /// Show metadata only and omit large body/conversation fields.
-        #[arg(long)]
-        meta: bool,
     },
     /// List messages by sender, subject, date, or workspace scope.
     List {

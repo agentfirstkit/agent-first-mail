@@ -8,7 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) const WORKSPACE_IDENTITY_SCHEMA_NAME: &str = "workspace_identity";
-pub(crate) const WORKSPACE_IDENTITY_SCHEMA_VERSION: u32 = 1;
+pub(crate) const WORKSPACE_IDENTITY_SCHEMA_VERSION: u32 = 2;
+pub(crate) const WORKSPACE_LAYOUT_VERSION: u32 = 2;
 const WORKSPACE_UID_PREFIX: &str = "workspace_";
 const WORKSPACE_UID_RANDOM_BYTES: usize = 16;
 
@@ -17,6 +18,7 @@ const WORKSPACE_UID_RANDOM_BYTES: usize = 16;
 pub(crate) struct WorkspaceIdentity {
     pub(crate) schema_name: String,
     pub(crate) schema_version: u32,
+    pub(crate) layout_version: u32,
     pub(crate) workspace_uid: String,
     pub(crate) created_rfc3339: String,
 }
@@ -33,19 +35,33 @@ impl WorkspaceIdentity {
         Ok(Self {
             schema_name: WORKSPACE_IDENTITY_SCHEMA_NAME.to_string(),
             schema_version: WORKSPACE_IDENTITY_SCHEMA_VERSION,
+            layout_version: WORKSPACE_LAYOUT_VERSION,
             workspace_uid: format!("{WORKSPACE_UID_PREFIX}{}", lowercase_hex(&random)),
             created_rfc3339: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         })
     }
 
     fn validate(&self, path: &Path) -> Result<()> {
+        self.validate_fields(path)?;
+        if self.schema_version != WORKSPACE_IDENTITY_SCHEMA_VERSION {
+            return Err(invalid_identity_error(
+                path,
+                format!("schema_version must be {WORKSPACE_IDENTITY_SCHEMA_VERSION}"),
+            ));
+        }
+        if self.layout_version != WORKSPACE_LAYOUT_VERSION {
+            return Err(invalid_identity_error(
+                path,
+                format!("layout_version must be {WORKSPACE_LAYOUT_VERSION}"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_fields(&self, path: &Path) -> Result<()> {
         let invalid_reason = if self.schema_name != WORKSPACE_IDENTITY_SCHEMA_NAME {
             Some(format!(
                 "schema_name must be {WORKSPACE_IDENTITY_SCHEMA_NAME:?}"
-            ))
-        } else if self.schema_version != WORKSPACE_IDENTITY_SCHEMA_VERSION {
-            Some(format!(
-                "schema_version must be {WORKSPACE_IDENTITY_SCHEMA_VERSION}"
             ))
         } else if !valid_workspace_uid(&self.workspace_uid) {
             Some("workspace_uid must be workspace_ followed by 32 lowercase hex digits".to_string())
@@ -61,6 +77,22 @@ impl WorkspaceIdentity {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyWorkspaceIdentity {
+    schema_name: String,
+    schema_version: u32,
+    workspace_uid: String,
+    created_rfc3339: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WorkspaceIdentityInitState {
+    pub(crate) identity: WorkspaceIdentity,
+    pub(crate) layout_version_before: u32,
+    pub(crate) workspace_upgraded: bool,
+}
+
 /// Strictly load and validate the immutable identity for `workspace_root`.
 pub(crate) fn load_workspace_identity(workspace_root: &Path) -> Result<WorkspaceIdentity> {
     let path = identity_path(workspace_root);
@@ -72,14 +104,136 @@ pub(crate) fn load_workspace_identity(workspace_root: &Path) -> Result<Workspace
                 .with_details(json!({ "workspace_identity_path": path_to_string(&path) }))
         }
     })?;
-    let identity = serde_json::from_str::<WorkspaceIdentity>(&data)
+    let value = serde_json::from_str::<serde_json::Value>(&data)
         .map_err(|err| invalid_identity_error(&path, err.to_string()))?;
-    identity.validate(&path)?;
+    let schema_version = identity_schema_version(&value, &path)?;
+    if schema_version == 1 {
+        let legacy = serde_json::from_value::<LegacyWorkspaceIdentity>(value)
+            .map_err(|err| invalid_identity_error(&path, err.to_string()))?;
+        validate_legacy_identity(&legacy, &path)?;
+        return Err(workspace_upgrade_required_error(&path, 1));
+    }
+    if schema_version > u64::from(WORKSPACE_IDENTITY_SCHEMA_VERSION) {
+        return Err(workspace_version_unsupported_error(
+            &path,
+            schema_version,
+            value
+                .get("layout_version")
+                .and_then(serde_json::Value::as_u64),
+        ));
+    }
+    if schema_version != u64::from(WORKSPACE_IDENTITY_SCHEMA_VERSION) {
+        return Err(invalid_identity_error(
+            &path,
+            "unsupported schema_version".to_string(),
+        ));
+    }
+    let identity = serde_json::from_value::<WorkspaceIdentity>(value)
+        .map_err(|err| invalid_identity_error(&path, err.to_string()))?;
+    identity.validate_fields(&path)?;
+    match identity.layout_version.cmp(&WORKSPACE_LAYOUT_VERSION) {
+        std::cmp::Ordering::Less => {
+            return Err(workspace_upgrade_required_error(
+                &path,
+                identity.layout_version,
+            ));
+        }
+        std::cmp::Ordering::Greater => {
+            return Err(workspace_version_unsupported_error(
+                &path,
+                u64::from(identity.schema_version),
+                Some(u64::from(identity.layout_version)),
+            ));
+        }
+        std::cmp::Ordering::Equal => {}
+    }
     Ok(identity)
+}
+
+pub(crate) fn workspace_identity_for_init(
+    workspace_root: &Path,
+) -> Result<WorkspaceIdentityInitState> {
+    let path = identity_path(workspace_root);
+    if !path.exists() {
+        let metadata_root = workspace_root.join(".afmail");
+        if metadata_root.exists() && metadata_root_has_workspace_data(&metadata_root)? {
+            return Err(missing_identity_error(&path));
+        }
+        return Ok(WorkspaceIdentityInitState {
+            identity: WorkspaceIdentity::generate()?,
+            layout_version_before: 0,
+            workspace_upgraded: false,
+        });
+    }
+    let data = fs::read_to_string(&path).map_err(|err| {
+        AppError::io("read workspace identity", &err)
+            .with_details(json!({ "workspace_identity_path": path_to_string(&path) }))
+    })?;
+    let value = serde_json::from_str::<serde_json::Value>(&data)
+        .map_err(|err| invalid_identity_error(&path, err.to_string()))?;
+    match identity_schema_version(&value, &path)? {
+        1 => {
+            let legacy = serde_json::from_value::<LegacyWorkspaceIdentity>(value)
+                .map_err(|err| invalid_identity_error(&path, err.to_string()))?;
+            validate_legacy_identity(&legacy, &path)?;
+            Ok(WorkspaceIdentityInitState {
+                identity: WorkspaceIdentity {
+                    schema_name: WORKSPACE_IDENTITY_SCHEMA_NAME.to_string(),
+                    schema_version: WORKSPACE_IDENTITY_SCHEMA_VERSION,
+                    layout_version: WORKSPACE_LAYOUT_VERSION,
+                    workspace_uid: legacy.workspace_uid,
+                    created_rfc3339: legacy.created_rfc3339,
+                },
+                layout_version_before: 1,
+                workspace_upgraded: true,
+            })
+        }
+        version if version == u64::from(WORKSPACE_IDENTITY_SCHEMA_VERSION) => {
+            let mut identity = serde_json::from_value::<WorkspaceIdentity>(value)
+                .map_err(|err| invalid_identity_error(&path, err.to_string()))?;
+            identity.validate_fields(&path)?;
+            if identity.layout_version > WORKSPACE_LAYOUT_VERSION {
+                return Err(workspace_version_unsupported_error(
+                    &path,
+                    version,
+                    Some(u64::from(identity.layout_version)),
+                ));
+            }
+            let layout_version_before = identity.layout_version;
+            identity.layout_version = WORKSPACE_LAYOUT_VERSION;
+            Ok(WorkspaceIdentityInitState {
+                identity,
+                layout_version_before,
+                workspace_upgraded: layout_version_before < WORKSPACE_LAYOUT_VERSION,
+            })
+        }
+        version if version > u64::from(WORKSPACE_IDENTITY_SCHEMA_VERSION) => {
+            Err(workspace_version_unsupported_error(
+                &path,
+                version,
+                value
+                    .get("layout_version")
+                    .and_then(serde_json::Value::as_u64),
+            ))
+        }
+        _ => Err(invalid_identity_error(
+            &path,
+            "unsupported schema_version".to_string(),
+        )),
+    }
+}
+
+pub(crate) fn write_workspace_identity(
+    workspace_root: &Path,
+    identity: &WorkspaceIdentity,
+) -> Result<()> {
+    identity.validate(&identity_path(workspace_root))?;
+    write_json_pretty(&identity_path(workspace_root), identity)
 }
 
 /// Create an identity only for an otherwise-new metadata directory; existing
 /// workspaces must load their original identity instead of silently rotating it.
+#[cfg(test)]
 pub(crate) fn initialize_workspace_identity(workspace_root: &Path) -> Result<WorkspaceIdentity> {
     let path = identity_path(workspace_root);
     if path.exists() {
@@ -90,8 +244,68 @@ pub(crate) fn initialize_workspace_identity(workspace_root: &Path) -> Result<Wor
         return Err(missing_identity_error(&path));
     }
     let identity = WorkspaceIdentity::generate()?;
-    write_json_pretty(&path, &identity)?;
+    write_workspace_identity(workspace_root, &identity)?;
     Ok(identity)
+}
+
+fn workspace_upgrade_required_error(path: &Path, layout_version_before: u32) -> AppError {
+    AppError::new(
+        "workspace_upgrade_required",
+        "workspace layout must be upgraded before this command can run",
+    )
+    .with_hint("Run `afmail init` once from this workspace root, then retry the command.")
+    .with_details(json!({
+        "workspace_identity_path": path_to_string(path),
+        "layout_version_before": layout_version_before,
+        "layout_version_after": WORKSPACE_LAYOUT_VERSION,
+    }))
+}
+
+fn workspace_version_unsupported_error(
+    path: &Path,
+    schema_version: u64,
+    layout_version: Option<u64>,
+) -> AppError {
+    AppError::new(
+        "workspace_version_unsupported",
+        "workspace was created by a newer afmail version",
+    )
+    .with_hint(
+        "Upgrade afmail to a version that supports this workspace, then retry; do not run `afmail init` with this older binary.",
+    )
+    .with_details(json!({
+        "workspace_identity_path": path_to_string(path),
+        "workspace_identity_schema_version": schema_version,
+        "supported_workspace_identity_schema_version": WORKSPACE_IDENTITY_SCHEMA_VERSION,
+        "workspace_layout_version": layout_version,
+        "supported_workspace_layout_version": WORKSPACE_LAYOUT_VERSION,
+    }))
+}
+
+fn identity_schema_version(value: &serde_json::Value, path: &Path) -> Result<u64> {
+    value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            invalid_identity_error(
+                path,
+                "schema_version must be a non-negative integer".to_string(),
+            )
+        })
+}
+
+fn validate_legacy_identity(identity: &LegacyWorkspaceIdentity, path: &Path) -> Result<()> {
+    if identity.schema_name != WORKSPACE_IDENTITY_SCHEMA_NAME
+        || identity.schema_version != 1
+        || !valid_workspace_uid(&identity.workspace_uid)
+        || DateTime::parse_from_rfc3339(&identity.created_rfc3339).is_err()
+    {
+        return Err(invalid_identity_error(
+            path,
+            "legacy workspace identity fields are invalid".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn valid_workspace_uid(value: &str) -> bool {

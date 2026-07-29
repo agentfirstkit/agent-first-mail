@@ -1,0 +1,142 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/message-list-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "filters": {
+      "properties": {
+        "scope": {
+          "type": "string"
+        },
+        "sender": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "since": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subject_contains": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "scope"
+      ],
+      "type": "object"
+    },
+    "items": {
+      "items": {
+        "properties": {
+          "case_refs": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "case_path": {
+                  "type": "string"
+                },
+                "case_uid": {
+                  "type": "string"
+                },
+                "group": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_uid",
+                "group",
+                "case_path"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "direction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "json_path": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "notification_uid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "received_rfc3339": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sender": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sent_rfc3339": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "view_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace_status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "workspace_status",
+          "case_refs",
+          "json_path"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "count",
+    "filters",
+    "items"
+  ],
+  "title": "MessageListResult",
+  "type": "object"
+}

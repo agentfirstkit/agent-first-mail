@@ -1,0 +1,22 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/case-suggestion-clear-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "agent_suggestion_uid": {
+      "type": "string"
+    },
+    "case_uid": {
+      "type": "string"
+    },
+    "suggestion_cleared": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "case_uid",
+    "agent_suggestion_uid",
+    "suggestion_cleared"
+  ],
+  "title": "CaseSuggestionClearResult",
+  "type": "object"
+}

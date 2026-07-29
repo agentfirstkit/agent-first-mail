@@ -19,8 +19,19 @@ impl<'a> DraftContent<'a> {
         &self.body[self.compose_start.after_line..self.compose_end.line_start]
     }
 
+    #[cfg(test)]
     pub(crate) fn authored_text(self) -> &'a str {
         self.compose()
+    }
+
+    pub(crate) fn authored_text_range(self) -> std::ops::Range<usize> {
+        let raw_start = self.compose_start.after_line;
+        let raw_end = self.compose_end.line_start;
+        let raw = &self.body[raw_start..raw_end];
+        let leading = raw.len() - raw.trim_start_matches(['\r', '\n']).len();
+        let trimmed = raw.trim_matches(['\r', '\n']);
+        let start = raw_start + leading;
+        start..start + trimmed.len()
     }
 
     #[cfg(test)]
@@ -290,7 +301,10 @@ mod tests {
             let parsed = parse_draft_content(template).expect("parse reply draft template");
             assert!(!parsed.has_authored_text());
             assert_eq!(parsed.compose().trim(), "");
-            assert_eq!(parsed.quote().map(str::trim), Some("{{ quoted }}"));
+            assert_eq!(
+                parsed.quote().map(str::trim),
+                Some("{{ parent.body_text | markdown_quote }}")
+            );
         }
     }
 

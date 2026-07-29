@@ -1,0 +1,273 @@
+{
+  "count": 53,
+  "json_schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+  "schema_name": "afmail_schema_index",
+  "schema_version": 1,
+  "schemas": [
+    {
+      "component_name": "ApiErrorEnvelope",
+      "schema_name": "api-error-envelope",
+      "schema_url": "/schemas/api-error-envelope.schema.json"
+    },
+    {
+      "component_name": "HealthResult",
+      "schema_name": "health-result",
+      "schema_url": "/schemas/health-result.schema.json"
+    },
+    {
+      "component_name": "StatusResult",
+      "schema_name": "status-result",
+      "schema_url": "/schemas/status-result.schema.json"
+    },
+    {
+      "component_name": "PullRequest",
+      "schema_name": "pull-request",
+      "schema_url": "/schemas/pull-request.schema.json"
+    },
+    {
+      "component_name": "PullResult",
+      "schema_name": "pull-result",
+      "schema_url": "/schemas/pull-result.schema.json"
+    },
+    {
+      "component_name": "TriageListQuery",
+      "schema_name": "triage-list-query",
+      "schema_url": "/schemas/triage-list-query.schema.json"
+    },
+    {
+      "component_name": "TriageListResult",
+      "schema_name": "triage-list-result",
+      "schema_url": "/schemas/triage-list-result.schema.json"
+    },
+    {
+      "component_name": "MessageListQuery",
+      "schema_name": "message-list-query",
+      "schema_url": "/schemas/message-list-query.schema.json"
+    },
+    {
+      "component_name": "MessageListResult",
+      "schema_name": "message-list-result",
+      "schema_url": "/schemas/message-list-result.schema.json"
+    },
+    {
+      "component_name": "MessageShowResult",
+      "schema_name": "message-show-result",
+      "schema_url": "/schemas/message-show-result.schema.json"
+    },
+    {
+      "component_name": "MessageDispositionRequest",
+      "schema_name": "message-disposition-request",
+      "schema_url": "/schemas/message-disposition-request.schema.json"
+    },
+    {
+      "component_name": "MessageDispositionResult",
+      "schema_name": "message-disposition-result",
+      "schema_url": "/schemas/message-disposition-result.schema.json"
+    },
+    {
+      "component_name": "MessageSuggestionSetRequest",
+      "schema_name": "message-suggestion-set-request",
+      "schema_url": "/schemas/message-suggestion-set-request.schema.json"
+    },
+    {
+      "component_name": "MessageSuggestionSetResult",
+      "schema_name": "message-suggestion-set-result",
+      "schema_url": "/schemas/message-suggestion-set-result.schema.json"
+    },
+    {
+      "component_name": "MessageSuggestionClearResult",
+      "schema_name": "message-suggestion-clear-result",
+      "schema_url": "/schemas/message-suggestion-clear-result.schema.json"
+    },
+    {
+      "component_name": "SuggestionClearQuery",
+      "schema_name": "suggestion-clear-query",
+      "schema_url": "/schemas/suggestion-clear-query.schema.json"
+    },
+    {
+      "component_name": "CaseListQuery",
+      "schema_name": "case-list-query",
+      "schema_url": "/schemas/case-list-query.schema.json"
+    },
+    {
+      "component_name": "CaseListResult",
+      "schema_name": "case-list-result",
+      "schema_url": "/schemas/case-list-result.schema.json"
+    },
+    {
+      "component_name": "CaseCreateRequest",
+      "schema_name": "case-create-request",
+      "schema_url": "/schemas/case-create-request.schema.json"
+    },
+    {
+      "component_name": "CaseCreateResult",
+      "schema_name": "case-create-result",
+      "schema_url": "/schemas/case-create-result.schema.json"
+    },
+    {
+      "component_name": "CaseShowResult",
+      "schema_name": "case-show-result",
+      "schema_url": "/schemas/case-show-result.schema.json"
+    },
+    {
+      "component_name": "CaseMessageAddRequest",
+      "schema_name": "case-message-add-request",
+      "schema_url": "/schemas/case-message-add-request.schema.json"
+    },
+    {
+      "component_name": "CaseMessageAddResult",
+      "schema_name": "case-message-add-result",
+      "schema_url": "/schemas/case-message-add-result.schema.json"
+    },
+    {
+      "component_name": "CaseActionRequest",
+      "schema_name": "case-action-request",
+      "schema_url": "/schemas/case-action-request.schema.json"
+    },
+    {
+      "component_name": "CaseActionResult",
+      "schema_name": "case-action-result",
+      "schema_url": "/schemas/case-action-result.schema.json"
+    },
+    {
+      "component_name": "CaseSuggestionSetRequest",
+      "schema_name": "case-suggestion-set-request",
+      "schema_url": "/schemas/case-suggestion-set-request.schema.json"
+    },
+    {
+      "component_name": "CaseSuggestionSetResult",
+      "schema_name": "case-suggestion-set-result",
+      "schema_url": "/schemas/case-suggestion-set-result.schema.json"
+    },
+    {
+      "component_name": "CaseSuggestionClearResult",
+      "schema_name": "case-suggestion-clear-result",
+      "schema_url": "/schemas/case-suggestion-clear-result.schema.json"
+    },
+    {
+      "component_name": "NotificationCreateRequest",
+      "schema_name": "notification-create-request",
+      "schema_url": "/schemas/notification-create-request.schema.json"
+    },
+    {
+      "component_name": "NotificationCreateResult",
+      "schema_name": "notification-create-result",
+      "schema_url": "/schemas/notification-create-result.schema.json"
+    },
+    {
+      "component_name": "NotificationListResult",
+      "schema_name": "notification-list-result",
+      "schema_url": "/schemas/notification-list-result.schema.json"
+    },
+    {
+      "component_name": "NotificationShowResult",
+      "schema_name": "notification-show-result",
+      "schema_url": "/schemas/notification-show-result.schema.json"
+    },
+    {
+      "component_name": "NotificationMessageAddRequest",
+      "schema_name": "notification-message-add-request",
+      "schema_url": "/schemas/notification-message-add-request.schema.json"
+    },
+    {
+      "component_name": "NotificationMessageAddResult",
+      "schema_name": "notification-message-add-result",
+      "schema_url": "/schemas/notification-message-add-result.schema.json"
+    },
+    {
+      "component_name": "NotificationActionRequest",
+      "schema_name": "notification-action-request",
+      "schema_url": "/schemas/notification-action-request.schema.json"
+    },
+    {
+      "component_name": "NotificationActionResult",
+      "schema_name": "notification-action-result",
+      "schema_url": "/schemas/notification-action-result.schema.json"
+    },
+    {
+      "component_name": "NotificationSuggestionSetRequest",
+      "schema_name": "notification-suggestion-set-request",
+      "schema_url": "/schemas/notification-suggestion-set-request.schema.json"
+    },
+    {
+      "component_name": "NotificationSuggestionSetResult",
+      "schema_name": "notification-suggestion-set-result",
+      "schema_url": "/schemas/notification-suggestion-set-result.schema.json"
+    },
+    {
+      "component_name": "NotificationSuggestionClearResult",
+      "schema_name": "notification-suggestion-clear-result",
+      "schema_url": "/schemas/notification-suggestion-clear-result.schema.json"
+    },
+    {
+      "component_name": "DraftCreateRequest",
+      "schema_name": "draft-create-request",
+      "schema_url": "/schemas/draft-create-request.schema.json"
+    },
+    {
+      "component_name": "DraftCreateResult",
+      "schema_name": "draft-create-result",
+      "schema_url": "/schemas/draft-create-result.schema.json"
+    },
+    {
+      "component_name": "DraftPatchRequest",
+      "schema_name": "draft-patch-request",
+      "schema_url": "/schemas/draft-patch-request.schema.json"
+    },
+    {
+      "component_name": "DraftPatchResult",
+      "schema_name": "draft-patch-result",
+      "schema_url": "/schemas/draft-patch-result.schema.json"
+    },
+    {
+      "component_name": "DraftDeleteQuery",
+      "schema_name": "draft-delete-query",
+      "schema_url": "/schemas/draft-delete-query.schema.json"
+    },
+    {
+      "component_name": "DraftDeleteResult",
+      "schema_name": "draft-delete-result",
+      "schema_url": "/schemas/draft-delete-result.schema.json"
+    },
+    {
+      "component_name": "DraftQueueRequest",
+      "schema_name": "draft-queue-request",
+      "schema_url": "/schemas/draft-queue-request.schema.json"
+    },
+    {
+      "component_name": "DraftQueueResult",
+      "schema_name": "draft-queue-result",
+      "schema_url": "/schemas/draft-queue-result.schema.json"
+    },
+    {
+      "component_name": "DraftValidateResult",
+      "schema_name": "draft-validate-result",
+      "schema_url": "/schemas/draft-validate-result.schema.json"
+    },
+    {
+      "component_name": "DraftListResult",
+      "schema_name": "draft-list-result",
+      "schema_url": "/schemas/draft-list-result.schema.json"
+    },
+    {
+      "component_name": "DraftShowResult",
+      "schema_name": "draft-show-result",
+      "schema_url": "/schemas/draft-show-result.schema.json"
+    },
+    {
+      "component_name": "PushPlanResult",
+      "schema_name": "push-plan-result",
+      "schema_url": "/schemas/push-plan-result.schema.json"
+    },
+    {
+      "component_name": "PushConfirmRequest",
+      "schema_name": "push-confirm-request",
+      "schema_url": "/schemas/push-confirm-request.schema.json"
+    },
+    {
+      "component_name": "PushConfirmResult",
+      "schema_name": "push-confirm-result",
+      "schema_url": "/schemas/push-confirm-result.schema.json"
+    }
+  ]
+}

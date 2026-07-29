@@ -11,6 +11,42 @@ the `git` shape — pull from a remote, work in a local worktree, push deliberat
 
 Supported platforms: macOS, Linux, Windows.
 
+## Try the complete workflow locally
+
+Create an ordinary workspace connected only to afmail's loopback mock mail
+server:
+
+```bash
+afmail demo init
+cd afmail-demo
+afmail demo serve
+```
+
+Leave `demo serve` running, then ask your agent to pull and triage the inbox,
+draft replies, and show the push preview before confirmation. The focused
+`founder-inbox` scenario contains 12 messages, including a reproducible product
+bug, receipts, an outage, a VIP request, phishing, and a fake invoice.
+
+This is the real workflow: pull and push use the normal IMAP/SMTP paths, and a
+remote effect still requires the exact `afmail push --confirm PLAN_ID` returned
+by the preview. The server listens on `127.0.0.1` only. Restarting it resets its
+in-memory mailbox; remove the generated `afmail-demo/` directory and run
+`afmail demo init` again for a completely clean workspace.
+
+## Build features
+
+Default builds include all three optional product surfaces:
+
+- `demo`: the loopback mock IMAP/SMTP server and embedded demo mailbox.
+- `api`: the Axum HTTP API server and OpenAPI export commands.
+- `review`: interactive local and LAN Review sessions.
+
+Build a core mail-workspace binary without them using
+`cargo build --no-default-features`. Enable only selected surfaces with, for
+example, `cargo build --no-default-features --features api,review`. Commands
+whose implementation was excluded remain discoverable and return a structured
+`feature_disabled` error naming the required feature.
+
 ## How it works: one email, start to finish
 
 <video src="https://github.com/user-attachments/assets/a7f9ee4d-3729-41e7-811c-74590d963782" controls muted playsinline></video>
@@ -46,7 +82,7 @@ only for an explicitly reviewed full-history import. Explicit
 `--max-new-messages` and `--max-total-bytes` remain hard command-wide budgets.
 
 The mailbox workspace is designed to be kept in your own private Git repository.
-Raw `.eml` evidence, sidecars, generated read views, attachments, queued effects,
+Raw `.eml` evidence, canonical metadata, generated read views, attachments, queued effects,
 and audit files are normal workspace state that private Git can version, sync,
 and back up. That is a Git trust boundary, not an encryption boundary: anyone
 with repository access, host backups, local machine access, or retained Git
@@ -144,9 +180,9 @@ afmail push --confirm push_plan_<REVIEWED_PLAN_ID>       # apply only that exact
 ```
 
 If the case still contains queued send drafts or a remote archive effect,
-`case archive` returns lifecycle `archiving` and queues the remote archive as
+`case archive` returns canonical `status: archiving` and queues the remote archive as
 its own push item. Its workspace is held under `archived-cases/`, but it does
-not become lifecycle `archived` or receive `archived_rfc3339` until the send and
+not become `status: archived` or receive `archived_rfc3339` until the send and
 archive pushes both succeed.
 
 If a confirmed push exits with code `3` and `outcome: partial`, do not blindly
@@ -225,7 +261,7 @@ machine evidence in separate places:
 - **`cases/`** — a folder per ongoing issue, holding notes, the messages
   involved, and draft replies.
 - **`archived-cases/`** — both archiving cases waiting for confirmed effects and
-  fully archived cases, distinguished by their typed lifecycle.
+  fully archived cases, distinguished by canonical `collection.status`.
 - **`notifications/`** — completed notification mail filed out of the way.
 - **Stable refs** — every message, case, and notification collection has a durable id,
   so an agent can point at the same thing across runs.
@@ -236,21 +272,91 @@ machine evidence in separate places:
 
 That is the shape. The [docs](#docs) cover the exact files, fields, and commands.
 
-## Review mail and edit drafts with AFUI
+## Review with your agent
 
-Run `afmail ui` inside a workspace to open the product view. It is intentionally
-small: one split mail window with the queue on the left and selected message on
-the right, a draft list and editor, plus mailbox glance facts. Editing the draft
-form writes the real local draft through afmail and the view refreshes from the
-workspace; remote mail still follows the ordinary
-explicit push rules.
+Review commands are blocking, local human-in-the-loop sessions for work that
+benefits from dense reading or an explicit decision. An agent starts one in the
+background. Before triage review, it saves one complete typed proposal with
+`afmail triage suggestion set`; the proposal lives in the message's canonical
+JSON metadata, never in Markdown or a separate review file. Review reads those
+persisted proposals and, on submit, writes a hash-bound `human_suggestion`
+before returning its finite result. It never files a message, changes a case,
+queues a push, or touches the remote mailbox.
 
-Message and draft records expose a single `#` control. It sends the stable inert
-reference to the Host-owned termail companion so a directing agent can operate
-on that object. It does not click an afmail operation, execute a command, or
-submit Enter. Use `afmail ui --no-termail` when only the review/editor surface is
-wanted. `afmail ui snapshot` remains the data-only integration output; its AFUI
-message is carried in the standard AFDATA `kind: "result"` envelope.
+Case and notification suggestions use the same lifecycle in their canonical
+JSON through `afmail case suggestion set|clear` and
+`afmail notification suggestion set|clear`. Notes and draft fields remain
+canonical user content and autosave through the Workspace API under an
+exclusive lock and base-hash check; each result records those writes in
+`saved_files`. Review never pushes or sends mail. A new Agent suggestion
+replaces the previous round and clears its human response. Cancel or window
+dismissal leaves suggestion state unchanged. Deletion proposals that set
+`allow_notes: true` require a separate destructive confirmation in Review.
+
+All review surfaces expose one top-right Done button. Case, notification, and
+draft Done is enabled only after every edit is saved; dismissing the window
+never rolls back an autosave. Triage uses every persisted Agent suggestion by default and only
+shows a “Message to agent” text box when the user opens “Disagree or write to
+the agent”. Notes and drafts show no save badge on open; save progress begins
+only after an edit, and `Saved locally` appears only after the canonical file
+write succeeds. A save error keeps Done disabled.
+
+`afmail case review CASE_REF` opens the case and its notes;
+`afmail notification review NOTIFICATION_REF` opens a notification and its notes;
+`afmail case draft review CASE_REF DRAFT_NAME` opens one draft. Submit, cancel,
+or dismiss each session returns one structured result with its outcome, base
+hashes, and any `saved_files`. The agent must re-check triage hashes before
+applying a decision. The persisted human suggestion is feedback, not proof that
+the formal action ran and not authorization for push or send; those still use
+the normal commands and preview/confirm flow.
+
+If a suggestion `set` or `clear` may be retried after interrupted output, use a
+stable global `--request-id` for that exact command and inputs. Case and
+notification review hashes include every canonical document visible to Review.
+Message hashes include the exact message context and related messages; case
+hashes include the exact collection, contained messages, current notes, and
+active drafts; notification hashes include the exact collection, contained
+messages, and current notes. Changing any of them makes an older proposal stale
+and requires a fresh suggestion.
+
+Use `--mode lan` with any review command to use a phone or another browser on
+the same trusted IPv4 local network. afmail prints a clickable, one-time
+`review_url`, waits for that review to finish, and expires the URL after 15
+minutes. Review mode defaults to `local`; both modes emit `review_ready` when
+the review surface is ready. LAN mode uses local HTTP and must not be used on
+public or untrusted networks.
+
+Review HTML uses the same MiniJinja system and the same typed render documents
+as generated Markdown. Export editable multilingual templates with
+`afmail render templates`; language entries live under `templates/<language>/`
+and shared layouts under `templates/shared/`. Workspace Review templates may
+provide HTML and CSS but never JavaScript. See the [template
+contract](docs/templates.md).
+
+## Typed local HTTP API
+
+Trusted Agent runtimes and applications can use afmail through the same domain
+core over HTTP. `afmail api serve` publishes OpenAPI 3.2 plus standalone JSON
+Schemas and reuses the CLI's workspace locks, transaction guard, persistent
+idempotency records, suggestion hashes, audit behavior, and push plan
+confirmation. It does not expose a shell or generic command endpoint.
+
+Set a random 32–512-character bearer-safe ASCII credential, then start the API
+from a mailbox workspace:
+
+```bash
+export AFMAIL_API_ACCESS_TOKEN_SECRET='replace-with-a-random-32-character-value'
+afmail api serve --mode local
+```
+
+The ready event prints the API and OpenAPI URLs without printing the credential.
+Use `--mode lan` only on a trusted IPv4 local network. For arbitrary-network
+access, keep loopback mode and use an established encrypted tunnel or TLS
+reverse proxy instead of exposing afmail directly. Human `review` remains an
+afmail-owned interactive UI action; OpenAPI does not replace it with a generic
+HTTP command.
+
+See the [HTTP API contract](docs/api.md).
 
 ## Adopt it: hand afmail to your agent
 
@@ -296,8 +402,7 @@ the Agent root's `AGENTS.md`. Its structured `created_files`, `changed_files`,
 and `next_steps` fields drive setup without guessing config keys. After applying
 those steps, use `afmail status` for local readiness and `afmail remote test`
 for IMAP plus configured SMTP handshake/authentication. The remote test sends no
-mail. `status.readiness.afui_host_available` also tells source installs whether
-the separate `afui` executable is available.
+mail.
 See the [Workspace Model](docs/workspace.md).
 
 ## Docs
@@ -305,6 +410,7 @@ See the [Workspace Model](docs/workspace.md).
 - [Core Design Principles](docs/design-principles.md) — what afmail guarantees, and why
 - [Workspace Model](docs/workspace.md) — the folder layout and what each part is for
 - [File Formats](docs/file-formats.md) — the exact files a pull and your commands produce
+- [HTTP API](docs/api.md) — OpenAPI discovery, authentication, idempotency, and network modes
 - [CLI Contract](docs/cli.md) — every command and flag for the `afmail` binary
 - [Code Structure](docs/code-structure.md) — where crate responsibilities live
 - [Agent Skill](skills/agent-first-mail/SKILL.md) — the behavior contract agents follow

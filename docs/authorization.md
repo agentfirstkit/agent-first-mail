@@ -4,6 +4,10 @@ afmail separates authorization by effect domain. An agent may use a narrower
 operation when it is necessary to answer the user's request, but a broad or
 remote operation is never an automatic prelude.
 
+The local demo does not weaken these boundaries. Although its configured
+remote is a loopback-only mock server, bare `afmail push` remains a preview and
+only `afmail push --confirm PLAN_ID` applies that exact plan.
+
 | Domain | Examples | Required user intent |
 | --- | --- | --- |
 | Local read | `status`, `message show`, bounded `list` | Implicit when needed to answer the current mailbox request. Prefer a supplied ref over broad discovery. |
@@ -17,3 +21,10 @@ Invocation is automatic: supported agents may discover and load the installed
 selection does not authorize `pull`, `push`, `purge`, or any other operation
 beyond the matrix above.
 
+The HTTP API follows the same matrix. A valid bearer credential authenticates a
+trusted client to one local afmail process; it does not grant remote-read intent,
+authorize a push plan, authorize permanent deletion, or override an object's
+review base hash. API callers must preserve the same user-intent checks as an
+Agent using the CLI. Non-idempotent local HTTP mutations additionally require a
+persistent `Idempotency-Key`, and remote push still requires the exact reviewed
+`plan_id`.

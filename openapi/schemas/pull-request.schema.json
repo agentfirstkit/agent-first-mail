@@ -1,0 +1,57 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/pull-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "all_history": {
+      "default": false,
+      "description": "Explicitly include all remote history.",
+      "type": "boolean"
+    },
+    "dry_run": {
+      "default": false,
+      "description": "Estimate candidates and budgets without downloading or writing.",
+      "type": "boolean"
+    },
+    "mailbox_ids": {
+      "default": [],
+      "description": "Configured mailbox ids. Empty uses actions.pull.default_mailbox_ids.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "max_new_messages": {
+      "default": null,
+      "description": "Maximum number of new messages stored during this pull.",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "max_total_bytes": {
+      "default": null,
+      "description": "Maximum total bytes stored for new raw messages during this pull.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "since_days": {
+      "default": null,
+      "description": "Limit the initial remote candidate window to the last number of days.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "title": "PullRequest",
+  "type": "object"
+}

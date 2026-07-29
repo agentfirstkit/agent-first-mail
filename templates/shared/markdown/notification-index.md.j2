@@ -1,0 +1,12 @@
+{%- import "i18n/catalog.j2" as i18n -%}
+{% set notification_document = document %}{% set notification = notification_document.collection %}# {{ i18n.t('notifications') }}: {{ notification.collection_name | inline }} (`{{ notification.collection_uid }}`)
+
+{% if not notification_document.messages %}_{{ i18n.t('no_messages') }}_
+{% else %}{% for message_document in notification_document.messages | notification_date_desc(notification.items) %}{% set mail = message_document.message %}{% set analysis = message_document.analysis %}{% if analysis.direction == 'inbound' %}{% set message_time = mail.received_rfc3339 or mail.sent_rfc3339 %}{% else %}{% set message_time = mail.sent_rfc3339 or mail.received_rfc3339 %}{% endif %}{% set membership = notification.items | message_item(mail.message_id) %}## {{ loop.index }}. {% if analysis.direction == 'inbound' %}← {{ i18n.t('received') }}{% else %}→ {{ i18n.t('sent') }}{% endif %}{% if analysis.action == 'reply' %} {{ i18n.t('reply') }}{% elif analysis.action == 'forward' %} {{ i18n.t('forward') }}{% endif %}{% if membership.summary %}: {{ membership.summary | inline }}{% elif mail.subject %}: {{ mail.subject | inline }}{% endif %}
+
+{% if message_time %}- {{ i18n.t('time') }}: {{ message_time | datetime }}
+{% endif %}{% if analysis.direction == 'inbound' and mail.from %}- {{ i18n.t('from') }}: {{ mail.from | inline }}
+{% elif analysis.direction == 'outbound' and mail.to %}- {{ i18n.t('to') }}: {{ mail.to | map("inline") | join(", ") }}
+{% endif %}{% if membership.summary %}- {{ i18n.t('summary') }}: {{ membership.summary | inline }}
+{% endif %}- {{ i18n.t('message') }}: [{{ mail.message_id }}](views/messages/{{ mail.message_id }}.md)
+{% endfor %}{% endif %}

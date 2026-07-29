@@ -21,7 +21,10 @@ use crate::imap_client::{
 };
 use crate::mail::parse_inbound_message;
 use crate::progress::ProgressCallback;
-use crate::types::{ImapRef, MessageFile, MessageStatus, RemoteLocation, RemoteState};
+use crate::types::{
+    CaseRelationshipEvidence, CaseRelationshipSuggestion, ImapRef, MessageFile, MessageStatus,
+    RemoteLocation, RemoteState,
+};
 #[cfg(test)]
 use crate::util::write_json_pretty;
 use crate::util::{canonical_flags, write_bytes_atomic, write_string_atomic};
@@ -742,12 +745,8 @@ mod tests {
                 .join(format!(".afmail/messages/{id}.state.json"))
                 .exists()
         );
-        assert!(
-            root.join(format!(".afmail/messages/{id}.remote.json"))
-                .exists()
-        );
+        assert!(root.join(format!(".afmail/messages/{id}.json")).exists());
         assert!(!root.join(format!(".afmail/messages/{id}.txt")).exists());
-        assert!(!root.join(format!(".afmail/messages/{id}.json")).exists());
         assert!(root.join(format!("messages/{id}.json")).exists());
         assert!(root.join(format!("triage/{id}.md")).exists());
         let _ = fs::remove_dir_all(root);
@@ -838,12 +837,15 @@ mod tests {
         );
         let existing = MessageFile {
             schema_name: "message".to_string(),
-            schema_version: 1,
+            schema_version: crate::types::MESSAGE_SCHEMA_VERSION,
             message_id: "message_case_1".to_string(),
             rfc822_message_id: Some("<Case-One@Example.com>".to_string()),
             in_reply_to: None,
             references: Vec::new(),
             remote: None,
+            agent_suggestion: None,
+            human_suggestion: None,
+            case_relationship_suggestion: None,
             direction: Some("inbound".to_string()),
             subject: Some("Case".to_string()),
             from: Some("alice@example.com".to_string()),
@@ -901,15 +903,15 @@ mod tests {
             "Message-ID: <case-two@example.com>\r\nFrom: Alice <alice@example.com>\r\nTo: Me <me@example.com>\r\nSubject: Case\r\n\r\nCase",
         );
         let _ = crate::store::Workspace::at(&root).write_message_artifacts(&second);
-        let _ = fs::create_dir_all(root.join("cases/support/case-one/data"));
-        let _ = fs::create_dir_all(root.join("cases/support/case-two/data"));
+        let _ = fs::create_dir_all(root.join("cases/support/c20260521001-case-one/data"));
+        let _ = fs::create_dir_all(root.join("cases/support/c20260521002-case-two/data"));
         let _ = write_json_pretty(
-            &root.join("cases/support/case-one/data/case.json"),
-            &case_collection("case-one", "Case One", "message_case_1"),
+            &root.join("cases/support/c20260521001-case-one/data/case.json"),
+            &case_collection("c20260521001", "Case One", "message_case_1"),
         );
         let _ = write_json_pretty(
-            &root.join("cases/support/case-two/data/case.json"),
-            &case_collection("case-two", "Case Two", "message_case_2"),
+            &root.join("cases/support/c20260521002-case-two/data/case.json"),
+            &case_collection("c20260521002", "Case Two", "message_case_2"),
         );
         let index = load_existing_remote_index(&root);
         assert!(index.is_ok(), "{:?}", index.as_ref().err());
@@ -925,7 +927,7 @@ mod tests {
         let suggestion = index.unwrap_or_default().suggest_case(raw.as_bytes());
         assert_eq!(
             suggestion.case_uids,
-            vec!["case-one".to_string(), "case-two".to_string()]
+            vec!["c20260521001".to_string(), "c20260521002".to_string()]
         );
         let _ = fs::remove_dir_all(root);
     }

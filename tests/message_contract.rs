@@ -148,6 +148,7 @@ fn message_list_filters_by_sender_subject_since_and_scope() {
     assert_eq!(value["items"][0]["message_id"], "message_list_case");
     assert_eq!(value["items"][0]["workspace_status"], "case");
     assert_eq!(value["items"][0]["case_refs"][0]["case_uid"], case_uid);
+    assert!(value["items"][0]["case_refs"][0].get("lifecycle").is_none());
 
     let (status, stdout) = run(
         &root,
@@ -162,6 +163,7 @@ fn message_list_filters_by_sender_subject_since_and_scope() {
     assert_eq!(items[2]["message_id"], "message_list_triage");
     assert_eq!(items[0]["notification_uid"], notification_uid);
     assert_eq!(items[1]["case_refs"][0]["case_uid"], case_uid);
+    assert!(items[1]["case_refs"][0].get("lifecycle").is_none());
 
     let _ = fs::remove_dir_all(root);
 }

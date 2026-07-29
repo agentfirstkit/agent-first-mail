@@ -14,6 +14,48 @@ fn protocol_events(stdout: &str) -> Vec<Value> {
         .collect()
 }
 
+#[cfg(any(not(feature = "api"), not(feature = "demo"), not(feature = "review")))]
+fn assert_feature_disabled(root: &std::path::Path, args: &[&str], feature: &str) {
+    let (status, stdout) = run(root, args);
+    assert_eq!(status, 1, "{stdout}");
+    let error = parse_one(&stdout);
+    assert_eq!(error["code"], "feature_disabled", "{error}");
+    assert_eq!(error["feature"], feature, "{error}");
+    assert!(
+        error["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains(&format!("--features {feature}"))),
+        "{error}"
+    );
+}
+
+#[test]
+#[cfg(not(feature = "api"))]
+fn api_command_reports_its_disabled_build_feature() {
+    let root = temp_root("api-feature-disabled");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_feature_disabled(&root, &["api", "serve"], "api");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[cfg(not(feature = "demo"))]
+fn demo_command_reports_its_disabled_build_feature() {
+    let root = temp_root("demo-feature-disabled");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_feature_disabled(&root, &["demo", "init"], "demo");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[cfg(not(feature = "review"))]
+fn review_command_reports_its_disabled_build_feature() {
+    let root = temp_root("review-feature-disabled");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_feature_disabled(&root, &["triage", "review", "message_example"], "review");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn protocol_v1_streams_are_valid_and_have_one_terminal_event() {
     let root = temp_root("protocol-v1");
@@ -27,7 +69,16 @@ fn protocol_v1_streams_are_valid_and_have_one_terminal_event() {
     assert!(events[0]["result"].get("code").is_none());
     assert!(events[0]["trace"]["duration_ms"].as_u64().is_some());
 
-    let (status, stdout) = run(&root, &["--log", "startup,request,progress", "status"]);
+    let (status, stdout) = run(
+        &root,
+        &[
+            "--output-to",
+            "stdout",
+            "--log",
+            "startup,request,progress",
+            "status",
+        ],
+    );
     assert_eq!(status, 0, "{stdout}");
     let events = protocol_events(&stdout);
     assert!(agent_first_data::validate_protocol_stream(&events, false).is_ok());
@@ -55,12 +106,47 @@ fn version_uses_afdata_output_formats() {
     let root = temp_root("version");
     assert!(fs::create_dir_all(&root).is_ok());
 
+    // Bare `--version` is a protocol-v1 event by default now, not conventional
+    // `<name> <version>` text — matches every other afmail command's default.
     let (status, stdout) = run(&root, &["--version"]);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(
-        stdout.trim(),
-        format!("afmail {}", env!("CARGO_PKG_VERSION"))
+    let value = parse_one(&stdout);
+    assert_eq!(value["name"], "afmail");
+    assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
+    let build = value["build"].as_str().map(str::to_owned);
+
+    let (status, stdout) = run(&root, &["--help"]);
+    assert_eq!(status, 0, "{stdout}");
+    let help_result = parse_one(&stdout);
+    assert_eq!(help_result["code"], "help");
+    let help = &help_result["help"];
+    assert_eq!(help["scope"], "one_level");
+    assert_eq!(help["command_path"], "afmail");
+    assert!(help.get("code").is_none());
+    assert!(help.get("description").is_none());
+    assert!(help.get("description_markdown").is_none());
+    assert!(help.get("versions").is_none());
+    let version_argument = help["arguments"]
+        .as_array()
+        .and_then(|arguments| {
+            arguments
+                .iter()
+                .find(|argument| argument["name"] == "--version")
+        })
+        .expect("help must advertise --version without eagerly returning version values");
+    assert!(
+        version_argument.get("short").is_none(),
+        "--version must not expose a short alias"
     );
+    assert!(!stdout.contains(env!("CARGO_PKG_VERSION")));
+    if let Some(build) = build {
+        assert!(!stdout.contains(&build));
+    }
+
+    let (status, stdout) = run(&root, &["-V"]);
+    assert_eq!(status, 2, "{stdout}");
+    let error = parse_one(&stdout);
+    assert_eq!(error["code"], "cli_error");
 
     let (status, stdout) = run(&root, &["--version", "--output", "json"]);
     assert_eq!(status, 0, "{stdout}");
@@ -114,6 +200,55 @@ fn removed_flag_and_seen_commands_are_cli_errors() {
     assert_eq!(status, 2, "{stdout}");
     let value = parse_one(&stdout);
     assert_eq!(value["code"], "cli_error");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn help_progressively_discloses_inherited_global_arguments() {
+    let root = temp_root("help-progressive");
+    assert!(fs::create_dir_all(&root).is_ok());
+
+    let (status, stdout) = run(&root, &["message", "list", "--help"]);
+    assert_eq!(status, 0, "{stdout}");
+    let result = parse_one(&stdout);
+    let help = &result["help"];
+    assert_eq!(result["code"], "help");
+    assert_eq!(help["command_path"], "afmail message list");
+    assert_eq!(
+        help["inherited_arguments_from"],
+        serde_json::json!(["afmail"])
+    );
+    assert!(help["arguments"].as_array().is_some_and(|arguments| {
+        arguments
+            .iter()
+            .any(|argument| argument["name"] == "--sender")
+    }));
+    assert!(
+        !stdout.contains("--workspace"),
+        "structured leaf help must reference, not repeat, root globals: {stdout}"
+    );
+
+    let (status, plain) = run(&root, &["message", "list", "--help", "--output", "plain"]);
+    assert_eq!(status, 0, "{plain}");
+    assert!(plain.contains("Usage: afmail message list [OPTIONS]"));
+    assert!(plain.contains("--workspace"));
+    assert!(plain.contains("--version"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn clap_help_pseudo_command_is_a_structured_cli_error() {
+    let root = temp_root("help-pseudo");
+    assert!(fs::create_dir_all(&root).is_ok());
+
+    let (status, stdout) = run(&root, &["help"]);
+    assert_eq!(status, 2, "{stdout}");
+    let event = protocol_events(&stdout);
+    assert_eq!(event.len(), 1, "{event:?}");
+    assert_eq!(event[0]["kind"], "error");
+    assert_eq!(event[0]["error"]["code"], "cli_error");
 
     let _ = fs::remove_dir_all(root);
 }
@@ -237,6 +372,62 @@ fn case_create_requires_explicit_group() {
         stderr.contains("--group") || stdout.contains("--group"),
         "stdout: {stdout}\nstderr: {stderr}"
     );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// A review or serve command reports an address the caller must act on, waits an
+/// unbounded time, then reports its outcome. Both are caller-needed, so the
+/// ordered stream must stay on one destination rather than splitting the first
+/// output onto the diagnostic stream.
+#[test]
+#[cfg(all(feature = "demo", feature = "review"))]
+fn event_stream_commands_keep_the_whole_stream_on_stdout() {
+    let root = temp_root("event-stream-routing");
+    assert!(fs::create_dir_all(&root).is_ok());
+
+    // No workspace here, so every command fails the same way. What differs is
+    // which stream carries the failure, and that is decided by the mode.
+    let (_, stream_stdout, stream_stderr) = run_allow_stderr(&root, &["demo", "serve"]);
+    assert!(
+        stream_stdout.contains("workspace_not_found"),
+        "an event-stream command must collapse onto stdout: stdout={stream_stdout} stderr={stream_stderr}"
+    );
+    assert!(
+        stream_stderr.trim().is_empty(),
+        "an event-stream command must not split across streams: {stream_stderr}"
+    );
+
+    let (_, finite_stdout, finite_stderr) = run_allow_stderr(&root, &["pull"]);
+    assert!(
+        finite_stderr.contains("workspace_not_found"),
+        "a finite command keeps diagnostics on stderr: {finite_stderr}"
+    );
+    assert!(
+        finite_stdout.trim().is_empty(),
+        "a finite command must not write a failure to the result stream: {finite_stdout}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[cfg(all(feature = "demo", feature = "api"))]
+fn event_stream_commands_reject_split_routing() {
+    let root = temp_root("event-stream-split-rejected");
+    assert!(fs::create_dir_all(&root).is_ok());
+
+    for args in [
+        vec!["demo", "serve", "--output-to", "split"],
+        vec!["api", "serve", "--output-to", "split"],
+    ] {
+        let (status, stdout, stderr) = run_allow_stderr(&root, &args);
+        assert_eq!(status, 2, "{args:?}: stdout={stdout} stderr={stderr}");
+        assert!(
+            stderr.contains("must stay on one stream"),
+            "{args:?}: {stderr}"
+        );
+    }
 
     let _ = fs::remove_dir_all(root);
 }

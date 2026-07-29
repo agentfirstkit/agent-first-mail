@@ -1,0 +1,22 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/message-suggestion-clear-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "agent_suggestion_uid": {
+      "type": "string"
+    },
+    "message_id": {
+      "type": "string"
+    },
+    "suggestion_cleared": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "message_id",
+    "agent_suggestion_uid",
+    "suggestion_cleared"
+  ],
+  "title": "MessageSuggestionClearResult",
+  "type": "object"
+}

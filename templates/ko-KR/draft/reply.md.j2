@@ -1,11 +1,11 @@
-# 답장
+{% set parent = document.message.message %}# 답장
 
 <!-- afmail:compose:start -->
 
 <!-- afmail:compose:end -->
 
-이전 메시지에서 {% if sender %}{{ sender }}{% else %}보낸 사람{% endif %} 작성:
+이전 메시지에서 {% if parent.from %}{{ parent.from | inline }}{% else %}보낸 사람{% endif %} 작성:
 
 <!-- afmail:quote:start -->
-{{ quoted }}
+{{ parent.body_text | markdown_quote }}
 <!-- afmail:quote:end -->

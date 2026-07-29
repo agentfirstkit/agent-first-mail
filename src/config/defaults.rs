@@ -77,11 +77,3 @@ pub(super) fn default_reason_mode() -> ReasonMode {
 pub(super) fn default_contact_group() -> String {
     "people".to_string()
 }
-
-pub(super) fn default_notification_index_fields() -> Vec<NotificationIndexField> {
-    vec![
-        NotificationIndexField::Time,
-        NotificationIndexField::From,
-        NotificationIndexField::Summary,
-    ]
-}

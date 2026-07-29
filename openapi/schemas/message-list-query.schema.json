@@ -1,0 +1,41 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/message-list-query.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "scope": {
+      "default": "all",
+      "enum": [
+        "triage",
+        "case",
+        "notification",
+        "all"
+      ],
+      "type": "string"
+    },
+    "sender": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "since": {
+      "default": null,
+      "description": "RFC 3339 timestamp or YYYY-MM-DD lower bound.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "subject_contains": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "MessageListQuery",
+  "type": "object"
+}

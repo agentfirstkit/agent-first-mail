@@ -1,0 +1,71 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/status-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": true,
+      "properties": {
+        "case_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "notification_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "push_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "triage_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workspace_path": {
+          "type": "string"
+        },
+        "workspace_uid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_uid",
+        "workspace_path",
+        "triage_count",
+        "case_count",
+        "notification_count",
+        "message_count",
+        "push_count"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": true,
+      "properties": {
+        "hint": {
+          "type": "string"
+        },
+        "progress": true,
+        "workspace_locked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "workspace_locked",
+        "progress",
+        "hint"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "StatusResult"
+}

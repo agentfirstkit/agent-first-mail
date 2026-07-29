@@ -1,0 +1,327 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/pull-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": true,
+      "properties": {
+        "all_history": {
+          "type": "boolean"
+        },
+        "archived_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "body_fetch_mode": {
+          "type": "string"
+        },
+        "budget_limited": {
+          "type": "boolean"
+        },
+        "budget_skipped_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "draft_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "flagged_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "flags_updated_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "indexed_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mailbox_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mailbox_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mailbox_names": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_new_messages": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_total_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "new_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "new_message_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "new_message_ids_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "new_message_ids_truncated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reclassified_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining_bytes_budget": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining_message_budget": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sent_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "since_days": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "skipped_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped_messages": {
+          "items": true,
+          "type": "array"
+        },
+        "spam_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stored_new_message_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trashed_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "triage_created_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "triage_created_message_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "triage_created_message_ids_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "triage_created_message_ids_truncated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "updated_location_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "new_message_count",
+        "triage_created_count",
+        "archived_message_count",
+        "spam_message_count",
+        "trashed_message_count",
+        "sent_message_count",
+        "draft_message_count",
+        "indexed_message_count",
+        "flagged_message_count",
+        "reclassified_message_count",
+        "updated_location_count",
+        "flags_updated_count",
+        "mailbox_ids",
+        "all_history",
+        "body_fetch_mode",
+        "max_new_messages",
+        "max_total_bytes",
+        "mailbox_count",
+        "budget_limited",
+        "budget_skipped_count",
+        "remaining_message_budget",
+        "remaining_bytes_budget",
+        "stored_new_message_bytes",
+        "skipped_message_count",
+        "skipped_messages",
+        "mailbox_names",
+        "duration_ms"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": true,
+      "properties": {
+        "all_history": {
+          "type": "boolean"
+        },
+        "budget_limited": {
+          "type": "boolean"
+        },
+        "budget_skipped": {
+          "items": true,
+          "type": "array"
+        },
+        "budget_skipped_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidate_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidate_declared_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidates": {
+          "items": true,
+          "type": "array"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "local_changed": {
+          "type": "boolean"
+        },
+        "mailbox_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_new_messages": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_total_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining_bytes_budget": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining_message_budget": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remote_envelope_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remote_read": {
+          "type": "boolean"
+        },
+        "since_days": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "dry_run",
+        "remote_read",
+        "local_changed",
+        "mailbox_ids",
+        "all_history",
+        "max_new_messages",
+        "max_total_bytes",
+        "remote_envelope_count",
+        "candidate_count",
+        "candidate_declared_bytes",
+        "candidates",
+        "budget_limited",
+        "budget_skipped_count",
+        "budget_skipped",
+        "remaining_message_budget",
+        "remaining_bytes_budget"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "PullResult"
+}

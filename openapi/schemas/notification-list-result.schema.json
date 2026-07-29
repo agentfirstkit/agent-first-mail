@@ -1,0 +1,42 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/notification-list-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "items": {
+      "items": {
+        "properties": {
+          "notification_dir": {
+            "type": "string"
+          },
+          "notification_name": {
+            "type": "string"
+          },
+          "notification_uid": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "notification_uid",
+          "notification_name",
+          "notification_dir"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "path_templates": true
+  },
+  "required": [
+    "count",
+    "path_templates",
+    "items"
+  ],
+  "title": "NotificationListResult",
+  "type": "object"
+}

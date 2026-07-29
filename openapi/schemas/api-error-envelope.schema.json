@@ -1,0 +1,60 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/api-error-envelope.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "error": {
+      "additionalProperties": true,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "type": "object"
+    },
+    "kind": {
+      "enum": [
+        "error"
+      ],
+      "type": "string"
+    },
+    "trace": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "duration_ms"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "kind",
+    "error",
+    "trace"
+  ],
+  "title": "ApiErrorEnvelope",
+  "type": "object"
+}

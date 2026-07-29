@@ -32,7 +32,7 @@ pub(super) struct RemoteIndex {
 #[derive(Clone, Debug, Default)]
 pub(super) struct CaseSuggestion {
     pub(super) case_uids: Vec<String>,
-    pub(super) reason: Option<String>,
+    pub(super) evidence: Option<CaseRelationshipEvidence>,
 }
 
 pub(super) struct PullIngestRenderContext {
@@ -61,14 +61,6 @@ impl PullIngestRenderContext {
         message.observed_recipient_emails = matched.observed_recipient_emails;
     }
 
-    fn quoted_message_id(&self, raw_eml: &[u8]) -> Option<&str> {
-        reply_header_message_ids(raw_eml)
-            .into_iter()
-            .rev()
-            .find_map(|id| self.rfc822_ids.get(&normalize_message_id(&id)))
-            .map(String::as_str)
-    }
-
     pub(super) fn observe(&mut self, message: &SavedMessage) {
         if let Some(rfc822_message_id) = message.rfc822_message_id.as_deref() {
             self.rfc822_ids
@@ -87,12 +79,15 @@ impl RemoteIndex {
             }
         }
         let case_uids = case_uids.into_iter().collect::<Vec<_>>();
-        let reason = if case_uids.is_empty() {
+        let evidence = if case_uids.is_empty() {
             None
         } else {
-            Some("In-Reply-To/References matched local case message-id".to_string())
+            Some(CaseRelationshipEvidence::ReplyHeadersMatchedLocalCase)
         };
-        CaseSuggestion { case_uids, reason }
+        CaseSuggestion {
+            case_uids,
+            evidence,
+        }
     }
 }
 
@@ -123,13 +118,13 @@ pub(super) fn save_remote_message(
     }
     apply_pull_target(&mut parsed.message, target);
     render_context.apply_identity(&mut parsed.message);
-    parsed.conversation = crate::store::render_message_section_with_resolved_quote(
-        root,
-        &parsed.message,
-        &parsed.body_text,
-        mail_config,
-        render_context.quoted_message_id(&remote.raw_eml),
-    )?;
+    parsed.message.case_relationship_suggestion =
+        suggestion
+            .evidence
+            .map(|evidence| CaseRelationshipSuggestion {
+                case_uids: suggestion.case_uids.clone(),
+                evidence,
+            });
     let messages_dir = root.join(".afmail/messages");
     create_dir_all(&messages_dir)?;
     let workspace = crate::store::Workspace::at(root);
@@ -167,15 +162,7 @@ pub(super) fn save_remote_message(
         create_dir_all(&root.join(layout::TRIAGE))?;
         write_string_atomic(
             &root.join(layout::TRIAGE).join(format!("{message_id}.md")),
-            &crate::store::render_triage_view(
-                root,
-                mail_config.template_language(),
-                &parsed.message,
-                &parsed.conversation,
-                suggestion.case_uids.clone(),
-                suggestion.reason.clone(),
-                Vec::new(),
-            )?,
+            &crate::store::render_triage_view(root, mail_config, &parsed.message, Vec::new())?,
         )?;
     }
     Ok(SavedMessage {
@@ -274,7 +261,7 @@ pub(super) fn load_case_refs_by_message_id(
             let collection: crate::types::CaseMessages = serde_json::from_str(&data)
                 .map_err(|e| AppError::json("parse case metadata", &e))?;
             if collection.schema_name != crate::types::CASE_SCHEMA_NAME
-                || collection.schema_version != crate::types::MESSAGE_COLLECTION_SCHEMA_VERSION
+                || collection.schema_version != crate::types::SUGGESTIBLE_COLLECTION_SCHEMA_VERSION
             {
                 return Err(AppError::new(
                     "case_metadata_invalid",
@@ -347,7 +334,7 @@ pub(super) fn add_remote_location_parts(
     } else {
         state.locations.push(location);
     }
-    workspace.persist_message_remote(&message)?;
+    workspace.persist_message_metadata(&message)?;
     workspace.write_message_materialized_cache(&message)?;
     Ok(update)
 }
@@ -407,7 +394,7 @@ pub(super) fn update_remote_location_flags_parts(
         changed = true;
     }
     if changed {
-        workspace.persist_message_remote(&message)?;
+        workspace.persist_message_metadata(&message)?;
         workspace.write_message_materialized_cache(&message)?;
     }
     Ok(update)
@@ -493,7 +480,7 @@ pub(super) fn unique_message_id(root: &Path, base: &str) -> String {
     let durable_dir = root.join(".afmail/messages");
     let cache_dir = root.join(layout::MESSAGES);
     if !durable_dir.join(format!("{base}.eml")).exists()
-        && !durable_dir.join(format!("{base}.remote.json")).exists()
+        && !durable_dir.join(format!("{base}.json")).exists()
         && !cache_dir.join(format!("{base}.json")).exists()
     {
         return base.to_string();
@@ -501,9 +488,7 @@ pub(super) fn unique_message_id(root: &Path, base: &str) -> String {
     for i in 1..1000 {
         let candidate = format!("{base}_{i}");
         if !durable_dir.join(format!("{candidate}.eml")).exists()
-            && !durable_dir
-                .join(format!("{candidate}.remote.json"))
-                .exists()
+            && !durable_dir.join(format!("{candidate}.json")).exists()
             && !cache_dir.join(format!("{candidate}.json")).exists()
         {
             return candidate;

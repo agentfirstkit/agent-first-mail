@@ -1,11 +1,12 @@
 use super::{OutboundAction, PushItem, PushStepStatus};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// The only remote intent that may be recorded in draft frontmatter.
 ///
 /// This is deliberately distinct from a completed remote outcome: both values
 /// mean that work is queued locally until a push succeeds.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DraftSyncIntent {
     SaveDraft,
@@ -40,7 +41,7 @@ impl From<DraftSyncIntent> for OutboundAction {
 }
 
 /// Whether the typed compose section contains agent/user-authored text.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DraftCompleteness {
     Complete,
@@ -49,7 +50,7 @@ pub enum DraftCompleteness {
 
 /// Observable state of a local draft. A successful send consumes the draft, so
 /// there is intentionally no `sent` variant here.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DraftStatus {
     Editable,
@@ -75,7 +76,8 @@ impl DraftProjectionIssue {
     }
 }
 
-/// One canonical projection shared by CLI and AFUI output.
+/// One canonical operational-state projection shared by CLI output and Review
+/// documents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DraftStateProjection {
     pub status: DraftStatus,
@@ -121,7 +123,7 @@ fn status_for_queued_item(intent: DraftSyncIntent, item: &PushItem) -> DraftStat
     if failed {
         return DraftStatus::Failed;
     }
-    if item.local_stage.is_some() || item.has_started_steps() {
+    if item.has_started_effects() {
         return DraftStatus::Pushing;
     }
     match intent {
@@ -133,12 +135,12 @@ fn status_for_queued_item(intent: DraftSyncIntent, item: &PushItem) -> DraftStat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DraftPush, PushPayload, PushStepState};
+    use crate::types::{DraftPush, PUSH_ITEM_SCHEMA_VERSION, PushPayload, PushStepState};
 
     fn push_item(status: Option<PushStepStatus>) -> PushItem {
         PushItem {
             schema_name: "push_item".to_string(),
-            schema_version: 1,
+            schema_version: PUSH_ITEM_SCHEMA_VERSION,
             push_id: "push_test".to_string(),
             enqueue_seq: 1,
             payload: PushPayload::Draft(Box::new(DraftPush {

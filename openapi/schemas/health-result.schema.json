@@ -1,0 +1,22 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/health-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "service": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "service",
+    "version",
+    "status"
+  ],
+  "title": "HealthResult",
+  "type": "object"
+}

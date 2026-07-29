@@ -1,0 +1,14 @@
+{%- import "i18n/catalog.j2" as i18n -%}
+{% set case = document.collection %}{% set message_document = document.message %}{% set mail = message_document.message %}---
+kind: case_message
+case_uid: {{ case.collection_uid }}
+case_name: {{ case.collection_name | yaml }}
+message_id: {{ mail.message_id }}
+---
+
+# {% if mail.subject %}{{ mail.subject | inline }}{% else %}{{ i18n.t('case_message') }}{% endif %}
+
+{{ i18n.t('case') }}: {{ i18n.collection_ref(case.collection_name | inline, case.collection_uid) }}
+{{ i18n.t('message') }}: `{{ mail.message_id }}`
+
+{% with document = message_document %}{% include "message/section.md.j2" %}{% endwith %}

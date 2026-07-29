@@ -1,0 +1,70 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/notification-suggestion-set-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "confidence_percent": {
+      "format": "uint8",
+      "maximum": 100,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "notification_review_base_hash": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "suggested_action": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "notification_rename",
+              "type": "string"
+            },
+            "notification_name": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "notification_name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "allow_notes": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "notification_delete",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "allow_notes"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "required": [
+    "notification_review_base_hash",
+    "suggested_action",
+    "reason"
+  ],
+  "title": "NotificationSuggestionSetRequest",
+  "type": "object"
+}

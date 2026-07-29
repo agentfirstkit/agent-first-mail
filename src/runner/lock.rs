@@ -1,7 +1,7 @@
 use crate::cli::{
     CaseCommand, CaseDraftAction, CaseNotesAction, Command, ConfigAction, ContactCommand,
-    ContactNotesAction, DoctorAction, MessageAction, NotificationCommand, NotificationNotesAction,
-    PushAction, RemoteAction, RenderAction, TriageAction,
+    ContactNotesAction, DemoAction, DoctorAction, MessageAction, NotificationCommand,
+    NotificationNotesAction, PushAction, RemoteAction, RenderAction, TriageAction,
 };
 use crate::error::Result;
 use crate::store::Workspace;
@@ -15,7 +15,13 @@ pub(super) struct CommandLock {
 
 pub(super) fn command_lock(command: &Command, cwd: &Path) -> Result<CommandLock> {
     let mode = lock_mode(command);
-    let root = if matches!(command, Command::Init { .. }) {
+    let root = if matches!(
+        command,
+        Command::Init { .. }
+            | Command::Demo {
+                action: DemoAction::Init { .. }
+            }
+    ) {
         cwd.to_path_buf()
     } else {
         Workspace::discover(cwd)?.root().to_path_buf()
@@ -25,6 +31,11 @@ pub(super) fn command_lock(command: &Command, cwd: &Path) -> Result<CommandLock>
 
 fn lock_mode(command: &Command) -> LockMode {
     match command {
+        Command::Api { .. } => LockMode::Shared,
+        Command::Demo { action } => match action {
+            DemoAction::Init { .. } => LockMode::Exclusive,
+            DemoAction::Serve { .. } => LockMode::Shared,
+        },
         Command::Init { .. } => LockMode::Exclusive,
         Command::Pull { dry_run, .. } => {
             if *dry_run {
@@ -69,11 +80,13 @@ fn lock_mode(command: &Command) -> LockMode {
         },
         Command::Skill { .. } => LockMode::Shared,
         Command::Triage { action } => match action {
-            TriageAction::List { .. } => LockMode::Shared,
+            TriageAction::List { .. } | TriageAction::Review { .. } => LockMode::Shared,
+            TriageAction::Suggestion { .. } => LockMode::Exclusive,
         },
         Command::Case { action } => match action {
             CaseCommand::Create(_) => LockMode::Exclusive,
             CaseCommand::Show { .. }
+            | CaseCommand::Review { .. }
             | CaseCommand::List { .. }
             | CaseCommand::Notes {
                 action: CaseNotesAction::Show { .. },
@@ -104,8 +117,6 @@ fn lock_mode(command: &Command) -> LockMode {
             _ => LockMode::Exclusive,
         },
         Command::Log { .. } => LockMode::Shared,
-        #[cfg(feature = "ui")]
-        Command::Ui(_) => LockMode::Shared,
     }
 }
 

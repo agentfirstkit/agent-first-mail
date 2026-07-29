@@ -1,0 +1,40 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/case-create-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "case_name": {
+      "type": "string"
+    },
+    "case_path": {
+      "type": "string"
+    },
+    "case_uid": {
+      "type": "string"
+    },
+    "group": {
+      "type": "string"
+    },
+    "message_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "message_ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "case_uid",
+    "case_name",
+    "group",
+    "message_ids",
+    "message_count",
+    "case_path"
+  ],
+  "title": "CaseCreateResult",
+  "type": "object"
+}

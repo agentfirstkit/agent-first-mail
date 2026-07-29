@@ -1,13 +1,1 @@
-# {{ case.collection_name }}
-
-Caso: {{ case.collection_uid }} · Mensagens: {{ view.message_count }}
-
-{% if items | length == 0 %}_Sem mensagens._
-{% elif view.conversation %}## Conversa
-
-<!-- afmail:conversation:start -->
-
-{{ view.conversation }}
-
-<!-- afmail:conversation:end -->
-{% endif %}
+{% import "i18n/catalog.j2" as i18n %}{% include "markdown/case-document.md.j2" %}

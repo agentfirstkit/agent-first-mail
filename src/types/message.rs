@@ -1,6 +1,23 @@
 use crate::error::{AppError, Result};
+use crate::types::{ContactFrontmatter, MessageAgentSuggestion, MessageHumanSuggestion};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+pub const MESSAGE_SCHEMA_VERSION: u64 = 2;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CaseRelationshipEvidence {
+    ReplyHeadersMatchedLocalCase,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CaseRelationshipSuggestion {
+    pub case_uids: Vec<String>,
+    pub evidence: CaseRelationshipEvidence,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MessageStatus {
@@ -85,7 +102,7 @@ impl MailDirection {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MessageFile {
     pub schema_name: String,
@@ -99,6 +116,12 @@ pub struct MessageFile {
     pub references: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_suggestion: Option<MessageAgentSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_suggestion: Option<MessageHumanSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_relationship_suggestion: Option<CaseRelationshipSuggestion>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,11 +160,11 @@ pub struct MessageFile {
     pub eml_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentRef>,
-    /// Contact association materialized from the sender address at
-    /// render/materialize time. Read-only on `message show`; refreshed when a
-    /// contact's emails or name change, or by `afmail render refresh`.
+    /// Exact contact frontmatter associated from the sender address at
+    /// render/materialize time. Read-only on `message show`; refreshed when the
+    /// canonical contact changes, or by `afmail render refresh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub contact: Option<MessageContact>,
+    pub contact: Option<ContactFrontmatter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,12 +178,20 @@ pub struct MessageFile {
     pub workspace: WorkspaceState,
 }
 
-/// Snapshot of the contact whose email set includes this message's sender.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct MessageContact {
-    pub contact_uid: String,
-    pub display_name: String,
+pub struct MessageMetadata {
+    pub schema_name: String,
+    pub schema_version: u64,
+    pub message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_suggestion: Option<MessageAgentSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_suggestion: Option<MessageHumanSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_relationship_suggestion: Option<CaseRelationshipSuggestion>,
 }
 
 /// Result of a single email authentication mechanism (SPF / DKIM / DMARC).
@@ -168,7 +199,7 @@ pub struct MessageContact {
 /// `Missing` means no `Authentication-Results` entry for the mechanism was
 /// present at all — which is a distinct, and arguably more suspicious, state
 /// than an explicit `none`.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthVerdict {
     Pass,
@@ -199,7 +230,7 @@ impl AuthVerdict {
 
 /// Whether the DMARC-authenticated domain lines up with the visible `From`
 /// domain. `Unknown` when there is nothing authenticated to compare against.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthAlignment {
     Aligned,
@@ -223,7 +254,7 @@ impl AuthAlignment {
 /// afmail does not classify mail; this only reports what the receiving server
 /// asserted (which domain authenticated, and whether it aligns with `From`).
 /// Pass authenticates the *domain*, not the legitimacy of the contents.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MessageAuthentication {
     #[serde(default)]
@@ -265,7 +296,7 @@ impl MessageAuthentication {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ImapRef {
     pub mailbox_name: String,
@@ -273,14 +304,14 @@ pub struct ImapRef {
     pub uid: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub locations: Vec<RemoteLocation>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteLocation {
     pub mailbox_name: String,
@@ -297,22 +328,20 @@ pub struct RemoteLocation {
     pub missing_rfc3339: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AttachmentRef {
     pub part_id: String,
     pub filename: String,
     pub content_type: String,
     pub size_bytes: u64,
-    #[serde(default)]
-    pub fetched: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceState {
     pub status: String,
@@ -330,14 +359,14 @@ pub struct WorkspaceState {
     pub push: Option<WorkspacePushState>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteSyncState {
     pub archive_eligible: bool,
     pub checked_rfc3339: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspacePushState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -346,7 +375,7 @@ pub struct WorkspacePushState {
     pub last_completed_rfc3339: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspacePendingPush {
     pub push_id: String,

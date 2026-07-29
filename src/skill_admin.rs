@@ -17,6 +17,7 @@ const SPEC: SkillSpec = SkillSpec {
     source: include_str!("../skills/agent-first-mail/SKILL.md"),
     title: "Agent-First Mail",
     marker_slug: "afmail",
+    assets: &[],
 };
 
 pub fn handle_action(action: SkillAction) -> Result<Value> {
@@ -140,6 +141,15 @@ mod tests {
         }
         assert!(SPEC.source.contains("push --confirm PLAN_ID"));
         assert!(SPEC.source.contains("purge --confirm PLAN_ID"));
+        assert!(
+            SPEC.source
+                .contains("the word `review` always means opening")
+        );
+        assert!(SPEC.source.contains("interactive UI sessions"));
+        assert!(
+            SPEC.source
+                .contains("afmail case draft review REF DRAFT_NAME")
+        );
     }
 
     #[test]

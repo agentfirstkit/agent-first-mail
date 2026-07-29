@@ -1,0 +1,40 @@
+{%- import "i18n/catalog.j2" as i18n -%}
+{%- set mail = document.message -%}
+{%- set analysis = document.analysis -%}
+{%- set authored = analysis.body.segments | selectattr("kind", "equalto", "authored") | first -%}
+{%- set authored_text = mail.body_text | text_range(authored.start_bytes, authored.end_bytes) if authored else '' -%}
+{%- set auth = mail.authentication -%}
+{%- if analysis.direction == 'inbound' %}{% set message_time = mail.received_rfc3339 or mail.sent_rfc3339 %}{% else %}{% set message_time = mail.sent_rfc3339 or mail.received_rfc3339 %}{% endif -%}
+### {% if analysis.direction == 'inbound' %}{{ i18n.t('received_from') }}{% else %}{{ i18n.t('sent_to') }}{% endif %} {% if analysis.direction == 'inbound' %}{% if mail.from %}{{ mail.from | inline }}{% else %}{{ i18n.t('unknown') }}{% endif %}{% else %}{% if mail.to %}{{ mail.to | map("inline") | join(", ") }}{% else %}{{ i18n.t('unknown') }}{% endif %}{% endif %} - {% if message_time %}{{ message_time | datetime }}{% else %}{{ i18n.t('unknown_time') }}{% endif %}
+
+- {{ i18n.t('message') }}: {% if message_link is defined and message_link %}[`{{ mail.message_id }}`]({{ message_link }}){% else %}`{{ mail.message_id }}`{% endif %}
+- {{ i18n.t('from') }}: {% if mail.from %}{{ mail.from | plain }}{% else %}{{ i18n.t('unknown') }}{% endif %}
+{% if mail.contact %}- {{ i18n.t('contact') }}: {{ mail.contact.display_name | plain }} (`{{ mail.contact.contact_uid }}`)
+{% endif %}{% if mail.subject %}- {{ i18n.t('subject') }}: {{ mail.subject | plain }}
+{% endif %}{% if mail.to %}- {{ i18n.t('to') }}: {{ mail.to | map("plain") | join(", ") }}
+{% endif %}{% if mail.cc %}- {{ i18n.t('cc') }}: {{ mail.cc | map("plain") | join(", ") }}
+{% endif %}{% if mail.bcc %}- {{ i18n.t('bcc') }}: {{ mail.bcc | map("plain") | join(", ") }}
+{% endif %}{% if mail.identity_match %}- {{ i18n.t('identity') }}: {% if mail.identity %}{{ mail.identity | plain }}{% else %}{{ mail.identity_match | plain }}{% endif %}{% if mail.identity_email %} {{ mail.identity_email | plain }}{% endif %}{% if mail.identity_candidates %} ({{ i18n.t('candidates') }}: {{ mail.identity_candidates | map("plain") | join(", ") }}){% endif %}{% if mail.observed_recipient_emails %} ({{ i18n.t('observed') }}: {{ mail.observed_recipient_emails | map("plain") | join(", ") }}){% endif %}
+{% endif %}{% if analysis.security.authentication_warning %}- {{ i18n.t('warnings') }}:
+{% if auth.spf != "pass" %}  - {{ i18n.t('authentication') }}: SPF {% if auth.spf == "missing" %}{{ i18n.t('missing') }}{% else %}{{ i18n.t('did_not_pass') }} ({{ auth.spf }}){% endif %}
+{% endif %}{% if auth.dkim != "pass" %}  - {{ i18n.t('authentication') }}: DKIM {% if auth.dkim == "missing" %}{{ i18n.t('missing') }}{% else %}{{ i18n.t('did_not_pass') }} ({{ auth.dkim }}){% endif %}
+{% endif %}{% if auth.dmarc != "pass" %}  - {{ i18n.t('authentication') }}: DMARC {% if auth.dmarc == "missing" %}{{ i18n.t('missing') }}{% else %}{{ i18n.t('did_not_pass') }} ({{ auth.dmarc }}){% endif %}
+{% endif %}{% if auth.alignment == "mismatch" %}  - {{ i18n.t('authentication') }}: {{ i18n.t('authenticated_domain') }} {% if auth.authenticated_domain %}{{ auth.authenticated_domain | plain }}{% else %}{{ i18n.t('unknown') }}{% endif %} {{ i18n.t('domain_mismatch') }} {{ i18n.t('from_domain') }} {% if auth.from_domain %}{{ auth.from_domain | plain }}{% else %}{{ i18n.t('unknown') }}{% endif %}
+{% endif %}{% endif %}{% set security = analysis.security %}{% if security.possible_bcc or security.reply_to_differs or security.sender_differs or mail.list_id or mail.mailing_list_headers %}- {{ i18n.t('notes') }}:
+{% if security.possible_bcc %}  - {{ i18n.t('possible_bcc') }}
+{% endif %}{% if security.reply_to_differs %}  - {{ i18n.t('reply_to_differs') }}: {{ mail.reply_to | map("plain") | join(", ") }}
+{% endif %}{% if security.sender_differs %}  - {{ i18n.t('sender_differs') }}: {{ mail.sender | plain }}
+{% endif %}{% if mail.list_id %}  - {{ i18n.t('mailing_list') }}: {{ mail.list_id | plain }}
+{% elif mail.mailing_list_headers %}  - {{ i18n.t('mailing_list_headers') }}: {{ mail.mailing_list_headers | map("plain") | join(" | ") }}
+{% endif %}{% endif %}
+
+{% if authored %}{% set fence = authored_text | markdown_fence %}{{ fence }}text
+{{ authored_text }}
+{{ fence }}
+{% else %}_{{ i18n.t('no_readable_body') }}_
+{% endif %}
+{% if mail.attachments %}
+{{ i18n.t('attachments') }}:
+{% for attachment in mail.attachments %}- `{{ attachment.filename | markdown_code }}` (`{{ attachment.content_type | markdown_code }}`, {{ attachment.size_bytes | bytes }}; `{{ mail.message_id }}`, {{ i18n.t('part') }} `{{ attachment.part_id | markdown_code }}`, {% if attachment.file_path %}{{ i18n.t('fetched') }}: `{{ attachment.file_path | markdown_code }}`{% else %}{{ i18n.t('not_fetched') }}{% endif %})
+{% if attachment.file_path and (attachment.content_type | is_image) %}![{{ attachment.filename | markdown_alt }}](<{{ attachment.file_path | asset_path }}>)
+{% endif %}{% endfor %}{% endif %}

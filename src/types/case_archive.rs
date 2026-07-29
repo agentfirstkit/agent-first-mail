@@ -1,14 +1,17 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::types::{
+    CaseAgentSuggestion, CaseHumanSuggestion, NotificationAgentSuggestion,
+    NotificationHumanSuggestion,
+};
 
 pub const CASE_SCHEMA_NAME: &str = "case";
 pub const NOTIFICATION_SCHEMA_NAME: &str = "notification";
-pub const MESSAGE_COLLECTION_SCHEMA_VERSION: u64 = 1;
+pub const MESSAGE_COLLECTION_SCHEMA_VERSION: u64 = 2;
+pub const SUGGESTIBLE_COLLECTION_SCHEMA_VERSION: u64 = 3;
 
-fn is_zero(value: &usize) -> bool {
-    *value == 0
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MessageCollectionItem {
     pub message_id: String,
@@ -17,7 +20,7 @@ pub struct MessageCollectionItem {
     pub added_rfc3339: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MessageCollection {
     pub schema_name: String,
@@ -34,16 +37,26 @@ pub struct MessageCollection {
     pub updated_rfc3339: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_rfc3339: Option<String>,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub message_count: usize,
-    #[serde(default, rename = "thread_count", skip_serializing)]
-    pub legacy_thread_count: usize,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub attachment_count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_message_rfc3339: Option<String>,
     #[serde(default)]
     pub items: Vec<MessageCollectionItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_suggestion: Option<CollectionAgentSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_suggestion: Option<CollectionHumanSuggestion>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CollectionAgentSuggestion {
+    Case(CaseAgentSuggestion),
+    Notification(NotificationAgentSuggestion),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CollectionHumanSuggestion {
+    Case(CaseHumanSuggestion),
+    Notification(NotificationHumanSuggestion),
 }
 
 pub type CaseMessages = MessageCollection;
@@ -62,16 +75,15 @@ impl MessageCollection {
             created_rfc3339: None,
             updated_rfc3339: None,
             archived_rfc3339: None,
-            message_count: 0,
-            legacy_thread_count: 0,
-            attachment_count: 0,
-            last_message_rfc3339: None,
             items: Vec::new(),
+            agent_suggestion: None,
+            human_suggestion: None,
         }
     }
 
     pub fn new_case(case_uid: &str, case_name: &str, now_rfc3339: &str) -> Self {
         let mut collection = Self::new(CASE_SCHEMA_NAME, case_uid, case_name);
+        collection.schema_version = SUGGESTIBLE_COLLECTION_SCHEMA_VERSION;
         collection.created_rfc3339 = Some(now_rfc3339.to_string());
         collection.updated_rfc3339 = Some(now_rfc3339.to_string());
         collection
@@ -87,6 +99,7 @@ impl MessageCollection {
             notification_uid,
             notification_name,
         );
+        collection.schema_version = SUGGESTIBLE_COLLECTION_SCHEMA_VERSION;
         collection.created_rfc3339 = Some(now_rfc3339.to_string());
         collection.updated_rfc3339 = Some(now_rfc3339.to_string());
         collection
@@ -101,6 +114,14 @@ impl MessageCollection {
 
     pub fn contains_message(&self, message_id: &str) -> bool {
         self.items.iter().any(|item| item.message_id == message_id)
+    }
+
+    pub(crate) fn duplicate_message_id(&self) -> Option<&str> {
+        let mut seen = std::collections::BTreeSet::new();
+        self.items
+            .iter()
+            .map(|item| item.message_id.as_str())
+            .find(|message_id| !seen.insert(*message_id))
     }
 
     pub fn upsert_item(
@@ -125,7 +146,6 @@ impl MessageCollection {
             summary,
             added_rfc3339: added_rfc3339.to_string(),
         });
-        self.message_count = self.items.len();
         true
     }
 
@@ -136,24 +156,6 @@ impl MessageCollection {
             }
             self.items.push(item.clone());
         }
-        self.message_count = self.items.len();
-    }
-
-    pub fn normalize(&mut self, schema_name: &str, collection_uid: &str, collection_name: &str) {
-        self.schema_name = schema_name.to_string();
-        self.schema_version = MESSAGE_COLLECTION_SCHEMA_VERSION;
-        self.collection_uid = collection_uid.to_string();
-        self.collection_name = collection_name.to_string();
-        let mut seen = Vec::new();
-        self.items.retain(|item| {
-            if seen.iter().any(|message_id| message_id == &item.message_id) {
-                false
-            } else {
-                seen.push(item.message_id.clone());
-                true
-            }
-        });
-        self.message_count = self.items.len();
     }
 }
 

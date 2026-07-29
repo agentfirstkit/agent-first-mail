@@ -6,38 +6,77 @@ struct NotificationRenderRow {
     message: MessageFile,
 }
 
-pub(super) fn notification_index_field_value(
-    field: NotificationIndexField,
-    message: &MessageFile,
-    item: &NotificationMessageItem,
-    offset: &FixedOffset,
-) -> Option<Value> {
-    let value = match field {
-        NotificationIndexField::Time => message_time_datetime(message, offset).unwrap_or_default(),
-        NotificationIndexField::From => message.from.clone().unwrap_or_default(),
-        NotificationIndexField::To => message.to.join(", "),
-        NotificationIndexField::Subject => message.subject.clone().unwrap_or_default(),
-        NotificationIndexField::Summary => item.summary.clone().unwrap_or_default(),
-        NotificationIndexField::MessageId => item.message_id.clone(),
-        NotificationIndexField::NotificationTime => item.added_rfc3339.clone(),
-        NotificationIndexField::Link => String::new(),
-    };
-    let keep_empty = matches!(
-        field,
-        NotificationIndexField::Time
-            | NotificationIndexField::From
-            | NotificationIndexField::Link
-            | NotificationIndexField::MessageId
-    );
-    if value.is_empty() && !keep_empty {
-        None
-    } else {
-        Some(json!({
-            "kind": field.as_str(),
-            "value": value,
-            "href": format!("views/messages/{}.md", item.message_id),
-        }))
+pub(super) fn validate_notification_collection(
+    root: &Path,
+    path: &Path,
+    notification_uid: &str,
+    expected_name: Option<&str>,
+    messages: &NotificationMessages,
+) -> Result<()> {
+    let duplicate_message_id = messages.duplicate_message_id();
+    let content_issues = message_collection_content_issues(messages);
+    let valid = messages.schema_name == NOTIFICATION_SCHEMA_NAME
+        && messages.schema_version == SUGGESTIBLE_COLLECTION_SCHEMA_VERSION
+        && messages.collection_uid == notification_uid
+        && validate_notification_uid(&messages.collection_uid).is_ok()
+        && expected_name.is_none_or(|name| messages.collection_name == name)
+        && messages.status.is_empty()
+        && messages.archived_rfc3339.is_none()
+        && content_issues.is_empty()
+        && duplicate_message_id.is_none();
+    if valid {
+        return Ok(());
     }
+    Err(AppError::new(
+        "notifications_invalid",
+        format!("invalid notification collection: {}", rel_path(root, path)),
+    )
+    .with_details(json!({
+        "path": rel_path(root, path),
+        "expected_schema_name": NOTIFICATION_SCHEMA_NAME,
+        "schema_name": messages.schema_name,
+        "expected_schema_version": SUGGESTIBLE_COLLECTION_SCHEMA_VERSION,
+        "schema_version": messages.schema_version,
+        "expected_collection_uid": notification_uid,
+        "collection_uid": messages.collection_uid,
+        "expected_collection_name": expected_name,
+        "collection_name": messages.collection_name,
+        "expected_status": "",
+        "status": messages.status,
+        "archived_rfc3339": messages.archived_rfc3339,
+        "duplicate_message_id": duplicate_message_id,
+        "content_issues": content_issues,
+    })))
+}
+
+fn validate_notification_message(
+    notification_uid: &str,
+    row: &NotificationRenderRow,
+) -> Result<()> {
+    let message = &row.message;
+    if message.workspace.status == MessageStatus::Notification.as_str()
+        && message.workspace.notification_uid.as_deref() == Some(notification_uid)
+        && message.workspace.notification_rfc3339.as_deref() == Some(&row.item.added_rfc3339)
+        && message.workspace.origin.is_none()
+    {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "notification_state_invalid",
+        format!(
+            "message {} does not match canonical notification {} membership",
+            message.message_id, notification_uid
+        ),
+    )
+    .with_details(json!({
+        "message_id": message.message_id,
+        "notification_uid": notification_uid,
+        "expected_notification_rfc3339": row.item.added_rfc3339,
+        "status": message.workspace.status,
+        "message_notification_uid": message.workspace.notification_uid,
+        "message_notification_rfc3339": message.workspace.notification_rfc3339,
+        "origin": message.workspace.origin,
+    })))
 }
 
 impl Workspace {
@@ -166,22 +205,26 @@ impl Workspace {
     pub fn notification_show(&self, notification_ref: &str) -> Result<Value> {
         self.require_workspace()?;
         let (notification_uid, notification_dir) = self.resolve_notification(notification_ref)?;
-        let data = self.read_notifications(&notification_uid)?;
-        for item in &data.items {
-            self.read_message_by_id(&item.message_id)?;
-        }
+        let context = self.notification_render_document(&notification_uid)?;
         let notification_path = self.notification_index_path(&notification_uid);
-        let text = read_generated_view(&self.root, &notification_path, "notification index")?;
-        Ok(json!({
-            "notification_uid": notification_uid,
-            "notification_name": data.collection_name,
-            "path": rel_path(&self.root, &notification_dir),
-            "view_path": rel_path(&self.root, &notification_path),
-            "notes_path": rel_path(&self.root, &notification_dir.join("notes.md")),
-            "message_count": data.items.len(),
-            "items": data.items,
-            "text": text,
-        }))
+        serde_json::to_value(CollectionShowDocument {
+            schema_name: "afmail_collection_show_document".to_string(),
+            schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+            context,
+            locator: CollectionShowLocator {
+                collection_path: rel_path(&self.root, &notification_dir),
+                view_path: notification_path
+                    .is_file()
+                    .then(|| rel_path(&self.root, &notification_path)),
+                notes_path: rel_path(&self.root, &notification_dir.join("notes.md")),
+                messages_path: rel_path(
+                    &self.root,
+                    &notification_dir.join("views").join("messages"),
+                ),
+            },
+            review_base_hash: self.notification_review_base_hash(notification_ref)?,
+        })
+        .map_err(|error| AppError::json("serialize notification show document", &error))
     }
 
     pub fn notification_remove(
@@ -472,10 +515,8 @@ impl Workspace {
         } else {
             String::new()
         };
-        let default_notes = new_notes_md(&self.root, self.template_language()?)?;
-        let notes_modified =
-            !notes_text.trim().is_empty() && notes_text.trim() != default_notes.trim();
-        if notes_modified && !allow_notes {
+        let notes_present = !notes_text.trim().is_empty();
+        if notes_present && !allow_notes {
             return Err(AppError::new(
                 "notification_notes_present",
                 format!("notification {notification_uid} has notes.md content"),
@@ -508,7 +549,7 @@ impl Workspace {
                 "notification_name": data.collection_name.clone(),
                 "from_path": path.clone(),
                 "notes_deleted": notes_exists,
-                "notes_modified": notes_modified,
+                "notes_present": notes_present,
                 "notes_len_bytes": notes_text.len(),
                 "notes_hash": stable_text_hash(&notes_text),
             }),
@@ -519,18 +560,22 @@ impl Workspace {
             "from_path": path,
             "deleted": true,
             "notes_deleted": notes_exists,
-            "notes_modified": notes_modified,
+            "notes_present": notes_present,
         }))
     }
 
     pub fn notification_notes_show(&self, notification_ref: &str) -> Result<Value> {
         let (notification_uid, _) = self.resolve_notification(notification_ref)?;
         let path = self.notification_notes_path(&notification_uid);
-        self.notes_show(
-            "notification_notes",
-            vec![audit_target("notification", &notification_uid)],
-            &path,
-        )
+        self.notes_show(&path)
+    }
+
+    pub(crate) fn notification_notes_render_document(
+        &self,
+        notification_ref: &str,
+    ) -> Result<NotesRenderDocument> {
+        let (notification_uid, _) = self.resolve_notification(notification_ref)?;
+        self.notes_render_document(&self.notification_notes_path(&notification_uid))
     }
 
     pub fn notification_notes_append(&self, notification_ref: &str, text: &str) -> Result<Value> {
@@ -634,27 +679,31 @@ impl Workspace {
         validate_notification_uid(notification_uid)?;
         let path = self.notification_json_path(notification_uid);
         if !path.exists() {
-            return Ok(NotificationMessages::new_notification(
-                notification_uid,
-                "",
-                &now_rfc3339(),
+            return Err(AppError::new(
+                "notifications_invalid",
+                format!(
+                    "notification collection is missing: {}",
+                    rel_path(&self.root, &path)
+                ),
             ));
         }
         let data = read_to_string(&path, "read notifications")?;
         let messages: NotificationMessages =
             serde_json::from_str(&data).map_err(|e| AppError::json("parse notifications", &e))?;
-        if messages.schema_name != NOTIFICATION_SCHEMA_NAME
-            || messages.schema_version != MESSAGE_COLLECTION_SCHEMA_VERSION
-            || messages.collection_uid != notification_uid
-        {
-            return Err(AppError::new(
+        validate_notification_collection(&self.root, &path, notification_uid, None, &messages)?;
+        super::suggestions::validate_notification_suggestion_pair(
+            messages.agent_suggestion.as_ref(),
+            messages.human_suggestion.as_ref(),
+        )
+        .map_err(|error| {
+            AppError::new(
                 "notifications_invalid",
                 format!(
-                    "invalid notifications schema: {}",
+                    "invalid suggestion metadata in {}: {error}",
                     rel_path(&self.root, &path)
                 ),
-            ));
-        }
+            )
+        })?;
         Ok(messages)
     }
 
@@ -672,13 +721,19 @@ impl Workspace {
         notification_name: &str,
         data: &NotificationMessages,
     ) -> Result<()> {
-        let mut normalized = data.clone();
-        normalized.normalize(
-            NOTIFICATION_SCHEMA_NAME,
+        let path = self.notification_json_path(notification_uid);
+        validate_notification_collection(
+            &self.root,
+            &path,
             notification_uid,
-            notification_name,
-        );
-        write_json_pretty(&self.notification_json_path(notification_uid), &normalized)
+            Some(notification_name),
+            data,
+        )?;
+        super::suggestions::validate_notification_suggestion_pair(
+            data.agent_suggestion.as_ref(),
+            data.human_suggestion.as_ref(),
+        )?;
+        write_json_pretty(&path, data)
     }
 
     pub(super) fn upsert_notification_item(
@@ -757,29 +812,9 @@ impl Workspace {
         create_dir_all(&self.root.join(layout::ARCHIVED_CASES))?;
         create_dir_all(&self.root.join(layout::NOTIFICATIONS))?;
         let language = self.template_language()?;
-        let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
+        let mut renderer = TemplateRenderer::new(&self.root, language);
         for notification_uid in self.notification_ids()? {
-            self.refresh_notification_with_renderer(&notification_uid, &mut renderer, true)?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn synchronize_notification_membership(&self) -> Result<()> {
-        for notification_uid in self.notification_ids()? {
-            let mut data = self.read_notifications(&notification_uid)?;
-            let rows = self
-                .notification_render_rows(&data.items)?
-                .into_iter()
-                .filter(|row| {
-                    row.message.workspace.notification_uid.as_deref()
-                        == Some(notification_uid.as_str())
-                })
-                .collect::<Vec<_>>();
-            if rows.len() != data.items.len() {
-                data.items = rows.into_iter().map(|row| row.item).collect();
-                data.updated_rfc3339 = Some(now_rfc3339());
-                self.write_notifications(&notification_uid, &data)?;
-            }
+            self.refresh_notification_with_renderer(&notification_uid, &mut renderer)?;
         }
         Ok(())
     }
@@ -787,14 +822,13 @@ impl Workspace {
     pub(super) fn refresh_notification_indexes_cached(
         &self,
         cache: &mut RenderCache,
-        sync_state: bool,
         render_context: &RenderContext,
         mut progress: Option<&mut crate::progress::ProgressCallback<'_>>,
     ) -> Result<NotificationViewRefresh> {
         create_dir_all(&self.root.join(layout::ARCHIVED_CASES))?;
         create_dir_all(&self.root.join(layout::NOTIFICATIONS))?;
         let language = render_context.config().template_language();
-        let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
+        let mut renderer = TemplateRenderer::new(&self.root, language);
         let mut totals = NotificationViewRefresh::default();
         let notification_ids = self.notification_ids()?;
         let total_count = notification_ids.len();
@@ -802,7 +836,6 @@ impl Workspace {
             let refresh = self.refresh_notification_with_cache(
                 &notification_uid,
                 &mut renderer,
-                sync_state,
                 cache,
                 render_context,
             )?;
@@ -832,32 +865,29 @@ impl Workspace {
 
     pub(super) fn refresh_notification(&self, notification_uid: &str) -> Result<()> {
         let language = self.template_language()?;
-        let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
-        self.refresh_notification_with_renderer(notification_uid, &mut renderer, true)?;
+        let mut renderer = TemplateRenderer::new(&self.root, language);
+        self.refresh_notification_with_renderer(notification_uid, &mut renderer)?;
         Ok(())
     }
 
     pub(super) fn refresh_notification_with_renderer(
         &self,
         notification_uid: &str,
-        renderer: &mut MarkdownTemplateRenderer<'_>,
-        sync_state: bool,
+        renderer: &mut TemplateRenderer<'_>,
     ) -> Result<NotificationViewRefresh> {
-        self.refresh_notification_inner(notification_uid, renderer, sync_state, None, None)
+        self.refresh_notification_inner(notification_uid, renderer, None, None)
     }
 
     pub(super) fn refresh_notification_with_cache(
         &self,
         notification_uid: &str,
-        renderer: &mut MarkdownTemplateRenderer<'_>,
-        sync_state: bool,
+        renderer: &mut TemplateRenderer<'_>,
         cache: &mut RenderCache,
         render_context: &RenderContext,
     ) -> Result<NotificationViewRefresh> {
         self.refresh_notification_inner(
             notification_uid,
             renderer,
-            sync_state,
             Some(cache),
             Some(render_context),
         )
@@ -866,8 +896,7 @@ impl Workspace {
     fn refresh_notification_inner(
         &self,
         notification_uid: &str,
-        renderer: &mut MarkdownTemplateRenderer<'_>,
-        sync_state: bool,
+        renderer: &mut TemplateRenderer<'_>,
         mut cache: Option<&mut RenderCache>,
         render_context: Option<&RenderContext>,
     ) -> Result<NotificationViewRefresh> {
@@ -875,19 +904,19 @@ impl Workspace {
         let notification_dir = self.notification_dir(notification_uid);
         let messages_dir = notification_dir.join("views").join("messages");
         create_dir_all(&messages_dir)?;
-        let mut data = self.read_notifications(notification_uid)?;
-        let before = data.items.len();
-        let rows = self
-            .notification_render_rows_with_context(&data.items, render_context)?
-            .into_iter()
-            .filter(|row| {
-                row.message.workspace.notification_uid.as_deref() == Some(notification_uid)
-            })
-            .collect::<Vec<_>>();
-        if sync_state && rows.len() != before {
-            data.items = rows.iter().map(|row| row.item.clone()).collect();
-            data.updated_rfc3339 = Some(now_rfc3339());
-            self.write_notifications(notification_uid, &data)?;
+        let owned_config = if render_context.is_none() {
+            Some(MailConfig::load(&self.root)?)
+        } else {
+            None
+        };
+        let config = render_context
+            .map(RenderContext::config)
+            .or(owned_config.as_ref())
+            .ok_or_else(|| AppError::new("internal", "render config was not initialized"))?;
+        let data = self.read_notifications(notification_uid)?;
+        let rows = self.notification_render_rows_with_context(&data.items, render_context)?;
+        for row in &rows {
+            validate_notification_message(notification_uid, row)?;
         }
         let desired = rows
             .iter()
@@ -898,47 +927,29 @@ impl Workspace {
             let item = &row.item;
             let message = &row.message;
             let view_path = self.notification_view_path(notification_uid, &item.message_id);
+            let document =
+                self.notification_message_render_document(message, &data, config, render_context)?;
             let outcome = if let Some(cache) = cache.as_deref_mut() {
-                let input_hash = self.render_input_hash_cached(
-                    cache,
-                    "notification",
-                    &view_path,
-                    &[
-                        TemplateKey::NotificationMessage,
-                        TemplateKey::MessageSection,
-                    ],
-                    json!({
-                        "notification_uid": notification_uid,
-                        "notification_name": data.collection_name.as_str(),
-                        "item": item,
-                        "message_hash": render_context
-                            .and_then(|context| context.snapshot(&message.message_id))
-                            .map(|snapshot| snapshot.hash.clone())
-                            .unwrap_or(blake3_json_fingerprint(message)?),
-                        "quoted_message_id": render_context
-                            .and_then(|context| context.quoted_message_id(&message.message_id)),
-                    }),
-                )?;
+                let input_hash =
+                    self.render_input_hash_cached(cache, "notification", &view_path, &document)?;
                 self.render_cached_string(cache, &view_path, "notification", input_hash, || {
-                    self.render_notification_view(
-                        message,
-                        notification_uid,
-                        &data.collection_name,
-                        item,
-                        renderer,
-                        view_path.parent(),
-                        render_context,
+                    renderer.render_with_options(
+                        TemplateKey::NotificationMessage,
+                        &document,
+                        TemplateRenderOptions {
+                            timezone_offset: Some(config.resolved_timezone_offset()),
+                            output_dir: view_path.parent(),
+                        },
                     )
                 })?
             } else {
-                let rendered = self.render_notification_view(
-                    message,
-                    notification_uid,
-                    &data.collection_name,
-                    item,
-                    renderer,
-                    view_path.parent(),
-                    render_context,
+                let rendered = renderer.render_with_options(
+                    TemplateKey::NotificationMessage,
+                    &document,
+                    TemplateRenderOptions {
+                        timezone_offset: Some(config.resolved_timezone_offset()),
+                        output_dir: view_path.parent(),
+                    },
                 )?;
                 write_string(&view_path, &rendered)?;
                 FileWriteOutcome::Written
@@ -959,48 +970,30 @@ impl Workspace {
                 }
             }
         }
-        let owned_config = if render_context.is_none() {
-            Some(MailConfig::load(&self.root)?)
-        } else {
-            None
-        };
-        let config = render_context
-            .map(RenderContext::config)
-            .or(owned_config.as_ref())
-            .ok_or_else(|| AppError::new("internal", "render config was not initialized"))?;
         let index_path = notification_dir.join("notification.md");
+        let document =
+            self.notification_index_render_document(&data, &rows, config, render_context)?;
         let index_outcome = if let Some(cache) = cache {
-            let input_hash = self.render_input_hash_cached(
-                cache,
-                "notification_index",
-                &index_path,
-                &[TemplateKey::NotificationIndex],
-                json!({
-                    "notification_uid": notification_uid,
-                    "notification_name": data.collection_name.as_str(),
-                    "items": rows.iter().map(|row| row.item.clone()).collect::<Vec<_>>(),
-                    "message_hashes": rows
-                        .iter()
-                        .map(|row| blake3_json_fingerprint(&row.message))
-                        .collect::<Result<Vec<_>>>()?,
-                }),
-            )?;
+            let input_hash =
+                self.render_input_hash_cached(cache, "notification_index", &index_path, &document)?;
             self.render_cached_string(cache, &index_path, "notification_index", input_hash, || {
-                self.render_notification_index_rows(
-                    notification_uid,
-                    &data.collection_name,
-                    &rows,
-                    config,
-                    renderer,
+                renderer.render_with_options(
+                    TemplateKey::NotificationIndex,
+                    &document,
+                    TemplateRenderOptions {
+                        timezone_offset: Some(config.resolved_timezone_offset()),
+                        output_dir: index_path.parent(),
+                    },
                 )
             })?
         } else {
-            let rendered = self.render_notification_index_rows(
-                notification_uid,
-                &data.collection_name,
-                &rows,
-                config,
-                renderer,
+            let rendered = renderer.render_with_options(
+                TemplateKey::NotificationIndex,
+                &document,
+                TemplateRenderOptions {
+                    timezone_offset: Some(config.resolved_timezone_offset()),
+                    output_dir: index_path.parent(),
+                },
             )?;
             write_string(&index_path, &rendered)?;
             FileWriteOutcome::Written
@@ -1015,14 +1008,13 @@ impl Workspace {
         })
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_notification_view(
         &self,
         message: &MessageFile,
-        notification_uid: &str,
-        notification_name: &str,
-        item: &NotificationMessageItem,
-        renderer: &mut MarkdownTemplateRenderer<'_>,
+        notification: &NotificationMessages,
+        renderer: &mut TemplateRenderer<'_>,
         output_dir: Option<&Path>,
         render_context: Option<&RenderContext>,
     ) -> Result<String> {
@@ -1035,41 +1027,35 @@ impl Workspace {
             .map(RenderContext::config)
             .or(owned_config.as_ref())
             .ok_or_else(|| AppError::new("internal", "render config was not initialized"))?;
-        let title = message.subject.as_deref().unwrap_or("");
-        let message_value = message_template_value(message)?;
-        let item_value = serde_json::to_value(item)
-            .map_err(|e| AppError::json("serialize notification item", &e))?;
-        let conversation = self.message_conversation_with_renderer_context(
+        let document = self.notification_message_render_document(
             message,
+            notification,
             config,
-            renderer,
-            output_dir,
             render_context,
         )?;
-        let context = json!({
-            "frontmatter": {
-                "kind": "notification",
-                "message_id": message.message_id.as_str(),
-                "notification_uid": notification_uid,
-                "notification_name": notification_name,
-                "added_rfc3339": item.added_rfc3339.as_str(),
+        renderer.render_with_options(
+            TemplateKey::NotificationMessage,
+            &document,
+            TemplateRenderOptions {
+                timezone_offset: Some(config.resolved_timezone_offset()),
+                output_dir,
             },
-            "notification": {
-                "notification_uid": notification_uid,
-                "notification_name": notification_name,
-            },
-            "message": message_value,
-            "item": item_value,
-            "view": {
-                "language": config.resolved_language_bcp47(),
-                "title": title,
-                "display_title": markdown_inline(title),
-                "summary": item.summary.as_deref().unwrap_or(""),
-                "added_rfc3339": item.added_rfc3339.as_str(),
-                "conversation": conversation.trim(),
-            },
-        });
-        renderer.render(TemplateKey::NotificationMessage, &context)
+        )
+    }
+
+    fn notification_message_render_document(
+        &self,
+        message: &MessageFile,
+        notification: &NotificationMessages,
+        config: &MailConfig,
+        render_context: Option<&RenderContext>,
+    ) -> Result<CollectionMessageRenderDocument> {
+        let message = self.message_render_document_with_context(message, config, render_context)?;
+        Ok(collection_message_render_document(
+            notification.clone(),
+            message,
+            None,
+        ))
     }
 
     #[cfg(test)]
@@ -1079,23 +1065,16 @@ impl Workspace {
         notification_name: &str,
         data_items: &[NotificationMessageItem],
         config: &MailConfig,
-        renderer: &mut MarkdownTemplateRenderer<'_>,
+        renderer: &mut TemplateRenderer<'_>,
     ) -> Result<String> {
-        let rows = self.notification_render_rows(data_items)?;
-        self.render_notification_index_rows(
+        let rows = self.notification_render_rows_with_context(data_items, None)?;
+        let mut notification = NotificationMessages::new_notification(
             notification_uid,
             notification_name,
-            &rows,
-            config,
-            renderer,
-        )
-    }
-
-    fn notification_render_rows(
-        &self,
-        data_items: &[NotificationMessageItem],
-    ) -> Result<Vec<NotificationRenderRow>> {
-        self.notification_render_rows_with_context(data_items, None)
+            &now_rfc3339(),
+        );
+        notification.items = data_items.to_vec();
+        self.render_notification_index_rows(&notification, &rows, config, renderer, None)
     }
 
     fn notification_render_rows_with_context(
@@ -1117,127 +1096,46 @@ impl Workspace {
             .collect()
     }
 
+    #[cfg(test)]
     fn render_notification_index_rows(
         &self,
-        notification_uid: &str,
-        notification_name: &str,
+        notification: &NotificationMessages,
         rows: &[NotificationRenderRow],
         config: &MailConfig,
-        renderer: &mut MarkdownTemplateRenderer<'_>,
+        renderer: &mut TemplateRenderer<'_>,
+        render_context: Option<&RenderContext>,
     ) -> Result<String> {
-        let mut rows = rows.to_vec();
-        rows.sort_by(|a, b| {
-            let a_time = message_time(&a.message).unwrap_or_else(|| a.item.added_rfc3339.clone());
-            let b_time = message_time(&b.message).unwrap_or_else(|| b.item.added_rfc3339.clone());
-            compare_rfc3339_asc(&b_time, &a_time)
-                .then_with(|| a.item.message_id.cmp(&b.item.message_id))
-        });
-        let mut rendered_items = Vec::new();
-        let offset = config.resolved_timezone_offset();
-        for row in &rows {
-            let item = &row.item;
-            let message = &row.message;
-            let fields = config
-                .notification
-                .message_index
-                .item_fields
-                .iter()
-                .filter_map(|field| notification_index_field_value(*field, message, item, &offset))
-                .collect::<Vec<_>>();
-            let has_message_id = config
-                .notification
-                .message_index
-                .item_fields
-                .contains(&NotificationIndexField::MessageId);
-            let has_link = config
-                .notification
-                .message_index
-                .item_fields
-                .contains(&NotificationIndexField::Link);
-            let mut second = Vec::new();
-            if !has_message_id || !has_link {
-                if !has_message_id {
-                    second.push(json!({
-                        "kind": "message_id",
-                        "value": item.message_id.as_str(),
-                    }));
-                }
-                if !has_link {
-                    second.push(json!({
-                        "kind": "link",
-                        "href": format!("views/messages/{}.md", item.message_id),
-                    }));
-                }
-            }
-            let title = item
-                .summary
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .or(message.subject.as_deref())
-                .unwrap_or(item.message_id.as_str())
-                .to_string();
-            let mut rendered_item = thread_item_common(
-                message,
-                &offset,
-                format!("views/messages/{}.md", item.message_id),
-                title,
-            )?;
-            if let Value::Object(map) = &mut rendered_item {
-                if let Some(Value::Object(view)) = map.get_mut("view") {
-                    view.insert(
-                        "summary".to_string(),
-                        json!(item.summary.as_deref().unwrap_or("")),
-                    );
-                    view.insert(
-                        "display_summary".to_string(),
-                        json!(
-                            item.summary
-                                .as_deref()
-                                .map(markdown_inline)
-                                .unwrap_or_default()
-                        ),
-                    );
-                    view.insert(
-                        "added_rfc3339".to_string(),
-                        json!(item.added_rfc3339.as_str()),
-                    );
-                    view.insert(
-                        "added_time".to_string(),
-                        time_context(&item.added_rfc3339, &offset),
-                    );
-                    view.insert("fields".to_string(), json!(fields));
-                    view.insert("secondary".to_string(), json!(second));
-                }
-                map.insert(
-                    "item".to_string(),
-                    serde_json::to_value(item)
-                        .map_err(|e| AppError::json("serialize notification item", &e))?,
-                );
-            }
-            rendered_items.push(rendered_item);
-        }
-        let context = json!({
-            "notification": {
-                "notification_uid": notification_uid,
-                "notification_name": notification_name,
+        let document =
+            self.notification_index_render_document(notification, rows, config, render_context)?;
+        let output_dir = self.notification_dir(&notification.collection_uid);
+        renderer.render_with_options(
+            TemplateKey::NotificationIndex,
+            &document,
+            TemplateRenderOptions {
+                timezone_offset: Some(config.resolved_timezone_offset()),
+                output_dir: Some(&output_dir),
             },
-            "items": rendered_items,
-            "view": {
-                "language": config.resolved_language_bcp47(),
-                "message_count": rendered_items.len(),
-            },
-            "config": {
-                "notification": {
-                    "message_index": {
-                        "item_fields": config.notification.message_index.item_fields
-                            .iter()
-                            .map(|field| field.as_str())
-                            .collect::<Vec<_>>(),
-                    },
-                },
-            },
-        });
-        renderer.render(TemplateKey::NotificationIndex, &context)
+        )
+    }
+
+    fn notification_index_render_document(
+        &self,
+        notification: &NotificationMessages,
+        rows: &[NotificationRenderRow],
+        config: &MailConfig,
+        render_context: Option<&RenderContext>,
+    ) -> Result<CollectionRenderDocument> {
+        let messages = rows
+            .iter()
+            .map(|row| row.message.clone())
+            .collect::<Vec<_>>();
+        let messages =
+            self.message_render_documents_with_context(&messages, config, render_context)?;
+        Ok(collection_render_document(
+            notification.clone(),
+            messages,
+            None,
+        ))
     }
 
     pub(super) fn notification_ids(&self) -> Result<Vec<String>> {

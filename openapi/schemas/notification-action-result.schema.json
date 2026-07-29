@@ -1,0 +1,15 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/notification-action-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "notification_uid": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "notification_uid"
+  ],
+  "title": "NotificationActionResult",
+  "type": "object"
+}

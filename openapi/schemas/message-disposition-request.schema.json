@@ -1,0 +1,26 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/message-disposition-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "disposition": {
+      "enum": [
+        "spam",
+        "trash",
+        "unspam",
+        "untrash"
+      ],
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "disposition",
+    "reason"
+  ],
+  "title": "MessageDispositionRequest",
+  "type": "object"
+}

@@ -1,0 +1,52 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/notification-action-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "rename",
+          "type": "string"
+        },
+        "notification_name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "notification_name",
+        "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "allow_notes": {
+          "type": "boolean"
+        },
+        "kind": {
+          "const": "delete",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "allow_notes",
+        "reason"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "NotificationActionRequest"
+}

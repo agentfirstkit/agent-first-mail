@@ -1,17 +1,1 @@
----
-kind: {{ frontmatter.kind }}
-case_uid: {{ frontmatter.case_uid }}
-case_name: {{ frontmatter.case_name }}
-message_id: {{ frontmatter.message_id }}
----
-
-# {% if view.display_title %}{{ view.display_title }}{% else %}Case message{% endif %}
-
-Case: {{ case.case_name }} (`{{ case.case_uid }}`)
-Message: `{{ message.message_id }}`
-
-<!-- afmail:conversation:start -->
-
-{{ view.conversation }}
-
-<!-- afmail:conversation:end -->
+{% import "i18n/catalog.j2" as i18n %}{% include "markdown/case-message.md.j2" %}

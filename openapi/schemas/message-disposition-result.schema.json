@@ -1,0 +1,58 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/message-disposition-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": true,
+      "properties": {
+        "message_id": {
+          "type": "string"
+        },
+        "message_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "queued": {
+          "type": "boolean"
+        },
+        "special_use": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message_id",
+        "special_use",
+        "message_ids",
+        "queued"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": true,
+      "properties": {
+        "from_status": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "queued": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message_id",
+        "from_status",
+        "status",
+        "queued"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "MessageDispositionResult"
+}

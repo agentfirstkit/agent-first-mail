@@ -19,7 +19,7 @@ pub enum ContactCommand {
         #[arg(long)]
         role: Option<String>,
     },
-    /// Show a contact's full file content.
+    /// Show the exact typed contact document used by its Markdown template.
     Show {
         /// Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix.
         contact_ref: String,
@@ -187,7 +187,7 @@ pub enum ContactPhoneAction {
 
 #[derive(Subcommand, Debug)]
 pub enum ContactNotesAction {
-    /// Show notes markdown.
+    /// Show the typed contact document with raw notes Markdown.
     Show {
         /// Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix.
         contact_ref: String,

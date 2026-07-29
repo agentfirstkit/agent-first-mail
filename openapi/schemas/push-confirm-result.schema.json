@@ -1,0 +1,128 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/push-confirm-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "audit_pending_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "audit_warnings": {
+      "items": true,
+      "type": "array"
+    },
+    "confirmed": {
+      "type": "boolean"
+    },
+    "failed_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "failures": {
+      "items": true,
+      "type": "array"
+    },
+    "partially_applied_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "plan_id": {
+      "type": "string"
+    },
+    "pushed_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "remaining_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "stopped_after_failure": {
+      "type": "boolean"
+    },
+    "succeeded_items": {
+      "items": {
+        "properties": {
+          "action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "audit_pending": {
+            "type": "boolean"
+          },
+          "case_uid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_kind": {
+            "type": "string"
+          },
+          "draft_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "push_id": {
+            "type": "string"
+          },
+          "succeeded_step_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "push_id",
+          "kind",
+          "display_kind",
+          "message_ids",
+          "succeeded_step_count",
+          "audit_pending"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "workspace_path": {
+      "type": "string"
+    },
+    "workspace_uid": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "confirmed",
+    "plan_id",
+    "workspace_uid",
+    "workspace_path",
+    "pushed_count",
+    "failed_count",
+    "partially_applied_count",
+    "audit_pending_count",
+    "stopped_after_failure",
+    "remaining_count",
+    "succeeded_items",
+    "failures",
+    "audit_warnings"
+  ],
+  "title": "PushConfirmResult",
+  "type": "object"
+}

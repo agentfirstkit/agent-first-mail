@@ -1,0 +1,18 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/case-list-query.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "scope": {
+      "default": "active",
+      "enum": [
+        "active",
+        "archived",
+        "all"
+      ],
+      "type": "string"
+    }
+  },
+  "title": "CaseListQuery",
+  "type": "object"
+}

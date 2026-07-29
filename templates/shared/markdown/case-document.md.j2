@@ -1,0 +1,12 @@
+{%- import "i18n/catalog.j2" as i18n -%}
+{% set case_document = document %}{% set case = case_document.collection %}# {{ case.collection_name | inline }}
+
+{{ i18n.t('case') }}: {{ case.collection_uid }} · {{ i18n.t('messages_label') }}: {{ case_document.messages | length }}
+
+{% if not case_document.messages %}_{{ i18n.t('no_messages') }}_
+{% else %}## {{ i18n.t('conversation') }}
+
+{% for message_document in case_document.messages | chronological %}{% set link = "views/messages/" ~ message_document.message.message_id ~ ".md" %}{% with document = message_document, message_link = link %}{% include "message/section.md.j2" %}{% endwith %}{% if not loop.last %}
+
+{% endif %}{% endfor %}
+{% endif %}

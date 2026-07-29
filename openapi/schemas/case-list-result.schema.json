@@ -1,0 +1,72 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/case-list-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "active_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "archived_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "archiving_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "items": {
+      "items": {
+        "properties": {
+          "case_dir": {
+            "type": "string"
+          },
+          "case_name": {
+            "type": "string"
+          },
+          "case_uid": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "case_uid",
+          "case_name",
+          "group",
+          "status",
+          "case_dir"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "path_templates": true,
+    "scope": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "scope",
+    "count",
+    "active_count",
+    "archiving_count",
+    "archived_count",
+    "path_templates",
+    "items"
+  ],
+  "title": "CaseListResult",
+  "type": "object"
+}

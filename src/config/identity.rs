@@ -449,12 +449,15 @@ mod tests {
     fn message(to: Vec<String>, delivered_to: Vec<String>) -> MessageFile {
         MessageFile {
             schema_name: "message".to_string(),
-            schema_version: 1,
+            schema_version: crate::types::MESSAGE_SCHEMA_VERSION,
             message_id: "message_id".to_string(),
             rfc822_message_id: None,
             in_reply_to: None,
             references: Vec::new(),
             remote: None::<RemoteState>,
+            agent_suggestion: None,
+            human_suggestion: None,
+            case_relationship_suggestion: None,
             direction: Some("inbound".to_string()),
             subject: None,
             from: Some("sender@example.com".to_string()),

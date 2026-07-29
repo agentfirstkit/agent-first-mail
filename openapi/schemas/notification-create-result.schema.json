@@ -1,0 +1,29 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/notification-create-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "message_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "notification_name": {
+      "type": "string"
+    },
+    "notification_uid": {
+      "type": "string"
+    },
+    "path": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "notification_uid",
+    "notification_name",
+    "message_count",
+    "path"
+  ],
+  "title": "NotificationCreateResult",
+  "type": "object"
+}

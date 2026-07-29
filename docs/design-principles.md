@@ -1,16 +1,27 @@
 # Core Design Principles
 
-## 1. Files Are The Read Interface
+## 1. Files Are The Default Local Read Interface
 
 Agents and humans should read Markdown and JSON files directly. The CLI exists
 for effects: moving local attention state, queueing remote work, composing mail,
 fetching attachments, and writing audit events.
 
+The typed HTTP API is the integration interface for Agent runtimes and
+applications that need an explicit machine contract. It publishes OpenAPI and
+standalone JSON Schemas but enters the same dispatch, locks, transaction guards,
+idempotency records, store methods, and push plan confirmation as the CLI. It is
+not another state model, and neither API clients nor UIs may edit machine state
+behind those boundaries.
+
 Commands assigned a shared lock are strict `Read` or `Plan` operations: they may
-project EML, sidecars, object state, identities, contacts, and push effects in
+project EML, canonical metadata, object state, identities, contacts, and push effects in
 memory, but they do not change workspace files, directories, bytes, or mtimes.
 Generated caches and views are materialized only by explicit write paths such as
 pull, mutation, repair, or `afmail render refresh`.
+
+An API server holds no workspace lock for its lifetime. Each request takes only
+the shared or exclusive lock required by its corresponding command, so a
+long-running local integration surface does not block normal afmail work.
 
 ## 2. Active Attention Is Separate From Archiving And Archived Cases
 
@@ -20,7 +31,7 @@ completed cases:
 
 - `archived-cases/<group>/<case_uid>-<name>/` with `status: archiving` and no
   `archived_rfc3339` is an archiving case workspace.
-- The same path with lifecycle `archived` is a finalized case workspace; its
+- The same path with `status: archived` is a finalized case workspace; its
   `<group>` segment is the case group carried forward from active work, not an
   archive category.
 - `notifications/<notification_uid>-<name>/` is a notification collection.
@@ -84,7 +95,16 @@ Generated triage views, case `case.md`, case `views/messages/*.md`,
 notification `notification.md`, and notification `views/messages/*.md` should be reproducible from
 message evidence and canonical `data/*.json` state. Persistent human edits
 belong in notes, drafts, files, or `templates/` when the user is
-intentionally customizing generated read-view templates.
+intentionally customizing generated Markdown or Review templates. Both outputs
+contain the same typed render documents; presentation remains in templates.
+
+Suggestions preserve this boundary. `agent_suggestion` and `human_suggestion`
+are typed annotations on canonical message, case, or notification JSON. They
+never live in generated Markdown and never get a separate recommendation or
+review-record file. A new Agent suggestion replaces the current round and clears
+its human response; audit records the transition but is not replayed into current
+state. Rendering only projects canonical state and cannot create, recover, or
+modify a suggestion.
 
 Drafts remain ordinary Markdown, and files under `drafts/` are the only
 editable source. afmail records validation metadata in case-local

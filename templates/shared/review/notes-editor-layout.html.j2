@@ -1,0 +1,9 @@
+{%- import "i18n/catalog.j2" as i18n -%}
+{% set notes = notes_state.document %}<form class="panel" data-afmail-autosave>
+  <input type="hidden" name="action" value="save_notes">
+  <input type="hidden" name="base_hash" value="{{ notes_state.base_hash }}" data-afmail-base-hash>
+  <h2>{{ i18n.t('notes') }}</h2>
+  <p class="muted">{{ i18n.t('private_markdown_notes') }}</p>
+  <label><span>{{ i18n.t('notes') }}</span><textarea class="editor-body" name="text">{{ notes.text }}</textarea></label>
+  <div class="save-row"><span class="muted">{{ notes.notes_path }}</span><span class="save-state" data-afmail-save-status aria-live="polite"></span></div>
+</form>

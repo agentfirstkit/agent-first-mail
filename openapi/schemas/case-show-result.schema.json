@@ -1,0 +1,1681 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/case-show-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "context": {
+      "additionalProperties": false,
+      "properties": {
+        "collection": {
+          "additionalProperties": false,
+          "properties": {
+            "agent_suggestion": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "agent_suggestion_uid": {
+                          "type": "string"
+                        },
+                        "case_review_base_hash": {
+                          "type": "string"
+                        },
+                        "confidence_percent": {
+                          "format": "uint8",
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "created_rfc3339": {
+                          "type": "string"
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "suggested_action": {
+                          "oneOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "case_archive",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "group": {
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "const": "case_unarchive",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "group"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "group": {
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "const": "case_move",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "group"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "case_name": {
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "const": "case_rename",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "case_name"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "case_tag",
+                                  "type": "string"
+                                },
+                                "tag": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "tag"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "case_untag",
+                                  "type": "string"
+                                },
+                                "tag": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "tag"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "case_trash",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "allow_notes": {
+                                  "type": "boolean"
+                                },
+                                "kind": {
+                                  "const": "case_delete",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "allow_notes"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "agent_suggestion_uid",
+                        "case_review_base_hash",
+                        "suggested_action",
+                        "reason",
+                        "created_rfc3339"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "agent_suggestion_uid": {
+                          "type": "string"
+                        },
+                        "confidence_percent": {
+                          "format": "uint8",
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "created_rfc3339": {
+                          "type": "string"
+                        },
+                        "notification_review_base_hash": {
+                          "type": "string"
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "suggested_action": {
+                          "oneOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "notification_rename",
+                                  "type": "string"
+                                },
+                                "notification_name": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "notification_name"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "allow_notes": {
+                                  "type": "boolean"
+                                },
+                                "kind": {
+                                  "const": "notification_delete",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "allow_notes"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "agent_suggestion_uid",
+                        "notification_review_base_hash",
+                        "suggested_action",
+                        "reason",
+                        "created_rfc3339"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "archived_rfc3339": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "collection_name": {
+              "type": "string"
+            },
+            "collection_uid": {
+              "type": "string"
+            },
+            "created_rfc3339": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "human_suggestion": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "based_on_agent_suggestion_uid": {
+                          "type": "string"
+                        },
+                        "case_review_base_hash": {
+                          "type": "string"
+                        },
+                        "created_rfc3339": {
+                          "type": "string"
+                        },
+                        "human_suggestion_uid": {
+                          "type": "string"
+                        },
+                        "outcome": {
+                          "enum": [
+                            "accepted",
+                            "changed",
+                            "rejected",
+                            "deferred"
+                          ],
+                          "type": "string"
+                        },
+                        "reason": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "suggested_action": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "case_archive",
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "group": {
+                                      "type": "string"
+                                    },
+                                    "kind": {
+                                      "const": "case_unarchive",
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "group"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "group": {
+                                      "type": "string"
+                                    },
+                                    "kind": {
+                                      "const": "case_move",
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "group"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "case_name": {
+                                      "type": "string"
+                                    },
+                                    "kind": {
+                                      "const": "case_rename",
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "case_name"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "case_tag",
+                                      "type": "string"
+                                    },
+                                    "tag": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "tag"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "case_untag",
+                                      "type": "string"
+                                    },
+                                    "tag": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "tag"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "case_trash",
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "allow_notes": {
+                                      "type": "boolean"
+                                    },
+                                    "kind": {
+                                      "const": "case_delete",
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "allow_notes"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "human_suggestion_uid",
+                        "based_on_agent_suggestion_uid",
+                        "case_review_base_hash",
+                        "outcome",
+                        "created_rfc3339"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "based_on_agent_suggestion_uid": {
+                          "type": "string"
+                        },
+                        "created_rfc3339": {
+                          "type": "string"
+                        },
+                        "human_suggestion_uid": {
+                          "type": "string"
+                        },
+                        "notification_review_base_hash": {
+                          "type": "string"
+                        },
+                        "outcome": {
+                          "enum": [
+                            "accepted",
+                            "changed",
+                            "rejected",
+                            "deferred"
+                          ],
+                          "type": "string"
+                        },
+                        "reason": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "suggested_action": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "notification_rename",
+                                      "type": "string"
+                                    },
+                                    "notification_name": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "notification_name"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "allow_notes": {
+                                      "type": "boolean"
+                                    },
+                                    "kind": {
+                                      "const": "notification_delete",
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "allow_notes"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "human_suggestion_uid",
+                        "based_on_agent_suggestion_uid",
+                        "notification_review_base_hash",
+                        "outcome",
+                        "created_rfc3339"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "items": {
+              "default": [],
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "added_rfc3339": {
+                    "type": "string"
+                  },
+                  "message_id": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "message_id",
+                  "added_rfc3339"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "schema_name": {
+              "type": "string"
+            },
+            "schema_version": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "type": "string"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "updated_rfc3339": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "schema_name",
+            "schema_version",
+            "collection_uid",
+            "collection_name"
+          ],
+          "type": "object"
+        },
+        "location": {
+          "additionalProperties": false,
+          "properties": {
+            "group": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "group"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "messages": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "analysis": {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "message",
+                      "reply",
+                      "forward"
+                    ],
+                    "type": "string"
+                  },
+                  "body": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "segments": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "end_bytes": {
+                              "format": "uint",
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "kind": {
+                              "enum": [
+                                "authored",
+                                "quoted"
+                              ],
+                              "type": "string"
+                            },
+                            "start_bytes": {
+                              "format": "uint",
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "start_bytes",
+                            "end_bytes"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "segments"
+                    ],
+                    "type": "object"
+                  },
+                  "direction": {
+                    "enum": [
+                      "inbound",
+                      "outbound"
+                    ],
+                    "type": "string"
+                  },
+                  "security": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "authentication_warning": {
+                        "type": "boolean"
+                      },
+                      "possible_bcc": {
+                        "type": "boolean"
+                      },
+                      "reply_to_differs": {
+                        "type": "boolean"
+                      },
+                      "sender_differs": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "authentication_warning",
+                      "possible_bcc",
+                      "reply_to_differs",
+                      "sender_differs"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "direction",
+                  "action",
+                  "body",
+                  "security"
+                ],
+                "type": "object"
+              },
+              "content_provenance": {
+                "additionalProperties": false,
+                "properties": {
+                  "source": {
+                    "enum": [
+                      "remote_mail"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source"
+                ],
+                "type": "object"
+              },
+              "content_trust": {
+                "enum": [
+                  "untrusted_remote"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "additionalProperties": false,
+                "properties": {
+                  "agent_suggestion": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "agent_suggestion_uid": {
+                        "type": "string"
+                      },
+                      "confidence_percent": {
+                        "format": "uint8",
+                        "maximum": 255,
+                        "minimum": 0,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "created_rfc3339": {
+                        "type": "string"
+                      },
+                      "message_review_base_hash": {
+                        "type": "string"
+                      },
+                      "reason": {
+                        "type": "string"
+                      },
+                      "suggested_action": {
+                        "oneOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "case_name": {
+                                "type": "string"
+                              },
+                              "group": {
+                                "type": "string"
+                              },
+                              "kind": {
+                                "const": "case_create",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "case_name",
+                              "group"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "case_ref": {
+                                "type": "string"
+                              },
+                              "kind": {
+                                "const": "case_add",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "case_ref"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "notification_create",
+                                "type": "string"
+                              },
+                              "notification_name": {
+                                "type": "string"
+                              },
+                              "summary": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "notification_name",
+                              "summary"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "notification_add",
+                                "type": "string"
+                              },
+                              "notification_ref": {
+                                "type": "string"
+                              },
+                              "summary": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "notification_ref",
+                              "summary"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "spam",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "trash",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind"
+                            ],
+                            "type": "object"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "agent_suggestion_uid",
+                      "message_review_base_hash",
+                      "suggested_action",
+                      "reason",
+                      "created_rfc3339"
+                    ],
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "attachments": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "content_type": {
+                          "type": "string"
+                        },
+                        "file_path": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "filename": {
+                          "type": "string"
+                        },
+                        "part_id": {
+                          "type": "string"
+                        },
+                        "size_bytes": {
+                          "format": "uint64",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "source_path": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "part_id",
+                        "filename",
+                        "content_type",
+                        "size_bytes"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "authentication": {
+                    "additionalProperties": false,
+                    "default": {
+                      "alignment": "unknown",
+                      "dkim": "missing",
+                      "dmarc": "missing",
+                      "spf": "missing"
+                    },
+                    "description": "Structured view of a message's `Authentication-Results` headers.\n\nafmail does not classify mail; this only reports what the receiving server\nasserted (which domain authenticated, and whether it aligns with `From`).\nPass authenticates the *domain*, not the legitimacy of the contents.",
+                    "properties": {
+                      "alignment": {
+                        "default": "unknown",
+                        "description": "Whether the DMARC-authenticated domain lines up with the visible `From`\ndomain. `Unknown` when there is nothing authenticated to compare against.",
+                        "enum": [
+                          "aligned",
+                          "mismatch",
+                          "unknown"
+                        ],
+                        "type": "string"
+                      },
+                      "authenticated_domain": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "dkim": {
+                        "default": "missing",
+                        "description": "Result of a single email authentication mechanism (SPF / DKIM / DMARC).\n\n`Missing` means no `Authentication-Results` entry for the mechanism was\npresent at all — which is a distinct, and arguably more suspicious, state\nthan an explicit `none`.",
+                        "enum": [
+                          "pass",
+                          "fail",
+                          "soft_fail",
+                          "neutral",
+                          "none",
+                          "temp_error",
+                          "perm_error",
+                          "missing"
+                        ],
+                        "type": "string"
+                      },
+                      "dmarc": {
+                        "default": "missing",
+                        "description": "Result of a single email authentication mechanism (SPF / DKIM / DMARC).\n\n`Missing` means no `Authentication-Results` entry for the mechanism was\npresent at all — which is a distinct, and arguably more suspicious, state\nthan an explicit `none`.",
+                        "enum": [
+                          "pass",
+                          "fail",
+                          "soft_fail",
+                          "neutral",
+                          "none",
+                          "temp_error",
+                          "perm_error",
+                          "missing"
+                        ],
+                        "type": "string"
+                      },
+                      "dmarc_policy": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "from_domain": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "raw": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "spf": {
+                        "default": "missing",
+                        "description": "Result of a single email authentication mechanism (SPF / DKIM / DMARC).\n\n`Missing` means no `Authentication-Results` entry for the mechanism was\npresent at all — which is a distinct, and arguably more suspicious, state\nthan an explicit `none`.",
+                        "enum": [
+                          "pass",
+                          "fail",
+                          "soft_fail",
+                          "neutral",
+                          "none",
+                          "temp_error",
+                          "perm_error",
+                          "missing"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "bcc": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "body_text": {
+                    "default": "",
+                    "type": "string"
+                  },
+                  "case_relationship_suggestion": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "case_uids": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "evidence": {
+                        "enum": [
+                          "reply_headers_matched_local_case"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "case_uids",
+                      "evidence"
+                    ],
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "cc": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "contact": {
+                    "additionalProperties": false,
+                    "description": "Exact contact frontmatter associated from the sender address at\nrender/materialize time. Read-only on `message show`; refreshed when the\ncanonical contact changes, or by `afmail render refresh`.",
+                    "properties": {
+                      "contact_uid": {
+                        "type": "string"
+                      },
+                      "created_rfc3339": {
+                        "type": "string"
+                      },
+                      "display_name": {
+                        "type": "string"
+                      },
+                      "emails": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "kind": {
+                        "type": "string"
+                      },
+                      "organization": {
+                        "default": "",
+                        "type": "string"
+                      },
+                      "phones": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "role": {
+                        "default": "",
+                        "type": "string"
+                      },
+                      "tags": {
+                        "default": [],
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "updated_rfc3339": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "contact_uid",
+                      "display_name",
+                      "created_rfc3339",
+                      "updated_rfc3339"
+                    ],
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "delivered_to": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "direction": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "eml_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "envelope_to": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "from": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "human_suggestion": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "based_on_agent_suggestion_uid": {
+                        "type": "string"
+                      },
+                      "created_rfc3339": {
+                        "type": "string"
+                      },
+                      "human_suggestion_uid": {
+                        "type": "string"
+                      },
+                      "message_review_base_hash": {
+                        "type": "string"
+                      },
+                      "outcome": {
+                        "enum": [
+                          "accepted",
+                          "changed",
+                          "rejected",
+                          "deferred"
+                        ],
+                        "type": "string"
+                      },
+                      "reason": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "suggested_action": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "case_name": {
+                                    "type": "string"
+                                  },
+                                  "group": {
+                                    "type": "string"
+                                  },
+                                  "kind": {
+                                    "const": "case_create",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "case_name",
+                                  "group"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "case_ref": {
+                                    "type": "string"
+                                  },
+                                  "kind": {
+                                    "const": "case_add",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "case_ref"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "notification_create",
+                                    "type": "string"
+                                  },
+                                  "notification_name": {
+                                    "type": "string"
+                                  },
+                                  "summary": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "notification_name",
+                                  "summary"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "notification_add",
+                                    "type": "string"
+                                  },
+                                  "notification_ref": {
+                                    "type": "string"
+                                  },
+                                  "summary": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "notification_ref",
+                                  "summary"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "spam",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "trash",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "human_suggestion_uid",
+                      "based_on_agent_suggestion_uid",
+                      "message_review_base_hash",
+                      "outcome",
+                      "created_rfc3339"
+                    ],
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "identity": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "identity_candidates": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "identity_email": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "identity_match": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "in_reply_to": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "list_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "mailing_list_headers": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "message_id": {
+                    "type": "string"
+                  },
+                  "observed_recipient_emails": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "received_rfc3339": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "references": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "remote": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "locations": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "flags": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            },
+                            "mailbox_id": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "mailbox_name": {
+                              "type": "string"
+                            },
+                            "missing_rfc3339": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "observed_rfc3339": {
+                              "type": "string"
+                            },
+                            "uid": {
+                              "format": "uint64",
+                              "minimum": 0,
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "uid_validity": {
+                              "format": "uint64",
+                              "minimum": 0,
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "mailbox_name",
+                            "observed_rfc3339"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "reply_to": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "rfc822_message_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "schema_name": {
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "sender": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "sent_rfc3339": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "subject": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "to": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "workspace": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "notification_rfc3339": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "notification_uid": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "origin": {
+                        "description": "Provenance tag for messages whose archived status comes from a remote\nsource rather than an explicit local disposition (e.g. \"imap-archive\").",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "push": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "last_completed_rfc3339": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "pending": {
+                            "items": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "type": "string"
+                                },
+                                "last_error": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "push_id": {
+                                  "type": "string"
+                                },
+                                "queued_rfc3339": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "push_id",
+                                "kind",
+                                "queued_rfc3339"
+                              ],
+                              "type": "object"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "type": [
+                          "object",
+                          "null"
+                        ]
+                      },
+                      "remote_sync": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "archive_eligible": {
+                            "type": "boolean"
+                          },
+                          "checked_rfc3339": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "archive_eligible",
+                          "checked_rfc3339"
+                        ],
+                        "type": [
+                          "object",
+                          "null"
+                        ]
+                      },
+                      "status": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ],
+                    "type": "object"
+                  },
+                  "x_original_to": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "schema_name",
+                  "schema_version",
+                  "message_id",
+                  "workspace"
+                ],
+                "type": "object"
+              },
+              "schema_name": {
+                "type": "string"
+              },
+              "schema_version": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "schema_name",
+              "schema_version",
+              "content_trust",
+              "content_provenance",
+              "message",
+              "analysis"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "schema_name": {
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_name",
+        "schema_version",
+        "collection",
+        "messages"
+      ],
+      "type": "object"
+    },
+    "locator": {
+      "additionalProperties": false,
+      "properties": {
+        "collection_path": {
+          "type": "string"
+        },
+        "messages_path": {
+          "type": "string"
+        },
+        "notes_path": {
+          "type": "string"
+        },
+        "view_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "collection_path",
+        "notes_path",
+        "messages_path"
+      ],
+      "type": "object"
+    },
+    "review_base_hash": {
+      "type": "string"
+    },
+    "schema_name": {
+      "type": "string"
+    },
+    "schema_version": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_name",
+    "schema_version",
+    "context",
+    "locator",
+    "review_base_hash"
+  ],
+  "title": "CaseShowResult",
+  "type": "object"
+}

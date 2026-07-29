@@ -1,18 +1,1 @@
----
-kind: {{ frontmatter.kind }}
-status: {{ frontmatter.status }}
-message_count: {{ frontmatter.message_count }}
----
-
-# {% if view.status == 'spam' %}Spam{% elif view.status == 'trashed' %}Trash{% else %}Remote Deleted{% endif %}
-
-{% if items | length == 0 %}_No messages._
-{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.direction_kind == 'received' %}Received{% else %}Sent{% endif %}{% if item.view.action == 'reply' %} reply{% elif item.view.action == 'forward' %} forward{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
-
-{% if item.view.display_contact %}- {% if item.view.contact_kind == 'from' %}From{% else %}To{% endif %}: {{ item.view.display_contact }}
-{% endif %}- Message: [{{ item.message.message_id }}]({{ item.view.link }})
-- Workspace status: {% if view.status == 'spam' %}Spam{% elif view.status == 'trashed' %}Trash{% else %}Remote deleted{% endif %} (`{{ view.status }}`)
-{% if item.view.time.datetime %}- Time: {{ item.view.time.datetime }}
-{% endif %}
-
-{% endfor %}{% endif %}
+{% import "i18n/catalog.j2" as i18n %}{% include "markdown/status-index.md.j2" %}

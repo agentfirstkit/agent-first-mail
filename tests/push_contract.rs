@@ -148,14 +148,15 @@ fn run_confirmed_push_with_env(cwd: &std::path::Path, envs: &[(&str, &str)]) -> 
         Ok(value) => value,
         Err(_) => return (99, String::new()),
     };
+    let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+    let stderr = String::from_utf8(output.stderr).unwrap_or_default();
     assert!(
-        output.stderr.is_empty(),
-        "stderr must stay empty: {}",
-        String::from_utf8_lossy(&output.stderr)
+        stdout.is_empty() || stderr.is_empty(),
+        "default split routing produced both streams\nstdout: {stdout}\nstderr: {stderr}"
     );
     (
         output.status.code().unwrap_or(99),
-        String::from_utf8(output.stdout).unwrap_or_default(),
+        if stdout.is_empty() { stderr } else { stdout },
     )
 }
 
@@ -838,16 +839,12 @@ fn write_case_fixture(
         &case_dir.join("data/case.json"),
         &json!({
             "schema_name": "case",
-            "schema_version": 1,
+            "schema_version": 3,
             "collection_uid": case_uid,
             "collection_name": case_name,
             "tags": [],
             "created_rfc3339": "2026-05-21T10:00:00Z",
             "updated_rfc3339": "2026-05-21T10:00:00Z",
-            "message_count": message_ids.len(),
-            "thread_count": 0,
-            "attachment_count": 0,
-            "last_message_rfc3339": "2026-05-21T10:00:00Z",
             "items": message_ids
                 .iter()
                 .map(|message_id| json!({
@@ -1769,15 +1766,6 @@ fn queued_send_case_archive_transitions_through_archiving_after_push() {
         "customer needs a reply",
     );
 
-    // Drain the case.add push item queued by case creation before queuing the draft
-    // send below. Archiving this message later requires its notification push item to
-    // run strictly after the draft's send push item (the draft file, and the reference
-    // it holds on the message, is only cleared once the send push completes); draining
-    // the case.add push now keeps that later notification item's enqueue_seq later than
-    // the draft's, matching real user behavior of pushing queued work incrementally.
-    let (status, stdout) = run_confirmed_push(&root);
-    assert_eq!(status, 0, "{stdout}");
-
     let draft = draft_with_compose(format!(
         "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: reply\nreply_to_message_id: message_archive_after_send\nto:\n  - bob@example.com\ncc: []\nsubject: \"Done\"\nattachments:\n---\n\nHandled\n"
     ));
@@ -1791,7 +1779,7 @@ fn queued_send_case_archive_transitions_through_archiving_after_push() {
     );
     assert_eq!(status, 0, "{stdout}");
     let archived = parse_one(&stdout);
-    assert_eq!(archived["lifecycle"], "archiving");
+    assert_eq!(archived["status"], "archiving");
     let archived_path = root.join(format!(
         "archived-cases/support/{case_uid}-archive-after-send"
     ));
@@ -1803,23 +1791,17 @@ fn queued_send_case_archive_transitions_through_archiving_after_push() {
     assert_eq!(list["scope"], "active");
     assert_eq!(list["count"], 1, "{list}");
     assert_eq!(list["items"][0]["case_uid"], case_uid);
-    assert_eq!(list["items"][0]["lifecycle"], "archiving");
+    assert_eq!(list["items"][0]["status"], "archiving");
     assert_eq!(
         parse_one(&run(&root, &["case", "list", "--archived"]).1)["count"],
         0
     );
     let push = parse_one(&run(&root, &["push", "list"]).1);
     assert_eq!(push["count"], 2, "{push}");
-    assert!(push["items"].as_array().is_some_and(|items| {
-        items
-            .iter()
-            .any(|item| item["kind"] == "draft" && item["action"] == "send")
-    }));
-    assert!(push["items"].as_array().is_some_and(|items| {
-        items
-            .iter()
-            .any(|item| item["kind"] == "message" && item["action"] == "notification")
-    }));
+    assert_eq!(push["items"][0]["kind"], "draft", "{push}");
+    assert_eq!(push["items"][0]["action"], "send", "{push}");
+    assert_eq!(push["items"][1]["kind"], "message", "{push}");
+    assert_eq!(push["items"][1]["action"], "notification", "{push}");
 
     let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 0, "{stdout}");
@@ -1856,7 +1838,7 @@ fn queued_send_case_archive_transitions_through_archiving_after_push() {
     assert_eq!(case_data["status"], "archived");
     let list = parse_one(&run(&root, &["case", "list", "--archived"]).1);
     assert_eq!(list["count"], 1);
-    assert_eq!(list["items"][0]["lifecycle"], "archived");
+    assert_eq!(list["items"][0]["status"], "archived");
     assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
     let _ = fs::remove_dir_all(root);
 }
@@ -1926,7 +1908,7 @@ fn archived_case_unarchive_removes_archive_push_and_preserves_queued_send() {
     );
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["source_status"], "archived");
+    assert_eq!(value["source_status"], "archiving");
     assert_eq!(value["removed_push_count"], 1);
     let restored_path = root.join(format!("cases/support/{case_uid}-archived-unarchive"));
     assert!(restored_path.exists());
@@ -2114,7 +2096,7 @@ fn archived_case_remove_and_delete_empty_case() {
     );
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["archived"], true);
+    assert_eq!(value["status"], "archiving");
     if !push_id.is_empty() {
         assert_eq!(value["push_ids"], json!([push_id]));
     }
@@ -2437,7 +2419,7 @@ fn case_trash_discards_entire_related_conversation() {
     );
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["source_status"], "active");
+    assert_eq!(value["source_status"], "");
     assert_eq!(value["trashed_message_count"], 2);
     assert_eq!(
         value["message_ids"],
@@ -2931,7 +2913,8 @@ fn push_multiple_sends_logs_incremental_refresh_progress() {
         0
     );
 
-    let (status, stdout) = run_confirmed_push_with_global_args(&root, &["--log", "progress"]);
+    let (status, stdout) =
+        run_confirmed_push_with_global_args(&root, &["--output-to", "stdout", "--log", "progress"]);
     assert_eq!(status, 0, "{stdout}");
     let lines = parse_lines(&stdout);
     let progress = lines

@@ -5,9 +5,6 @@ use noyalib::{
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-pub const CONVERSATION_START: &str = "<!-- afmail:conversation:start -->";
-pub const CONVERSATION_END: &str = "<!-- afmail:conversation:end -->";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkdownDoc {
     pub frontmatter: String,
@@ -120,70 +117,9 @@ pub fn render_frontmatter<T: Serialize>(frontmatter: &T, body: &str) -> Result<S
     ))
 }
 
-pub fn extract_conversation(input: &str) -> Result<String> {
-    let start = input.find(CONVERSATION_START).ok_or_else(|| {
-        AppError::new("invalid_request", "conversation start marker was not found")
-    })?;
-    let after_start = start + CONVERSATION_START.len();
-    let end_rel = input[after_start..]
-        .find(CONVERSATION_END)
-        .ok_or_else(|| AppError::new("invalid_request", "conversation end marker was not found"))?;
-    let end = after_start + end_rel;
-    Ok(input[after_start..end].trim_matches('\n').to_string())
-}
-
-pub fn append_conversation(case_md: &str, conversation: &str) -> Result<String> {
-    let end = case_md.find(CONVERSATION_END).ok_or_else(|| {
-        AppError::new(
-            "invalid_request",
-            "case conversation end marker was not found",
-        )
-    })?;
-    let before = case_md[..end].trim_end();
-    let after = &case_md[end..];
-    Ok(format!("{before}\n\n{}\n\n{after}", conversation.trim()))
-}
-
-pub fn replace_conversation(markdown: &str, conversation: &str) -> Result<String> {
-    let start = markdown.find(CONVERSATION_START).ok_or_else(|| {
-        AppError::new("invalid_request", "conversation start marker was not found")
-    })?;
-    let after_start = start + CONVERSATION_START.len();
-    let end_rel = markdown[after_start..]
-        .find(CONVERSATION_END)
-        .ok_or_else(|| AppError::new("invalid_request", "conversation end marker was not found"))?;
-    let end = after_start + end_rel;
-    let before = markdown[..after_start].trim_end();
-    let after = markdown[end..].trim_start_matches('\n');
-    Ok(format!("{before}\n\n{}\n\n{after}", conversation.trim()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extracts_and_appends_conversation() {
-        let triage = format!("a\n{CONVERSATION_START}\nhello\n{CONVERSATION_END}\nz");
-        let conversation = extract_conversation(&triage);
-        assert_eq!(conversation, Ok("hello".to_string()));
-        let case_md = format!("a\n{CONVERSATION_START}\nold\n{CONVERSATION_END}\nz");
-        let updated = append_conversation(&case_md, "new");
-        assert!(updated.is_ok());
-        assert!(
-            updated
-                .as_ref()
-                .map(|s| s.contains("old\n\nnew"))
-                .unwrap_or(false)
-        );
-        let replaced = replace_conversation(&case_md, "new");
-        assert_eq!(
-            replaced,
-            Ok(format!(
-                "a\n{CONVERSATION_START}\n\nnew\n\n{CONVERSATION_END}\nz"
-            ))
-        );
-    }
 
     #[test]
     fn normalizes_only_bare_null_mapping_values() {

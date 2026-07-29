@@ -1,0 +1,35 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/draft-delete-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "case_uid": {
+      "type": "string"
+    },
+    "draft_deleted": {
+      "type": "boolean"
+    },
+    "draft_name": {
+      "type": "string"
+    },
+    "draft_path": {
+      "type": "string"
+    },
+    "mail_sent": {
+      "type": "boolean"
+    },
+    "queued_removed": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "case_uid",
+    "draft_name",
+    "draft_path",
+    "draft_deleted",
+    "queued_removed",
+    "mail_sent"
+  ],
+  "title": "DraftDeleteResult",
+  "type": "object"
+}

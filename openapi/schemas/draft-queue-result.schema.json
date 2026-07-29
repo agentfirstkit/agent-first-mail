@@ -1,0 +1,42 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/draft-queue-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "action": {
+      "type": "string"
+    },
+    "case_uid": {
+      "type": "string"
+    },
+    "completeness": {
+      "type": "string"
+    },
+    "draft_name": {
+      "type": "string"
+    },
+    "draft_path": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "last_validated_rfc3339": {
+      "type": "string"
+    },
+    "push_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "push_id",
+    "kind",
+    "action",
+    "case_uid",
+    "draft_name",
+    "draft_path",
+    "completeness",
+    "last_validated_rfc3339"
+  ],
+  "title": "DraftQueueResult",
+  "type": "object"
+}

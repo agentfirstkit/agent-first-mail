@@ -1,0 +1,148 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/message-suggestion-set-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "confidence_percent": {
+      "format": "uint8",
+      "maximum": 100,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "message_review_base_hash": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "suggested_action": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case_name": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "group": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "kind": {
+              "const": "case_create",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "case_name",
+            "group"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "case_ref": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "kind": {
+              "const": "case_add",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "case_ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "notification_create",
+              "type": "string"
+            },
+            "notification_name": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "summary": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "notification_name",
+            "summary"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "notification_add",
+              "type": "string"
+            },
+            "notification_ref": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "summary": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "notification_ref",
+            "summary"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "spam",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "trash",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "required": [
+    "message_review_base_hash",
+    "suggested_action",
+    "reason"
+  ],
+  "title": "MessageSuggestionSetRequest",
+  "type": "object"
+}

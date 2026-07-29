@@ -899,7 +899,7 @@ mod tests {
     fn outbound_item(push_id: &str, step_states: Vec<PushStepState>) -> PushItem {
         PushItem {
             schema_name: "push_item".to_string(),
-            schema_version: 1,
+            schema_version: PUSH_ITEM_SCHEMA_VERSION,
             push_id: push_id.to_string(),
             enqueue_seq: 1,
             payload: PushPayload::Draft(Box::new(DraftPush {
@@ -960,7 +960,7 @@ mod tests {
                 &path,
                 &json!({
                     "schema_name": "message",
-                    "schema_version": 1,
+                    "schema_version": crate::types::MESSAGE_SCHEMA_VERSION,
                     "message_id": message_id,
                     "rfc822_message_id": rfc822_message_id,
                     "remote": {
@@ -1144,11 +1144,12 @@ mod tests {
             )));
         let item = PushItem {
             schema_name: "push_item".to_string(),
-            schema_version: 1,
+            schema_version: PUSH_ITEM_SCHEMA_VERSION,
             push_id: "push_move_partial".to_string(),
             enqueue_seq: 1,
             payload: PushPayload::Message(MessagePush {
                 message_id: "message_one".to_string(),
+                action: MessagePushAction::Spam,
             }),
             planned_outbound: None,
             planned_outbound_message: None,

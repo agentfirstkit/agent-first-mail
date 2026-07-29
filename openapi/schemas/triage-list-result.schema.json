@@ -1,0 +1,39 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/triage-list-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "items": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "message_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "returned_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "count",
+    "returned_count",
+    "items"
+  ],
+  "title": "TriageListResult",
+  "type": "object"
+}

@@ -1,10 +1,9 @@
-//! Typed metadata for markdown frontmatter and adjacent JSON state.
+//! Typed metadata for canonical user-authored Markdown frontmatter.
 //!
-//! Draft and triage markdown use `markdown::read_doc::<T>` and
-//! `markdown::render_frontmatter`; cases store the same typed metadata in
-//! `data/case.json`. Body content (conversation blocks, notes sections) is never
-//! modeled here; it stays raw markdown.
+//! Draft Markdown uses `markdown::read_doc::<T>` and
+//! `markdown::render_frontmatter`. Body content stays raw Markdown.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::types::DraftSyncIntent;
@@ -23,7 +22,8 @@ where
 
 /// Frontmatter of an agent-authored `drafts/*.md`. Shared by draft validation
 /// and outbound message building so both agree on one schema.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DraftFrontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
@@ -70,43 +70,6 @@ pub struct IdentityFileFrontmatter {
     pub footer: Option<String>,
 }
 
-/// Frontmatter of a generated `triage/message_*.md` view.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct TriageFrontmatter {
-    pub kind: String,
-    pub message_id: String,
-    #[serde(
-        default,
-        deserialize_with = "de_null_seq",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub message_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generated_rfc3339: Option<String>,
-    #[serde(default)]
-    pub message_count: usize,
-    #[serde(default)]
-    pub attachment_count: usize,
-    #[serde(
-        default,
-        deserialize_with = "de_null_seq",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub suggested_case_uids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suggested_reason: Option<String>,
-}
-
-/// Frontmatter of generated `cases/<group>/<case-uid>/views/messages/<message-id>.md`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct CaseMessageFrontmatter {
-    pub kind: String,
-    pub case_uid: String,
-    pub message_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generated_rfc3339: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,8 +108,7 @@ mod tests {
     fn case_round_trips_through_render() {
         let mut fm = CaseFrontmatter::new_case("c20260521001", "Acme", "2026-05-30T00:00:00Z");
         fm.tags = vec!["legal".to_string()];
-        fm.attachment_count = 1;
-        let body = "\n# Title\n\n<!-- afmail:conversation:start -->\nhi\n<!-- afmail:conversation:end -->\n";
+        let body = "\n# Title\n\nhi\n";
         let rendered = render_frontmatter(&fm, body);
         assert!(rendered.is_ok());
         if let Ok(rendered) = rendered {

@@ -1,4 +1,12 @@
-use clap::Subcommand;
+use clap::{Args, Subcommand, ValueEnum};
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ReviewMode {
+    /// Open a local review window.
+    Local,
+    /// Print a one-time review URL for the trusted local network.
+    Lan,
+}
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigAction {
@@ -37,6 +45,76 @@ pub enum TriageAction {
         #[arg(long)]
         details: bool,
     },
+    /// Set or clear the current typed Agent suggestion for a message.
+    Suggestion {
+        #[command(subcommand)]
+        action: TriageSuggestionAction,
+    },
+    /// Open a review session for persisted triage suggestions.
+    Review {
+        /// Message ids to review. With none, review every current triage suggestion.
+        message_id: Vec<String>,
+        /// Review presentation mode.
+        #[arg(long, value_enum, default_value = "local")]
+        mode: ReviewMode,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TriageSuggestionAction {
+    /// Replace the current suggestion and clear any human review of the prior round.
+    Set(TriageSuggestionSetArgs),
+    /// Clear exactly the current suggestion round.
+    Clear {
+        /// Message id whose current suggestion round should be cleared.
+        message_id: String,
+        /// UID returned by the current suggestion set command.
+        #[arg(long)]
+        agent_suggestion_uid: String,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct TriageSuggestionSetArgs {
+    /// Message id currently in triage.
+    pub message_id: String,
+    /// Current hash returned by `afmail message show`.
+    #[arg(long)]
+    pub message_review_base_hash: String,
+    /// Why this complete action is being suggested.
+    #[arg(long)]
+    pub reason: String,
+    /// Optional confidence from 0 through 100.
+    #[arg(long)]
+    pub confidence_percent: Option<u8>,
+    #[command(subcommand)]
+    pub action: MessageSuggestionAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MessageSuggestionAction {
+    CaseCreate {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        group: String,
+    },
+    CaseAdd {
+        case_ref: String,
+    },
+    NotificationCreate {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        summary: String,
+    },
+    NotificationAdd {
+        notification_ref: String,
+        #[arg(long)]
+        summary: String,
+    },
+    Spam,
+    Trash,
 }
 
 #[derive(Subcommand, Debug)]

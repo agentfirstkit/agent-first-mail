@@ -1,15 +1,1 @@
----
-kind: {{ frontmatter.kind }}
-message_id: {{ frontmatter.message_id }}
-notification_uid: {{ frontmatter.notification_uid }}
-notification_name: {{ frontmatter.notification_name }}
-added_rfc3339: "{{ frontmatter.added_rfc3339 }}"
----
-
-# {% if view.display_title %}{{ view.display_title }}{% else %}通知{% endif %}
-
-通知: {{ notification.notification_name }}（`{{ notification.notification_uid }}`）
-
-摘要: {{ view.summary }}
-
-{{ view.conversation }}
+{% import "i18n/catalog.j2" as i18n %}{% include "markdown/notification-message.md.j2" %}

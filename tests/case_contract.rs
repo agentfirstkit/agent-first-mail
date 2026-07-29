@@ -161,13 +161,7 @@ fn case_remove_and_delete_empty_active_case() {
     assert_eq!(value["message_count"], 0);
     assert!(root.join("triage/message_case_remove.md").exists());
     let case_json = read_json(&case_path.join("data/case.json"));
-    assert_eq!(
-        case_json
-            .get("message_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        0
-    );
+    assert!(case_json.get("message_count").is_none());
     assert_eq!(
         case_json
             .get("items")
@@ -290,13 +284,22 @@ fn case_add_accepts_multiple_message_ids() {
     assert!(value[0].get("code").is_none());
     assert_eq!(value[1]["message_id"], "message_case_b");
     let case_data = read_json(&case_path.join("data/case.json"));
+    assert_eq!(case_data["schema_version"], 3);
     assert_eq!(case_data["items"].as_array().map(Vec::len), Some(2));
+    for derived in [
+        "message_count",
+        "thread_count",
+        "attachment_count",
+        "last_message_rfc3339",
+    ] {
+        assert!(case_data.get(derived).is_none(), "{derived}: {case_data}");
+    }
 
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn archiving_case_move_changes_group_without_finalizing() {
+fn archived_case_move_preserves_canonical_status() {
     let root = temp_root("archived-case-move");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
@@ -322,8 +325,8 @@ fn archiving_case_move_changes_group_without_finalizing() {
     ));
     assert!(archived_path.join("case.md").exists());
     let archived_before = read_json(&archived_path.join("data/case.json"));
-    assert!(archived_before["archived_rfc3339"].is_null());
-    assert_eq!(archived_before["status"], "archiving");
+    assert!(archived_before["archived_rfc3339"].as_str().is_some());
+    assert_eq!(archived_before["status"], "archived");
 
     let (status, stdout) = run(
         &root,
@@ -342,7 +345,7 @@ fn archiving_case_move_changes_group_without_finalizing() {
     assert_eq!(value["case_uid"], case_uid);
     assert_eq!(value["from_group"], "support");
     assert_eq!(value["to_group"], "members");
-    assert_eq!(value["archived"], true);
+    assert_eq!(value["status"], "archived");
     assert_eq!(value["changed"], true);
     assert_eq!(
         value["case_path"],
@@ -355,23 +358,25 @@ fn archiving_case_move_changes_group_without_finalizing() {
     ));
     assert!(moved_path.join("case.md").exists());
     let archived_after = read_json(&moved_path.join("data/case.json"));
-    assert!(archived_after["archived_rfc3339"].is_null());
-    assert_eq!(archived_after["status"], "archiving");
+    assert!(archived_after["archived_rfc3339"].as_str().is_some());
+    assert_eq!(archived_after["status"], "archived");
 
     let (status, stdout) = run(&root, &["case", "show", &case_uid]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["group"], "members");
-    assert_eq!(value["archived"], true);
-    assert_eq!(value["lifecycle"], "archiving");
+    assert_eq!(value["context"]["location"]["group"], "members");
+    assert!(value["context"]["location"].get("archived").is_none());
+    assert!(value["context"]["location"].get("lifecycle").is_none());
+    assert_eq!(value["context"]["collection"]["status"], "archived");
 
-    let (status, stdout) = run(&root, &["case", "list"]);
+    let (status, stdout) = run(&root, &["case", "list", "--archived"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
     assert_eq!(value["count"], 1);
     assert_eq!(value["items"][0]["group"], "members");
-    assert_eq!(value["items"][0]["archived"], true);
-    assert_eq!(value["items"][0]["lifecycle"], "archiving");
+    assert_eq!(value["items"][0]["status"], "archived");
+    assert!(value["items"][0].get("archived").is_none());
+    assert!(value["items"][0].get("lifecycle").is_none());
 
     let (status, stdout) = run(
         &root,
@@ -420,23 +425,34 @@ fn archived_case_notes_rename_unarchive_and_active_hint_work() {
     let (status, stdout) = run(&root, &["case", "show", &case_uid]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["case_uid"], case_uid);
-    assert_eq!(value["case_name"], "case-archive");
-    assert_eq!(value["group"], "support");
+    assert_eq!(value["context"]["collection"]["collection_uid"], case_uid);
     assert_eq!(
-        root.join(value["case_path"].as_str().unwrap_or_default()),
+        value["context"]["collection"]["collection_name"],
+        "case-archive"
+    );
+    assert_eq!(value["context"]["location"]["group"], "support");
+    assert_eq!(
+        root.join(
+            value["locator"]["collection_path"]
+                .as_str()
+                .unwrap_or_default()
+        ),
         case_path
     );
     assert_eq!(
-        root.join(value["view_path"].as_str().unwrap_or_default()),
+        root.join(value["locator"]["view_path"].as_str().unwrap_or_default()),
         case_path.join("case.md")
     );
     assert!(value.get("index_path").is_none());
     assert_eq!(
-        root.join(value["messages_path"].as_str().unwrap_or_default()),
+        root.join(
+            value["locator"]["messages_path"]
+                .as_str()
+                .unwrap_or_default()
+        ),
         case_path.join("views/messages")
     );
-    assert_eq!(value["text"], "stale generated case");
+    assert!(value.get("text").is_none());
     assert_eq!(
         fs::read_to_string(case_path.join("case.md")).unwrap_or_default(),
         "stale generated case"
@@ -455,12 +471,16 @@ fn archived_case_notes_rename_unarchive_and_active_hint_work() {
     let (status, stdout) = run(&root, &["case", "show", &case_uid]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["case_uid"], case_uid);
-    assert_eq!(value["case_name"], "case-archive");
-    assert_eq!(value["archived"], true);
+    assert_eq!(value["context"]["collection"]["collection_uid"], case_uid);
+    assert_eq!(
+        value["context"]["collection"]["collection_name"],
+        "case-archive"
+    );
+    assert!(value["context"]["location"].get("archived").is_none());
+    assert!(value["context"]["location"].get("lifecycle").is_none());
+    assert_eq!(value["context"]["collection"]["status"], "archived");
     assert!(
-        value["text"]
-            .as_str()
+        fs::read_to_string(archived_path.join("case.md"))
             .unwrap_or_default()
             .contains("# case-archive")
     );

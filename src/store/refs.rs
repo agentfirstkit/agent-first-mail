@@ -1,6 +1,6 @@
 use super::{Workspace, case_json_path, read_case_messages, rel_path};
 use crate::error::Result;
-use serde_json::{Value, json};
+use crate::render_document::CaseReferenceDocument;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -16,7 +16,7 @@ struct CaseIndexEntry {
     case_uid: String,
     group: String,
     path: PathBuf,
-    status: &'static str,
+    status: String,
     message_ids: BTreeSet<String>,
 }
 
@@ -28,6 +28,15 @@ impl CaseIndex {
                 continue;
             }
             let messages = read_case_messages(&case_path, &case_uid)?;
+            if !messages.status.is_empty() {
+                return Err(crate::error::AppError::new(
+                    "case_metadata_invalid",
+                    format!(
+                        "active case {case_uid} must have an empty canonical status, found {:?}",
+                        messages.status
+                    ),
+                ));
+            }
             let group = case_path
                 .parent()
                 .and_then(|path| path.file_name())
@@ -38,7 +47,7 @@ impl CaseIndex {
                 case_uid,
                 group,
                 path: case_path,
-                status: "active",
+                status: messages.status.clone(),
                 message_ids: messages.message_ids().into_iter().collect(),
             });
         }
@@ -47,11 +56,20 @@ impl CaseIndex {
                 continue;
             }
             let messages = read_case_messages(&entry.path, &entry.case_uid)?;
+            if !matches!(messages.status.as_str(), "archiving" | "archived") {
+                return Err(crate::error::AppError::new(
+                    "case_metadata_invalid",
+                    format!(
+                        "case {} stored under archived-cases has invalid canonical status {:?}",
+                        entry.case_uid, messages.status
+                    ),
+                ));
+            }
             entries.push(CaseIndexEntry {
                 case_uid: entry.case_uid,
                 group: entry.group,
                 path: entry.path,
-                status: "archived",
+                status: messages.status.clone(),
                 message_ids: messages.message_ids().into_iter().collect(),
             });
         }
@@ -79,25 +97,21 @@ impl CaseIndex {
     /// True if an active case lists this message.
     pub(super) fn has_active_reference(&self, message_id: &str) -> bool {
         self.entries_for_message(message_id)
-            .any(|entry| entry.status == "active")
+            .any(|entry| entry.status.is_empty())
     }
 
     /// True if an archived case lists this message.
     pub(super) fn has_archived_reference(&self, message_id: &str) -> bool {
         self.entries_for_message(message_id)
-            .any(|entry| entry.status != "active")
+            .any(|entry| matches!(entry.status.as_str(), "archiving" | "archived"))
     }
 
-    pub(super) fn case_refs_for_message(&self, message_id: &str) -> Vec<Value> {
+    pub(super) fn case_refs_for_message(&self, message_id: &str) -> Vec<CaseReferenceDocument> {
         self.entries_for_message(message_id)
-            .map(|entry| {
-                json!({
-                    "case_uid": entry.case_uid.as_str(),
-                    "group": entry.group.as_str(),
-                    "case_status": entry.status,
-                    "archived": entry.status == "archived",
-                    "case_path": rel_path(&self.root, &entry.path),
-                })
+            .map(|entry| CaseReferenceDocument {
+                case_uid: entry.case_uid.clone(),
+                group: entry.group.clone(),
+                case_path: rel_path(&self.root, &entry.path),
             })
             .collect()
     }

@@ -1,0 +1,186 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/push-plan-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "config_effect_id": {
+      "type": "string"
+    },
+    "confirmed": {
+      "type": "boolean"
+    },
+    "count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "hint": {
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "properties": {
+          "action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "attempt_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audit_pending": {
+            "type": "boolean"
+          },
+          "case_uid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_kind": {
+            "type": "string"
+          },
+          "draft_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effect_scope": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "local_stage": true,
+          "locations": {
+            "items": true,
+            "type": "array"
+          },
+          "message_content_hashes": {
+            "items": true,
+            "type": "array"
+          },
+          "message_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "outbound": true,
+          "push_id": {
+            "type": "string"
+          },
+          "queue_item_hash": {
+            "type": "string"
+          },
+          "step_states": {
+            "items": true,
+            "type": "array"
+          },
+          "steps": {
+            "items": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "push_id",
+          "queue_item_hash",
+          "kind",
+          "display_kind",
+          "effect_scope",
+          "actions",
+          "steps",
+          "step_states",
+          "attempt_count",
+          "audit_pending",
+          "message_ids",
+          "locations",
+          "message_content_hashes"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "plan_id": {
+      "type": "string"
+    },
+    "schema_name": {
+      "type": "string"
+    },
+    "schema_version": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "skipped_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "skipped_items": {
+      "items": {
+        "properties": {
+          "push_id": {
+            "type": "string"
+          },
+          "queue_item_hash": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "push_id",
+          "queue_item_hash",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "workspace_path": {
+      "type": "string"
+    },
+    "workspace_uid": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_name",
+    "schema_version",
+    "confirmed",
+    "workspace_uid",
+    "workspace_path",
+    "plan_id",
+    "config_effect_id",
+    "count",
+    "items",
+    "skipped_count",
+    "skipped_items",
+    "hint"
+  ],
+  "title": "PushPlanResult",
+  "type": "object"
+}

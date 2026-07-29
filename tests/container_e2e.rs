@@ -1,8 +1,3 @@
-#[cfg(feature = "ui")]
-use agent_first_ui::{
-    AgentFirstUiMessage, MessagePayload, PrepareRequestSpec, PreparedStatus, find_unit,
-    prepare_request, validate_space, validate_space_bindings,
-};
 use rustls_connector::{RustlsConnectorConfig, TlsStream};
 use serde_json::{Value, json};
 use std::fs;
@@ -252,9 +247,6 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
         ],
     );
     assert_eq!(status, 0, "{stdout}");
-
-    #[cfg(feature = "ui")]
-    assert_fixture_ui_room_snapshot(root.path(), &attachment_id, &case_uid);
 
     let (status, stdout) = run(root.path(), &["push", "--dry-run"]);
     assert_eq!(status, 0, "{stdout}");
@@ -1010,112 +1002,6 @@ fn assert_fixture_imports(root: &Path, batch: &test_fixtures::MailBatch) {
     }
 }
 
-#[cfg(feature = "ui")]
-fn assert_fixture_ui_room_snapshot(root: &Path, message_id: &str, case_uid: &str) {
-    let (status, stdout) = run(root, &["ui", "snapshot"]);
-    assert_eq!(status, 0, "{stdout}");
-    let value = parse_one(&stdout);
-    assert_eq!(value["agent_first_ui"], "0.2");
-    assert_eq!(value["type"], "snapshot");
-    let message = serde_json::from_value::<AgentFirstUiMessage>(value);
-    assert!(message.is_ok(), "{message:?}");
-    let Ok(message) = message else {
-        return;
-    };
-    assert!(
-        matches!(&message.payload, MessagePayload::Snapshot { .. }),
-        "ui snapshot should be a space snapshot"
-    );
-    let MessagePayload::Snapshot { space, .. } = message.payload else {
-        return;
-    };
-    let validation = validate_space(&space);
-    assert!(validation.is_ok(), "{validation:?}");
-    let binding_validation = validate_space_bindings(&space);
-    assert!(binding_validation.is_ok(), "{binding_validation:?}");
-    let afmail = &space.as_value()["afmail"];
-
-    let units = afmail["units"].as_array();
-    assert!(units.is_some(), "{afmail}");
-    let Some(units) = units else {
-        return;
-    };
-    let unit_ids = units
-        .iter()
-        .filter_map(|unit| unit["id"].as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        unit_ids,
-        ["mail_queue", "draft_list", "draft_editor", "mailbox_glance"]
-    );
-    for retired in [
-        "mailbox_status",
-        "inbox_triage",
-        "active_cases",
-        "push_queue",
-        "notifications",
-        "archived_cases",
-        "activity_log",
-        "mail_terminal",
-    ] {
-        assert!(find_unit(&space, "afmail", retired).is_none(), "{retired}");
-    }
-
-    let mail_items = afmail["mail"]["items"].as_array();
-    assert!(mail_items.is_some(), "{afmail}");
-    let Some(mail_items) = mail_items else {
-        return;
-    };
-    assert_eq!(mail_items.len(), 30);
-    assert!(
-        mail_items
-            .iter()
-            .any(|item| item["message"]["message_id"].as_str() == Some(message_id))
-    );
-
-    let drafts = afmail["drafts"]["items"].as_array();
-    assert!(drafts.is_some(), "{afmail}");
-    let Some(drafts) = drafts else {
-        return;
-    };
-    let draft_match = drafts
-        .iter()
-        .enumerate()
-        .find(|(_, item)| item["case_ref"].as_str() == Some(case_uid));
-    assert!(draft_match.is_some(), "draft missing: {drafts:?}");
-    let Some((draft_index, draft)) = draft_match else {
-        return;
-    };
-    assert_eq!(draft["status"], "queued_send");
-    assert_eq!(draft["queued_action"], "send");
-    assert_eq!(draft["remote_changed"], false);
-    assert_eq!(draft["completeness"], "complete");
-    assert_eq!(draft["availability"]["send_ready"], true);
-    assert!(
-        draft["body"]
-            .as_str()
-            .is_some_and(|body| body.contains("shipping refund has been approved"))
-    );
-    assert!(
-        !draft["body"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("afmail:compose")
-    );
-
-    let prepared = prepare_request(
-        &space,
-        PrepareRequestSpec::new("session_operator", "afmail", "draft_change")
-            .with_source_unit_id("draft_list")
-            .with_record_path(format!("/afmail/drafts/items/{draft_index}")),
-    );
-    assert!(prepared.is_ok(), "{prepared:?}");
-    let Ok(prepared) = prepared else {
-        return;
-    };
-    assert_eq!(prepared.status, PreparedStatus::NeedsInput);
-}
-
 fn message_id_by_fixture(
     root: &Path,
     batch: &test_fixtures::MailBatch,
@@ -1515,12 +1401,13 @@ fn run(cwd: &Path, args: &[&str]) -> (i32, String) {
     };
     let status = output.status.code().unwrap_or(99);
     let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+    let stderr = String::from_utf8(output.stderr).unwrap_or_default();
     assert!(
-        output.stderr.is_empty(),
-        "stderr must stay empty: {}",
-        String::from_utf8_lossy(&output.stderr)
+        stdout.is_empty() || stderr.is_empty(),
+        "default split routing produced both streams; use --output-to stdout \
+         when the test needs one ordered event stream\nstdout: {stdout}\nstderr: {stderr}"
     );
-    (status, stdout)
+    (status, if stdout.is_empty() { stderr } else { stdout })
 }
 
 fn run_confirmed_push(cwd: &Path) -> (i32, String) {
@@ -1581,7 +1468,9 @@ fn message_ids_where(root: &Path, field: &str, expected: &str) -> Vec<String> {
         .into_iter()
         .filter(|id| {
             let (status, stdout) = run(root, &["message", "show", id]);
-            status == 0 && parse_one(&stdout)[field].as_str() == Some(expected)
+            status == 0
+                && parse_one(&stdout)["context"]["message"]["message"][field].as_str()
+                    == Some(expected)
         })
         .collect()
 }
@@ -1742,12 +1631,9 @@ fn contact_crud_local_e2e() {
     let (status, stdout) = run(root.path(), &["contact", "show", &p001]);
     assert_eq!(status, 0, "contact show failed: {stdout}");
     let result = parse_one(&stdout);
-    assert!(
-        result["content"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Zhang San")
-    );
+    assert_eq!(result["contact"]["display_name"], "Zhang San");
+    assert_eq!(result["locator"]["group"], "people");
+    assert!(result.get("content").is_none());
 
     // Step 5: tag
     let (status, stdout) = run(root.path(), &["contact", "tag", &p001, "vip"]);
@@ -1804,7 +1690,7 @@ fn contact_crud_local_e2e() {
     let (_, show_stdout) = run(root.path(), &["contact", "notes", "show", &p001]);
     let show_result = parse_one(&show_stdout);
     assert!(
-        show_result["notes"]
+        show_result["notes_markdown"]
             .as_str()
             .unwrap_or("")
             .contains("replaced content"),
@@ -2037,10 +1923,13 @@ fn docker_greenmail_contact_cards_e2e() {
     assert_eq!(status, 0, "message show failed: {stdout}");
     let msg = parse_one(&stdout);
     assert_eq!(
-        msg["contact"]["contact_uid"], p001,
+        msg["context"]["message"]["message"]["contact"]["contact_uid"], p001,
         "message show should have contact.contact_uid"
     );
-    assert_eq!(msg["contact"]["display_name"], "Alice Customer");
+    assert_eq!(
+        msg["context"]["message"]["message"]["contact"]["display_name"],
+        "Alice Customer"
+    );
 
     // Step 4: create a case from alice's message; the contact link stays
     //         materialized on the message after it moves into the case.
@@ -2061,7 +1950,7 @@ fn docker_greenmail_contact_cards_e2e() {
     let (status, stdout) = run(root.path(), &["message", "show", &alice_msg_id]);
     assert_eq!(status, 0, "message show after case create failed: {stdout}");
     assert_eq!(
-        parse_one(&stdout)["contact"]["contact_uid"],
+        parse_one(&stdout)["context"]["message"]["message"]["contact"]["contact_uid"],
         p001,
         "contact link should survive case creation"
     );
@@ -2117,7 +2006,7 @@ fn docker_greenmail_contact_cards_e2e() {
     let (status, stdout) = run(root.path(), &["message", "show", &bob_msg_id]);
     assert_eq!(status, 0, "bob message show failed: {stdout}");
     assert_eq!(
-        parse_one(&stdout)["contact"]["contact_uid"],
+        parse_one(&stdout)["context"]["message"]["message"]["contact"]["contact_uid"],
         p002,
         "bob's message should link to the extracted contact"
     );
@@ -2140,7 +2029,7 @@ fn docker_greenmail_contact_cards_e2e() {
     let (status, stdout) = run(root.path(), &["message", "show", &bob_msg_id]);
     assert_eq!(status, 0, "bob message show after case failed: {stdout}");
     assert_eq!(
-        parse_one(&stdout)["contact"]["contact_uid"],
+        parse_one(&stdout)["context"]["message"]["message"]["contact"]["contact_uid"],
         p002,
         "bob's case message should keep contact = p002"
     );
@@ -2150,7 +2039,7 @@ fn docker_greenmail_contact_cards_e2e() {
     assert_eq!(status, 0, "contact list failed: {stdout}");
     assert_eq!(parse_one(&stdout)["count"], 2);
 
-    // Step 10: rename alice; the message's contact name snapshot refreshes.
+    // Step 10: rename alice; the exact contained ContactFrontmatter refreshes.
     let (status, stdout) = run(
         root.path(),
         &["contact", "rename", &p001, "--name", "Alice VIP"],
@@ -2159,9 +2048,9 @@ fn docker_greenmail_contact_cards_e2e() {
     let (status, stdout) = run(root.path(), &["message", "show", &alice_msg_id]);
     assert_eq!(status, 0, "message show after rename failed: {stdout}");
     assert_eq!(
-        parse_one(&stdout)["contact"]["display_name"],
+        parse_one(&stdout)["context"]["message"]["message"]["contact"]["display_name"],
         "Alice VIP",
-        "rename should refresh the message's contact name snapshot"
+        "rename should refresh the exact contained contact frontmatter"
     );
 
     // Step 11: add second email to alice

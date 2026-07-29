@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+pub const PUSH_ITEM_SCHEMA_VERSION: u64 = 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PushKind {
     Draft,
@@ -146,7 +148,7 @@ impl PushItem {
         }
         match &self.payload {
             PushPayload::Draft(_) => "draft".to_string(),
-            PushPayload::Message(_) => "message".to_string(),
+            PushPayload::Message(message) => message.action.kind().to_string(),
         }
     }
 
@@ -227,6 +229,10 @@ impl PushItem {
                 || state.completed_rfc3339.is_some()
         })
     }
+
+    pub fn has_started_effects(&self) -> bool {
+        self.has_started_steps() || self.local_stage.is_some() || self.audit_pending.is_some()
+    }
 }
 
 fn validate_push_item_keys(value: &Value) -> Result<()> {
@@ -243,11 +249,13 @@ fn validate_push_item_keys(value: &Value) -> Result<()> {
         ));
     };
     if obj.get("schema_name").and_then(Value::as_str) != Some("push_item")
-        || obj.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || obj.get("schema_version").and_then(Value::as_u64) != Some(PUSH_ITEM_SCHEMA_VERSION)
     {
         return Err(AppError::new(
             "push_item_invalid",
-            "push item requires schema_name push_item and schema_version 1",
+            format!(
+                "push item requires schema_name push_item and schema_version {PUSH_ITEM_SCHEMA_VERSION}"
+            ),
         ));
     }
     let kind = PushKind::parse(raw_kind)?.as_str();
@@ -282,7 +290,7 @@ fn push_payload_key_allowed(kind: &str, key: &str) -> bool {
             key,
             "case_uid" | "draft_name" | "draft_uid_validity" | "draft_uid"
         ),
-        "message" => key == "message_id",
+        "message" => matches!(key, "message_id" | "action"),
         _ => false,
     }
 }
@@ -325,6 +333,7 @@ pub struct DraftPush {
 #[serde(deny_unknown_fields)]
 pub struct MessagePush {
     pub message_id: String,
+    pub action: MessagePushAction,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -424,11 +433,12 @@ mod tests {
     fn push_item_requires_step_states() {
         let data = r#"{
           "schema_name": "push_item",
-          "schema_version": 1,
+          "schema_version": 2,
           "push_id": "push_20260609T000000Z",
           "enqueue_seq": 1,
           "kind": "message",
           "message_id": "message_1",
+          "action": "spam",
           "created_rfc3339": "2026-06-09T00:00:00Z",
           "updated_rfc3339": "2026-06-09T00:00:00Z",
           "attempt_count": 1
@@ -443,7 +453,7 @@ mod tests {
     fn invalid_push_kind_is_rejected() {
         let data = r#"{
           "schema_name": "push_item",
-          "schema_version": 1,
+          "schema_version": 2,
           "push_id": "push_bad",
           "kind": "surprise",
           "created_rfc3339": "2026-06-09T00:00:00Z",
@@ -452,6 +462,26 @@ mod tests {
         let err = PushItem::parse_json(data)
             .err()
             .unwrap_or_else(|| AppError::new("test_failure", "expected invalid kind to fail"));
+        assert_eq!(err.error_code, "push_item_invalid");
+    }
+
+    #[test]
+    fn push_item_v1_without_canonical_message_action_is_rejected() {
+        let data = r#"{
+          "schema_name": "push_item",
+          "schema_version": 1,
+          "push_id": "push_old",
+          "enqueue_seq": 1,
+          "kind": "message",
+          "message_id": "message_1",
+          "created_rfc3339": "2026-06-09T00:00:00Z",
+          "updated_rfc3339": "2026-06-09T00:00:00Z",
+          "attempt_count": 0,
+          "step_states": []
+        }"#;
+        let err = PushItem::parse_json(data)
+            .err()
+            .unwrap_or_else(|| AppError::new("test_failure", "expected push v1 to fail"));
         assert_eq!(err.error_code, "push_item_invalid");
     }
 }

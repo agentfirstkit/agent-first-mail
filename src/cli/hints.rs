@@ -26,8 +26,6 @@ pub fn error_hint(argv: &[String]) -> String {
         "triage" => nested_hint("afmail triage", tokens.get(1), TRIAGE_ACTIONS),
         "render" => nested_hint("afmail render", tokens.get(1), RENDER_ACTIONS),
         "log" => nested_hint("afmail log", tokens.get(1), LOG_ACTIONS),
-        #[cfg(feature = "ui")]
-        "ui" => nested_hint("afmail ui", tokens.get(1), UI_ACTIONS),
         command if ROOT_COMMANDS.contains(&command) => format!("try: afmail {command} --help"),
         _ => "try: afmail --help".to_string(),
     }
@@ -50,6 +48,7 @@ fn command_tokens(argv: &[String]) -> Vec<String> {
             break;
         }
         if arg == "--output"
+            || arg == "--output-to"
             || arg == "--log"
             || arg == "--stdout-file"
             || arg == "--stderr-file"
@@ -60,6 +59,7 @@ fn command_tokens(argv: &[String]) -> Vec<String> {
         }
         if arg == "--verbose"
             || arg.starts_with("--output=")
+            || arg.starts_with("--output-to=")
             || arg.starts_with("--log=")
             || arg.starts_with("--stdout-file=")
             || arg.starts_with("--stderr-file=")
@@ -75,27 +75,6 @@ fn command_tokens(argv: &[String]) -> Vec<String> {
     out
 }
 
-#[cfg(feature = "ui")]
-const ROOT_COMMANDS: &[&str] = &[
-    "init",
-    "pull",
-    "config",
-    "remote",
-    "push",
-    "status",
-    "doctor",
-    "purge",
-    "skill",
-    "triage",
-    "message",
-    "case",
-    "contact",
-    "notification",
-    "render",
-    "log",
-    "ui",
-];
-#[cfg(not(feature = "ui"))]
 const ROOT_COMMANDS: &[&str] = &[
     "init",
     "pull",
@@ -116,6 +95,8 @@ const ROOT_COMMANDS: &[&str] = &[
 ];
 const CASE_ACTIONS: &[&str] = &[
     "create",
+    "review",
+    "suggestion",
     "list",
     "show",
     "add",
@@ -144,22 +125,22 @@ const NOTIFICATION_ACTIONS: &[&str] = &[
     "delete",
     "list",
     "show",
+    "review",
     "remove",
     "move",
     "rename",
     "set-summary",
     "notes",
+    "suggestion",
 ];
 const CONFIG_ACTIONS: &[&str] = &["show", "get", "set", "add", "remove"];
 const REMOTE_ACTIONS: &[&str] = &["test", "folders"];
 const PUSH_ACTIONS: &[&str] = &["list"];
 const DOCTOR_ACTIONS: &[&str] = &["repair"];
 const SKILL_ACTIONS: &[&str] = &["status", "install", "uninstall"];
-const TRIAGE_ACTIONS: &[&str] = &["list"];
+const TRIAGE_ACTIONS: &[&str] = &["list", "review", "suggestion"];
 const RENDER_ACTIONS: &[&str] = &["refresh", "templates"];
 const LOG_ACTIONS: &[&str] = &["list", "tail", "message", "case", "notification"];
-#[cfg(feature = "ui")]
-const UI_ACTIONS: &[&str] = &["snapshot"];
 
 #[cfg(test)]
 mod tests {
@@ -189,6 +170,8 @@ mod tests {
             error_hint(&argv(&[
                 "--output",
                 "yaml",
+                "--output-to",
+                "stdout",
                 "--log=startup",
                 "notification",
                 "rename",

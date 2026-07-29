@@ -3,7 +3,6 @@ mod actions;
 mod defaults;
 mod identity;
 mod mailbox;
-mod notification;
 mod validation;
 mod workspace;
 
@@ -17,9 +16,6 @@ pub use identity::{IdentityConfig, MessageIdentityMatch, ResolvedIdentity};
 pub use mailbox::{
     ImapConfig, ImapMailboxConfig, ImapSection, MailboxResolveRule, SpecialUseKind,
     SpecialUseSource, SpecialUseTarget, special_use_kinds,
-};
-pub use notification::{
-    NotificationIndexField, NotificationIndexSection, NotificationIndexSort, NotificationSection,
 };
 pub use workspace::{
     AuditSection, CaseSection, ContactSection, ReasonMode, SmtpConfig, SmtpSection,
@@ -50,8 +46,6 @@ pub struct MailConfig {
     pub identities: Vec<IdentityConfig>,
     #[serde(default)]
     pub case: CaseSection,
-    #[serde(default)]
-    pub notification: NotificationSection,
     pub audit: AuditSection,
     pub smtp: SmtpSection,
     #[serde(default)]
@@ -69,7 +63,6 @@ impl Default for MailConfig {
             actions: ActionsSection::default(),
             identities: default_identities(),
             case: CaseSection::default(),
-            notification: NotificationSection::default(),
             audit: AuditSection::default(),
             smtp: SmtpSection::default(),
             contact: ContactSection::default(),
@@ -185,7 +178,6 @@ impl MailConfig {
         self.workspace.validate()?;
         self.actions.validate(self)?;
         self.validate_identities()?;
-        self.notification.validate()?;
         validate_password_secret_source(
             "imap.password_secret",
             self.imap.password_secret.as_deref(),

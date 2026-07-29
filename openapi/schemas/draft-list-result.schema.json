@@ -1,0 +1,87 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/draft-list-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "case_uid": {
+      "type": "string"
+    },
+    "draft_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "drafts": {
+      "items": {
+        "properties": {
+          "completeness": {
+            "type": "string"
+          },
+          "draft_name": {
+            "type": "string"
+          },
+          "draft_path": {
+            "type": "string"
+          },
+          "identity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_validated_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_validated_rfc3339": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "push_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "queued_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remote_changed": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "draft_name",
+          "draft_path",
+          "status",
+          "remote_changed",
+          "completeness"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "case_uid",
+    "draft_count",
+    "drafts"
+  ],
+  "title": "DraftListResult",
+  "type": "object"
+}

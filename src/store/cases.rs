@@ -12,7 +12,7 @@ pub(super) struct ResolvedCase {
     pub(super) case_uid: String,
     pub(super) group: String,
     pub(super) path: PathBuf,
-    pub(super) archived: bool,
+    pub(super) status: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -20,7 +20,7 @@ struct CaseMessageRemovalContext<'a> {
     event_kind: &'a str,
     result_code: &'a str,
     undo_push_kind: &'a str,
-    archived: bool,
+    status: &'a str,
 }
 
 #[cfg(test)]
@@ -82,16 +82,6 @@ fn update_case_archiving_state(case_path: &Path) -> Result<()> {
     write_case_file(case_path, &case)
 }
 
-fn case_lifecycle(case: &CaseFrontmatter, stored_under_archived: bool) -> &'static str {
-    if stored_under_archived && case.status == "archiving" && case.archived_rfc3339.is_none() {
-        "archiving"
-    } else if stored_under_archived || case.archived_rfc3339.is_some() {
-        "archived"
-    } else {
-        "active"
-    }
-}
-
 pub(super) fn new_case_file(
     case_uid: &str,
     case_name: &str,
@@ -100,10 +90,6 @@ pub(super) fn new_case_file(
     let now = now_rfc3339();
     let mut case = CaseFrontmatter::new_case(case_uid, case_name, &now);
     case.items = items;
-    case.message_count = case.items.len();
-    if !case.items.is_empty() {
-        case.last_message_rfc3339 = Some(now);
-    }
     case
 }
 
@@ -112,14 +98,16 @@ pub(super) fn new_notes_md(root: &Path, language: TemplateLanguage) -> Result<St
         root,
         language,
         TemplateKey::NotesDefault,
-        &json!({"language": language.as_str()}),
+        &EmptyRenderDocument {
+            schema_name: "afmail_notes_new_render_document".to_string(),
+            schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+        },
     )
 }
 
 pub(super) fn merge_case_notes(
     root: &Path,
     language: TemplateLanguage,
-    case_uid: &str,
     primary: &Path,
     other: &Path,
     other_case_uid: &str,
@@ -137,30 +125,23 @@ pub(super) fn merge_case_notes(
         return Err(notes_missing_error(root, &primary_notes_path));
     }
     let existing = read_to_string(&primary_notes_path, "read primary notes.md")?;
-    let section = render_template(
-        root,
-        language,
-        TemplateKey::NotesMergeSection,
-        &json!({
-            "language": language.as_str(),
-            "case_uid": case_uid,
-            "other_case_uid": other_case_uid,
-            "other_body": other_notes,
-        }),
-    )?;
-    let merged = format!("{}\n\n{}", existing.trim_end(), section.trim_start());
+    let document = NotesMergeRenderDocument {
+        schema_name: "afmail_notes_merge_render_document".to_string(),
+        schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+        primary: notes_render_document_from_text(root, &primary_notes_path, existing),
+        merged_case_uid: other_case_uid.to_string(),
+        merged: notes_render_document_from_text(root, &other_notes_path, other_notes),
+    };
+    let merged = render_template(root, language, TemplateKey::NotesMergeSection, &document)?;
     write_string(&primary_notes_path, &merged)
 }
 
-pub(super) fn update_case_counts(
-    case: &mut CaseFrontmatter,
-    added_ids: &[String],
-    attachment_count: Option<usize>,
-) {
-    case.message_count += added_ids.len();
-    case.updated_rfc3339 = Some(now_rfc3339());
-    if let Some(count) = attachment_count {
-        case.attachment_count = count;
+fn notes_render_document_from_text(root: &Path, path: &Path, text: String) -> NotesRenderDocument {
+    NotesRenderDocument {
+        schema_name: notes_document_schema_name(),
+        schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+        notes_path: rel_path(root, path),
+        text,
     }
 }
 
@@ -170,11 +151,7 @@ fn remove_case_item(case: &mut CaseFrontmatter, message_id: &str) -> Option<Mess
         .iter()
         .position(|item| item.message_id == message_id)?;
     let item = case.items.remove(position);
-    case.message_count = case.items.len();
     case.updated_rfc3339 = Some(now_rfc3339());
-    if case.items.is_empty() {
-        case.last_message_rfc3339 = None;
-    }
     Some(item)
 }
 
@@ -202,46 +179,6 @@ pub(super) fn read_case_messages(case_path: &Path, case_uid: &str) -> Result<Cas
         ));
     }
     Ok(messages)
-}
-
-pub(super) fn existing_triage_suggestion(path: &Path) -> Result<(Vec<String>, Option<String>)> {
-    if !path.exists() {
-        return Ok((Vec::new(), None));
-    }
-    let file = fs::File::open(path).map_err(|err| AppError::io("read triage file", &err))?;
-    let mut lines = BufReader::new(file).lines();
-    match lines.next() {
-        Some(Ok(line)) if line == "---" => {}
-        Some(Ok(_)) => {
-            return Err(AppError::new(
-                "invalid_request",
-                "markdown file is missing frontmatter",
-            ));
-        }
-        Some(Err(err)) => return Err(AppError::io("read triage file", &err)),
-        None => {
-            return Err(AppError::new(
-                "invalid_request",
-                "markdown file is missing frontmatter",
-            ));
-        }
-    }
-    let mut frontmatter = Vec::new();
-    for line in lines {
-        let line = line.map_err(|err| AppError::io("read triage file", &err))?;
-        if line == "---" {
-            let fm = parse_frontmatter::<TriageFrontmatter>(&frontmatter.join("\n"))?;
-            if fm.suggested_case_uids.is_empty() {
-                return Ok((Vec::new(), None));
-            }
-            return Ok((fm.suggested_case_uids, fm.suggested_reason));
-        }
-        frontmatter.push(line);
-    }
-    Err(AppError::new(
-        "invalid_request",
-        "markdown frontmatter is not closed",
-    ))
 }
 
 impl Workspace {
@@ -316,7 +253,7 @@ impl Workspace {
     pub(crate) fn finalize_archiving_cases(&self) -> Result<()> {
         for entry in self.archived_case_entries()? {
             let case = read_case_file(&entry.path)?;
-            if case_lifecycle(&case, true) != "archiving" {
+            if case.status != "archiving" {
                 continue;
             }
             let message_ids = case.message_ids();
@@ -332,7 +269,7 @@ impl Workspace {
                     "case_uid": entry.case_uid,
                     "case_path": rel_path(&self.root, &entry.path),
                     "message_ids": message_ids,
-                    "lifecycle": "archived",
+                    "status": "archived",
                 }),
             )?;
         }
@@ -426,7 +363,7 @@ impl Workspace {
             "case_name": name,
             "group": group,
             "message_ids": message_ids,
-            "message_count": case_data.message_count,
+            "message_count": case_data.items.len(),
             "case_path": rel_path(&self.root, &case_path)
         });
         if !message_ids.is_empty() {
@@ -537,12 +474,12 @@ impl Workspace {
             CaseMessageRemovalContext {
                 event_kind: "case_message_removed",
                 result_code: "case_message_removed",
-                undo_push_kind: if case.archived {
-                    "message.notification"
-                } else {
+                undo_push_kind: if case.status.is_empty() {
                     "case.add"
+                } else {
+                    "message.notification"
                 },
-                archived: case.archived,
+                status: &case.status,
             },
             reason,
         )
@@ -558,16 +495,8 @@ impl Workspace {
         let related_message_ids = self.related_message_ids(message_id)?;
         let mut case = read_case_file(case_path)?;
         let already_present = case.contains_message(message_id);
-        if !already_present {
-            let added_rfc3339 = now_rfc3339();
-            case.upsert_item(message_id, summary, &added_rfc3339);
-            update_case_counts(&mut case, &[message_id.to_string()], None);
-            write_case_file(case_path, &case)?;
-        } else if summary
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_some()
-        {
+        let has_summary_update = summary.is_some_and(|value| !value.trim().is_empty());
+        if !already_present || has_summary_update {
             let added_rfc3339 = now_rfc3339();
             case.upsert_item(message_id, summary, &added_rfc3339);
             case.updated_rfc3339 = Some(added_rfc3339);
@@ -591,6 +520,21 @@ impl Workspace {
             "related_message_ids": related_message_ids,
             "case_path": rel_path(&self.root, case_path)
         }))
+    }
+
+    pub(crate) fn append_sent_message_to_case(
+        &self,
+        case_path: &Path,
+        case_uid: &str,
+        message_id: &str,
+        summary: Option<&str>,
+        added_rfc3339: &str,
+    ) -> Result<()> {
+        self.require_workspace()?;
+        let mut case = read_case_messages(case_path, case_uid)?;
+        case.upsert_item(message_id, summary, added_rfc3339);
+        case.updated_rfc3339 = Some(now_rfc3339());
+        write_case_file(case_path, &case)
     }
 
     pub fn case_set_summary(
@@ -650,10 +594,10 @@ impl Workspace {
             .path
             .file_name()
             .ok_or_else(|| AppError::new("store_error", "case has no directory name"))?;
-        let root_dir = if case.archived {
-            layout::ARCHIVED_CASES
-        } else {
+        let root_dir = if case.status.is_empty() {
             layout::CASES
+        } else {
+            layout::ARCHIVED_CASES
         };
         let to = self.root.join(root_dir).join(group).join(dir_name);
         let to_path = rel_path(&self.root, &to);
@@ -668,7 +612,7 @@ impl Workspace {
                     "to_group": group,
                     "from_path": from_path,
                     "to_path": to_path,
-                    "archived": case.archived,
+                    "status": case.status,
                     "changed": false,
                 }),
             )?;
@@ -676,7 +620,7 @@ impl Workspace {
                 "case_uid": case.case_uid,
                 "from_group": case.group,
                 "to_group": group,
-                "archived": case.archived,
+                "status": case.status,
                 "changed": false,
                 "from_path": from_path,
                 "to_path": to_path,
@@ -707,7 +651,7 @@ impl Workspace {
                 "to_group": group,
                 "from_path": from_path,
                 "to_path": to_path,
-                "archived": case.archived,
+                "status": case.status,
                 "changed": true,
             }),
         )?;
@@ -715,7 +659,7 @@ impl Workspace {
             "case_uid": case.case_uid,
             "from_group": case.group,
             "to_group": group,
-            "archived": case.archived,
+            "status": case.status,
             "changed": true,
             "from_path": from_path,
             "to_path": to_path,
@@ -735,7 +679,7 @@ impl Workspace {
         Err(case_has_local_drafts_error(case_uid, draft_names))
     }
 
-    fn local_draft_names(&self, case_path: &Path) -> Result<Vec<String>> {
+    pub(super) fn local_draft_names(&self, case_path: &Path) -> Result<Vec<String>> {
         let drafts_dir = case_path.join("drafts");
         let mut draft_names = Vec::new();
         if drafts_dir.exists() {
@@ -868,7 +812,12 @@ impl Workspace {
             }
         }
         self.collect_draft_references(&ids, &mut references)?;
-        self.collect_push_references(&ids, None, &mut references)?;
+        self.collect_push_references_except_message_pushes(
+            &ids,
+            None,
+            &[MessagePushAction::CaseAdd, MessagePushAction::Notification],
+            &mut references,
+        )?;
         self.collect_notification_references(&ids, &mut references)?;
         if references.is_empty() {
             return Ok(());
@@ -915,11 +864,11 @@ impl Workspace {
         )?;
         let target_path =
             self.move_active_case_workspace(&case_uid, &case_path, layout::ARCHIVED_CASES)?;
-        let (queue, lifecycle) =
+        let (queue, status) =
             self.complete_case_archive_workspace(&case_uid, &target_path, &message_ids)?;
         transaction.commit()?;
         self.append_audit_event(
-            if lifecycle == "archived" {
+            if status == "archived" {
                 "case_archived"
             } else {
                 "case_archiving"
@@ -931,13 +880,13 @@ impl Workspace {
                 "from_path": from_path,
                 "to_path": rel_path(&self.root, &target_path),
                 "message_ids": message_ids,
-                "lifecycle": lifecycle,
+                "status": status,
             }),
         )?;
         Ok(json!({
-            "lifecycle": lifecycle,
+            "status": status,
             "case_uid": case_uid,
-            "message_count": messages.message_count,
+            "message_count": messages.items.len(),
             "eligible_message_ids": queue.eligible_message_ids,
             "location_count": queue.location_count,
             "queued_location_count": queue.queued_location_count,
@@ -958,14 +907,14 @@ impl Workspace {
         self.refresh_messages_after_ref_change(message_ids)?;
         self.refresh_case_message_views(target_path)?;
         let queue = self.queue_archive_for_archived_messages(message_ids, None, Some(case_uid))?;
-        let lifecycle = if self.case_has_pending_archive_work(case_uid, message_ids)? {
+        let status = if self.case_has_pending_archive_work(case_uid, message_ids)? {
             update_case_archiving_state(target_path)?;
             "archiving"
         } else {
             update_case_archive_state(target_path, true)?;
             "archived"
         };
-        Ok((queue, lifecycle))
+        Ok((queue, status))
     }
 
     pub(super) fn recover_case_archive_transaction(&self, case_uid: &str) -> Result<()> {
@@ -986,6 +935,11 @@ impl Workspace {
                 )
             })?;
         let messages = read_case_messages(&archived.path, case_uid)?;
+        // The transaction itself is the authority that this move was an
+        // archive operation. A crash may have happened after the directory
+        // rename but before the canonical status write, so restore that write
+        // explicitly before any index or render path reads the case.
+        update_case_archive_state(&archived.path, true)?;
         self.complete_case_archive_workspace(case_uid, &archived.path, &messages.message_ids())?;
         Ok(())
     }
@@ -994,8 +948,8 @@ impl Workspace {
         self.require_workspace()?;
         let reason = self.checked_reason(reason)?;
         let case = self.resolve_case_any(case_ref)?;
-        let source_status = if case.archived { "archived" } else { "active" };
-        self.trash_case_workspace(&case.case_uid, &case.path, source_status, reason)
+        let data = read_case_file(&case.path)?;
+        self.trash_case_workspace(&case.case_uid, &case.path, &data.status, reason)
     }
 
     pub fn delete_case(
@@ -1010,7 +964,7 @@ impl Workspace {
         self.delete_case_workspace(
             &case.case_uid,
             &case.path,
-            case.archived,
+            &case.status,
             allow_notes,
             "case_deleted",
             reason,
@@ -1089,7 +1043,6 @@ impl Workspace {
         merge_case_notes(
             &self.root,
             self.template_language()?,
-            &case_uid,
             &primary,
             &other,
             &other_case_uid,
@@ -1120,7 +1073,7 @@ impl Workspace {
         Ok(json!({
             "case_uid": case_uid,
             "merged_case_uid": other_case_uid,
-            "message_count": other_messages.message_count
+            "message_count": other_messages.items.len()
         }))
     }
 
@@ -1156,7 +1109,7 @@ impl Workspace {
                 "old_case_name": old_name,
                 "case_name": name,
                 "group": case.group,
-                "archived": case.archived,
+                "status": case.status,
                 "from_path": rel_path(&self.root, &case.path),
                 "to_path": rel_path(&self.root, &to),
             }),
@@ -1166,7 +1119,7 @@ impl Workspace {
             "old_case_name": old_name,
             "case_name": name,
             "group": case.group,
-            "archived": case.archived,
+            "status": case.status,
             "case_path": rel_path(&self.root, &to),
             "changed": old_name != name || changed_path
         }))
@@ -1175,23 +1128,23 @@ impl Workspace {
     pub fn case_show(&self, case_ref: &str) -> Result<Value> {
         self.require_workspace()?;
         let case = self.resolve_case_any(case_ref)?;
-        let data = read_case_file(&case.path)?;
-        for message_id in data.message_ids() {
-            self.read_message_by_id(&message_id)?;
-        }
+        let context = self.case_render_document(&case.case_uid)?;
         let view_path = case.path.join("case.md");
-        let text = read_generated_view(&self.root, &view_path, "case index")?;
-        Ok(json!({
-            "case_uid": case.case_uid,
-            "case_name": data.collection_name,
-            "group": case.group,
-            "archived": case.archived,
-            "lifecycle": case_lifecycle(&data, case.archived),
-            "case_path": rel_path(&self.root, &case.path),
-            "view_path": rel_path(&self.root, &view_path),
-            "messages_path": rel_path(&self.root, &case_views_messages_dir(&case.path)),
-            "text": text,
-        }))
+        serde_json::to_value(CollectionShowDocument {
+            schema_name: "afmail_collection_show_document".to_string(),
+            schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+            context,
+            locator: CollectionShowLocator {
+                collection_path: rel_path(&self.root, &case.path),
+                view_path: view_path
+                    .is_file()
+                    .then(|| rel_path(&self.root, &view_path)),
+                notes_path: rel_path(&self.root, &case.path.join("notes.md")),
+                messages_path: rel_path(&self.root, &case_views_messages_dir(&case.path)),
+            },
+            review_base_hash: self.case_review_base_hash(case_ref)?,
+        })
+        .map_err(|error| AppError::json("serialize case show document", &error))
     }
 
     pub fn case_list(&self, archived: bool, all: bool) -> Result<Value> {
@@ -1206,12 +1159,12 @@ impl Workspace {
         let all_archived_items = self.archived_case_items()?;
         let archiving_items = all_archived_items
             .iter()
-            .filter(|item| item["lifecycle"] == "archiving")
+            .filter(|item| item["status"] == "archiving")
             .cloned()
             .collect::<Vec<_>>();
         let completed_archived_items = all_archived_items
             .iter()
-            .filter(|item| item["lifecycle"] == "archived")
+            .filter(|item| item["status"] == "archived")
             .cloned()
             .collect::<Vec<_>>();
         let (scope, mut active_items, archived_items) = if all {
@@ -1273,11 +1226,12 @@ impl Workspace {
 
     pub fn case_notes_show(&self, case_ref: &str) -> Result<Value> {
         let case = self.resolve_case_any(case_ref)?;
-        self.notes_show(
-            "case_notes",
-            vec![audit_target("case", &case.case_uid)],
-            &case.path.join("notes.md"),
-        )
+        self.notes_show(&case.path.join("notes.md"))
+    }
+
+    pub(crate) fn case_notes_render_document(&self, case_ref: &str) -> Result<NotesRenderDocument> {
+        let case = self.resolve_case_any(case_ref)?;
+        self.notes_render_document(&case.path.join("notes.md"))
     }
 
     pub fn case_notes_append(&self, case_ref: &str, text: &str) -> Result<Value> {
@@ -1467,7 +1421,7 @@ impl Workspace {
             "case_uid": case_uid,
             "message_id": message_id,
             "message_count": case.items.len(),
-            "archived": context.archived,
+            "status": context.status,
             "triage_path": format!("{}/{message_id}.md", layout::TRIAGE),
             "removed_push_count": push_ids.len(),
             "push_ids": push_ids,
@@ -1478,7 +1432,7 @@ impl Workspace {
         &self,
         case_uid: &str,
         case_path: &Path,
-        archived: bool,
+        status: &str,
         allow_notes: bool,
         result_code: &str,
         reason: Option<&str>,
@@ -1522,10 +1476,8 @@ impl Workspace {
         } else {
             String::new()
         };
-        let default_notes = new_notes_md(&self.root, self.template_language()?)?;
-        let notes_modified =
-            !notes_text.trim().is_empty() && notes_text.trim() != default_notes.trim();
-        if notes_modified && !allow_notes {
+        let notes_present = !notes_text.trim().is_empty();
+        if notes_present && !allow_notes {
             return Err(AppError::new(
                 "case_notes_present",
                 format!("case {case_uid} has notes.md content"),
@@ -1561,9 +1513,9 @@ impl Workspace {
                 "case_uid": case_uid,
                 "case_name": case.collection_name,
                 "from_path": path.clone(),
-                "archived": archived,
+                "status": status,
                 "notes_deleted": notes_exists,
-                "notes_modified": notes_modified,
+                "notes_present": notes_present,
                 "notes_len_bytes": notes_text.len(),
                 "notes_hash": stable_text_hash(&notes_text),
             }),
@@ -1573,9 +1525,9 @@ impl Workspace {
             "case_name": case.collection_name,
             "from_path": path,
             "deleted": true,
-            "archived": archived,
+            "status": status,
             "notes_deleted": notes_exists,
-            "notes_modified": notes_modified,
+            "notes_present": notes_present,
         }))
     }
 
@@ -1650,7 +1602,7 @@ impl Workspace {
             "source_status": source_status,
             "from_path": source_path,
             "message_ids": message_ids,
-            "trashed_message_count": messages.message_count,
+            "trashed_message_count": messages.items.len(),
             "eligible_message_ids": eligible_message_ids,
             "location_count": locations.len(),
             "queued_location_count": queued_location_count,
@@ -1687,7 +1639,17 @@ impl Workspace {
 
     pub(super) fn active_case_items(&self) -> Result<Vec<Value>> {
         let mut out = Vec::new();
-        for (case_uid, path) in self.case_entries()? {
+        for (_case_uid, path) in self.case_entries()? {
+            let data = read_case_file(&path)?;
+            if !data.status.is_empty() {
+                return Err(AppError::new(
+                    "case_metadata_invalid",
+                    format!(
+                        "active case {} must have an empty canonical status",
+                        data.collection_uid
+                    ),
+                ));
+            }
             let group = path
                 .parent()
                 .and_then(Path::file_name)
@@ -1695,11 +1657,10 @@ impl Workspace {
                 .unwrap_or_default()
                 .to_string();
             out.push(json!({
-                "case_uid": case_uid,
-                "case_name": case_name(&path).unwrap_or_default(),
+                "case_uid": data.collection_uid,
+                "case_name": data.collection_name,
                 "group": group,
-                "archived": false,
-                "lifecycle": "active",
+                "status": data.status,
                 "case_dir": path
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -1725,43 +1686,45 @@ impl Workspace {
     }
 
     pub(super) fn archived_case_items(&self) -> Result<Vec<Value>> {
-        Ok(self
-            .archived_case_entries()?
+        self.archived_case_entries()?
             .into_iter()
             .map(|entry| {
-                let data = read_case_file(&entry.path).ok();
-                let lifecycle = data
-                    .as_ref()
-                    .map(|case| case_lifecycle(case, true))
-                    .unwrap_or("archived");
-                json!({
-                    "case_uid": entry.case_uid,
-                    "case_name": case_name(&entry.path).unwrap_or_default(),
+                let data = read_case_file(&entry.path)?;
+                if !matches!(data.status.as_str(), "archiving" | "archived") {
+                    return Err(AppError::new(
+                        "case_metadata_invalid",
+                        format!(
+                            "case {} stored under archived-cases must have canonical status archiving or archived",
+                            data.collection_uid
+                        ),
+                    ));
+                }
+                Ok(json!({
+                    "case_uid": data.collection_uid,
+                    "case_name": data.collection_name,
                     "group": entry.group,
-                    "archived": true,
-                    "lifecycle": lifecycle,
+                    "status": data.status,
                     "case_dir": entry
                         .path
                         .file_name()
                         .and_then(|s| s.to_str())
                         .unwrap_or_default(),
-                })
+                }))
             })
-            .collect())
+            .collect()
     }
 
-    pub(super) fn notes_show(
-        &self,
-        _code: &str,
-        targets: Vec<Value>,
-        path: &Path,
-    ) -> Result<Value> {
-        let text = read_existing_notes(&self.root, path)?;
-        Ok(json!({
-            "targets": targets,
-            "notes_path": rel_path(&self.root, path),
-            "text": text
-        }))
+    pub(super) fn notes_show(&self, path: &Path) -> Result<Value> {
+        serde_json::to_value(self.notes_render_document(path)?)
+            .map_err(|error| AppError::json("serialize notes render document", &error))
+    }
+
+    pub(super) fn notes_render_document(&self, path: &Path) -> Result<NotesRenderDocument> {
+        Ok(notes_render_document_from_text(
+            &self.root,
+            path,
+            read_existing_notes(&self.root, path)?,
+        ))
     }
 
     pub(super) fn notes_append(
@@ -1851,6 +1814,15 @@ impl Workspace {
     pub(super) fn resolve_case_any(&self, case_ref: &str) -> Result<ResolvedCase> {
         let case_uid = parse_case_ref(case_ref)?;
         if let Some(path) = self.find_case_by_uid(&case_uid)? {
+            let status = read_case_file(&path)?.status;
+            if !status.is_empty() {
+                return Err(AppError::new(
+                    "case_metadata_invalid",
+                    format!(
+                        "active case {case_uid} must have an empty canonical status, found {status:?}"
+                    ),
+                ));
+            }
             let group = path
                 .parent()
                 .and_then(Path::file_name)
@@ -1861,15 +1833,24 @@ impl Workspace {
                 case_uid,
                 group,
                 path,
-                archived: false,
+                status,
             });
         }
         if let Some(entry) = self.find_archived_case_by_uid(&case_uid)? {
+            let status = read_case_file(&entry.path)?.status;
+            if !matches!(status.as_str(), "archiving" | "archived") {
+                return Err(AppError::new(
+                    "case_metadata_invalid",
+                    format!(
+                        "case {case_uid} stored under archived-cases has invalid canonical status {status:?}"
+                    ),
+                ));
+            }
             return Ok(ResolvedCase {
                 case_uid,
                 group: entry.group,
                 path: entry.path,
-                archived: true,
+                status,
             });
         }
         Err(AppError::new(
@@ -1886,16 +1867,24 @@ impl Workspace {
     pub(super) fn resolve_unarchive_case(
         &self,
         case_ref: &str,
-    ) -> Result<(String, ArchivedCaseEntry, &'static str)> {
+    ) -> Result<(String, ArchivedCaseEntry, String)> {
         let case_uid = parse_case_ref(case_ref)?;
-        self.find_archived_case_by_uid(&case_uid)?
-            .map(|entry| (case_uid.clone(), entry, "archived"))
-            .ok_or_else(|| {
-                AppError::new(
-                    "case_not_found",
-                    format!("archived case not found: {case_uid}"),
-                )
-            })
+        let entry = self.find_archived_case_by_uid(&case_uid)?.ok_or_else(|| {
+            AppError::new(
+                "case_not_found",
+                format!("archived case not found: {case_uid}"),
+            )
+        })?;
+        let status = read_case_file(&entry.path)?.status;
+        if !matches!(status.as_str(), "archiving" | "archived") {
+            return Err(AppError::new(
+                "case_metadata_invalid",
+                format!(
+                    "case {case_uid} stored under archived-cases has invalid canonical status {status:?}"
+                ),
+            ));
+        }
+        Ok((case_uid, entry, status))
     }
 
     pub fn find_case(&self, case_ref: &str) -> Result<Option<PathBuf>> {

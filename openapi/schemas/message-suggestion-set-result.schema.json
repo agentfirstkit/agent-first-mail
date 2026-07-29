@@ -1,0 +1,169 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/message-suggestion-set-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "agent_suggestion": {
+      "properties": {
+        "agent_suggestion_uid": {
+          "type": "string"
+        },
+        "confidence_percent": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "created_rfc3339": {
+          "type": "string"
+        },
+        "message_review_base_hash": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "suggested_action": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "case_name": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "group": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "case_create",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "case_name",
+                "group"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "case_ref": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "case_add",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "case_ref"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "notification_create",
+                  "type": "string"
+                },
+                "notification_name": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "summary": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "notification_name",
+                "summary"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "notification_add",
+                  "type": "string"
+                },
+                "notification_ref": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "summary": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "notification_ref",
+                "summary"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "spam",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "trash",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "agent_suggestion_uid",
+        "message_review_base_hash",
+        "suggested_action",
+        "reason",
+        "created_rfc3339"
+      ],
+      "type": "object"
+    },
+    "human_suggestion_cleared": {
+      "type": "boolean"
+    },
+    "message_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "message_id",
+    "agent_suggestion",
+    "human_suggestion_cleared"
+  ],
+  "title": "MessageSuggestionSetResult",
+  "type": "object"
+}

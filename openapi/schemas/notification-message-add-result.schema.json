@@ -1,0 +1,27 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/notification-message-add-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "message_id": {
+      "type": "string"
+    },
+    "notification_uid": {
+      "type": "string"
+    },
+    "path": {
+      "type": "string"
+    },
+    "queued": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "message_id",
+    "notification_uid",
+    "path",
+    "queued"
+  ],
+  "title": "NotificationMessageAddResult",
+  "type": "object"
+}

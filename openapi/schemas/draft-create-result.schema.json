@@ -1,0 +1,27 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/draft-create-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "case_uid": {
+      "type": "string"
+    },
+    "draft_name": {
+      "type": "string"
+    },
+    "draft_path": {
+      "type": "string"
+    },
+    "identity": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "case_uid",
+    "draft_name",
+    "draft_path",
+    "identity"
+  ],
+  "title": "DraftCreateResult",
+  "type": "object"
+}

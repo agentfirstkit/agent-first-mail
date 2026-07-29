@@ -6,7 +6,7 @@ maintenance guide for contributors; user-facing mailbox behavior is documented i
 
 ## Top-Level Flow
 
-`afmail` has three main layers:
+`afmail` has four main layers:
 
 1. `src/main.rs` handles early CLI bootstrapping: version/help output, parse
    errors, output-format recovery, and process exit codes.
@@ -14,6 +14,8 @@ maintenance guide for contributors; user-facing mailbox behavior is documented i
    command-specific error hints.
 3. `src/runner/` dispatches parsed commands to workspace operations and owns
    structured command logging/progress output.
+4. `src/api/` defines HTTP DTOs, OpenAPI/JSON Schema generation, bearer/network
+   serving, and thin handlers that enter the same runner dispatch as CLI calls.
 
 Most behavior then lands in `src/store/Workspace`, which owns the file-first
 mailbox workspace. Network-facing code stays outside the store in `imap_pull/`,
@@ -25,7 +27,8 @@ mailbox workspace. Network-facing code stays outside the store in `imap_pull/`,
 src/
   main.rs            early CLI bootstrap and exit handling
   cli/               Clap argument model, parsing, and invalid-command hints
-  runner/            command dispatch, output, locks, push/purge, and trusted AFUI owner bridge
+  runner/            command dispatch, output, locks, push/purge, and blocking review sessions
+  api/               HTTP handlers, typed DTOs, OpenAPI/Schema generation and export
   config/            typed config schema, defaults, key access, and validation
   store/             workspace file model and local state transitions
   imap_pull/         read-only IMAP pull sessions, remote identity, special-use folders
@@ -39,7 +42,8 @@ src/
   markdown.rs        Markdown frontmatter split/parse/render and conversation extraction
   frontmatter.rs     draft/triage/case-message frontmatter types
   draft_content.rs   typed compose/quote boundaries, completeness, and outbound projection
-  templates.rs       built-in and workspace MiniJinja template loading
+  render_document.rs versioned output-neutral documents shared by Markdown and Review
+  templates.rs       shared Markdown/HTML MiniJinja loading, filters, and Review safety checks
   skill_admin.rs     skill install/status backing `afmail skill`
   progress.rs        workspace progress snapshot sink and status projection
   error.rs           AppError type with structured error codes and hints
@@ -70,12 +74,12 @@ high-level wiring. Sibling modules add focused `impl Workspace` blocks:
   `pull_with_progress`, dispatched for `afmail pull`), reconciles local references
   with remote IMAP locations, and exposes remote-location helpers used by push
   execution. The IMAP I/O it drives lives in `imap_pull/`.
-- `triage.rs`, `render.rs`, and `view_model.rs` build generated Markdown read
-  views and shared message rendering context.
+- `triage.rs` and `render.rs` build generated Markdown read views and shared
+  message rendering context.
 - `drafts.rs` owns draft creation, queue validation, and attachment bookkeeping
   for cases. `draft_content.rs` owns the body schema and authored/outbound
   projections; `types/draft.rs` owns intent/status/completeness enums shared by
-  CLI and AFUI.
+  CLI output and typed Review documents.
 - `push_state.rs`, `purge.rs`, `doctor.rs`, and `transactions.rs` own narrower
   maintenance concerns.
 - `util.rs` contains store-private filesystem, id, path, timestamp, and audit
@@ -84,17 +88,38 @@ high-level wiring. Sibling modules add focused `impl Workspace` blocks:
 Keep new store behavior near the durable state it changes. Prefer another small
 module only when a concern has its own file format, lifecycle, or command group.
 
-`runner/ui.rs` launches the generic AFUI Host with afmail's pack, default termail
-companion, and trusted sidecar configuration. `runner/ui_bridge.rs` is the JSONL
-owner process: it accepts only afmail's declared local-mutation draft contract,
-takes the workspace lock, calls `Workspace::change_draft`, and returns a fresh
-producer snapshot. It is transport glue, not a second draft implementation.
+`runner/review.rs` owns local, blocking review sessions for triage, cases,
+notifications, and drafts. It contains the same typed render documents used by
+Markdown, renders the page through `TemplateRenderer` while holding only a
+shared lock, then returns one AFDATA result when the reviewer submits, cancels,
+or dismisses the window. Triage, case, and notification review persist typed,
+hash-bound human
+suggestion state before returning a submitted result, but never apply the
+suggested domain action. Case-note, notification-note, and draft edits debounce
+into automatic saves that acquire an exclusive lock, verify the base hash, and
+call the canonical Workspace API; the result lists each completed write in
+`saved_files`. Review never queues, pushes, or sends remote effects, and closing
+the window does not roll back saved local changes.
+
+The old Review-specific HTML/CSS/DOM-rendering bundle does not exist. Workspace
+Review templates own server-rendered structure, style, and localized copy;
+`runner/review_runtime.js` is an afmail-owned behavior-only runtime. Workspace
+templates cannot supply JavaScript.
+
+`api/server.rs` owns the Axum boundary but not domain behavior. Handlers reject
+malformed typed JSON, authenticate, obtain any required idempotency key, convert
+the DTO to an existing `Command`, and call `runner::dispatch::execute_command_at`.
+That path applies the normal workspace lock and incomplete-transaction guard.
+`api/schema.rs` generates both OpenAPI components and standalone JSON Schemas
+from the DTOs; committed files under `openapi/` have a drift test.
 
 ## File-State Boundaries
 
 The workspace keeps durable state in a few canonical places:
 
-- Raw message evidence and remote sidecars live under `.afmail/messages/`.
+- Raw message evidence and canonical message metadata live under
+  `.afmail/messages/`; metadata includes remote state and current suggestion
+  annotations.
 - Rebuildable parsed message caches live under `messages/`.
 - Case state lives in `cases/.../data/case.json` or
   `archived-cases/.../data/case.json`.
@@ -123,8 +148,8 @@ canonical files with `afmail render refresh`.
   paths unless a migration is explicitly planned.
 - Add new CLI actions in `src/cli/` first, then dispatch them in `src/runner/`,
   and keep workspace mutations on `Workspace` methods.
-- Use typed structs at module boundaries; reserve `serde_json::Value` for dynamic
-  CLI output and template contexts.
+- Use typed structs at module boundaries and for template documents; reserve
+  `serde_json::Value` for genuinely dynamic CLI output.
 - Keep generated view code separate from durable state mutation code where
   possible, then call refresh helpers after state changes.
 - Keep helpers `pub(super)` or narrower unless another crate module already
@@ -140,11 +165,18 @@ repository root:
 ./scripts/test.sh unit
 ```
 
-`static` covers formatting, default and no-default-feature Clippy, generated CLI
-documentation drift, and manifest JSON validity. `unit` runs default-feature
-tests; `minimal` runs the same crate without the optional UI feature. `all` runs
-all three. Do not replace these entry points with hand-written Cargo command
-sequences.
+`static` covers formatting, Clippy for the default set, the empty feature set,
+and each standalone `api`, `demo`, and `review` feature, plus generated CLI
+documentation drift, manifest JSON validity, and a dependency-tree assertion
+that `axum` and `tokio` are absent when default features are disabled. `unit`
+runs default-feature tests; `minimal` runs the same crate with no default
+features. `all` runs all three. Do not replace these entry points with
+hand-written Cargo command sequences.
+
+The default feature set is `api,demo,review`. Disabled implementations are not
+compiled, but their command shapes remain discoverable and return a structured
+`feature_disabled` error. Keep the small fallback modules free of the optional
+dependencies so `--no-default-features` remains a real capability boundary.
 
 Use focused modes for large integration targets instead of ad hoc Cargo command
 lines:
@@ -168,7 +200,7 @@ split-out config and dependency contract target (`tests/config_contract.rs`).
 target (`tests/draft_contract.rs`). `push` runs the split-out push contract
 target (`tests/push_contract.rs`).
 
-## Fixture Batch, Docker E2E, and Demo
+## Fixture Batch, Docker E2E, and GreenMail Workflow
 
 The reusable mailbox story lives under `tests/fixtures/mail-batch/`: a
 `manifest.json` plus 30 realistic `.eml` files. Tests should load that manifest
@@ -187,7 +219,7 @@ live GreenMail mailbox and configured afmail workspace, but does not pull or
 process mail; the agent must actually operate the inbox:
 
 ```bash
-./scripts/test.sh demo-prepare
+./scripts/test.sh greenmail-prepare
 ```
 
 After it prints the workspace path, open your agent there and say:
@@ -215,11 +247,12 @@ refund this order, reply.
 
 The CRM helper is intentionally optional context for customer/order cases, not a
 scripted requirement; the agent can use it when the email thread mentions an
-order and more context would help. `AGENTS.md` only receives this CRM lookup
-hint; the normal mailbox workflow instructions come from `afmail init`.
+order and more context would help. The demo-owned `AGENTS.md` only receives this
+CRM lookup hint; normal mailbox behavior comes from the installed afmail skill,
+while `afmail init` deliberately does not create or edit `AGENTS.md`.
 
 For an automated scripted demo pass, use:
 
 ```bash
-./scripts/test.sh demo
+./scripts/test.sh greenmail
 ```

@@ -1,0 +1,28 @@
+{%- import "i18n/catalog.j2" as i18n -%}
+{% set mail = message_document.message %}{% set analysis = message_document.analysis %}{% if analysis.direction == 'inbound' %}{% set message_time = mail.received_rfc3339 or mail.sent_rfc3339 %}{% else %}{% set message_time = mail.sent_rfc3339 or mail.received_rfc3339 %}{% endif %}<div class="message-entry">
+  <article class="message-card {% if analysis.direction == 'outbound' %}outbound{% else %}inbound{% endif %}">
+    <header class="message-header">
+      <span class="avatar" aria-hidden="true">{{ (mail.from or mail.identity_email or '') | initials }}</span>
+      <div>
+        <p class="sender">{% if analysis.direction == 'outbound' %}{{ i18n.t('you') }}{% elif mail.from %}{{ mail.from | display_name }}{% else %}{{ i18n.t('unknown_sender') }}{% endif %}</p>
+        <span class="message-address">{% if analysis.direction == 'outbound' %}{{ mail.to | join(', ') }}{% elif mail.from %}{{ mail.from }}{% endif %}</span>
+      </div>
+      <time class="message-time" datetime="{{ message_time or '' }}">{% if message_time %}{{ message_time | datetime }}{% else %}{{ i18n.t('unknown_time') }}{% endif %}</time>
+    </header>
+    {% if mail.subject %}<h3 class="message-subject">{{ mail.subject }}</h3>{% endif %}
+    {% if analysis.security.authentication_warning %}<p class="authentication-warning" role="note">{{ i18n.t('auth_attention') }}: SPF {{ mail.authentication.spf }}, DKIM {{ mail.authentication.dkim }}, DMARC {{ mail.authentication.dmarc }}{% if mail.authentication.alignment == 'mismatch' %}; {{ i18n.t('sender_domains_not_align') }}{% endif %}.</p>{% endif %}
+    <div class="message-body">{% if analysis.body.segments %}{% for segment in analysis.body.segments %}<div{% if segment.kind == 'quoted' %} class="quoted-body"{% endif %}>{{ mail.body_text | text_range(segment.start_bytes, segment.end_bytes) }}</div>{% endfor %}{% else %}<div>{{ i18n.t('no_readable_body') }}</div>{% endif %}</div>
+    <details class="message-details">
+      <summary>{{ i18n.t('message_details') }}</summary>
+      <div class="detail-grid">
+        <span class="detail-label">{{ i18n.t('message_id') }}</span><span>{{ mail.message_id }}</span>
+        {% if mail.from %}<span class="detail-label">{{ i18n.t('from') }}</span><span>{{ mail.from }}</span>{% endif %}
+        {% if mail.to %}<span class="detail-label">{{ i18n.t('to') }}</span><span>{{ mail.to | join(', ') }}</span>{% endif %}
+        {% if mail.cc %}<span class="detail-label">{{ i18n.t('cc') }}</span><span>{{ mail.cc | join(', ') }}</span>{% endif %}
+        {% if analysis.security.reply_to_differs %}<span class="detail-label">{{ i18n.t('reply_to') }}</span><span>{{ mail.reply_to | join(', ') }}</span>{% endif %}
+        {% if mail.list_id %}<span class="detail-label">{{ i18n.t('mailing_list') }}</span><span>{{ mail.list_id }}</span>{% endif %}
+      </div>
+    </details>
+    {% if mail.attachments %}<div class="attachment-list" aria-label="{{ i18n.t('attachments') }}">{% for attachment in mail.attachments %}<div class="attachment"><span>{{ attachment.filename }}</span><span class="message-address">{{ attachment.content_type }} · {{ attachment.size_bytes | bytes }}</span></div>{% endfor %}</div>{% endif %}
+  </article>
+</div>

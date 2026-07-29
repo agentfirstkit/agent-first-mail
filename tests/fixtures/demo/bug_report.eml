@@ -1,0 +1,24 @@
+Message-ID: <bug_report@fixtures.afmail.local>
+Date: Sun, 26 Jul 2026 09:40:00 +0000
+From: Maya Chen <maya@northstar.example>
+To: Founder <me@localhost>
+Subject: Export freezes after reconnecting on slow Wi-Fi
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Authentication-Results: demo.example; spf=pass smtp.mailfrom=northstar.example; dkim=pass header.d=northstar.example; dmarc=pass header.from=northstar.example
+
+Hi,
+
+I can reproduce a freeze in the desktop app:
+
+1. Start a CSV export with about 2,000 rows.
+2. Turn Wi-Fi off for ten seconds.
+3. Turn Wi-Fi back on and click Retry.
+
+The progress bar stays at 63% and the app stops responding. Restarting the app
+clears it, but the export never finishes. This happened three times on version
+2.4.1 for macOS.
+
+Could you confirm whether there is a workaround? I can collect logs if useful.
+
+Maya

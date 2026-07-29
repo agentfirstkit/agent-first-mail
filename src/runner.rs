@@ -1,27 +1,20 @@
-mod dispatch;
+pub(crate) mod dispatch;
 mod lock;
 mod output;
 mod purge;
 mod push;
-#[cfg(feature = "ui")]
-mod ui;
-#[cfg(feature = "ui")]
-mod ui_bridge;
+#[cfg(feature = "review")]
+mod review;
+#[cfg(not(feature = "review"))]
+#[path = "runner/review_disabled.rs"]
+mod review;
 
 pub use dispatch::execute_command;
 pub use output::{emit_result, output_write_failed_exit_code};
 
-#[cfg(feature = "ui")]
-pub(crate) use ui::afui_host_available;
-
-#[cfg(not(feature = "ui"))]
-pub(crate) fn afui_host_available() -> bool {
-    false
-}
-
 use crate::cli::Command;
 use crate::progress::{ProgressCallback, object_with_phase};
-use agent_first_data::{CliEmitter, CliEmitterError, LogFilters, OutputFormat};
+use agent_first_data::{CliEmitter, CliEmitterError, LogFilters, OutputFormat, OutputTo};
 use dispatch::execute_command_with_progress;
 use output::{
     argv_shape, command_name, log_event, output_format_name, progress_event, redact_argv,
@@ -50,16 +43,12 @@ pub fn run_command(
     command: Command,
     request_id: Option<String>,
     output: OutputFormat,
+    output_to: OutputTo,
     log_filters: &LogFilters,
     argv: &[String],
 ) -> i32 {
-    #[cfg(feature = "ui")]
-    if let Command::Ui(command) = command {
-        return ui::run_ui_command(command, output);
-    }
     let started = Instant::now();
-    let stdout = std::io::stdout();
-    let mut emitter = CliEmitter::new(stdout.lock(), output).with_strict_protocol();
+    let mut emitter = CliEmitter::from_output_to(output_to, output).with_strict_protocol();
     let command_name = command_name(&command).to_string();
     if log_filters.enabled("startup") {
         let argv_shape = argv_shape(argv);
@@ -106,7 +95,43 @@ pub fn run_command(
 
     let progress_enabled = log_filters.enabled("progress");
     let mut progress_write_error: Option<CliEmitterError> = None;
-    let result = {
+    let is_review_command = review::is_review_command(&command);
+    let is_api_command = crate::api::is_api_command(&command);
+    let is_demo_serve_command = crate::demo::is_demo_serve_command(&command);
+    let result = if is_review_command {
+        match dispatch::validate_request_id(&command, request_id.as_deref()) {
+            Err(error) => Err(error),
+            Ok(()) => match review::run_review_command(&command, &mut emitter, started) {
+                Ok(result) => Ok(result),
+                Err(review::ReviewRunError::App(error)) => Err(error),
+                Err(review::ReviewRunError::Output(error)) => {
+                    return output_write_failed_exit_code(&error);
+                }
+            },
+        }
+    } else if is_api_command {
+        match dispatch::validate_request_id(&command, request_id.as_deref()) {
+            Err(error) => Err(error),
+            Ok(()) => match crate::api::run_api_command(&command, &mut emitter, started) {
+                Ok(result) => Ok(result),
+                Err(crate::api::ApiRunError::App(error)) => Err(error),
+                Err(crate::api::ApiRunError::Output(error)) => {
+                    return output_write_failed_exit_code(&error);
+                }
+            },
+        }
+    } else if is_demo_serve_command {
+        match dispatch::validate_request_id(&command, request_id.as_deref()) {
+            Err(error) => Err(error),
+            Ok(()) => match crate::demo::run_serve_command(&command, &mut emitter, started) {
+                Ok(result) => Ok(result),
+                Err(crate::demo::DemoRunError::App(error)) => Err(error),
+                Err(crate::demo::DemoRunError::Output(error)) => {
+                    return output_write_failed_exit_code(&error);
+                }
+            },
+        }
+    } else {
         let mut emit_progress = |phase: &str, fields: Value| {
             if progress_write_error.is_some() {
                 return;

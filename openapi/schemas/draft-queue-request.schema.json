@@ -1,0 +1,19 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/draft-queue-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "enum": [
+        "save_draft",
+        "send"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "action"
+  ],
+  "title": "DraftQueueRequest",
+  "type": "object"
+}

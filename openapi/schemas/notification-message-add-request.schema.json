@@ -1,0 +1,26 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/notification-message-add-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "message_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "summary": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "message_id",
+    "summary",
+    "reason"
+  ],
+  "title": "NotificationMessageAddRequest",
+  "type": "object"
+}

@@ -1,5 +1,7 @@
 use clap::{Args, Subcommand};
 
+use super::common::ReviewMode;
+
 #[derive(Subcommand, Debug)]
 pub enum CaseCommand {
     /// Create a new case and return its stable UID/ref.
@@ -13,10 +15,23 @@ pub enum CaseCommand {
         #[arg(long, conflicts_with_all = ["archived"])]
         all: bool,
     },
-    /// Show a case's case.md without changing workspace state.
+    /// Show the exact typed case collection document used by Markdown and Review.
     Show {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
+    },
+    /// Open a review session for this case, including editable notes.
+    Review {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Review presentation mode.
+        #[arg(long, value_enum, default_value = "local")]
+        mode: ReviewMode,
+    },
+    /// Set or clear the current typed Agent suggestion for this case.
+    Suggestion {
+        #[command(subcommand)]
+        action: CaseSuggestionAction,
     },
     /// Add a message to this existing case.
     Add {
@@ -157,6 +172,65 @@ pub enum CaseCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum CaseSuggestionAction {
+    /// Replace the current suggestion and clear any human review of the prior round.
+    Set(CaseSuggestionSetArgs),
+    /// Clear exactly the current suggestion round.
+    Clear {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// UID returned by the current suggestion set command.
+        #[arg(long)]
+        agent_suggestion_uid: String,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct CaseSuggestionSetArgs {
+    /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+    pub case_ref: String,
+    /// Current hash returned by `afmail case show`.
+    #[arg(long)]
+    pub case_review_base_hash: String,
+    /// Why this complete action is being suggested.
+    #[arg(long)]
+    pub reason: String,
+    /// Optional confidence from 0 through 100.
+    #[arg(long)]
+    pub confidence_percent: Option<u8>,
+    #[command(subcommand)]
+    pub action: CaseSuggestionActionKind,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CaseSuggestionActionKind {
+    Archive,
+    Unarchive {
+        #[arg(long)]
+        group: String,
+    },
+    Move {
+        #[arg(long)]
+        group: String,
+    },
+    Rename {
+        #[arg(long)]
+        name: String,
+    },
+    Tag {
+        tag: String,
+    },
+    Untag {
+        tag: String,
+    },
+    Trash,
+    Delete {
+        #[arg(long)]
+        allow_notes: bool,
+    },
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct CaseCreateArgs {
     /// Human-readable case name used in case.md and the directory suffix.
@@ -273,12 +347,22 @@ pub enum CaseDraftAction {
         #[arg(long = "body-file")]
         body_file: Option<String>,
     },
-    /// Show an existing draft in a review-friendly JSON shape.
+    /// Show an existing draft as a typed render document.
     Show {
         /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
         /// Draft markdown file under the case drafts directory.
         draft_name: String,
+    },
+    /// Open a review session for this draft.
+    Review {
+        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
+        case_ref: String,
+        /// Draft markdown file under the case drafts directory.
+        draft_name: String,
+        /// Review presentation mode.
+        #[arg(long, value_enum, default_value = "local")]
+        mode: ReviewMode,
     },
     /// Validate a draft under the case drafts directory.
     Validate {

@@ -1,11 +1,11 @@
-# 返信
+{% set parent = document.message.message %}# 返信
 
 <!-- afmail:compose:start -->
 
 <!-- afmail:compose:end -->
 
-以前のメッセージで、 {% if sender %}{{ sender }}{% else %}送信者{% endif %} は次のように書きました:
+以前のメッセージで、 {% if parent.from %}{{ parent.from | inline }}{% else %}送信者{% endif %} は次のように書きました:
 
 <!-- afmail:quote:start -->
-{{ quoted }}
+{{ parent.body_text | markdown_quote }}
 <!-- afmail:quote:end -->

@@ -2,26 +2,21 @@ use super::*;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DispositionViewSpec {
-    status: MessageStatus,
-    dir: &'static str,
-    data_file: &'static str,
-    schema_name: &'static str,
-    collection_uid: &'static str,
-    // English title only — used for the collection's stored (data) title. The
-    // human-facing localized title/label shown in the Markdown view is rendered
-    // by the per-language template from `view.status`, not from here.
-    title_en: &'static str,
+    pub(super) status: MessageStatus,
+    pub(super) dir: &'static str,
+    pub(super) data_file: &'static str,
+    pub(super) schema_name: &'static str,
+    pub(super) collection_uid: &'static str,
     frontmatter_kind: &'static str,
 }
 
-const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
+pub(super) const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
     DispositionViewSpec {
         status: MessageStatus::Spam,
         dir: layout::SPAM,
         data_file: "spam.json",
         schema_name: "spam",
         collection_uid: "spam",
-        title_en: "Spam",
         frontmatter_kind: "spam_message",
     },
     DispositionViewSpec {
@@ -30,7 +25,6 @@ const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
         data_file: "trash.json",
         schema_name: "trash",
         collection_uid: "trash",
-        title_en: "Trash",
         frontmatter_kind: "trash_message",
     },
     DispositionViewSpec {
@@ -39,21 +33,98 @@ const DISPOSITION_VIEW_SPECS: [DispositionViewSpec; 3] = [
         data_file: "deleted.json",
         schema_name: "deleted_remote",
         collection_uid: "deleted",
-        title_en: "Remote Deleted",
         frontmatter_kind: "deleted_message",
     },
 ];
+
+struct DispositionIndexInput<'a> {
+    spec: DispositionViewSpec,
+    collection: &'a MessageCollection,
+    messages: &'a [MessageFile],
+    config: &'a MailConfig,
+    render_context: Option<&'a RenderContext>,
+}
 
 impl DispositionViewSpec {
     fn empty_collection(self) -> MessageCollection {
         let now = now_rfc3339();
         let mut collection =
-            MessageCollection::new(self.schema_name, self.collection_uid, self.title_en);
+            MessageCollection::new(self.schema_name, self.collection_uid, self.collection_uid);
         collection.status = self.status.as_str().to_string();
         collection.created_rfc3339 = Some(now.clone());
         collection.updated_rfc3339 = Some(now);
         collection
     }
+}
+
+pub(super) fn validate_disposition_collection(
+    root: &Path,
+    path: &Path,
+    spec: DispositionViewSpec,
+    messages: &MessageCollection,
+) -> Result<()> {
+    let duplicate_message_id = messages.duplicate_message_id();
+    let content_issues = message_collection_content_issues(messages);
+    let valid = messages.schema_name == spec.schema_name
+        && messages.schema_version == MESSAGE_COLLECTION_SCHEMA_VERSION
+        && messages.collection_uid == spec.collection_uid
+        && messages.collection_name == spec.collection_uid
+        && messages.status == spec.status.as_str()
+        && messages.archived_rfc3339.is_none()
+        && messages.agent_suggestion.is_none()
+        && messages.human_suggestion.is_none()
+        && content_issues.is_empty()
+        && duplicate_message_id.is_none();
+    if valid {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "disposition_messages_invalid",
+        format!("invalid disposition messages: {}", rel_path(root, path)),
+    )
+    .with_details(json!({
+        "path": rel_path(root, path),
+        "expected_schema_name": spec.schema_name,
+        "schema_name": messages.schema_name,
+        "expected_schema_version": MESSAGE_COLLECTION_SCHEMA_VERSION,
+        "schema_version": messages.schema_version,
+        "expected_collection_uid": spec.collection_uid,
+        "collection_uid": messages.collection_uid,
+        "expected_collection_name": spec.collection_uid,
+        "collection_name": messages.collection_name,
+        "expected_status": spec.status.as_str(),
+        "status": messages.status,
+        "archived_rfc3339": messages.archived_rfc3339,
+        "has_agent_suggestion": messages.agent_suggestion.is_some(),
+        "has_human_suggestion": messages.human_suggestion.is_some(),
+        "duplicate_message_id": duplicate_message_id,
+        "content_issues": content_issues,
+    })))
+}
+
+fn validate_disposition_message(spec: DispositionViewSpec, message: &MessageFile) -> Result<()> {
+    if message.workspace.status == spec.status.as_str()
+        && message.workspace.notification_uid.is_none()
+        && message.workspace.notification_rfc3339.is_none()
+        && message.workspace.origin.is_none()
+    {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "disposition_state_invalid",
+        format!(
+            "message {} does not match canonical {} disposition state",
+            message.message_id, spec.collection_uid
+        ),
+    )
+    .with_details(json!({
+        "message_id": message.message_id,
+        "expected_status": spec.status.as_str(),
+        "status": message.workspace.status,
+        "notification_uid": message.workspace.notification_uid,
+        "notification_rfc3339": message.workspace.notification_rfc3339,
+        "origin": message.workspace.origin,
+    })))
 }
 
 impl Workspace {
@@ -68,18 +139,7 @@ impl Workspace {
         let data = read_to_string(&path, "read disposition messages")?;
         let messages: MessageCollection = serde_json::from_str(&data)
             .map_err(|e| AppError::json("parse disposition messages", &e))?;
-        if messages.schema_name != spec.schema_name
-            || messages.schema_version != MESSAGE_COLLECTION_SCHEMA_VERSION
-            || messages.collection_uid != spec.collection_uid
-        {
-            return Err(AppError::new(
-                "disposition_messages_invalid",
-                format!(
-                    "invalid disposition messages schema: {}",
-                    rel_path(&self.root, &path)
-                ),
-            ));
-        }
+        validate_disposition_collection(&self.root, &path, spec, &messages)?;
         Ok(messages)
     }
 
@@ -88,23 +148,15 @@ impl Workspace {
         spec: DispositionViewSpec,
         data: &MessageCollection,
     ) -> Result<()> {
-        let mut normalized = data.clone();
-        normalized.normalize(spec.schema_name, spec.collection_uid, spec.title_en);
-        normalized.status = spec.status.as_str().to_string();
-        if normalized.created_rfc3339.is_none() {
-            normalized.created_rfc3339 = Some(now_rfc3339());
-        }
-        if normalized.updated_rfc3339.is_none() {
-            normalized.updated_rfc3339 = Some(now_rfc3339());
-        }
         let path = self.disposition_json_path(spec);
-        if normalized.items.is_empty() && !path.exists() {
+        validate_disposition_collection(&self.root, &path, spec, data)?;
+        if data.items.is_empty() && !path.exists() {
             return Ok(());
         }
         if let Some(parent) = path.parent() {
             create_dir_all(parent)?;
         }
-        write_json_pretty(&path, &normalized)
+        write_json_pretty(&path, data)
     }
 
     pub(crate) fn set_message_disposition(
@@ -170,7 +222,6 @@ impl Workspace {
         if data.items.len() == before {
             return Ok(false);
         }
-        data.message_count = data.items.len();
         data.updated_rfc3339 = Some(now_rfc3339());
         self.write_disposition_messages(spec, &data)?;
         Ok(true)
@@ -180,13 +231,24 @@ impl Workspace {
         &self,
         message_id: &str,
     ) -> Result<Option<(MessageStatus, String)>> {
+        let mut state: Option<(MessageStatus, String)> = None;
         for spec in DISPOSITION_VIEW_SPECS {
             let data = self.read_disposition_messages(spec)?;
             if let Some(item) = data.items.iter().find(|item| item.message_id == message_id) {
-                return Ok(Some((spec.status, item.added_rfc3339.clone())));
+                if let Some((existing_status, _)) = &state {
+                    return Err(AppError::new(
+                        "disposition_state_invalid",
+                        format!(
+                            "message {message_id} is present in both {} and {} dispositions",
+                            existing_status.as_str(),
+                            spec.status.as_str()
+                        ),
+                    ));
+                }
+                state = Some((spec.status, item.added_rfc3339.clone()));
             }
         }
-        Ok(None)
+        Ok(state)
     }
 
     pub(super) fn disposition_state_by_message(&self) -> Result<BTreeMap<String, MessageStatus>> {
@@ -194,7 +256,17 @@ impl Workspace {
         for spec in DISPOSITION_VIEW_SPECS {
             let data = self.read_disposition_messages(spec)?;
             for item in data.items {
-                out.insert(item.message_id, spec.status);
+                if let Some(existing_status) = out.insert(item.message_id.clone(), spec.status) {
+                    return Err(AppError::new(
+                        "disposition_state_invalid",
+                        format!(
+                            "message {} is present in both {} and {} dispositions",
+                            item.message_id,
+                            existing_status.as_str(),
+                            spec.status.as_str()
+                        ),
+                    ));
+                }
             }
         }
         Ok(out)
@@ -228,8 +300,9 @@ impl Workspace {
             .or(owned_config.as_ref())
             .ok_or_else(|| AppError::new("internal", "render config was not initialized"))?;
         let language = config.template_language();
-        let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
+        let mut renderer = TemplateRenderer::new(&self.root, language);
         let mut groups: BTreeMap<&'static str, Vec<MessageFile>> = BTreeMap::new();
+        let mut collections: BTreeMap<&'static str, MessageCollection> = BTreeMap::new();
         let mut desired: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
         let mut written: BTreeMap<&'static str, usize> = BTreeMap::new();
         let mut unchanged: BTreeMap<&'static str, usize> = BTreeMap::new();
@@ -243,15 +316,13 @@ impl Workspace {
 
         for spec in DISPOSITION_VIEW_SPECS {
             let data = self.read_disposition_messages(spec)?;
-            for item in data.items {
+            collections.insert(spec.dir, data.clone());
+            for item in &data.items {
                 let mut message = match render_context {
                     Some(context) => context.read_message(self, &item.message_id)?,
                     None => self.read_message_by_id(&item.message_id)?,
                 };
-                message.workspace.status = spec.status.as_str().to_string();
-                message.workspace.notification_uid = None;
-                message.workspace.notification_rfc3339 = None;
-                message.workspace.origin = None;
+                validate_disposition_message(spec, &message)?;
                 if render_context.is_none() {
                     self.apply_identity_match(&mut message, config)?;
                 }
@@ -289,14 +360,20 @@ impl Workspace {
                 MessageStatus::DeletedRemote => stale_deleted_removed_count = stale_count,
                 _ => {}
             }
-            let mut messages = groups.remove(spec.dir).unwrap_or_default();
+            let messages = groups.remove(spec.dir).unwrap_or_default();
             if messages.is_empty() {
                 continue;
             }
             let outcome = self.write_disposition_index_inner(
-                spec,
-                &mut messages,
-                config,
+                DispositionIndexInput {
+                    spec,
+                    collection: collections.get(spec.dir).ok_or_else(|| {
+                        AppError::new("internal", "disposition collection was not initialized")
+                    })?,
+                    messages: &messages,
+                    config,
+                    render_context,
+                },
                 &mut renderer,
                 cache.as_deref_mut(),
             )?;
@@ -337,148 +414,90 @@ impl Workspace {
         spec: DispositionViewSpec,
         message: &MessageFile,
         config: &MailConfig,
-        renderer: &mut MarkdownTemplateRenderer<'_>,
+        renderer: &mut TemplateRenderer<'_>,
         cache: Option<&mut RenderCache>,
         render_context: Option<&RenderContext>,
     ) -> Result<FileWriteOutcome> {
         let path = self.disposition_message_view_path(spec, &message.message_id);
-        let context = json!({
-            "frontmatter": {
-                "kind": spec.frontmatter_kind,
-                "message_id": message.message_id.as_str(),
-                "status": message.workspace.status.as_str(),
-            },
-            "message": message_template_value(message)?,
-            "view": {
-                "language": config.resolved_language_bcp47(),
-                "status": message.workspace.status.as_str(),
-                "title": message.subject.as_deref().unwrap_or(""),
-                "display_title": markdown_inline(message.subject.as_deref().unwrap_or("")),
-            },
-        });
+        let document =
+            self.message_render_document_with_context(message, config, render_context)?;
         if let Some(cache) = cache {
-            let input_hash = self.render_input_hash_cached(
-                cache,
-                spec.frontmatter_kind,
-                &path,
-                &[TemplateKey::StatusMessage, TemplateKey::MessageSection],
-                json!({
-                    "message_hash": render_context
-                        .and_then(|context| context.snapshot(&message.message_id))
-                        .map(|snapshot| snapshot.hash.clone())
-                        .unwrap_or(blake3_json_fingerprint(message)?),
-                    "quoted_message_id": render_context
-                        .and_then(|context| context.quoted_message_id(&message.message_id)),
-                    "context": context.clone(),
-                }),
-            )?;
+            let input_hash =
+                self.render_input_hash_cached(cache, spec.frontmatter_kind, &path, &document)?;
             return self.render_cached_string(
                 cache,
                 &path,
                 spec.frontmatter_kind,
                 input_hash,
                 || {
-                    let conversation = self.message_conversation_with_renderer_context(
-                        message,
-                        config,
-                        renderer,
-                        path.parent(),
-                        render_context,
-                    )?;
-                    let mut context = context.clone();
-                    if let Value::Object(root) = &mut context
-                        && let Some(Value::Object(view)) = root.get_mut("view")
-                    {
-                        view.insert("conversation".to_string(), json!(conversation.trim()));
-                    }
-                    renderer.render(TemplateKey::StatusMessage, &context)
+                    renderer.render_with_options(
+                        TemplateKey::StatusMessage,
+                        &document,
+                        TemplateRenderOptions {
+                            timezone_offset: Some(config.resolved_timezone_offset()),
+                            output_dir: path.parent(),
+                        },
+                    )
                 },
             );
         }
-        let conversation = self.message_conversation_with_renderer_context(
-            message,
-            config,
-            renderer,
-            path.parent(),
-            render_context,
+        let rendered = renderer.render_with_options(
+            TemplateKey::StatusMessage,
+            &document,
+            TemplateRenderOptions {
+                timezone_offset: Some(config.resolved_timezone_offset()),
+                output_dir: path.parent(),
+            },
         )?;
-        let mut context = context;
-        if let Value::Object(root) = &mut context
-            && let Some(Value::Object(view)) = root.get_mut("view")
-        {
-            view.insert("conversation".to_string(), json!(conversation.trim()));
-        }
-        let rendered = renderer.render(TemplateKey::StatusMessage, &context)?;
         write_string(&path, &rendered)?;
         Ok(FileWriteOutcome::Written)
     }
 
     fn write_disposition_index_inner(
         &self,
-        spec: DispositionViewSpec,
-        messages: &mut [MessageFile],
-        config: &MailConfig,
-        renderer: &mut MarkdownTemplateRenderer<'_>,
+        input: DispositionIndexInput<'_>,
+        renderer: &mut TemplateRenderer<'_>,
         cache: Option<&mut RenderCache>,
     ) -> Result<FileWriteOutcome> {
-        messages.sort_by(|a, b| compare_message_time_asc(b, a));
-        let offset = config.resolved_timezone_offset();
-        let items = messages
-            .iter()
-            .map(|message| {
-                let title = message
-                    .subject
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or(message.message_id.as_str())
-                    .to_string();
-                let item = thread_item_common(
-                    message,
-                    &offset,
-                    format!("{}.md", message.message_id),
-                    title,
-                )?;
-                Ok(item)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let context = json!({
-            "frontmatter": {
-                "kind": format!("{}_index", spec.frontmatter_kind),
-                "status": spec.status.as_str(),
-                "message_count": items.len(),
-            },
-            "items": items,
-            "view": {
-                "language": config.resolved_language_bcp47(),
-                "status": spec.status.as_str(),
-                "status_dir": spec.dir,
-                "message_count": items.len(),
-            },
-        });
-        let path = self.root.join(spec.dir).join("index.md");
+        let documents = self.message_render_documents_with_context(
+            input.messages,
+            input.config,
+            input.render_context,
+        )?;
+        let document = collection_render_document(input.collection.clone(), documents, None);
+        let path = self.root.join(input.spec.dir).join("index.md");
         if let Some(cache) = cache {
             let input_hash = self.render_input_hash_cached(
                 cache,
-                &format!("{}_index", spec.frontmatter_kind),
+                &format!("{}_index", input.spec.frontmatter_kind),
                 &path,
-                &[TemplateKey::StatusIndex],
-                json!({
-                    "message_hashes": messages
-                        .iter()
-                        .map(blake3_json_fingerprint)
-                        .collect::<Result<Vec<_>>>()?,
-                    "context": context.clone(),
-                }),
+                &document,
             )?;
             return self.render_cached_string(
                 cache,
                 &path,
-                &format!("{}_index", spec.frontmatter_kind),
+                &format!("{}_index", input.spec.frontmatter_kind),
                 input_hash,
-                || renderer.render(TemplateKey::StatusIndex, &context),
+                || {
+                    renderer.render_with_options(
+                        TemplateKey::StatusIndex,
+                        &document,
+                        TemplateRenderOptions {
+                            timezone_offset: Some(input.config.resolved_timezone_offset()),
+                            output_dir: path.parent(),
+                        },
+                    )
+                },
             );
         }
-        let rendered = renderer.render(TemplateKey::StatusIndex, &context)?;
+        let rendered = renderer.render_with_options(
+            TemplateKey::StatusIndex,
+            &document,
+            TemplateRenderOptions {
+                timezone_offset: Some(input.config.resolved_timezone_offset()),
+                output_dir: path.parent(),
+            },
+        )?;
         write_string(&path, &rendered)?;
         Ok(FileWriteOutcome::Written)
     }

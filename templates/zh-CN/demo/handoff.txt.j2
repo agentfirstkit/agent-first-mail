@@ -1,0 +1,7 @@
+演示工作区已创建在 {{ workspace_ref }}。
+
+它只连接本机模拟邮件服务器，无法访问任何真实邮箱。
+
+1. 在另一个终端运行：cd {{ workspace_ref }} && afmail demo serve
+2. 然后告诉 Agent：
+   “{{ agent_prompt }}”

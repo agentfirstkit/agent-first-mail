@@ -32,10 +32,25 @@ run_clippy() {
   cargo clippy --all-targets "$@" -- -D warnings
 }
 
+check_minimal_dependency_tree() {
+  local dependency_tree dependency
+  dependency_tree=$(cargo tree --no-default-features --edges normal --prefix none)
+  for dependency in axum tokio; do
+    if [[ "$dependency_tree" == *"$dependency v"* ]]; then
+      echo "$dependency must not be present in the no-default-features dependency tree" >&2
+      return 1
+    fi
+  done
+}
+
 run_static() {
   cargo fmt --all --check
   run_clippy
   run_clippy --no-default-features
+  run_clippy --no-default-features --features api
+  run_clippy --no-default-features --features demo
+  run_clippy --no-default-features --features review
+  check_minimal_dependency_tree
   check_cli_docs
   python3 -m json.tool spore.core.json >/dev/null
 }
@@ -44,7 +59,7 @@ run_unit() {
   # Tests are isolated (unique temp workspace per test via temp_root; mock
   # servers bind 127.0.0.1:0). Run them in parallel — the suite is I/O-wait
   # bound (fork+fsync), so parallelism overlaps the waits.
-  cargo test --lib --bins --tests
+  cargo test --all-features --lib --bins --tests
 }
 
 run_minimal() {
@@ -93,13 +108,13 @@ case "$MODE" in
   render)        run_target render_contract ;;
   render-perf)   run_render_perf ;;
   e2e)           run_e2e ;;
-  demo)          "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" run ;;
-  demo-prepare)  "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" prepare ;;
-  demo-ui)       "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" ui ;;
+  greenmail)          "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" run ;;
+  greenmail-prepare)  "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" prepare ;;
+  greenmail-review)   "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" review ;;
   all)           run_static; run_unit; run_minimal ;;
   full)          run_static; run_unit; run_minimal; run_e2e; "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" run ;;
   *)
-    echo "Usage: $0 [static|unit|minimal|cli [FILTER]|request-id [FILTER]|workspace [FILTER]|config [FILTER]|surface [FILTER]|draft [FILTER]|push [FILTER]|pull [FILTER]|notification [FILTER]|case [FILTER]|contact [FILTER]|message [FILTER]|notes [FILTER]|render [FILTER]|render-perf|e2e [FILTER]|demo|demo-prepare|demo-ui|all|full]" >&2
+    echo "Usage: $0 [static|unit|minimal|cli [FILTER]|request-id [FILTER]|workspace [FILTER]|config [FILTER]|surface [FILTER]|draft [FILTER]|push [FILTER]|pull [FILTER]|notification [FILTER]|case [FILTER]|contact [FILTER]|message [FILTER]|notes [FILTER]|render [FILTER]|render-perf|e2e [FILTER]|greenmail|greenmail-prepare|greenmail-review|all|full]" >&2
     exit 2
     ;;
 esac

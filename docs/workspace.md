@@ -3,11 +3,25 @@
 An afmail workspace is a local, file-first mailbox workspace. Files are the read
 interface; the CLI is the effect interface.
 
+## Demo workspaces
+
+`afmail demo init [PATH]` creates the same workspace layout and ordinary
+`.afmail/config.json` used for a real account, but points IMAP and SMTP at the
+loopback-only server started by `afmail demo serve`. There is no demo marker,
+alternate workspace schema, or disabled-remote mode. Pull, triage, drafting,
+push preview, and confirmed push therefore exercise their production paths
+without credentials for or connectivity to a real mailbox.
+
+The built-in `founder-inbox` scenario is deliberately focused: it contains 12
+messages, within the demo's 10–12-message target. Server state is in memory and
+resets whenever `demo serve` restarts. Workspace files do not reset with the
+server; create a fresh demo destination when you want both sides clean.
+
 ## Layout
 
 ```text
 account-workspace/
-  AGENTS.md
+  AGENTS.md  # optional user-authored mailbox policy; init does not create it
   triage/
     <message_id>.md
   spam/  # created when spam messages first exist
@@ -33,11 +47,6 @@ account-workspace/
         data/
           case.json
           drafts.json
-        views/
-          messages/
-            <message_id>.md
-        drafts/
-        files/
         views/
           messages/
             <message_id>.md
@@ -72,8 +81,12 @@ account-workspace/
   messages/
     <message_id>.json
   templates/
-    en-US/
-    zh-CN/
+    <language>/
+      i18n/
+      review/
+    shared/
+      markdown/
+      review/
   .afmail/
     DO_NOT_EDIT.txt
     config.json
@@ -89,7 +102,7 @@ account-workspace/
     push/
     messages/
       <message_id>.eml
-      <message_id>.remote.json
+      <message_id>.json
       <message_id>.files/
 ```
 
@@ -97,7 +110,7 @@ account-workspace/
 `deleted/` are generated review views for local discard states, created only
 after the first matching message appears.
 `archived-cases/` contains both archiving case workspaces waiting for queued
-sends/archive effects and finalized archived cases. Typed lifecycle metadata,
+sends/archive effects and finalized archived cases. Canonical `status` metadata,
 not another directory or CLI flag, distinguishes them.
 `notifications/<notification_uid>-<name>/` contains notification messages
 in one notification collection.
@@ -114,10 +127,19 @@ rebuild with `afmail render refresh`; use `notes.md` for durable notes instead
 of generated views. Case and notification message links point to
 `views/messages/<message_id>.md`.
 
-Show/list/status/push-preview commands read existing views and project message
-state in memory; they never rebuild a missing view as a side effect. A missing
-or invalid generated view returns `generated_view_unavailable` with an explicit
-`afmail render refresh` repair hint.
+Suggestions do not change that rule. Message `agent_suggestion` and
+`human_suggestion` state lives in `.afmail/messages/<message_id>.json`; case and
+notification suggestion state lives in the object's existing canonical
+`data/*.json`. Generated Markdown may render a suggestion but never owns it.
+Deleting any generated view cannot discard a pending review, and
+`afmail render refresh` never reconstructs state from Markdown or audit history.
+
+Show/list/status/push-preview commands never rebuild a missing view as a side
+effect. Message, draft, case, and notification `show` return typed documents
+from canonical state. Case/notification show contain the exact collection
+render document used by Markdown and Review, and omit `locator.view_path` when
+that generated file is missing. Use `afmail render refresh` explicitly to
+materialize or repair generated views.
 
 `.afmail/DO_NOT_EDIT.txt` is a warning sentinel. The rest of `.afmail/` is
 machine-managed evidence, remote state, push queue, and audit history; use the
@@ -154,11 +176,12 @@ history and is machine-local but lossy to remove.
 
 ## Message State
 
-Message evidence lives in `.afmail/messages/<message_id>.eml`; remote mailbox
-metadata lives in `.afmail/messages/<message_id>.remote.json`; parsed
-`messages/<message_id>.json` files are rebuildable cache. Triage, case,
+Message evidence lives in `.afmail/messages/<message_id>.eml`. Its canonical
+metadata—including remote mailbox locations plus the current Agent and human
+suggestions—lives in `.afmail/messages/<message_id>.json`. Parsed root
+`messages/<message_id>.json` files are rebuildable projections. Triage, case,
 notification, spam, trash, and deleted views are generated from message evidence
-plus the object collections under their respective directories. Inbound
+plus canonical metadata and object collections. Inbound
 attachments belong to the message. Attachment metadata is stored on the message
 record; `afmail message attachment fetch MESSAGE_ID [PART_ID]` materializes
 files under `.afmail/messages/<message_id>.files/` and refreshes generated read
@@ -227,9 +250,11 @@ by hand.
 Email addresses are globally unique across active contacts; `contact create` and
 `contact email add` reject an address already held by another contact. The
 sender→contact association is materialized onto each message as a `contact`
-object (`messages/<message_id>.json`) at pull/render time and refreshed
-automatically when a contact's emails or display name change. `afmail render
-refresh` rebuilds it for every message. There is no separate contact index file.
+object (`messages/<message_id>.json`) at pull/render time. That object contains
+the exact typed `ContactFrontmatter`; it is not a separate UID/name projection.
+It is refreshed automatically whenever the canonical contact changes, and
+`afmail render refresh` rebuilds it for every message. There is no separate
+contact index file.
 
 ## Drafts And Case Files
 
@@ -265,9 +290,10 @@ plain-text MIME body.
 An empty compose section is intentionally valid for local editing and remote
 Drafts upload, and appears as `completeness: incomplete`. It cannot enter a send
 queue: `draft send` returns `draft_incomplete`, leaves the file/queue unchanged,
-and push checks completeness again in case a queued draft was edited. Draft list,
-show, and AFUI share the states `editable`, `queued_upload`, `queued_send`,
-`pushing`, and `failed`; `queued_send` never means the message was sent.
+and push checks completeness again in case a queued draft was edited. Draft
+list, show, and typed Review documents share the states `editable`,
+`queued_upload`, `queued_send`, `pushing`, and `failed`; `queued_send` never
+means the message was sent.
 
 ## Notification Collections
 
@@ -277,7 +303,7 @@ The canonical membership file for a notification collection is
 ```json
 {
   "schema_name": "notification",
-  "schema_version": 1,
+  "schema_version": 3,
   "collection_uid": "n20260521001",
   "collection_name": "服务通知",
   "items": [
@@ -290,31 +316,47 @@ The canonical membership file for a notification collection is
 }
 ```
 
-`summary` is optional. Generated `notification.md` renders a Markdown list using
-`notification.message_index` config. The built-in notification templates display the
-message subject when a summary field is empty. Generated message views live
-under `notifications/<notification_uid>-<name>/views/messages/<message_id>.md`.
+`summary` is optional. Generated `notification.md` receives this exact
+collection plus contained typed message documents. Its template owns
+summary/subject fallback, selected fields, labels, ordering, links, and layout;
+there is no notification presentation config in canonical or render data.
+The collection does not persist derived message, attachment, or last-message
+counts; templates derive those values from `items` and the contained messages.
+Generated message views live under
+`notifications/<notification_uid>-<name>/views/messages/<message_id>.md`.
 
-## Generated Read-View Templates
+## Markdown and Review Templates
 
-Built-in MiniJinja Markdown templates render generated read views and
-human-facing scaffolds. A workspace can override language-specific templates
-under `templates/<language>/`. Legacy `.afmail/templates/` files are ignored.
+Built-in MiniJinja templates render generated Markdown, human-facing scaffolds,
+and Review HTML. A workspace can override language entry templates under
+`templates/<language>/` and shared Markdown/Review layouts under
+`templates/shared/`. Legacy `.afmail/templates/` files are ignored.
 
 Common generated-view template keys include:
 
 - `case/case.md.j2` and `case/message.md.j2`
 - `notification/notification.md.j2` and `notification/message.md.j2`
 - `triage/view.md.j2` and `message/section.md.j2`
+- `contact/default.md.j2`, `draft/*.md.j2`, and `notes/*.md.j2`
+- `review/page.html.j2`, `review/message.html.j2`, and the Review editors
+- `i18n/catalog.j2` for localized copy and punctuation
 
 Run `afmail render templates` to export built-ins, then `afmail render refresh`
-to rebuild generated Markdown after template edits.
+to rebuild generated Markdown after template edits. Review loads its templates
+when the page is rendered.
 
-Generated read-view templates use namespaced context data: `message` is the
-exact materialized `messages/<message_id>.json` record, and `view` contains
-Markdown-only display facts such as rendered conversation text, security notes,
-and attachment preview paths. Index rows use the same split as `item.message`
-and `item.view`.
+Markdown and Review receive the same schema-versioned typed render documents.
+Each document contains canonical data once plus output-independent semantic
+analysis; it never carries a Markdown-shaped or HTML-shaped display projection.
+Body and draft text exist once and semantic byte ranges identify authored and
+quoted portions. Templates own localization, fallback text, formatting,
+escaping, ordering, visibility, and markup.
+
+Workspace Review templates can use MiniJinja, HTML, and CSS but cannot provide
+JavaScript. afmail rejects JavaScript-capable Review overrides and supplies its
+own behavior-only autosave/submit runtime. See [Markdown and Review
+Templates](templates.md) for all paths, data fields, filters, language packs,
+and Review behavior hooks.
 
 ## Deleted Remote Messages
 
@@ -335,3 +377,11 @@ missing so existing case/notification state stays resolvable.
 `notes.md` files are plain Markdown with no frontmatter. They exist for active
 cases, archived cases, and notification collections. They are the only
 durable local notes surface inside those objects; generated views are disposable.
+
+Case review automatically saves edited `notes.md` locally after a short idle
+period. Draft review does the same for the reviewed draft. Each save uses the
+canonical Workspace API under an exclusive workspace lock after a base-hash
+check, and the review result records the completed files in `saved_files`.
+Triage review only returns typed decisions and does not mutate the workspace.
+No review action queues, pushes, or sends mail; closing the window does not undo
+an earlier completed local save.

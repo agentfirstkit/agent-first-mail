@@ -14,8 +14,8 @@ use crate::frontmatter::DraftFrontmatter;
 use crate::progress::ProgressCallback;
 use crate::types::{
     CommandResult, DraftPush, MessagePush, MessagePushAction, OutboundAction, OutboundPush,
-    PushAuditPending, PushItem, PushLocalStage, PushLocation, PushPayload, PushStepState,
-    PushStepStatus,
+    PUSH_ITEM_SCHEMA_VERSION, PushAuditPending, PushItem, PushLocalStage, PushLocation,
+    PushPayload, PushStepState, PushStepStatus,
 };
 use crate::util::write_string_atomic;
 use serde_json::{Value, json};
@@ -39,8 +39,17 @@ pub fn queue_outbound(
     case_uid: &str,
     draft_name: &str,
     action: OutboundAction,
+    previous_action: Option<OutboundAction>,
 ) -> Result<Value> {
     let existing = find_draft_item(root, case_uid, draft_name)?;
+    let reset_progress = validate_outbound_requeue(
+        existing.as_ref(),
+        case_uid,
+        draft_name,
+        previous_action,
+        action,
+    )?;
+    let preserved = existing.as_ref().filter(|_| !reset_progress);
     let push_id = draft_push_id(case_uid, draft_name);
     let push_dir = root.join(crate::layout::afmail_path(crate::layout::AFMAIL_PUSH));
     create_dir_all(&push_dir)?;
@@ -54,7 +63,7 @@ pub fn queue_outbound(
     };
     let item = PushItem {
         schema_name: "push_item".to_string(),
-        schema_version: 1,
+        schema_version: PUSH_ITEM_SCHEMA_VERSION,
         push_id: push_id.clone(),
         enqueue_seq,
         payload: PushPayload::Draft(Box::new(DraftPush {
@@ -67,20 +76,16 @@ pub fn queue_outbound(
         planned_outbound_message: None,
         planned_message_action: None,
         planned_message_rfc822: BTreeMap::new(),
-        created_rfc3339: existing
-            .as_ref()
+        created_rfc3339: preserved
             .map(|item| item.created_rfc3339.clone())
             .unwrap_or_else(|| now.clone()),
         updated_rfc3339: now,
-        attempt_count: existing.as_ref().map_or(0, |item| item.attempt_count),
-        step_states: existing
-            .as_ref()
+        attempt_count: preserved.map_or(0, |item| item.attempt_count),
+        step_states: preserved
             .map(|item| item.step_states.clone())
             .unwrap_or_default(),
-        local_stage: existing.as_ref().and_then(|item| item.local_stage),
-        audit_pending: existing
-            .as_ref()
-            .and_then(|item| item.audit_pending.clone()),
+        local_stage: preserved.and_then(|item| item.local_stage),
+        audit_pending: preserved.and_then(|item| item.audit_pending.clone()),
         last_error: None,
     };
     write_item(root, &item)?;
@@ -91,6 +96,57 @@ pub fn queue_outbound(
         "case_uid": case_uid,
         "draft_name": draft_name
     }))
+}
+
+pub(crate) fn ensure_outbound_requeue_allowed(
+    root: &Path,
+    case_uid: &str,
+    draft_name: &str,
+    previous_action: Option<OutboundAction>,
+    action: OutboundAction,
+) -> Result<()> {
+    let existing = find_draft_item(root, case_uid, draft_name)?;
+    validate_outbound_requeue(
+        existing.as_ref(),
+        case_uid,
+        draft_name,
+        previous_action,
+        action,
+    )?;
+    Ok(())
+}
+
+fn validate_outbound_requeue(
+    existing: Option<&PushItem>,
+    case_uid: &str,
+    draft_name: &str,
+    previous_action: Option<OutboundAction>,
+    action: OutboundAction,
+) -> Result<bool> {
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    if existing.has_started_effects() {
+        return Err(AppError::new(
+            "push_already_started",
+            format!(
+                "outbound push item already started and cannot be re-queued: {}",
+                existing.push_id
+            ),
+        )
+        .with_hint("Run `afmail push`, review its current plan_id and recovery state, then confirm that exact plan before changing the queued draft action.")
+        .with_details(json!({
+            "push_id": existing.push_id,
+            "case_uid": case_uid,
+            "draft_name": draft_name,
+            "previous_action": previous_action.map(OutboundAction::as_str),
+            "requested_action": action.as_str(),
+            "step_states": existing.step_states,
+            "local_stage": existing.local_stage.map(local_stage_name),
+            "audit_pending": existing.audit_pending.is_some(),
+        })));
+    }
+    Ok(previous_action != Some(action))
 }
 
 pub(crate) fn find_outbound_for_draft(
@@ -134,6 +190,37 @@ pub fn queue_action_steps(
             continue;
         }
         let existing = find_message_item(root, message_id)?;
+        let action_changed = existing
+            .as_ref()
+            .and_then(PushItem::message)
+            .is_some_and(|message| message.action != action);
+        if action_changed
+            && let Some(existing) = existing.as_ref()
+            && existing.has_started_effects()
+        {
+            return Err(AppError::new(
+                "push_already_started",
+                format!(
+                    "message push item already started and cannot change action from {} to {}: {}",
+                    existing
+                        .message()
+                        .map(|message| message.action.kind())
+                        .unwrap_or("unknown"),
+                    action.kind(),
+                    existing.push_id
+                ),
+            )
+            .with_details(json!({
+                "push_id": existing.push_id,
+                "message_id": message_id,
+                "previous_action": existing.message().map(|message| message.action.kind()),
+                "requested_action": action.kind(),
+                "step_states": existing.step_states,
+                "local_stage": existing.local_stage.map(local_stage_name),
+                "audit_pending": existing.audit_pending.is_some(),
+            })));
+        }
+        let preserved = existing.as_ref().filter(|_| !action_changed);
         let enqueue_seq = match &existing {
             Some(item) => item.enqueue_seq,
             // Enqueueing requires the exclusive workspace lock (see workspace_lock.rs);
@@ -144,11 +231,12 @@ pub fn queue_action_steps(
         };
         let item = PushItem {
             schema_name: "push_item".to_string(),
-            schema_version: 1,
+            schema_version: PUSH_ITEM_SCHEMA_VERSION,
             push_id: message_push_id(message_id),
             enqueue_seq,
             payload: PushPayload::Message(MessagePush {
                 message_id: message_id.clone(),
+                action,
             }),
             planned_outbound: None,
             planned_outbound_message: None,
@@ -164,21 +252,17 @@ pub fn queue_action_steps(
                 reply_to_message_id: _reply_to_message_id.clone(),
             }),
             planned_message_rfc822: BTreeMap::new(),
-            created_rfc3339: existing
-                .as_ref()
+            created_rfc3339: preserved
                 .map(|item| item.created_rfc3339.clone())
                 .unwrap_or_else(|| now.clone()),
             updated_rfc3339: now.clone(),
-            attempt_count: existing.as_ref().map_or(0, |item| item.attempt_count),
-            step_states: existing
-                .as_ref()
+            attempt_count: preserved.map_or(0, |item| item.attempt_count),
+            step_states: preserved
                 .map(|item| item.step_states.clone())
                 .unwrap_or_default(),
-            local_stage: existing.as_ref().and_then(|item| item.local_stage),
-            audit_pending: existing
-                .as_ref()
-                .and_then(|item| item.audit_pending.clone()),
-            last_error: existing.as_ref().and_then(|item| item.last_error.clone()),
+            local_stage: preserved.and_then(|item| item.local_stage),
+            audit_pending: preserved.and_then(|item| item.audit_pending.clone()),
+            last_error: preserved.and_then(|item| item.last_error.clone()),
         };
         write_item(root, &item)?;
         first.get_or_insert(item);
@@ -794,7 +878,7 @@ pub fn remove_outbound_for_draft(
                 .is_some_and(|draft| draft.case_uid == case_uid && draft.draft_name == draft_name)
         })
         .collect::<Vec<_>>();
-    if let Some(item) = items.iter().find(|item| item.has_started_steps()) {
+    if let Some(item) = items.iter().find(|item| item.has_started_effects()) {
         let draft = item.draft();
         return Err(AppError::new(
             "push_already_started",
@@ -835,7 +919,7 @@ pub fn remove_pending_message_pushes(
     message_id: &str,
     kind: &str,
 ) -> Result<Vec<RemovedMessagePush>> {
-    let _ = MessagePushAction::from_kind(kind).ok_or_else(|| {
+    let action = MessagePushAction::from_kind(kind).ok_or_else(|| {
         AppError::new(
             "push_item_invalid",
             format!("unsupported message push action kind: {kind}"),
@@ -845,10 +929,10 @@ pub fn remove_pending_message_pushes(
         .into_iter()
         .filter(|item| {
             item.message()
-                .is_some_and(|payload| payload.message_id == message_id)
+                .is_some_and(|payload| payload.message_id == message_id && payload.action == action)
         })
         .collect::<Vec<_>>();
-    if let Some(item) = items.iter().find(|item| item.has_started_steps()) {
+    if let Some(item) = items.iter().find(|item| item.has_started_effects()) {
         return Err(AppError::new(
             "push_already_started",
             format!(
@@ -875,8 +959,13 @@ fn plan_item(root: &Path, config: &MailConfig, item: &mut PushItem) -> Result<bo
     match &item.payload {
         PushPayload::Message(message) => {
             let workspace = crate::store::Workspace::at(root);
-            item.planned_message_action =
-                workspace.plan_message_push(&message.message_id, config)?;
+            let current_push_path = push_path(root, &item.push_id);
+            item.planned_message_action = workspace.plan_message_push(
+                &message.message_id,
+                message.action,
+                Some(&current_push_path),
+                config,
+            )?;
             if item.planned_message_action.is_some() {
                 reset_progress_if_plan_changed(root, config, item)?;
                 if item.message_action().is_some_and(|action| {
@@ -915,7 +1004,7 @@ fn plan_item(root: &Path, config: &MailConfig, item: &mut PushItem) -> Result<bo
                     });
                     return Ok(true);
                 }
-                if !item.has_started_steps() {
+                if !item.has_started_effects() {
                     return Ok(false);
                 }
                 return Err(AppError::new(
@@ -928,7 +1017,7 @@ fn plan_item(root: &Path, config: &MailConfig, item: &mut PushItem) -> Result<bo
                 .with_hint("Inspect the draft and push item before retrying."));
             };
             let Some(action) = frontmatter.sync_intent.map(OutboundAction::from) else {
-                if !item.has_started_steps() {
+                if !item.has_started_effects() {
                     return Ok(false);
                 }
                 return Err(AppError::new(
@@ -1051,14 +1140,7 @@ fn reset_progress_if_plan_changed(
     {
         return Ok(());
     }
-    if item.local_stage.is_some()
-        || item.step_states.iter().any(|state| {
-            matches!(
-                state.status,
-                PushStepStatus::Succeeded | PushStepStatus::RemoteOutcomeUnknown
-            ) || state.completed_rfc3339.is_some()
-        })
-    {
+    if item.has_started_effects() {
         return Err(AppError::new(
             "push_plan_changed_after_start",
             format!(
@@ -1072,6 +1154,7 @@ fn reset_progress_if_plan_changed(
             "current_step_labels": current_labels,
             "planned_step_labels": planned_labels,
             "local_stage": item.local_stage.map(local_stage_name),
+            "audit_pending": item.audit_pending.is_some(),
         })));
     }
     item.step_states.clear();

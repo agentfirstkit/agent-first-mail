@@ -2,7 +2,7 @@
 
 # afmail CLI Reference
 
-# Agent-First Mail - Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.
+# afmail - Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.
 
 ### Interface Policy
 
@@ -11,18 +11,19 @@
 - Message commands use `afmail message ACTION MESSAGE_ID ...`.
 - Case commands use `afmail case ACTION CASE_REF ...`.
 - Active and archived cases are readable with `afmail case show REF`.
-- stdout carries structured Agent-First Data events; stderr is not a protocol channel.
+- `--output-to split` sends results to stdout and errors/logs/progress to stderr.
+- `--output-to stdout|stderr` selects one ordered Agent-First Data event stream.
 
 ### Workspace Shape
 
 ```text
-.afmail/messages/        raw .eml plus durable remote sidecars
+.afmail/messages/        raw .eml plus canonical message metadata
 .afmail/workspace.json   immutable workspace identity used by plan digests
 messages/               rebuildable parsed message cache
 .afmail/logs/events.jsonl append-only audit log
 .afmail/transactions/    transient local write transaction sentinels
 .afmail/cache/progress.json latest push/pull runtime snapshot
-templates/               user-editable generated Markdown templates
+templates/               user-editable Markdown and Review templates
 triage/message_*.md      active unprocessed message views
 spam/*.md                generated spam review views
 trash/*.md               generated trash review views
@@ -42,6 +43,7 @@ notifications/<notification_uid>-<name>/views/ generated notification detail vie
 ```text
 afmail init
 afmail init email-a
+afmail api export --directory openapi --force
 afmail skill status
 afmail skill install --agent codex --scope workspace
 afmail status
@@ -86,7 +88,6 @@ afmail purge deleted
 afmail log list --limit 20
 afmail triage list --limit 10 --details
 afmail message show message_inbox_607146690_21
-afmail message show message_inbox_607146690_21 --meta
 afmail message list --sender alice@example.com --subject-contains invoice --since 2026-05-21 --in all
 afmail message attachment fetch message_inbox_607146690_21 2
 ```
@@ -97,2134 +98,1720 @@ afmail message attachment fetch message_inbox_607146690_21 2
 - `1`: command failed, including an aggregate command where no item completed successfully
 - `2`: invalid CLI arguments
 - `3`: command completed partially; inspect the canonical error for successful and failed items
-- `4`: canonical stdout output was not fully written
+- `4`: a canonical output event was not fully written
 
 Only completely successful commands emit `kind: result`; their payload has no generic `code`, `ok`,
-or `outcome` field. Any item failure emits `kind: error`. Partial failures use `error.code: partial`,
+or `outcome` field. Typed review results retain `outcome` as a business lifecycle field. Any item
+failure emits `kind: error`. Partial failures use `error.code: partial`,
 and the complete item list is carried in `error.items`; a failed item has an `error` child object.
-Exit code `4` means the command could not deliver a complete stdout protocol event; inspect stderr
-for the non-protocol fallback diagnostic.
+Exit code `4` means the command could not deliver a complete protocol event;
+inspect the selected output sink for the fallback diagnostic.
 
 ```text
-Usage: afmail [OPTIONS] [COMMAND]
-
-Commands:
-  init          Initialize the current directory or a child path as an afmail workspace
-  pull          Read configured IMAP mailbox ids into local message files without changing remote mail
-  config        Read or update local afmail configuration
-  remote        Inspect remote IMAP state for configuring mailboxes
-  push          Push queued local work or manage the local push queue
-  status        Report workspace health, counts, and latest pull/push progress
-  doctor        Check afmail workspace consistency without inspecting Git
-  purge         Permanently delete old local spam, trash, and remote-deleted records
-  skill         Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
-  triage        Inspect the triage queue
-  message       Operate on any local message id
-  case          Create a case or operate on an existing case ref
-  contact       Create a contact or operate on an existing contact ref
-  notification  Inspect and manage notification collections
-  render        Rebuild generated read views from local workspace state
-  log           Inspect the workspace audit log
-  ui            Emit or open an Agent-First UI operation surface for this workspace
-  help          Print this message or the help of the given subcommand(s)
-
-Options:
-      --output <OUTPUT>
-          Output format: json (default), yaml, plain
-
-          [default: json]
-
-      --log <LOG>
-          Log categories (comma-separated): startup, request, progress, retry
-
-      --verbose
-          Enable all log categories. Startup argv redacts values and non-command positional tokens
-
-      --stdout-file <PATH>
-          Redirect stdout bytes to this file
-
-      --stderr-file <PATH>
-          Redirect stderr bytes to this file
-
-      --workspace <PATH>
-          Operate on this existing afmail workspace instead of discovering from cwd
-
-      --request-id <ID>
-          Idempotency key for supported non-idempotent local mutations
-
-  -V, --version
-          Print structured version event
-
-  -h, --help
-          Print help. Add --recursive to expand every nested subcommand; add --output json|yaml|markdown to render this help in another format.
+afmail [OPTIONS] [COMMAND]
 ```
-
-## Agent-First Mail init - Initialize the current directory or a child path as an afmail workspace
-
-```text
-Usage: init [PATH]
 
-Arguments:
-  [PATH]
-          Optional workspace path to initialize under the current directory
+| Argument | Description |
+| --- | --- |
+| `--output <OUTPUT>` | Output format: json (default), yaml, plain *(global, default: `json`)* |
+| `--output-to <OUTPUT_TO>` | Where protocol events go: split, stdout, or stderr *(global)* |
+| `--log <LOG>...` | Log categories (comma-separated): startup, request, progress, retry *(global)* |
+| `--verbose` | Enable all log categories. Startup argv redacts values and non-command positional tokens *(global)* |
+| `--stdout-file <PATH>` | Redirect stdout bytes to this file *(global)* |
+| `--stderr-file <PATH>` | Redirect stderr bytes to this file *(global)* |
+| `--workspace <PATH>` | Operate on this existing afmail workspace instead of discovering from cwd *(global)* |
+| `--request-id <ID>` | Idempotency key for supported non-idempotent local mutations *(global)* |
+| `--version` | Print structured version event *(global)* |
+| `--help` | Print help. Add --recursive to expand every nested subcommand; add --output plain\|json\|yaml\|markdown to choose the format. |
 
-Options:
-  -h, --help
-          Print help
-```
+| Command | Summary |
+| --- | --- |
+| `afmail api` | Serve or export the afmail OpenAPI 3.2 contract and JSON Schemas |
+| `afmail demo` | Create and run a complete local mailbox demo |
+| `afmail init` | Initialize the current directory or a child path as an afmail workspace |
+| `afmail pull` | Read configured IMAP mailbox ids into local message files without changing remote mail |
+| `afmail config` | Read or update local afmail configuration |
+| `afmail remote` | Inspect remote IMAP state for configuring mailboxes |
+| `afmail push` | Push queued local work or manage the local push queue |
+| `afmail status` | Report workspace health, counts, and latest pull/push progress |
+| `afmail doctor` | Check afmail workspace consistency without inspecting Git |
+| `afmail purge` | Permanently delete old local spam, trash, and remote-deleted records |
+| `afmail skill` | Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes |
+| `afmail triage` | Inspect the triage queue |
+| `afmail message` | Operate on any local message id |
+| `afmail case` | Create a case or operate on an existing case ref |
+| `afmail contact` | Create a contact or operate on an existing contact ref |
+| `afmail notification` | Inspect and manage notification collections |
+| `afmail render` | Rebuild generated read views from local workspace state |
+| `afmail log` | Inspect the workspace audit log |
 
-## Agent-First Mail pull - Read configured IMAP mailbox ids into local message files without changing remote mail
+## afmail api - Serve or export the afmail OpenAPI 3.2 contract and JSON Schemas
 
 ```text
-Usage: pull [OPTIONS] [IDS]...
-
-Arguments:
-  [IDS]...
-          Configured mailbox ids to pull. With none, pulls actions.pull.default_mailbox_ids
-
-Options:
-      --dry-run
-          Estimate remote candidates and budgets without downloading or writing locally
-
-      --since-days <DAYS>
-          Limit the remote candidate range to messages from the last DAYS days
-
-      --max-new-messages <COUNT>
-          Maximum number of new messages stored across all selected mailboxes
-
-      --max-total-bytes <BYTES>
-          Maximum new raw message bytes stored across all selected mailboxes
-
-      --all-history
-          Explicitly include all remote history instead of the default initial window
-
-  -h, --help
-          Print help
+afmail api <COMMAND>
 ```
-
-## Agent-First Mail config - Read or update local afmail configuration
-
-```text
-Usage: config <COMMAND>
-
-Commands:
-  show    Show effective config after applying built-in defaults
-  get     Get one config key
-  set     Set one config key. Multiple values become an array for array keys
-  add     Add an element to a keyed list (e.g. `identities`). FIELDS are key=value
-  remove  Remove a keyed-list element by its slug
-  help    Print this message or the help of the given subcommand(s)
 
-Options:
-  -h, --help
-          Print help
-```
+| Command | Summary |
+| --- | --- |
+| `afmail api serve` | Serve the typed afmail HTTP API and its OpenAPI/JSON Schema documents |
+| `afmail api export` | Write the generated OpenAPI document and standalone JSON Schemas |
 
-### Agent-First Mail config show - Show effective config after applying built-in defaults
+### afmail api serve - Serve the typed afmail HTTP API and its OpenAPI/JSON Schema documents
 
 ```text
-Usage: show
-
-Options:
-  -h, --help
-          Print help
+afmail api serve [OPTIONS]
 ```
 
-### Agent-First Mail config get - Get one config key
+| Argument | Description |
+| --- | --- |
+| `--mode <MODE>` | Network exposure mode *(default: `local`)* |
+| `--port <PORT>` | TCP port. Use 0 to let the operating system choose an available port *(default: `9417`)* |
+| `--access-token-secret <ACCESS_TOKEN_SECRET>` | Bearer credential. Prefer AFMAIL_API_ACCESS_TOKEN_SECRET to avoid argv exposure |
 
-```text
-Usage: get <KEY>
-
-Arguments:
-  <KEY>
-
+### afmail api export - Write the generated OpenAPI document and standalone JSON Schemas
 
-Options:
-  -h, --help
-          Print help
-```
-
-### Agent-First Mail config set - Set one config key. Multiple values become an array for array keys
-
 ```text
-Usage: set <KEY> [VALUES]...
-
-Arguments:
-  <KEY>
-
-
-  [VALUES]...
-
-
-Options:
-  -h, --help
-          Print help
+afmail api export [OPTIONS]
 ```
-
-### Agent-First Mail config add - Add an element to a keyed list (e.g. `identities`). FIELDS are key=value
-
-```text
-Usage: add <KEY> <SLUG> [FIELDS]...
 
-Arguments:
-  <KEY>
+| Argument | Description |
+| --- | --- |
+| `--directory <DIRECTORY>` | Destination directory *(default: `openapi`)* |
+| `--force` | Replace existing generated files |
 
+## afmail demo - Create and run a complete local mailbox demo
 
-  <SLUG>
-
-
-  [FIELDS]...
-
-
-Options:
-  -h, --help
-          Print help
-```
-
-### Agent-First Mail config remove - Remove a keyed-list element by its slug
-
 ```text
-Usage: remove <KEY> <SLUG>
-
-Arguments:
-  <KEY>
-
-
-  <SLUG>
-
-
-Options:
-  -h, --help
-          Print help
+afmail demo <COMMAND>
 ```
-
-## Agent-First Mail remote - Inspect remote IMAP state for configuring mailboxes
-
-```text
-Usage: remote <COMMAND>
 
-Commands:
-  test     Test configured IMAP and SMTP access without sending mail
-  folders  List IMAP folders/mailboxes
-  help     Print this message or the help of the given subcommand(s)
+| Command | Summary |
+| --- | --- |
+| `afmail demo init` | Create a normal workspace wired to the local demo mail server |
+| `afmail demo serve` | Run the local demo IMAP and SMTP servers until interrupted |
 
-Options:
-  -h, --help
-          Print help
-```
+### afmail demo init - Create a normal workspace wired to the local demo mail server
 
-### Agent-First Mail remote test - Test configured IMAP and SMTP access without sending mail
-
 ```text
-Usage: test
-
-Options:
-  -h, --help
-          Print help
+afmail demo init [OPTIONS] [PATH]
 ```
 
-### Agent-First Mail remote folders - List IMAP folders/mailboxes
-
-```text
-Usage: folders
-
-Options:
-  -h, --help
-          Print help
-```
+| Argument | Description |
+| --- | --- |
+| `PATH` | Workspace path under the current directory *(default: `afmail-demo`)* |
+| `--scenario <SCENARIO>` | Built-in mailbox scenario *(default: `founder-inbox`)* |
+| `--imap-port <IMAP_PORT>` | Local IMAP port *(default: `14300`)* |
+| `--smtp-port <SMTP_PORT>` | Local SMTP port *(default: `14301`)* |
 
-## Agent-First Mail push - Push queued local work or manage the local push queue
+### afmail demo serve - Run the local demo IMAP and SMTP servers until interrupted
 
 ```text
-Usage: push [OPTIONS] [COMMAND]
-
-Commands:
-  list  Preview the complete resolved push plan without writing
-  help  Print this message or the help of the given subcommand(s)
-
-Options:
-      --dry-run
-          Show planned push actions without IMAP/SMTP writes. This is the default
-
-      --confirm <PLAN_ID>
-          Apply exactly the reviewed plan returned by push preview
-
-  -h, --help
-          Print help
+afmail demo serve
 ```
 
-### Agent-First Mail push list - Preview the complete resolved push plan without writing
+## afmail init - Initialize the current directory or a child path as an afmail workspace
 
 ```text
-Usage: list
-
-Options:
-  -h, --help
-          Print help
+afmail init [PATH]
 ```
-
-## Agent-First Mail status - Report workspace health, counts, and latest pull/push progress
-
-```text
-Usage: status
 
-Options:
-  -h, --help
-          Print help
-```
+| Argument | Description |
+| --- | --- |
+| `PATH` | Optional workspace path to initialize under the current directory |
 
-## Agent-First Mail doctor - Check afmail workspace consistency without inspecting Git
+## afmail pull - Read configured IMAP mailbox ids into local message files without changing remote mail
 
 ```text
-Usage: doctor [COMMAND]
-
-Commands:
-  repair  Repair only unambiguous afmail-generated state
-  help    Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
+afmail pull [OPTIONS] [IDS]...
 ```
-
-### Agent-First Mail doctor repair - Repair only unambiguous afmail-generated state
-
-```text
-Usage: repair [OPTIONS]
 
-Options:
-      --confirm
-          Apply repair actions. Without this flag, repair is refused
+| Argument | Description |
+| --- | --- |
+| `IDS...` | Configured mailbox ids to pull. With none, pulls actions.pull.default_mailbox_ids |
+| `--dry-run` | Estimate remote candidates and budgets without downloading or writing locally |
+| `--since-days <DAYS>` | Limit the remote candidate range to messages from the last DAYS days |
+| `--max-new-messages <COUNT>` | Maximum number of new messages stored across all selected mailboxes |
+| `--max-total-bytes <BYTES>` | Maximum new raw message bytes stored across all selected mailboxes |
+| `--all-history` | Explicitly include all remote history instead of the default initial window |
 
-  -h, --help
-          Print help
-```
-
-## Agent-First Mail purge - Permanently delete old local spam, trash, and remote-deleted records
+## afmail config - Read or update local afmail configuration
 
 ```text
-Usage: purge [OPTIONS] [COMMAND]
-
-Commands:
-  spam     Permanently delete old local spam records
-  trash    Permanently delete old local trash records
-  deleted  Permanently delete old local records whose remote message disappeared
-  help     Print this message or the help of the given subcommand(s)
-
-Options:
-      --older-than-days <DAYS>
-          Only purge messages in a discard state at least this many days ago. Defaults to 30
-
-      --confirm <PLAN_ID>
-          Permanently delete exactly the reviewed purge plan
-
-  -h, --help
-          Print help
+afmail config <COMMAND>
 ```
-
-### Agent-First Mail purge spam - Permanently delete old local spam records
-
-```text
-Usage: spam [OPTIONS]
 
-Options:
-      --older-than-days <DAYS>
-          Only purge messages marked spam at least this many days ago. Defaults to 30
-
-  -h, --help
-          Print help
-```
+| Command | Summary |
+| --- | --- |
+| `afmail config show` | Show effective config after applying built-in defaults |
+| `afmail config get` | Get one config key |
+| `afmail config set` | Set one config key. Multiple values become an array for array keys |
+| `afmail config add` | Add an element to a keyed list (e.g. `identities`). FIELDS are key=value |
+| `afmail config remove` | Remove a keyed-list element by its slug |
 
-### Agent-First Mail purge trash - Permanently delete old local trash records
+### afmail config show - Show effective config after applying built-in defaults
 
 ```text
-Usage: trash [OPTIONS]
-
-Options:
-      --older-than-days <DAYS>
-          Only purge messages marked trash at least this many days ago. Defaults to 30
-
-  -h, --help
-          Print help
+afmail config show
 ```
 
-### Agent-First Mail purge deleted - Permanently delete old local records whose remote message disappeared
+### afmail config get - Get one config key
 
 ```text
-Usage: deleted [OPTIONS]
-
-Options:
-      --older-than-days <DAYS>
-          Only purge messages marked remote-deleted at least this many days ago. Defaults to 30
-
-  -h, --help
-          Print help
+afmail config get <KEY>
 ```
 
-## Agent-First Mail skill - Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
+| Argument | Description |
+| --- | --- |
+| `KEY` | *(required)* |
 
-```text
-Usage: skill <COMMAND>
-
-Commands:
-  status     Show whether the Agent-First Mail skill is installed and valid
-  install    Install the Agent-First Mail skill
-  uninstall  Remove an afmail-managed Agent-First Mail skill
-  help       Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
-```
-
-### Agent-First Mail skill status - Show whether the Agent-First Mail skill is installed and valid
+### afmail config set - Set one config key. Multiple values become an array for array keys
 
 ```text
-Usage: status [OPTIONS]
-
-Options:
-      --agent <AGENT>
-          Agent to manage. Defaults to all personal skill targets
-
-          Possible values:
-          - all:         Manage every agent that supports the requested scope
-          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .codex/skills
-          - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
-          - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
-          - hermes:      Manage the Hermes skill under $HERMES_HOME/skills or ~/.hermes/skills
-
-          [default: all]
-
-      --scope <SCOPE>
-          Skill scope. Workspace scope installs under the current workspace's skill directory
-
-          Possible values:
-          - personal:  Install under the user-level skills directory
-          - workspace: Install under the current workspace's skills directory
-
-          [default: personal]
-
-      --skills-dir <SKILLS_DIR>
-          Directory that contains skill folders. Requires an explicit single --agent
-
-  -h, --help
-          Print help (see a summary with '-h')
+afmail config set <KEY> [VALUES]...
 ```
-
-### Agent-First Mail skill install - Install the Agent-First Mail skill
-
-```text
-Usage: install [OPTIONS]
-
-Options:
-      --agent <AGENT>
-          Agent to manage. Defaults to all personal skill targets
-
-          Possible values:
-          - all:         Manage every agent that supports the requested scope
-          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .codex/skills
-          - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
-          - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
-          - hermes:      Manage the Hermes skill under $HERMES_HOME/skills or ~/.hermes/skills
-
-          [default: all]
-
-      --scope <SCOPE>
-          Skill scope. Workspace scope installs under the current workspace's skill directory
-
-          Possible values:
-          - personal:  Install under the user-level skills directory
-          - workspace: Install under the current workspace's skills directory
-
-          [default: personal]
 
-      --skills-dir <SKILLS_DIR>
-          Directory that contains skill folders. Requires an explicit single --agent
+| Argument | Description |
+| --- | --- |
+| `KEY` | *(required)* |
+| `VALUES...` |  |
 
-      --force
-          Overwrite or remove an unmanaged Agent-First Mail skill at the target path
+### afmail config add - Add an element to a keyed list (e.g. `identities`). FIELDS are key=value
 
-  -h, --help
-          Print help (see a summary with '-h')
-```
-
-### Agent-First Mail skill uninstall - Remove an afmail-managed Agent-First Mail skill
-
 ```text
-Usage: uninstall [OPTIONS]
-
-Options:
-      --agent <AGENT>
-          Agent to manage. Defaults to all personal skill targets
-
-          Possible values:
-          - all:         Manage every agent that supports the requested scope
-          - codex:       Manage the Codex skill under $CODEX_HOME/skills or .codex/skills
-          - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
-          - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
-          - hermes:      Manage the Hermes skill under $HERMES_HOME/skills or ~/.hermes/skills
-
-          [default: all]
-
-      --scope <SCOPE>
-          Skill scope. Workspace scope installs under the current workspace's skill directory
-
-          Possible values:
-          - personal:  Install under the user-level skills directory
-          - workspace: Install under the current workspace's skills directory
-
-          [default: personal]
-
-      --skills-dir <SKILLS_DIR>
-          Directory that contains skill folders. Requires an explicit single --agent
-
-      --force
-          Overwrite or remove an unmanaged Agent-First Mail skill at the target path
-
-  -h, --help
-          Print help (see a summary with '-h')
+afmail config add <KEY> <SLUG> [FIELDS]...
 ```
-
-## Agent-First Mail triage - Inspect the triage queue
-
-```text
-Usage: triage <COMMAND>
 
-Commands:
-  list  List compact untriaged message locators
-  help  Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
-```
+| Argument | Description |
+| --- | --- |
+| `KEY` | *(required)* |
+| `SLUG` | *(required)* |
+| `FIELDS...` |  |
 
-### Agent-First Mail triage list - List compact untriaged message locators
+### afmail config remove - Remove a keyed-list element by its slug
 
 ```text
-Usage: list [OPTIONS]
-
-Options:
-      --limit <LIMIT>
-          Maximum number of newest triage messages to return
-
-      --details
-          Include message metadata, related message ids, and case refs
-
-  -h, --help
-          Print help
+afmail config remove <KEY> <SLUG>
 ```
-
-## Agent-First Mail message - Operate on any local message id
 
-```text
-Usage: message <COMMAND>
-
-Commands:
-  show        Show the full local message metadata, body text, and attachment metadata
-  list        List messages by sender, subject, date, or workspace scope
-  spam        Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
-  trash       Explicitly discard this message locally, show it under trash/, and queue a Trash move
-  unspam      Mark a spam false positive as triage and queue a move out of Junk when needed
-  untrash     Mark a trash false positive as triage and queue a move out of Trash when needed
-  attachment  Fetch an attachment for this message
-  help        Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
-```
+| Argument | Description |
+| --- | --- |
+| `KEY` | *(required)* |
+| `SLUG` | *(required)* |
 
-### Agent-First Mail message show - Show the full local message metadata, body text, and attachment metadata
+## afmail remote - Inspect remote IMAP state for configuring mailboxes
 
 ```text
-Usage: show [OPTIONS] <MESSAGE_ID>
-
-Arguments:
-  <MESSAGE_ID>
-          Message id, for example message_inbox_607146690_22
-
-Options:
-      --meta
-          Show metadata only and omit large body/conversation fields
-
-  -h, --help
-          Print help
+afmail remote <COMMAND>
 ```
-
-### Agent-First Mail message list - List messages by sender, subject, date, or workspace scope
 
-```text
-Usage: list [OPTIONS]
-
-Options:
-      --sender <SENDER>
-          Only include messages whose sender or from line contains this text
-
-      --subject-contains <SUBJECT_CONTAINS>
-          Only include messages whose subject contains this text
-
-      --since <DATE>
-          Only include messages on or after this date or RFC3339 timestamp
-
-      --in <SCOPE>
-          Limit results to one workspace scope
-
-          [default: all]
-          [possible values: triage, case, notification, all]
-
-  -h, --help
-          Print help
-```
+| Command | Summary |
+| --- | --- |
+| `afmail remote test` | Test configured IMAP and SMTP access without sending mail |
+| `afmail remote folders` | List IMAP folders/mailboxes |
 
-### Agent-First Mail message spam - Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
+### afmail remote test - Test configured IMAP and SMTP access without sending mail
 
 ```text
-Usage: spam [OPTIONS] <MESSAGE_ID>...
-
-Arguments:
-  <MESSAGE_ID>...
-          Message ids, for example message_inbox_607146690_22
-
-Options:
-      --reason <REASON>
-          Why this disposition is correct; required by default
-
-  -h, --help
-          Print help
+afmail remote test
 ```
 
-### Agent-First Mail message trash - Explicitly discard this message locally, show it under trash/, and queue a Trash move
+### afmail remote folders - List IMAP folders/mailboxes
 
 ```text
-Usage: trash [OPTIONS] <MESSAGE_ID>...
-
-Arguments:
-  <MESSAGE_ID>...
-          Message ids, for example message_inbox_607146690_22
-
-Options:
-      --reason <REASON>
-          Why this disposition is correct; required by default
-
-  -h, --help
-          Print help
+afmail remote folders
 ```
 
-### Agent-First Mail message unspam - Mark a spam false positive as triage and queue a move out of Junk when needed
+## afmail push - Push queued local work or manage the local push queue
 
 ```text
-Usage: unspam [OPTIONS] <MESSAGE_ID>...
-
-Arguments:
-  <MESSAGE_ID>...
-          Message ids, for example message_inbox_607146690_22
-
-Options:
-      --reason <REASON>
-          Why this message is not spam; required by default
-
-  -h, --help
-          Print help
+afmail push [OPTIONS] [COMMAND]
 ```
-
-### Agent-First Mail message untrash - Mark a trash false positive as triage and queue a move out of Trash when needed
-
-```text
-Usage: untrash [OPTIONS] <MESSAGE_ID>...
-
-Arguments:
-  <MESSAGE_ID>...
-          Message ids, for example message_inbox_607146690_22
 
-Options:
-      --reason <REASON>
-          Why this message should not be trashed; required by default
+| Argument | Description |
+| --- | --- |
+| `--dry-run` | Show planned push actions without IMAP/SMTP writes. This is the default |
+| `--confirm <PLAN_ID>` | Apply exactly the reviewed plan returned by push preview |
 
-  -h, --help
-          Print help
-```
+| Command | Summary |
+| --- | --- |
+| `afmail push list` | Preview the complete resolved push plan without writing |
 
-### Agent-First Mail message attachment - Fetch an attachment for this message
+### afmail push list - Preview the complete resolved push plan without writing
 
 ```text
-Usage: attachment <COMMAND>
-
-Commands:
-  fetch  Fetch one attachment by MIME part id, or all attachments when omitted
-  help   Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
+afmail push list
 ```
 
-#### Agent-First Mail message attachment fetch - Fetch one attachment by MIME part id, or all attachments when omitted
+## afmail status - Report workspace health, counts, and latest pull/push progress
 
 ```text
-Usage: fetch <MESSAGE_ID> [PART_ID]
-
-Arguments:
-  <MESSAGE_ID>
-          Message id, for example message_inbox_607146690_22
-
-  [PART_ID]
-
-
-Options:
-  -h, --help
-          Print help
+afmail status
 ```
 
-## Agent-First Mail case - Create a case or operate on an existing case ref
+## afmail doctor - Check afmail workspace consistency without inspecting Git
 
 ```text
-Usage: case <COMMAND>
-
-Commands:
-  create       Create a new case and return its stable UID/ref
-  list         List compact case locators
-  show         Show a case's case.md without changing workspace state
-  add          Add a message to this existing case
-  set-summary  Set or replace one case entry summary
-  remove       Remove one message from this case and return it to triage
-  move         Move this case to another group
-  rename       Rename this case's human-readable name without changing its UID
-  notes        Show or edit case notes
-  archive      Archive this active case
-  unarchive    Move this archived case back to an active case group
-  trash        Move every message in this case to local trash and queue Trash moves
-  delete       Delete an empty case
-  tag          Add a case organization tag
-  untag        Remove a case organization tag
-  draft        Create, edit, validate, queue, or remove local case drafts
-  merge        Merge another case into this case
-  help         Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
+afmail doctor [COMMAND]
 ```
-
-### Agent-First Mail case create - Create a new case and return its stable UID/ref
-
-```text
-Usage: create [OPTIONS] --name <NAME> --group <GROUP>
-
-Options:
-      --name <NAME>
-          Human-readable case name used in case.md and the directory suffix
-
-      --group <GROUP>
-          Required case category/group, for example support, invoice, 客服, 发票, 合同, or 退款
-
-      --message <MESSAGE>
-          Optional first message to add to the case
 
-      --summary <SUMMARY>
-          Short summary for the first message
+| Command | Summary |
+| --- | --- |
+| `afmail doctor repair` | Repair only unambiguous afmail-generated state |
 
-      --reason <REASON>
-          Why this case is being created
+### afmail doctor repair - Repair only unambiguous afmail-generated state
 
-  -h, --help
-          Print help
-```
-
-### Agent-First Mail case list - List compact case locators
-
 ```text
-Usage: list [OPTIONS]
-
-Options:
-      --archived
-          List archived cases instead of active cases
-
-      --all
-          List active and archived cases together
-
-  -h, --help
-          Print help
+afmail doctor repair [OPTIONS]
 ```
-
-### Agent-First Mail case show - Show a case's case.md without changing workspace state
 
-```text
-Usage: show <CASE_REF>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-Options:
-  -h, --help
-          Print help
-```
+| Argument | Description |
+| --- | --- |
+| `--confirm` | Apply repair actions. Without this flag, repair is refused |
 
-### Agent-First Mail case add - Add a message to this existing case
+## afmail purge - Permanently delete old local spam, trash, and remote-deleted records
 
 ```text
-Usage: add [OPTIONS] <CASE_REF> <MESSAGE_ID>...
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-  <MESSAGE_ID>...
-          Message ids to add
-
-Options:
-      --summary <SUMMARY>
-          Short summary for this message in the case
-
-      --reason <REASON>
-          Why this message belongs in this case; required by default
-
-  -h, --help
-          Print help
+afmail purge [OPTIONS] [COMMAND]
 ```
-
-### Agent-First Mail case set-summary - Set or replace one case entry summary
-
-```text
-Usage: set-summary [OPTIONS] --summary <SUMMARY> <CASE_REF> <MESSAGE_ID>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-  <MESSAGE_ID>
-          Message id whose summary should be changed
-
-Options:
-      --summary <SUMMARY>
-          New summary text
 
-      --reason <REASON>
-          Why this summary is useful; required by default
+| Argument | Description |
+| --- | --- |
+| `--older-than-days <DAYS>` | Only purge messages in a discard state at least this many days ago. Defaults to 30 |
+| `--confirm <PLAN_ID>` | Permanently delete exactly the reviewed purge plan *(global)* |
 
-  -h, --help
-          Print help
-```
+| Command | Summary |
+| --- | --- |
+| `afmail purge spam` | Permanently delete old local spam records |
+| `afmail purge trash` | Permanently delete old local trash records |
+| `afmail purge deleted` | Permanently delete old local records whose remote message disappeared |
 
-### Agent-First Mail case remove - Remove one message from this case and return it to triage
+### afmail purge spam - Permanently delete old local spam records
 
 ```text
-Usage: remove [OPTIONS] <CASE_REF> <MESSAGE_ID>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-  <MESSAGE_ID>
-          Message id to remove
-
-Options:
-      --reason <REASON>
-          Why this message does not belong in this case; required by default
-
-  -h, --help
-          Print help
+afmail purge spam [OPTIONS]
 ```
-
-### Agent-First Mail case move - Move this case to another group
-
-```text
-Usage: move [OPTIONS] --group <GROUP> <CASE_REF>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-Options:
-      --group <GROUP>
-          Destination group
 
-      --reason <REASON>
-          Why this group better represents the case; required by default
+| Argument | Description |
+| --- | --- |
+| `--older-than-days <DAYS>` | Only purge messages marked spam at least this many days ago. Defaults to 30 |
 
-  -h, --help
-          Print help
-```
-
-### Agent-First Mail case rename - Rename this case's human-readable name without changing its UID
+### afmail purge trash - Permanently delete old local trash records
 
 ```text
-Usage: rename [OPTIONS] --name <NAME> <CASE_REF>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-Options:
-      --name <NAME>
-          New human-readable case name
-
-      --reason <REASON>
-          Why this name better represents the case; required by default
-
-  -h, --help
-          Print help
+afmail purge trash [OPTIONS]
 ```
-
-### Agent-First Mail case notes - Show or edit case notes
 
-```text
-Usage: notes <COMMAND>
+| Argument | Description |
+| --- | --- |
+| `--older-than-days <DAYS>` | Only purge messages marked trash at least this many days ago. Defaults to 30 |
 
-Commands:
-  show     Show notes markdown
-  append   Append text to notes markdown
-  replace  Replace notes markdown with text
-  help     Print this message or the help of the given subcommand(s)
+### afmail purge deleted - Permanently delete old local records whose remote message disappeared
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail purge deleted [OPTIONS]
 ```
 
-#### Agent-First Mail case notes show - Show notes markdown
-
-```text
-Usage: show <CASE_REF>
+| Argument | Description |
+| --- | --- |
+| `--older-than-days <DAYS>` | Only purge messages marked remote-deleted at least this many days ago. Defaults to 30 |
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+## afmail skill - Manage the Agent-First Mail skill for Codex, Claude Code, opencode, and Hermes
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail skill <COMMAND>
 ```
+
+| Command | Summary |
+| --- | --- |
+| `afmail skill status` | Show whether the Agent-First Mail skill is installed and valid |
+| `afmail skill install` | Install the Agent-First Mail skill |
+| `afmail skill uninstall` | Remove an afmail-managed Agent-First Mail skill |
 
-#### Agent-First Mail case notes append - Append text to notes markdown
+### afmail skill status - Show whether the Agent-First Mail skill is installed and valid
 
 ```text
-Usage: append --text <TEXT> <CASE_REF>
+afmail skill status [OPTIONS]
+```
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+| Argument | Description |
+| --- | --- |
+| `--agent <AGENT>` | Agent to manage. Defaults to all personal skill targets *(default: `all`)* |
+| `--scope <SCOPE>` | Skill scope. Workspace scope installs under the current workspace's skill directory *(default: `personal`)* |
+| `--skills-dir <SKILLS_DIR>` | Directory that contains skill folders. Requires an explicit single --agent |
 
-Options:
-      --text <TEXT>
-          Markdown text to append
+### afmail skill install - Install the Agent-First Mail skill
 
-  -h, --help
-          Print help
+```text
+afmail skill install [OPTIONS]
 ```
 
-#### Agent-First Mail case notes replace - Replace notes markdown with text
+| Argument | Description |
+| --- | --- |
+| `--agent <AGENT>` | Agent to manage. Defaults to all personal skill targets *(default: `all`)* |
+| `--scope <SCOPE>` | Skill scope. Workspace scope installs under the current workspace's skill directory *(default: `personal`)* |
+| `--skills-dir <SKILLS_DIR>` | Directory that contains skill folders. Requires an explicit single --agent |
+| `--force` | Overwrite or remove an unmanaged Agent-First Mail skill at the target path |
 
+### afmail skill uninstall - Remove an afmail-managed Agent-First Mail skill
+
 ```text
-Usage: replace --text <TEXT> <CASE_REF>
+afmail skill uninstall [OPTIONS]
+```
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+| Argument | Description |
+| --- | --- |
+| `--agent <AGENT>` | Agent to manage. Defaults to all personal skill targets *(default: `all`)* |
+| `--scope <SCOPE>` | Skill scope. Workspace scope installs under the current workspace's skill directory *(default: `personal`)* |
+| `--skills-dir <SKILLS_DIR>` | Directory that contains skill folders. Requires an explicit single --agent |
+| `--force` | Overwrite or remove an unmanaged Agent-First Mail skill at the target path |
 
-Options:
-      --text <TEXT>
-          Markdown text to write
+## afmail triage - Inspect the triage queue
 
-  -h, --help
-          Print help
+```text
+afmail triage <COMMAND>
 ```
+
+| Command | Summary |
+| --- | --- |
+| `afmail triage list` | List compact untriaged message locators |
+| `afmail triage suggestion` | Set or clear the current typed Agent suggestion for a message |
+| `afmail triage review` | Open a review session for persisted triage suggestions |
 
-### Agent-First Mail case archive - Archive this active case
+### afmail triage list - List compact untriaged message locators
 
 ```text
-Usage: archive [OPTIONS] <CASE_REF>
+afmail triage list [OPTIONS]
+```
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+| Argument | Description |
+| --- | --- |
+| `--limit <LIMIT>` | Maximum number of newest triage messages to return |
+| `--details` | Include message metadata, related message ids, and case refs |
 
-Options:
-      --reason <REASON>
-          Why this case is ready to archive; required by default
+### afmail triage suggestion - Set or clear the current typed Agent suggestion for a message
 
-  -h, --help
-          Print help
+```text
+afmail triage suggestion <COMMAND>
 ```
+
+| Command | Summary |
+| --- | --- |
+| `afmail triage suggestion set` | Replace the current suggestion and clear any human review of the prior round |
+| `afmail triage suggestion clear` | Clear exactly the current suggestion round |
 
-### Agent-First Mail case unarchive - Move this archived case back to an active case group
+#### afmail triage suggestion set - Replace the current suggestion and clear any human review of the prior round
 
 ```text
-Usage: unarchive [OPTIONS] --group <GROUP> <CASE_REF>
+afmail triage suggestion set [OPTIONS] --message-review-base-hash <MESSAGE_REVIEW_BASE_HASH> --reason <REASON> <MESSAGE_ID> <COMMAND>
+```
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+| Argument | Description |
+| --- | --- |
+| `MESSAGE_ID` | Message id currently in triage *(required)* |
+| `--message-review-base-hash <MESSAGE_REVIEW_BASE_HASH>` | Current hash returned by `afmail message show` *(required)* |
+| `--reason <REASON>` | Why this complete action is being suggested *(required)* |
+| `--confidence-percent <CONFIDENCE_PERCENT>` | Optional confidence from 0 through 100 |
 
-Options:
-      --group <GROUP>
-          Active case group to unarchive into
+| Command | Summary |
+| --- | --- |
+| `afmail triage suggestion set case-create` |  |
+| `afmail triage suggestion set case-add` |  |
+| `afmail triage suggestion set notification-create` |  |
+| `afmail triage suggestion set notification-add` |  |
+| `afmail triage suggestion set spam` |  |
+| `afmail triage suggestion set trash` |  |
 
-      --reason <REASON>
-          Why this case needs active attention again; required by default
+##### afmail triage suggestion set case-create
 
-  -h, --help
-          Print help
+```text
+afmail triage suggestion set case-create --name <NAME> --group <GROUP>
 ```
 
-### Agent-First Mail case trash - Move every message in this case to local trash and queue Trash moves
+| Argument | Description |
+| --- | --- |
+| `--name <NAME>` | *(required)* |
+| `--group <GROUP>` | *(required)* |
 
+##### afmail triage suggestion set case-add
+
 ```text
-Usage: trash [OPTIONS] <CASE_REF>
+afmail triage suggestion set case-add <CASE_REF>
+```
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | *(required)* |
 
-Options:
-      --reason <REASON>
-          Why this whole case should be discarded; required by default
+##### afmail triage suggestion set notification-create
 
-  -h, --help
-          Print help
+```text
+afmail triage suggestion set notification-create --name <NAME> --summary <SUMMARY>
 ```
 
-### Agent-First Mail case delete - Delete an empty case
+| Argument | Description |
+| --- | --- |
+| `--name <NAME>` | *(required)* |
+| `--summary <SUMMARY>` | *(required)* |
 
-```text
-Usage: delete [OPTIONS] <CASE_REF>
+##### afmail triage suggestion set notification-add
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+```text
+afmail triage suggestion set notification-add --summary <SUMMARY> <NOTIFICATION_REF>
+```
 
-Options:
-      --allow-notes
-          Also delete notes.md when it contains user-authored notes
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | *(required)* |
+| `--summary <SUMMARY>` | *(required)* |
 
-      --reason <REASON>
-          Why this case should be deleted; required by default
+##### afmail triage suggestion set spam
 
-  -h, --help
-          Print help
+```text
+afmail triage suggestion set spam
 ```
 
-### Agent-First Mail case tag - Add a case organization tag
+##### afmail triage suggestion set trash
 
 ```text
-Usage: tag [OPTIONS] <CASE_REF> <TAG>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
-
-  <TAG>
-          Case organization tag
-
-Options:
-      --reason <REASON>
-          Why this tag is useful; required by default
-
-  -h, --help
-          Print help
+afmail triage suggestion set trash
 ```
 
-### Agent-First Mail case untag - Remove a case organization tag
+#### afmail triage suggestion clear - Clear exactly the current suggestion round
 
 ```text
-Usage: untag [OPTIONS] <CASE_REF> <TAG>
-
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+afmail triage suggestion clear --agent-suggestion-uid <AGENT_SUGGESTION_UID> <MESSAGE_ID>
+```
 
-  <TAG>
-          Case organization tag
+| Argument | Description |
+| --- | --- |
+| `MESSAGE_ID` | Message id whose current suggestion round should be cleared *(required)* |
+| `--agent-suggestion-uid <AGENT_SUGGESTION_UID>` | UID returned by the current suggestion set command *(required)* |
 
-Options:
-      --reason <REASON>
-          Why this tag should be removed; required by default
+### afmail triage review - Open a review session for persisted triage suggestions
 
-  -h, --help
-          Print help
+```text
+afmail triage review [OPTIONS] [MESSAGE_ID]...
 ```
 
-### Agent-First Mail case draft - Create, edit, validate, queue, or remove local case drafts
-
-```text
-Usage: draft <COMMAND>
+| Argument | Description |
+| --- | --- |
+| `MESSAGE_ID...` | Message ids to review. With none, review every current triage suggestion |
+| `--mode <MODE>` | Review presentation mode *(default: `local`)* |
 
-Commands:
-  new       Scaffold a new outbound draft (not a reply) in this case
-  reply     Scaffold a reply draft to a message, prefilled and quoting the original
-  change    Change an existing editable draft in place
-  show      Show an existing draft in a review-friendly JSON shape
-  validate  Validate a draft under the case drafts directory
-  list      List local drafts with their current status
-  upload    Queue this draft to be uploaded to the remote Drafts mailbox
-  send      Queue this draft to be sent and recorded in the case after push succeeds
-  attach    Copy or reference a file and add it to a draft's attachments
-  remove    Remove a local draft and any queued outbound item for it
-  help      Print this message or the help of the given subcommand(s)
+## afmail message - Operate on any local message id
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail message <COMMAND>
 ```
-
-#### Agent-First Mail case draft new - Scaffold a new outbound draft (not a reply) in this case
 
-```text
-Usage: new [OPTIONS] --to <TO> --subject <SUBJECT> <CASE_REF>
+| Command | Summary |
+| --- | --- |
+| `afmail message show` | Show the exact typed message document used by Markdown and Review templates |
+| `afmail message list` | List messages by sender, subject, date, or workspace scope |
+| `afmail message spam` | Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move |
+| `afmail message trash` | Explicitly discard this message locally, show it under trash/, and queue a Trash move |
+| `afmail message unspam` | Mark a spam false positive as triage and queue a move out of Junk when needed |
+| `afmail message untrash` | Mark a trash false positive as triage and queue a move out of Trash when needed |
+| `afmail message attachment` | Fetch an attachment for this message |
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+### afmail message show - Show the exact typed message document used by Markdown and Review templates
 
-Options:
-      --to <TO>
-          Recipient address. Repeatable
+```text
+afmail message show <MESSAGE_ID>
+```
 
-      --cc <CC>
-          Cc address. Repeatable
+| Argument | Description |
+| --- | --- |
+| `MESSAGE_ID` | Message id, for example message_inbox_607146690_22 *(required)* |
 
-      --subject <SUBJECT>
-          Draft subject
+### afmail message list - List messages by sender, subject, date, or workspace scope
 
-      --identity <IDENTITY>
-          Workspace identity slug to send as. Defaults to the configured default identity
+```text
+afmail message list [OPTIONS]
+```
 
-      --body <BODY>
-          Draft body text
+| Argument | Description |
+| --- | --- |
+| `--sender <SENDER>` | Only include messages whose sender or from line contains this text |
+| `--subject-contains <SUBJECT_CONTAINS>` | Only include messages whose subject contains this text |
+| `--since <DATE>` | Only include messages on or after this date or RFC3339 timestamp |
+| `--in <SCOPE>` | Limit results to one workspace scope *(default: `all`)* |
 
-      --body-file <BODY_FILE>
-          Path to a file whose contents become the draft body
+### afmail message spam - Mark junk/phishing/malware/suspicious mail locally, show it under spam/, and queue a Junk move
 
-  -h, --help
-          Print help
+```text
+afmail message spam [OPTIONS] <MESSAGE_ID>...
 ```
 
-#### Agent-First Mail case draft reply - Scaffold a reply draft to a message, prefilled and quoting the original
+| Argument | Description |
+| --- | --- |
+| `MESSAGE_ID...` | Message ids, for example message_inbox_607146690_22 *(required)* |
+| `--reason <REASON>` | Why this disposition is correct; required by default |
 
-```text
-Usage: reply [OPTIONS] <CASE_REF> <MESSAGE_ID>
+### afmail message trash - Explicitly discard this message locally, show it under trash/, and queue a Trash move
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+```text
+afmail message trash [OPTIONS] <MESSAGE_ID>...
+```
 
-  <MESSAGE_ID>
-          Message id in this case to reply to
+| Argument | Description |
+| --- | --- |
+| `MESSAGE_ID...` | Message ids, for example message_inbox_607146690_22 *(required)* |
+| `--reason <REASON>` | Why this disposition is correct; required by default |
 
-Options:
-      --identity <IDENTITY>
-          Workspace identity slug to send as. Defaults to the configured default identity
+### afmail message unspam - Mark a spam false positive as triage and queue a move out of Junk when needed
 
-      --body <BODY>
-          Draft body text. Replaces the default reply template when provided
+```text
+afmail message unspam [OPTIONS] <MESSAGE_ID>...
+```
 
-      --body-file <BODY_FILE>
-          Path to a file whose contents become the draft body
+| Argument | Description |
+| --- | --- |
+| `MESSAGE_ID...` | Message ids, for example message_inbox_607146690_22 *(required)* |
+| `--reason <REASON>` | Why this message is not spam; required by default |
 
-      --all
-          Reply to all original recipients (To and Cc), not just the sender
+### afmail message untrash - Mark a trash false positive as triage and queue a move out of Trash when needed
 
-  -h, --help
-          Print help
+```text
+afmail message untrash [OPTIONS] <MESSAGE_ID>...
 ```
 
-#### Agent-First Mail case draft change - Change an existing editable draft in place
+| Argument | Description |
+| --- | --- |
+| `MESSAGE_ID...` | Message ids, for example message_inbox_607146690_22 *(required)* |
+| `--reason <REASON>` | Why this message should not be trashed; required by default |
 
-```text
-Usage: change [OPTIONS] <CASE_REF> <DRAFT_NAME>
+### afmail message attachment - Fetch an attachment for this message
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+```text
+afmail message attachment <COMMAND>
+```
 
-  <DRAFT_NAME>
-          Draft markdown file under the case drafts directory
+| Command | Summary |
+| --- | --- |
+| `afmail message attachment fetch` | Fetch one attachment by MIME part id, or all attachments when omitted |
 
-Options:
-      --subject <SUBJECT>
-          Replacement subject
+#### afmail message attachment fetch - Fetch one attachment by MIME part id, or all attachments when omitted
 
-      --to <TO>
-          Replacement To list. Repeatable; when provided it replaces all To recipients
+```text
+afmail message attachment fetch <MESSAGE_ID> [PART_ID]
+```
 
-      --cc <CC>
-          Replacement Cc list. Repeatable; when provided it replaces all Cc recipients
+| Argument | Description |
+| --- | --- |
+| `MESSAGE_ID` | Message id, for example message_inbox_607146690_22 *(required)* |
+| `PART_ID` |  |
 
-      --clear-cc
-          Clear all Cc recipients
+## afmail case - Create a case or operate on an existing case ref
 
-      --identity <IDENTITY>
-          Change the workspace identity slug used by this draft
+```text
+afmail case <COMMAND>
+```
 
-      --body <BODY>
-          Replacement draft body text
+| Command | Summary |
+| --- | --- |
+| `afmail case create` | Create a new case and return its stable UID/ref |
+| `afmail case list` | List compact case locators |
+| `afmail case show` | Show the exact typed case collection document used by Markdown and Review |
+| `afmail case review` | Open a review session for this case, including editable notes |
+| `afmail case suggestion` | Set or clear the current typed Agent suggestion for this case |
+| `afmail case add` | Add a message to this existing case |
+| `afmail case set-summary` | Set or replace one case entry summary |
+| `afmail case remove` | Remove one message from this case and return it to triage |
+| `afmail case move` | Move this case to another group |
+| `afmail case rename` | Rename this case's human-readable name without changing its UID |
+| `afmail case notes` | Show or edit case notes |
+| `afmail case archive` | Archive this active case |
+| `afmail case unarchive` | Move this archived case back to an active case group |
+| `afmail case trash` | Move every message in this case to local trash and queue Trash moves |
+| `afmail case delete` | Delete an empty case |
+| `afmail case tag` | Add a case organization tag |
+| `afmail case untag` | Remove a case organization tag |
+| `afmail case draft` | Create, edit, validate, queue, or remove local case drafts |
+| `afmail case merge` | Merge another case into this case |
 
-      --body-file <BODY_FILE>
-          Path to a file whose contents replace the draft body
+### afmail case create - Create a new case and return its stable UID/ref
 
-  -h, --help
-          Print help
+```text
+afmail case create [OPTIONS] --name <NAME> --group <GROUP>
 ```
 
-#### Agent-First Mail case draft show - Show an existing draft in a review-friendly JSON shape
+| Argument | Description |
+| --- | --- |
+| `--name <NAME>` | Human-readable case name used in case.md and the directory suffix *(required)* |
+| `--group <GROUP>` | Required case category/group, for example support, invoice, 客服, 发票, 合同, or 退款 *(required)* |
+| `--message <MESSAGE>` | Optional first message to add to the case |
+| `--summary <SUMMARY>` | Short summary for the first message |
+| `--reason <REASON>` | Why this case is being created |
 
+### afmail case list - List compact case locators
+
 ```text
-Usage: show <CASE_REF> <DRAFT_NAME>
+afmail case list [OPTIONS]
+```
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+| Argument | Description |
+| --- | --- |
+| `--archived` | List archived cases instead of active cases |
+| `--all` | List active and archived cases together |
 
-  <DRAFT_NAME>
-          Draft markdown file under the case drafts directory
+### afmail case show - Show the exact typed case collection document used by Markdown and Review
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail case show <CASE_REF>
 ```
 
-#### Agent-First Mail case draft validate - Validate a draft under the case drafts directory
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
 
+### afmail case review - Open a review session for this case, including editable notes
+
 ```text
-Usage: validate <CASE_REF> <DRAFT_NAME>
+afmail case review [OPTIONS] <CASE_REF>
+```
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--mode <MODE>` | Review presentation mode *(default: `local`)* |
 
-  <DRAFT_NAME>
-          Draft markdown file under the case drafts directory
+### afmail case suggestion - Set or clear the current typed Agent suggestion for this case
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail case suggestion <COMMAND>
 ```
-
-#### Agent-First Mail case draft list - List local drafts with their current status
 
-```text
-Usage: list <CASE_REF>
+| Command | Summary |
+| --- | --- |
+| `afmail case suggestion set` | Replace the current suggestion and clear any human review of the prior round |
+| `afmail case suggestion clear` | Clear exactly the current suggestion round |
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+#### afmail case suggestion set - Replace the current suggestion and clear any human review of the prior round
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail case suggestion set [OPTIONS] --case-review-base-hash <CASE_REVIEW_BASE_HASH> --reason <REASON> <CASE_REF> <COMMAND>
 ```
 
-#### Agent-First Mail case draft upload - Queue this draft to be uploaded to the remote Drafts mailbox
-
-```text
-Usage: upload <CASE_REF> <DRAFT_NAME>
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--case-review-base-hash <CASE_REVIEW_BASE_HASH>` | Current hash returned by `afmail case show` *(required)* |
+| `--reason <REASON>` | Why this complete action is being suggested *(required)* |
+| `--confidence-percent <CONFIDENCE_PERCENT>` | Optional confidence from 0 through 100 |
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+| Command | Summary |
+| --- | --- |
+| `afmail case suggestion set archive` |  |
+| `afmail case suggestion set unarchive` |  |
+| `afmail case suggestion set move` |  |
+| `afmail case suggestion set rename` |  |
+| `afmail case suggestion set tag` |  |
+| `afmail case suggestion set untag` |  |
+| `afmail case suggestion set trash` |  |
+| `afmail case suggestion set delete` |  |
 
-  <DRAFT_NAME>
-          Draft markdown file under the case drafts directory
+##### afmail case suggestion set archive
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail case suggestion set archive
 ```
 
-#### Agent-First Mail case draft send - Queue this draft to be sent and recorded in the case after push succeeds
+##### afmail case suggestion set unarchive
 
 ```text
-Usage: send <CASE_REF> <DRAFT_NAME>
+afmail case suggestion set unarchive --group <GROUP>
+```
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+| Argument | Description |
+| --- | --- |
+| `--group <GROUP>` | *(required)* |
 
-  <DRAFT_NAME>
-          Draft markdown file under the case drafts directory
+##### afmail case suggestion set move
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail case suggestion set move --group <GROUP>
 ```
 
-#### Agent-First Mail case draft attach - Copy or reference a file and add it to a draft's attachments
+| Argument | Description |
+| --- | --- |
+| `--group <GROUP>` | *(required)* |
 
-```text
-Usage: attach <CASE_REF> <DRAFT_NAME> <PATH>
+##### afmail case suggestion set rename
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+```text
+afmail case suggestion set rename --name <NAME>
+```
 
-  <DRAFT_NAME>
-          Draft markdown file under the case drafts directory
+| Argument | Description |
+| --- | --- |
+| `--name <NAME>` | *(required)* |
 
-  <PATH>
-          Local file path to attach
+##### afmail case suggestion set tag
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail case suggestion set tag <TAG>
 ```
 
-#### Agent-First Mail case draft remove - Remove a local draft and any queued outbound item for it
+| Argument | Description |
+| --- | --- |
+| `TAG` | *(required)* |
 
-```text
-Usage: remove [OPTIONS] <CASE_REF> <DRAFT_NAME>
+##### afmail case suggestion set untag
 
-Arguments:
-  <CASE_REF>
-          Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix
+```text
+afmail case suggestion set untag <TAG>
+```
 
-  <DRAFT_NAME>
-          Draft markdown file under the case drafts directory
+| Argument | Description |
+| --- | --- |
+| `TAG` | *(required)* |
 
-Options:
-      --reason <REASON>
-          Why this draft should be removed; required by default
+##### afmail case suggestion set trash
 
-  -h, --help
-          Print help
+```text
+afmail case suggestion set trash
 ```
 
-### Agent-First Mail case merge - Merge another case into this case
+##### afmail case suggestion set delete
 
 ```text
-Usage: merge [OPTIONS] <CASE_REF> <OTHER_CASE_REF>
-
-Arguments:
-  <CASE_REF>
-          Primary case ref
+afmail case suggestion set delete [OPTIONS]
+```
 
-  <OTHER_CASE_REF>
-          Case ref to merge into the primary case
+| Argument | Description |
+| --- | --- |
+| `--allow-notes` |  |
 
-Options:
-      --reason <REASON>
-          Why these cases should be merged; required by default
+#### afmail case suggestion clear - Clear exactly the current suggestion round
 
-  -h, --help
-          Print help
+```text
+afmail case suggestion clear --agent-suggestion-uid <AGENT_SUGGESTION_UID> <CASE_REF>
 ```
 
-## Agent-First Mail contact - Create a contact or operate on an existing contact ref
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--agent-suggestion-uid <AGENT_SUGGESTION_UID>` | UID returned by the current suggestion set command *(required)* |
 
-```text
-Usage: contact <COMMAND>
-
-Commands:
-  create   Create a new contact record
-  list     List contacts, optionally filtered by group, tag, org, or role
-  show     Show a contact's full file content
-  move     Move a contact to a different group
-  rename   Rename a contact's display name
-  email    Add or remove email addresses for a contact
-  phone    Add or remove phone numbers for a contact
-  tag      Add a tag to a contact
-  untag    Remove a tag from a contact
-  notes    Show or edit contact notes
-  delete   Delete a contact
-  extract  Extract stub contacts from message senders not yet in the contact list
-  help     Print this message or the help of the given subcommand(s)
+### afmail case add - Add a message to this existing case
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail case add [OPTIONS] <CASE_REF> <MESSAGE_ID>...
 ```
+
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `MESSAGE_ID...` | Message ids to add *(required)* |
+| `--summary <SUMMARY>` | Short summary for this message in the case |
+| `--reason <REASON>` | Why this message belongs in this case; required by default |
 
-### Agent-First Mail contact create - Create a new contact record
+### afmail case set-summary - Set or replace one case entry summary
 
 ```text
-Usage: create [OPTIONS] --name <NAME>
+afmail case set-summary [OPTIONS] --summary <SUMMARY> <CASE_REF> <MESSAGE_ID>
+```
 
-Options:
-      --name <NAME>
-          Display name for the contact
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `MESSAGE_ID` | Message id whose summary should be changed *(required)* |
+| `--summary <SUMMARY>` | New summary text *(required)* |
+| `--reason <REASON>` | Why this summary is useful; required by default |
 
-      --group <GROUP>
-          Group. Defaults to the configured default contact group
+### afmail case remove - Remove one message from this case and return it to triage
 
-      --email <EMAILS>
-          Email address. Repeatable
+```text
+afmail case remove [OPTIONS] <CASE_REF> <MESSAGE_ID>
+```
 
-      --phone <PHONES>
-          Phone number. Repeatable
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `MESSAGE_ID` | Message id to remove *(required)* |
+| `--reason <REASON>` | Why this message does not belong in this case; required by default |
 
-      --org <ORG>
-          Organization name
+### afmail case move - Move this case to another group
 
-      --role <ROLE>
-          Role or title
+```text
+afmail case move [OPTIONS] --group <GROUP> <CASE_REF>
+```
 
-      --tag <TAGS>
-          Tag. Repeatable
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--group <GROUP>` | Destination group *(required)* |
+| `--reason <REASON>` | Why this group better represents the case; required by default |
 
-      --reason <REASON>
-          Why this contact is being created; required by default
+### afmail case rename - Rename this case's human-readable name without changing its UID
 
-  -h, --help
-          Print help
+```text
+afmail case rename [OPTIONS] --name <NAME> <CASE_REF>
 ```
-
-### Agent-First Mail contact list - List contacts, optionally filtered by group, tag, org, or role
 
-```text
-Usage: list [OPTIONS]
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--name <NAME>` | New human-readable case name *(required)* |
+| `--reason <REASON>` | Why this name better represents the case; required by default |
 
-Options:
-      --group <GROUP>
-          Filter to a specific group
+### afmail case notes - Show or edit case notes
 
-      --tag <TAG>
-          Filter by tag
+```text
+afmail case notes <COMMAND>
+```
 
-      --org <ORG>
-          Filter by organization
+| Command | Summary |
+| --- | --- |
+| `afmail case notes show` | Show notes markdown |
+| `afmail case notes append` | Append text to notes markdown |
+| `afmail case notes replace` | Replace notes markdown with text |
 
-      --role <ROLE>
-          Filter by role
+#### afmail case notes show - Show notes markdown
 
-  -h, --help
-          Print help
+```text
+afmail case notes show <CASE_REF>
 ```
 
-### Agent-First Mail contact show - Show a contact's full file content
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
 
-```text
-Usage: show <CONTACT_REF>
-
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+#### afmail case notes append - Append text to notes markdown
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail case notes append --text <TEXT> <CASE_REF>
 ```
 
-### Agent-First Mail contact move - Move a contact to a different group
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--text <TEXT>` | Markdown text to append *(required)* |
 
-```text
-Usage: move [OPTIONS] --group <GROUP> <CONTACT_REF>
+#### afmail case notes replace - Replace notes markdown with text
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+```text
+afmail case notes replace --text <TEXT> <CASE_REF>
+```
 
-Options:
-      --group <GROUP>
-          Destination group
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--text <TEXT>` | Markdown text to write *(required)* |
 
-      --reason <REASON>
-          Why this contact should move groups; required by default
+### afmail case archive - Archive this active case
 
-  -h, --help
-          Print help
+```text
+afmail case archive [OPTIONS] <CASE_REF>
 ```
 
-### Agent-First Mail contact rename - Rename a contact's display name
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--reason <REASON>` | Why this case is ready to archive; required by default |
 
-```text
-Usage: rename [OPTIONS] --name <NAME> <CONTACT_REF>
+### afmail case unarchive - Move this archived case back to an active case group
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+```text
+afmail case unarchive [OPTIONS] --group <GROUP> <CASE_REF>
+```
 
-Options:
-      --name <NAME>
-          New display name
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--group <GROUP>` | Active case group to unarchive into *(required)* |
+| `--reason <REASON>` | Why this case needs active attention again; required by default |
 
-      --reason <REASON>
-          Why this name better represents the contact; required by default
+### afmail case trash - Move every message in this case to local trash and queue Trash moves
 
-  -h, --help
-          Print help
+```text
+afmail case trash [OPTIONS] <CASE_REF>
 ```
 
-### Agent-First Mail contact email - Add or remove email addresses for a contact
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--reason <REASON>` | Why this whole case should be discarded; required by default |
 
-```text
-Usage: email <COMMAND>
+### afmail case delete - Delete an empty case
 
-Commands:
-  add     Add an email address to the contact
-  remove  Remove an email address from the contact
-  help    Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
+```text
+afmail case delete [OPTIONS] <CASE_REF>
 ```
 
-#### Agent-First Mail contact email add - Add an email address to the contact
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--allow-notes` | Also delete notes.md when it contains user-authored notes |
+| `--reason <REASON>` | Why this case should be deleted; required by default |
 
-```text
-Usage: add [OPTIONS] <CONTACT_REF> <EMAIL>
+### afmail case tag - Add a case organization tag
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+```text
+afmail case tag [OPTIONS] <CASE_REF> <TAG>
+```
 
-  <EMAIL>
-          Email address to add
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `TAG` | Case organization tag *(required)* |
+| `--reason <REASON>` | Why this tag is useful; required by default |
 
-Options:
-      --reason <REASON>
-          Why this email should be associated with the contact; required by default
+### afmail case untag - Remove a case organization tag
 
-  -h, --help
-          Print help
+```text
+afmail case untag [OPTIONS] <CASE_REF> <TAG>
 ```
 
-#### Agent-First Mail contact email remove - Remove an email address from the contact
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `TAG` | Case organization tag *(required)* |
+| `--reason <REASON>` | Why this tag should be removed; required by default |
 
-```text
-Usage: remove [OPTIONS] <CONTACT_REF> <EMAIL>
+### afmail case draft - Create, edit, validate, queue, or remove local case drafts
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+```text
+afmail case draft <COMMAND>
+```
 
-  <EMAIL>
-          Email address to remove
+| Command | Summary |
+| --- | --- |
+| `afmail case draft new` | Scaffold a new outbound draft (not a reply) in this case |
+| `afmail case draft reply` | Scaffold a reply draft to a message, prefilled and quoting the original |
+| `afmail case draft change` | Change an existing editable draft in place |
+| `afmail case draft show` | Show an existing draft as a typed render document |
+| `afmail case draft review` | Open a review session for this draft |
+| `afmail case draft validate` | Validate a draft under the case drafts directory |
+| `afmail case draft list` | List local drafts with their current status |
+| `afmail case draft upload` | Queue this draft to be uploaded to the remote Drafts mailbox |
+| `afmail case draft send` | Queue this draft to be sent and recorded in the case after push succeeds |
+| `afmail case draft attach` | Copy or reference a file and add it to a draft's attachments |
+| `afmail case draft remove` | Remove a local draft and any queued outbound item for it |
 
-Options:
-      --reason <REASON>
-          Why this email should be removed; required by default
+#### afmail case draft new - Scaffold a new outbound draft (not a reply) in this case
 
-  -h, --help
-          Print help
+```text
+afmail case draft new [OPTIONS] --to <TO> --subject <SUBJECT> <CASE_REF>
 ```
-
-### Agent-First Mail contact phone - Add or remove phone numbers for a contact
 
-```text
-Usage: phone <COMMAND>
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `--to <TO>...` | Recipient address. Repeatable *(required)* |
+| `--cc <CC>...` | Cc address. Repeatable |
+| `--subject <SUBJECT>` | Draft subject *(required)* |
+| `--identity <IDENTITY>` | Workspace identity slug to send as. Defaults to the configured default identity |
+| `--body <BODY>` | Draft body text |
+| `--body-file <BODY_FILE>` | Path to a file whose contents become the draft body |
 
-Commands:
-  add     Add a phone number to the contact
-  remove  Remove a phone number from the contact
-  help    Print this message or the help of the given subcommand(s)
+#### afmail case draft reply - Scaffold a reply draft to a message, prefilled and quoting the original
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail case draft reply [OPTIONS] <CASE_REF> <MESSAGE_ID>
 ```
 
-#### Agent-First Mail contact phone add - Add a phone number to the contact
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `MESSAGE_ID` | Message id in this case to reply to *(required)* |
+| `--identity <IDENTITY>` | Workspace identity slug to send as. Defaults to the configured default identity |
+| `--body <BODY>` | Draft body text. Replaces the default reply template when provided |
+| `--body-file <BODY_FILE>` | Path to a file whose contents become the draft body |
+| `--all` | Reply to all original recipients (To and Cc), not just the sender |
 
-```text
-Usage: add [OPTIONS] <CONTACT_REF> <PHONE>
+#### afmail case draft change - Change an existing editable draft in place
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+```text
+afmail case draft change [OPTIONS] <CASE_REF> <DRAFT_NAME>
+```
 
-  <PHONE>
-          Phone number to add
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `DRAFT_NAME` | Draft markdown file under the case drafts directory *(required)* |
+| `--subject <SUBJECT>` | Replacement subject |
+| `--to <TO>...` | Replacement To list. Repeatable; when provided it replaces all To recipients |
+| `--cc <CC>...` | Replacement Cc list. Repeatable; when provided it replaces all Cc recipients |
+| `--clear-cc` | Clear all Cc recipients |
+| `--identity <IDENTITY>` | Change the workspace identity slug used by this draft |
+| `--body <BODY>` | Replacement draft body text |
+| `--body-file <BODY_FILE>` | Path to a file whose contents replace the draft body |
 
-Options:
-      --reason <REASON>
-          Why this phone number should be associated with the contact; required by default
+#### afmail case draft show - Show an existing draft as a typed render document
 
-  -h, --help
-          Print help
+```text
+afmail case draft show <CASE_REF> <DRAFT_NAME>
 ```
 
-#### Agent-First Mail contact phone remove - Remove a phone number from the contact
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `DRAFT_NAME` | Draft markdown file under the case drafts directory *(required)* |
 
-```text
-Usage: remove [OPTIONS] <CONTACT_REF> <PHONE>
+#### afmail case draft review - Open a review session for this draft
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+```text
+afmail case draft review [OPTIONS] <CASE_REF> <DRAFT_NAME>
+```
 
-  <PHONE>
-          Phone number to remove
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `DRAFT_NAME` | Draft markdown file under the case drafts directory *(required)* |
+| `--mode <MODE>` | Review presentation mode *(default: `local`)* |
 
-Options:
-      --reason <REASON>
-          Why this phone number should be removed; required by default
+#### afmail case draft validate - Validate a draft under the case drafts directory
 
-  -h, --help
-          Print help
+```text
+afmail case draft validate <CASE_REF> <DRAFT_NAME>
 ```
 
-### Agent-First Mail contact tag - Add a tag to a contact
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `DRAFT_NAME` | Draft markdown file under the case drafts directory *(required)* |
 
-```text
-Usage: tag [OPTIONS] <CONTACT_REF> <TAG>
+#### afmail case draft list - List local drafts with their current status
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+```text
+afmail case draft list <CASE_REF>
+```
 
-  <TAG>
-          Tag to add
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
 
-Options:
-      --reason <REASON>
-          Why this tag is useful; required by default
+#### afmail case draft upload - Queue this draft to be uploaded to the remote Drafts mailbox
 
-  -h, --help
-          Print help
+```text
+afmail case draft upload <CASE_REF> <DRAFT_NAME>
 ```
 
-### Agent-First Mail contact untag - Remove a tag from a contact
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `DRAFT_NAME` | Draft markdown file under the case drafts directory *(required)* |
 
-```text
-Usage: untag [OPTIONS] <CONTACT_REF> <TAG>
+#### afmail case draft send - Queue this draft to be sent and recorded in the case after push succeeds
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+```text
+afmail case draft send <CASE_REF> <DRAFT_NAME>
+```
 
-  <TAG>
-          Tag to remove
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `DRAFT_NAME` | Draft markdown file under the case drafts directory *(required)* |
 
-Options:
-      --reason <REASON>
-          Why this tag should be removed; required by default
+#### afmail case draft attach - Copy or reference a file and add it to a draft's attachments
 
-  -h, --help
-          Print help
+```text
+afmail case draft attach <CASE_REF> <DRAFT_NAME> <PATH>
 ```
 
-### Agent-First Mail contact notes - Show or edit contact notes
-
-```text
-Usage: notes <COMMAND>
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `DRAFT_NAME` | Draft markdown file under the case drafts directory *(required)* |
+| `PATH` | Local file path to attach *(required)* |
 
-Commands:
-  show     Show notes markdown
-  append   Append text to notes markdown
-  replace  Replace notes markdown with text
-  help     Print this message or the help of the given subcommand(s)
+#### afmail case draft remove - Remove a local draft and any queued outbound item for it
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail case draft remove [OPTIONS] <CASE_REF> <DRAFT_NAME>
 ```
-
-#### Agent-First Mail contact notes show - Show notes markdown
 
-```text
-Usage: show <CONTACT_REF>
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix *(required)* |
+| `DRAFT_NAME` | Draft markdown file under the case drafts directory *(required)* |
+| `--reason <REASON>` | Why this draft should be removed; required by default |
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+### afmail case merge - Merge another case into this case
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail case merge [OPTIONS] <CASE_REF> <OTHER_CASE_REF>
 ```
 
-#### Agent-First Mail contact notes append - Append text to notes markdown
+| Argument | Description |
+| --- | --- |
+| `CASE_REF` | Primary case ref *(required)* |
+| `OTHER_CASE_REF` | Case ref to merge into the primary case *(required)* |
+| `--reason <REASON>` | Why these cases should be merged; required by default |
 
+## afmail contact - Create a contact or operate on an existing contact ref
+
 ```text
-Usage: append --text <TEXT> <CONTACT_REF>
+afmail contact <COMMAND>
+```
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+| Command | Summary |
+| --- | --- |
+| `afmail contact create` | Create a new contact record |
+| `afmail contact list` | List contacts, optionally filtered by group, tag, org, or role |
+| `afmail contact show` | Show the exact typed contact document used by its Markdown template |
+| `afmail contact move` | Move a contact to a different group |
+| `afmail contact rename` | Rename a contact's display name |
+| `afmail contact email` | Add or remove email addresses for a contact |
+| `afmail contact phone` | Add or remove phone numbers for a contact |
+| `afmail contact tag` | Add a tag to a contact |
+| `afmail contact untag` | Remove a tag from a contact |
+| `afmail contact notes` | Show or edit contact notes |
+| `afmail contact delete` | Delete a contact |
+| `afmail contact extract` | Extract stub contacts from message senders not yet in the contact list |
 
-Options:
-      --text <TEXT>
-          Markdown text to append
+### afmail contact create - Create a new contact record
 
-  -h, --help
-          Print help
+```text
+afmail contact create [OPTIONS] --name <NAME>
 ```
 
-#### Agent-First Mail contact notes replace - Replace notes markdown with text
+| Argument | Description |
+| --- | --- |
+| `--name <NAME>` | Display name for the contact *(required)* |
+| `--group <GROUP>` | Group. Defaults to the configured default contact group |
+| `--email <EMAILS>...` | Email address. Repeatable |
+| `--phone <PHONES>...` | Phone number. Repeatable |
+| `--org <ORG>` | Organization name |
+| `--role <ROLE>` | Role or title |
+| `--tag <TAGS>...` | Tag. Repeatable |
+| `--reason <REASON>` | Why this contact is being created; required by default |
 
+### afmail contact list - List contacts, optionally filtered by group, tag, org, or role
+
 ```text
-Usage: replace --text <TEXT> <CONTACT_REF>
+afmail contact list [OPTIONS]
+```
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+| Argument | Description |
+| --- | --- |
+| `--group <GROUP>` | Filter to a specific group |
+| `--tag <TAG>` | Filter by tag |
+| `--org <ORG>` | Filter by organization |
+| `--role <ROLE>` | Filter by role |
 
-Options:
-      --text <TEXT>
-          Markdown text to write
+### afmail contact show - Show the exact typed contact document used by its Markdown template
 
-  -h, --help
-          Print help
+```text
+afmail contact show <CONTACT_REF>
 ```
 
-### Agent-First Mail contact delete - Delete a contact
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
 
-```text
-Usage: delete [OPTIONS] <CONTACT_REF>
+### afmail contact move - Move a contact to a different group
 
-Arguments:
-  <CONTACT_REF>
-          Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix
+```text
+afmail contact move [OPTIONS] --group <GROUP> <CONTACT_REF>
+```
 
-Options:
-      --allow-notes
-          Also delete the contact body when it contains user-authored notes
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
+| `--group <GROUP>` | Destination group *(required)* |
+| `--reason <REASON>` | Why this contact should move groups; required by default |
 
-      --reason <REASON>
-          Why this contact should be deleted; required by default
+### afmail contact rename - Rename a contact's display name
 
-  -h, --help
-          Print help
+```text
+afmail contact rename [OPTIONS] --name <NAME> <CONTACT_REF>
 ```
-
-### Agent-First Mail contact extract - Extract stub contacts from message senders not yet in the contact list
 
-```text
-Usage: extract [OPTIONS]
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
+| `--name <NAME>` | New display name *(required)* |
+| `--reason <REASON>` | Why this name better represents the contact; required by default |
 
-Options:
-      --from-triage
-          Extract from triage messages only
+### afmail contact email - Add or remove email addresses for a contact
 
-      --from-case <CASE_REF>
-          Extract from a specific case's messages
+```text
+afmail contact email <COMMAND>
+```
 
-      --all
-          Extract from all triage and case messages
+| Command | Summary |
+| --- | --- |
+| `afmail contact email add` | Add an email address to the contact |
+| `afmail contact email remove` | Remove an email address from the contact |
 
-      --group <GROUP>
-          Destination group for created contacts. Defaults to contact.default_group
+#### afmail contact email add - Add an email address to the contact
 
-  -h, --help
-          Print help
+```text
+afmail contact email add [OPTIONS] <CONTACT_REF> <EMAIL>
 ```
 
-## Agent-First Mail notification - Inspect and manage notification collections
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
+| `EMAIL` | Email address to add *(required)* |
+| `--reason <REASON>` | Why this email should be associated with the contact; required by default |
 
-```text
-Usage: notification <COMMAND>
+#### afmail contact email remove - Remove an email address from the contact
 
-Commands:
-  create       Create a notification collection and optionally file one message
-  add          File an existing message into this notification collection
-  list         List compact notification collections
-  show         Show notification collection index and entries
-  remove       Remove a notification message from this collection and return it to triage
-  move         Move a notification message to another notification collection
-  rename       Rename this notification collection's human-readable name without changing its UID
-  delete       Delete an empty notification collection
-  set-summary  Set or replace one notification entry summary
-  notes        Show or edit notification collection notes
-  help         Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
+```text
+afmail contact email remove [OPTIONS] <CONTACT_REF> <EMAIL>
 ```
 
-### Agent-First Mail notification create - Create a notification collection and optionally file one message
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
+| `EMAIL` | Email address to remove *(required)* |
+| `--reason <REASON>` | Why this email should be removed; required by default |
 
-```text
-Usage: create [OPTIONS] --name <NAME>
-
-Options:
-      --name <NAME>
-          Human-readable notification name used in metadata and the directory suffix
+### afmail contact phone - Add or remove phone numbers for a contact
 
-      --message <MESSAGE>
-          Optional message to immediately file into the new notification collection
+```text
+afmail contact phone <COMMAND>
+```
 
-      --summary <SUMMARY>
-          Required when --message is supplied
+| Command | Summary |
+| --- | --- |
+| `afmail contact phone add` | Add a phone number to the contact |
+| `afmail contact phone remove` | Remove a phone number from the contact |
 
-      --reason <REASON>
-          Why this notification collection is being created
+#### afmail contact phone add - Add a phone number to the contact
 
-  -h, --help
-          Print help
+```text
+afmail contact phone add [OPTIONS] <CONTACT_REF> <PHONE>
 ```
 
-### Agent-First Mail notification add - File an existing message into this notification collection
-
-```text
-Usage: add [OPTIONS] --summary <SUMMARY> <NOTIFICATION_REF> <MESSAGE_ID>...
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
+| `PHONE` | Phone number to add *(required)* |
+| `--reason <REASON>` | Why this phone number should be associated with the contact; required by default |
 
-Arguments:
-  <NOTIFICATION_REF>
-          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
+#### afmail contact phone remove - Remove a phone number from the contact
 
-  <MESSAGE_ID>...
-          Message ids to file
+```text
+afmail contact phone remove [OPTIONS] <CONTACT_REF> <PHONE>
+```
 
-Options:
-      --summary <SUMMARY>
-          Human/agent-authored summary for this notification entry
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
+| `PHONE` | Phone number to remove *(required)* |
+| `--reason <REASON>` | Why this phone number should be removed; required by default |
 
-      --reason <REASON>
-          Why this message belongs in this notification; required by default
+### afmail contact tag - Add a tag to a contact
 
-  -h, --help
-          Print help
+```text
+afmail contact tag [OPTIONS] <CONTACT_REF> <TAG>
 ```
 
-### Agent-First Mail notification list - List compact notification collections
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
+| `TAG` | Tag to add *(required)* |
+| `--reason <REASON>` | Why this tag is useful; required by default |
 
-```text
-Usage: list
+### afmail contact untag - Remove a tag from a contact
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail contact untag [OPTIONS] <CONTACT_REF> <TAG>
 ```
 
-### Agent-First Mail notification show - Show notification collection index and entries
-
-```text
-Usage: show <NOTIFICATION_REF>
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
+| `TAG` | Tag to remove *(required)* |
+| `--reason <REASON>` | Why this tag should be removed; required by default |
 
-Arguments:
-  <NOTIFICATION_REF>
-          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
+### afmail contact notes - Show or edit contact notes
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail contact notes <COMMAND>
 ```
-
-### Agent-First Mail notification remove - Remove a notification message from this collection and return it to triage
 
-```text
-Usage: remove [OPTIONS] <NOTIFICATION_REF> <MESSAGE_ID>
+| Command | Summary |
+| --- | --- |
+| `afmail contact notes show` | Show the typed contact document with raw notes Markdown |
+| `afmail contact notes append` | Append text to notes markdown |
+| `afmail contact notes replace` | Replace notes markdown with text |
 
-Arguments:
-  <NOTIFICATION_REF>
-          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
+#### afmail contact notes show - Show the typed contact document with raw notes Markdown
 
-  <MESSAGE_ID>
+```text
+afmail contact notes show <CONTACT_REF>
+```
 
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
 
-Options:
-      --reason <REASON>
-          Why this message does not belong in this notification; required by default
+#### afmail contact notes append - Append text to notes markdown
 
-  -h, --help
-          Print help
+```text
+afmail contact notes append --text <TEXT> <CONTACT_REF>
 ```
 
-### Agent-First Mail notification move - Move a notification message to another notification collection
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
+| `--text <TEXT>` | Markdown text to append *(required)* |
 
+#### afmail contact notes replace - Replace notes markdown with text
+
 ```text
-Usage: move [OPTIONS] <NOTIFICATION_REF> <MESSAGE_ID> <NEW_NOTIFICATION_REF>
+afmail contact notes replace --text <TEXT> <CONTACT_REF>
+```
 
-Arguments:
-  <NOTIFICATION_REF>
-          Source notification collection ref
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
+| `--text <TEXT>` | Markdown text to write *(required)* |
 
-  <MESSAGE_ID>
+### afmail contact delete - Delete a contact
 
+```text
+afmail contact delete [OPTIONS] <CONTACT_REF>
+```
 
-  <NEW_NOTIFICATION_REF>
-          Destination notification collection ref
+| Argument | Description |
+| --- | --- |
+| `CONTACT_REF` | Contact ref: pYYYYMMDDNNN or pYYYYMMDDNNN-any-suffix *(required)* |
+| `--allow-notes` | Also delete the contact body when it contains user-authored notes |
+| `--reason <REASON>` | Why this contact should be deleted; required by default |
 
-Options:
-      --reason <REASON>
-          Why this collection is better; required by default
+### afmail contact extract - Extract stub contacts from message senders not yet in the contact list
 
-  -h, --help
-          Print help
+```text
+afmail contact extract [OPTIONS]
 ```
 
-### Agent-First Mail notification rename - Rename this notification collection's human-readable name without changing its UID
+| Argument | Description |
+| --- | --- |
+| `--from-triage` | Extract from triage messages only |
+| `--from-case <CASE_REF>` | Extract from a specific case's messages |
+| `--all` | Extract from all triage and case messages |
+| `--group <GROUP>` | Destination group for created contacts. Defaults to contact.default_group |
 
-```text
-Usage: rename [OPTIONS] --name <NAME> <NOTIFICATION_REF>
+## afmail notification - Inspect and manage notification collections
 
-Arguments:
-  <NOTIFICATION_REF>
-          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
+```text
+afmail notification <COMMAND>
+```
 
-Options:
-      --name <NAME>
-          New human-readable notification name
+| Command | Summary |
+| --- | --- |
+| `afmail notification create` | Create a notification collection and optionally file one message |
+| `afmail notification add` | File an existing message into this notification collection |
+| `afmail notification list` | List compact notification collections |
+| `afmail notification show` | Show the exact typed notification document used by Markdown and Review |
+| `afmail notification review` | Open a review session for this notification and its persisted suggestion |
+| `afmail notification suggestion` | Set or clear the current typed Agent suggestion for this collection |
+| `afmail notification remove` | Remove a notification message from this collection and return it to triage |
+| `afmail notification move` | Move a notification message to another notification collection |
+| `afmail notification rename` | Rename this notification collection's human-readable name without changing its UID |
+| `afmail notification delete` | Delete an empty notification collection |
+| `afmail notification set-summary` | Set or replace one notification entry summary |
+| `afmail notification notes` | Show or edit notification collection notes |
 
-      --reason <REASON>
-          Why this name better represents the collection; required by default
+### afmail notification create - Create a notification collection and optionally file one message
 
-  -h, --help
-          Print help
+```text
+afmail notification create [OPTIONS] --name <NAME>
 ```
 
-### Agent-First Mail notification delete - Delete an empty notification collection
+| Argument | Description |
+| --- | --- |
+| `--name <NAME>` | Human-readable notification name used in metadata and the directory suffix *(required)* |
+| `--message <MESSAGE>` | Optional message to immediately file into the new notification collection |
+| `--summary <SUMMARY>` | Required when --message is supplied |
+| `--reason <REASON>` | Why this notification collection is being created |
 
-```text
-Usage: delete [OPTIONS] <NOTIFICATION_REF>
+### afmail notification add - File an existing message into this notification collection
 
-Arguments:
-  <NOTIFICATION_REF>
-          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
+```text
+afmail notification add [OPTIONS] --summary <SUMMARY> <NOTIFICATION_REF> <MESSAGE_ID>...
+```
 
-Options:
-      --allow-notes
-          Also delete notes.md when it contains user-authored notes
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
+| `MESSAGE_ID...` | Message ids to file *(required)* |
+| `--summary <SUMMARY>` | Human/agent-authored summary for this notification entry *(required)* |
+| `--reason <REASON>` | Why this message belongs in this notification; required by default |
 
-      --reason <REASON>
-          Why this notification collection should be deleted; required by default
+### afmail notification list - List compact notification collections
 
-  -h, --help
-          Print help
+```text
+afmail notification list
 ```
 
-### Agent-First Mail notification set-summary - Set or replace one notification entry summary
+### afmail notification show - Show the exact typed notification document used by Markdown and Review
 
 ```text
-Usage: set-summary [OPTIONS] --summary <SUMMARY> <NOTIFICATION_REF> <MESSAGE_ID>
-
-Arguments:
-  <NOTIFICATION_REF>
-          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
+afmail notification show <NOTIFICATION_REF>
+```
 
-  <MESSAGE_ID>
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
 
+### afmail notification review - Open a review session for this notification and its persisted suggestion
 
-Options:
-      --summary <SUMMARY>
+```text
+afmail notification review [OPTIONS] <NOTIFICATION_REF>
+```
 
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
+| `--mode <MODE>` | Review presentation mode *(default: `local`)* |
 
-      --reason <REASON>
-          Why this summary is useful; required by default
+### afmail notification suggestion - Set or clear the current typed Agent suggestion for this collection
 
-  -h, --help
-          Print help
+```text
+afmail notification suggestion <COMMAND>
 ```
 
-### Agent-First Mail notification notes - Show or edit notification collection notes
-
-```text
-Usage: notes <COMMAND>
+| Command | Summary |
+| --- | --- |
+| `afmail notification suggestion set` | Replace the current suggestion and clear any human review of the prior round |
+| `afmail notification suggestion clear` | Clear exactly the current suggestion round |
 
-Commands:
-  show     Show notes markdown
-  append   Append text to notes markdown
-  replace  Replace notes markdown with text
-  help     Print this message or the help of the given subcommand(s)
+#### afmail notification suggestion set - Replace the current suggestion and clear any human review of the prior round
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail notification suggestion set [OPTIONS] --notification-review-base-hash <NOTIFICATION_REVIEW_BASE_HASH> --reason <REASON> <NOTIFICATION_REF> <COMMAND>
 ```
 
-#### Agent-First Mail notification notes show - Show notes markdown
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
+| `--notification-review-base-hash <NOTIFICATION_REVIEW_BASE_HASH>` | Current hash returned by `afmail notification show` *(required)* |
+| `--reason <REASON>` | Why this complete action is being suggested *(required)* |
+| `--confidence-percent <CONFIDENCE_PERCENT>` | Optional confidence from 0 through 100 |
 
-```text
-Usage: show <NOTIFICATION_REF>
+| Command | Summary |
+| --- | --- |
+| `afmail notification suggestion set rename` |  |
+| `afmail notification suggestion set delete` |  |
 
-Arguments:
-  <NOTIFICATION_REF>
-          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
+##### afmail notification suggestion set rename
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail notification suggestion set rename --name <NAME>
 ```
 
-#### Agent-First Mail notification notes append - Append text to notes markdown
+| Argument | Description |
+| --- | --- |
+| `--name <NAME>` | *(required)* |
 
+##### afmail notification suggestion set delete
+
 ```text
-Usage: append --text <TEXT> <NOTIFICATION_REF>
+afmail notification suggestion set delete [OPTIONS]
+```
 
-Arguments:
-  <NOTIFICATION_REF>
-          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
+| Argument | Description |
+| --- | --- |
+| `--allow-notes` |  |
 
-Options:
-      --text <TEXT>
-          Markdown text to append
+#### afmail notification suggestion clear - Clear exactly the current suggestion round
 
-  -h, --help
-          Print help
+```text
+afmail notification suggestion clear --agent-suggestion-uid <AGENT_SUGGESTION_UID> <NOTIFICATION_REF>
 ```
+
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
+| `--agent-suggestion-uid <AGENT_SUGGESTION_UID>` | UID returned by the current suggestion set command *(required)* |
 
-#### Agent-First Mail notification notes replace - Replace notes markdown with text
+### afmail notification remove - Remove a notification message from this collection and return it to triage
 
 ```text
-Usage: replace --text <TEXT> <NOTIFICATION_REF>
+afmail notification remove [OPTIONS] <NOTIFICATION_REF> <MESSAGE_ID>
+```
 
-Arguments:
-  <NOTIFICATION_REF>
-          Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
+| `MESSAGE_ID` | *(required)* |
+| `--reason <REASON>` | Why this message does not belong in this notification; required by default |
 
-Options:
-      --text <TEXT>
-          Markdown text to write
+### afmail notification move - Move a notification message to another notification collection
 
-  -h, --help
-          Print help
+```text
+afmail notification move [OPTIONS] <NOTIFICATION_REF> <MESSAGE_ID> <NEW_NOTIFICATION_REF>
 ```
 
-## Agent-First Mail render - Rebuild generated read views from local workspace state
-
-```text
-Usage: render <COMMAND>
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Source notification collection ref *(required)* |
+| `MESSAGE_ID` | *(required)* |
+| `NEW_NOTIFICATION_REF` | Destination notification collection ref *(required)* |
+| `--reason <REASON>` | Why this collection is better; required by default |
 
-Commands:
-  refresh    Rebuild generated case and notification read views
-  templates  Export built-in language templates, keeping existing files unless forced
-  help       Print this message or the help of the given subcommand(s)
+### afmail notification rename - Rename this notification collection's human-readable name without changing its UID
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail notification rename [OPTIONS] --name <NAME> <NOTIFICATION_REF>
 ```
 
-### Agent-First Mail render refresh - Rebuild generated case and notification read views
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
+| `--name <NAME>` | New human-readable notification name *(required)* |
+| `--reason <REASON>` | Why this name better represents the collection; required by default |
 
-```text
-Usage: refresh
+### afmail notification delete - Delete an empty notification collection
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail notification delete [OPTIONS] <NOTIFICATION_REF>
 ```
-
-### Agent-First Mail render templates - Export built-in language templates, keeping existing files unless forced
 
-```text
-Usage: templates [OPTIONS]
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
+| `--allow-notes` | Also delete notes.md when it contains user-authored notes |
+| `--reason <REASON>` | Why this notification collection should be deleted; required by default |
 
-Options:
-      --force
-          Overwrite existing workspace templates with built-in defaults
+### afmail notification set-summary - Set or replace one notification entry summary
 
-  -h, --help
-          Print help
+```text
+afmail notification set-summary [OPTIONS] --summary <SUMMARY> <NOTIFICATION_REF> <MESSAGE_ID>
 ```
-
-## Agent-First Mail log - Inspect the workspace audit log
 
-```text
-Usage: log <COMMAND>
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
+| `MESSAGE_ID` | *(required)* |
+| `--summary <SUMMARY>` | *(required)* |
+| `--reason <REASON>` | Why this summary is useful; required by default |
 
-Commands:
-  list          List recent audit events
-  tail          Tail recent audit events as JSON data
-  message       List events for one message id
-  case          List events for one case id
-  notification  List events for one notification collection
-  help          Print this message or the help of the given subcommand(s)
+### afmail notification notes - Show or edit notification collection notes
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail notification notes <COMMAND>
 ```
 
-### Agent-First Mail log list - List recent audit events
+| Command | Summary |
+| --- | --- |
+| `afmail notification notes show` | Show notes markdown |
+| `afmail notification notes append` | Append text to notes markdown |
+| `afmail notification notes replace` | Replace notes markdown with text |
 
+#### afmail notification notes show - Show notes markdown
+
 ```text
-Usage: list [OPTIONS]
+afmail notification notes show <NOTIFICATION_REF>
+```
 
-Options:
-      --limit <LIMIT>
-          Maximum number of events to return
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
 
-          [default: 50]
+#### afmail notification notes append - Append text to notes markdown
 
-  -h, --help
-          Print help
+```text
+afmail notification notes append --text <TEXT> <NOTIFICATION_REF>
 ```
 
-### Agent-First Mail log tail - Tail recent audit events as JSON data
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
+| `--text <TEXT>` | Markdown text to append *(required)* |
 
-```text
-Usage: tail
+#### afmail notification notes replace - Replace notes markdown with text
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail notification notes replace --text <TEXT> <NOTIFICATION_REF>
 ```
 
-### Agent-First Mail log message - List events for one message id
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix *(required)* |
+| `--text <TEXT>` | Markdown text to write *(required)* |
 
+## afmail render - Rebuild generated read views from local workspace state
+
 ```text
-Usage: message <MESSAGE_ID>
+afmail render <COMMAND>
+```
 
-Arguments:
-  <MESSAGE_ID>
+| Command | Summary |
+| --- | --- |
+| `afmail render refresh` | Rebuild generated case and notification read views |
+| `afmail render templates` | Export built-in language templates, keeping existing files unless forced |
 
+### afmail render refresh - Rebuild generated case and notification read views
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail render refresh
 ```
 
-### Agent-First Mail log case - List events for one case id
+### afmail render templates - Export built-in language templates, keeping existing files unless forced
 
 ```text
-Usage: case <CASE_UID>
+afmail render templates [OPTIONS]
+```
 
-Arguments:
-  <CASE_UID>
+| Argument | Description |
+| --- | --- |
+| `--force` | Overwrite existing workspace templates with built-in defaults |
 
+## afmail log - Inspect the workspace audit log
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail log <COMMAND>
 ```
 
-### Agent-First Mail log notification - List events for one notification collection
+| Command | Summary |
+| --- | --- |
+| `afmail log list` | List recent audit events |
+| `afmail log tail` | Tail recent audit events as JSON data |
+| `afmail log message` | List events for one message id |
+| `afmail log case` | List events for one case id |
+| `afmail log notification` | List events for one notification collection |
 
+### afmail log list - List recent audit events
+
 ```text
-Usage: notification <NOTIFICATION_UID>
+afmail log list [OPTIONS]
+```
 
-Arguments:
-  <NOTIFICATION_UID>
+| Argument | Description |
+| --- | --- |
+| `--limit <LIMIT>` | Maximum number of events to return *(default: `50`)* |
 
+### afmail log tail - Tail recent audit events as JSON data
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail log tail
 ```
 
-## Agent-First Mail ui - Emit or open an Agent-First UI operation surface for this workspace
+### afmail log message - List events for one message id
 
 ```text
-Usage: ui [OPTIONS] [COMMAND]
-
-Commands:
-  snapshot  Emit a complete AFUI snapshot for this workspace
-  help      Print this message or the help of the given subcommand(s)
-
-Options:
-      --no-open
-          Do not open a browser when delegating to the AFUI Web Host
-
-      --port <PORT>
-          Web Host bind port. Defaults to 0, letting the OS choose a free port
-
-          [default: 0]
-
-      --host <HOST>
-          Web Host bind address
-
-          [default: 127.0.0.1]
+afmail log message <MESSAGE_ID>
+```
 
-      --afui-bin <AFUI_BIN>
-          Explicit `afui` binary path or command name for `afmail ui`
+| Argument | Description |
+| --- | --- |
+| `MESSAGE_ID` | *(required)* |
 
-      --no-termail
-          Do not open the host-owned termail companion
+### afmail log case - List events for one case id
 
-  -h, --help
-          Print help
+```text
+afmail log case <CASE_UID>
 ```
 
-### Agent-First Mail ui snapshot - Emit a complete AFUI snapshot for this workspace
+| Argument | Description |
+| --- | --- |
+| `CASE_UID` | *(required)* |
 
-```text
-Usage: snapshot
+### afmail log notification - List events for one notification collection
 
-Options:
-  -h, --help
-          Print help
+```text
+afmail log notification <NOTIFICATION_UID>
 ```
-AFDATA: 0.20.0
+
+| Argument | Description |
+| --- | --- |
+| `NOTIFICATION_UID` | *(required)* |

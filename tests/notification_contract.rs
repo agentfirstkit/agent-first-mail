@@ -60,6 +60,37 @@ fn create_notification(
 }
 
 #[test]
+fn notification_reads_reject_lifecycle_fields_and_duplicate_membership() {
+    let root = temp_root("notification-invalid-canonical-data");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let (notification_uid, notification_path, _) =
+        create_notification(&root, "strict-data", None, None, None);
+    let data_path = notification_path.join("data/notification.json");
+    let mut data = read_json(&data_path);
+
+    data["status"] = json!("archived");
+    write_json(&data_path, &data);
+    let (status, stdout) = run(&root, &["notification", "show", &notification_uid]);
+    assert_ne!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "notifications_invalid");
+
+    data.as_object_mut()
+        .expect("notification data must be an object")
+        .remove("status");
+    let item = json!({
+        "message_id": "message_duplicate_notification",
+        "added_rfc3339": "2026-07-22T00:00:00Z"
+    });
+    data["items"] = json!([item.clone(), item]);
+    write_json(&data_path, &data);
+    let (status, stdout) = run(&root, &["notification", "show", &notification_uid]);
+    assert_ne!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "notifications_invalid");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn notification_delete_requires_empty_collection_and_protects_notes() {
     let root = temp_root("notification-delete");
     assert!(fs::create_dir_all(&root).is_ok());
@@ -114,7 +145,7 @@ fn notification_delete_requires_empty_collection_and_protects_notes() {
     let value = parse_one(&stdout);
     assert_eq!(value["notification_uid"], notification_uid);
     assert_eq!(value["notes_deleted"], true);
-    assert_eq!(value["notes_modified"], false);
+    assert_eq!(value["notes_present"], false);
     assert!(!notification_path.exists());
     assert_eq!(
         parse_one(&run(&root, &["notification", "list"]).1)["count"],
@@ -162,7 +193,7 @@ fn notification_delete_requires_empty_collection_and_protects_notes() {
     );
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["notes_modified"], true);
+    assert_eq!(value["notes_present"], true);
     assert!(!notes_path.exists());
     let _ = fs::remove_dir_all(root);
 }
@@ -258,7 +289,12 @@ fn notification_move_remove_and_log_filters_work() {
 
     let (status, stdout) = run(&root, &["notification", "show", &billing_uid]);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["message_count"], 1);
+    assert_eq!(
+        parse_one(&stdout)["context"]["messages"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
 
     let (status, stdout) = run(
         &root,
@@ -385,7 +421,19 @@ fn notification_add_accepts_multiple_message_ids() {
     assert!(value[0].get("code").is_none());
     assert_eq!(value[1]["message_id"], "message_note_b");
     let notification_data = read_json(&notification_path.join("data/notification.json"));
+    assert_eq!(notification_data["schema_version"], 3);
     assert_eq!(notification_data["items"].as_array().map(Vec::len), Some(2));
+    for derived in [
+        "message_count",
+        "thread_count",
+        "attachment_count",
+        "last_message_rfc3339",
+    ] {
+        assert!(
+            notification_data.get(derived).is_none(),
+            "{derived}: {notification_data}"
+        );
+    }
 
     let _ = fs::remove_dir_all(root);
 }
@@ -422,15 +470,15 @@ fn notification_show_propagates_message_cache_and_evidence_errors_without_mutati
     assert_eq!(fs::read(&data_path).unwrap_or_default(), before);
 
     assert!(fs::write(&cache_path, cache_before).is_ok());
-    let evidence_path = root.join(".afmail/messages/message_notification_error.remote.json");
-    assert!(fs::write(&evidence_path, b"{invalid remote evidence").is_ok());
+    let evidence_path = root.join(".afmail/messages/message_notification_error.json");
+    assert!(fs::write(&evidence_path, b"{invalid message metadata").is_ok());
 
     let (status, stdout) = run(&root, &["notification", "show", &notification_uid]);
     assert_ne!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
     assert_eq!(value["code"], "store_error");
     assert!(value["message"].as_str().is_some_and(|error| {
-        error.contains(".afmail/messages/message_notification_error.remote.json")
+        error.contains(".afmail/messages/message_notification_error.json")
     }));
     assert_eq!(fs::read(&data_path).unwrap_or_default(), before);
     let _ = fs::remove_dir_all(root);

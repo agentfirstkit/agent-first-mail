@@ -11,84 +11,6 @@ pub(super) fn message_time_raw(message: &MessageFile) -> Option<&str> {
         .or(message.sent_rfc3339.as_deref())
 }
 
-pub(super) fn message_time_utc(message: &MessageFile) -> Option<DateTime<Utc>> {
-    message_time_raw(message)
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc))
-}
-
-pub(super) fn compare_message_time_asc(a: &MessageFile, b: &MessageFile) -> std::cmp::Ordering {
-    match (message_time_utc(a), message_time_utc(b)) {
-        (Some(a_time), Some(b_time)) => a_time.cmp(&b_time),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => message_time(a)
-            .unwrap_or_default()
-            .cmp(&message_time(b).unwrap_or_default()),
-    }
-    .then_with(|| a.message_id.cmp(&b.message_id))
-}
-
-pub(super) fn compare_rfc3339_asc(a: &str, b: &str) -> std::cmp::Ordering {
-    let a_time = DateTime::parse_from_rfc3339(a)
-        .ok()
-        .map(|value| value.with_timezone(&Utc));
-    let b_time = DateTime::parse_from_rfc3339(b)
-        .ok()
-        .map(|value| value.with_timezone(&Utc));
-    match (a_time, b_time) {
-        (Some(a_time), Some(b_time)) => a_time.cmp(&b_time),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => a.cmp(b),
-    }
-}
-
-pub(super) fn message_time_datetime(message: &MessageFile, offset: &FixedOffset) -> Option<String> {
-    message_time_raw(message)
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| {
-            value
-                .with_timezone(offset)
-                .to_rfc3339_opts(SecondsFormat::Secs, true)
-        })
-}
-
-pub(super) fn message_time_context(message: &MessageFile, offset: &FixedOffset) -> Value {
-    time_context(message_time_raw(message).unwrap_or_default(), offset)
-}
-
-pub(super) fn time_context(original: &str, offset: &FixedOffset) -> Value {
-    if let Ok(parsed) = DateTime::parse_from_rfc3339(original) {
-        let local = parsed.with_timezone(offset);
-        json!({
-            "original_rfc3339": original,
-            "local_rfc3339": local.to_rfc3339_opts(SecondsFormat::Secs, true),
-            "date": local.format("%Y-%m-%d").to_string(),
-            "time": local.format("%H:%M").to_string(),
-            "datetime": local.to_rfc3339_opts(SecondsFormat::Secs, true),
-            "year": local.year(),
-            "month": local.month(),
-            "day": local.day(),
-            "hour": local.hour(),
-            "minute": local.minute(),
-        })
-    } else {
-        json!({
-            "original_rfc3339": original,
-            "local_rfc3339": "",
-            "date": "",
-            "time": "",
-            "datetime": "",
-            "year": null,
-            "month": null,
-            "day": null,
-            "hour": null,
-            "minute": null,
-        })
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ThreadDirection {
     Received,
@@ -143,89 +65,6 @@ pub(super) fn subject_has_prefix(subject: &str, prefixes: &[&str]) -> bool {
     prefixes
         .iter()
         .any(|prefix| lower.starts_with(&prefix.to_ascii_lowercase()))
-}
-
-pub(super) fn thread_action_kind(direction: ThreadDirection, action: ThreadAction) -> &'static str {
-    match (direction, action) {
-        (ThreadDirection::Received, ThreadAction::Message) => "received",
-        (ThreadDirection::Received, ThreadAction::Reply) => "received_reply",
-        (ThreadDirection::Received, ThreadAction::Forward) => "received_forward",
-        (ThreadDirection::Sent, ThreadAction::Message) => "sent",
-        (ThreadDirection::Sent, ThreadAction::Reply) => "sent_reply",
-        (ThreadDirection::Sent, ThreadAction::Forward) => "sent_forward",
-    }
-}
-
-// Returns the structured contact kind ("from"/"to") and value. The localized
-// label ("From"/"发件人"/…) is rendered by the per-language template from the
-// `contact_kind`, not here — no human-language strings live in this code.
-pub(super) fn thread_contact(
-    message: &MessageFile,
-    direction: ThreadDirection,
-) -> (&'static str, String) {
-    match direction {
-        ThreadDirection::Received => ("from", message.from.clone().unwrap_or_default()),
-        ThreadDirection::Sent => ("to", message.to.join(", ")),
-    }
-}
-
-pub(super) fn thread_item_common(
-    message: &MessageFile,
-    offset: &FixedOffset,
-    link: String,
-    title: String,
-) -> Result<Value> {
-    let direction = message_thread_direction(message);
-    let action = message_thread_action(message);
-    let (contact_kind, contact) = thread_contact(message, direction);
-    let time = message_time_context(message, offset);
-    let display_time = time
-        .get("datetime")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let direction_kind = match direction {
-        ThreadDirection::Received => "received",
-        ThreadDirection::Sent => "sent",
-    };
-    let action_kind = match action {
-        ThreadAction::Message => "message",
-        ThreadAction::Reply => "reply",
-        ThreadAction::Forward => "forward",
-    };
-    Ok(json!({
-        "message": message_template_value(message)?,
-        "view": {
-            "time": time,
-            "time_rfc3339": message_time(message).unwrap_or_default(),
-            "display_time": display_time,
-            "direction": match direction {
-                ThreadDirection::Received => "inbound",
-                ThreadDirection::Sent => "outbound",
-            },
-            "direction_kind": direction_kind,
-            "direction_symbol": match direction {
-                ThreadDirection::Received => "\u{2190}",
-                ThreadDirection::Sent => "\u{2192}",
-            },
-            "action": action_kind,
-            "action_kind": thread_action_kind(direction, action),
-            "is_reply": action == ThreadAction::Reply,
-            "is_forward": action == ThreadAction::Forward,
-            "contact_kind": contact_kind,
-            "contact": contact.as_str(),
-            "display_contact": markdown_inline(&contact),
-            "display_subject": message
-                .subject
-                .as_deref()
-                .map(markdown_inline)
-                .unwrap_or_default(),
-            "title": title.as_str(),
-            "display_title": markdown_inline(&title),
-            "display_status": markdown_inline(&message.workspace.status),
-            "link": link,
-        },
-    }))
 }
 
 pub fn clean_body_text(input: &str) -> String {
@@ -287,391 +126,202 @@ fn decode_numeric_html_entity(entity: &str) -> Option<char> {
     char::from_u32(value)
 }
 
-pub fn render_message_section(message: &MessageFile, body_text: &str) -> Result<String> {
-    render_message_section_with_options(message, body_text, TemplateLanguage::default(), None)
+pub fn render_message_section(message: &MessageFile) -> Result<String> {
+    render_message_section_with_options(message, TemplateLanguage::default(), None)
 }
 
 pub fn render_message_section_with_config(
     root: &Path,
     message: &MessageFile,
-    body_text: &str,
     config: &MailConfig,
 ) -> Result<String> {
-    let display_offset = config.resolved_timezone_offset();
-    let relations = MessageRelationIndex::build(&Workspace::at(root))?;
-    let quoted_message_id = message_body_has_visible_quote(body_text)
-        .then(|| relations.quoted_message_id(&message.message_id))
-        .flatten();
-    let mut renderer = MarkdownTemplateRenderer::new(root, config.template_language());
-    renderer.render(
+    let document = build_message_render_document(
+        message,
+        config
+            .default_identity()
+            .ok()
+            .map(|identity| identity.email.as_str()),
+    );
+    let mut renderer = TemplateRenderer::new(root, config.template_language());
+    renderer.render_with_options(
         TemplateKey::MessageSection,
-        &message_section_context_with_options(
-            Some(root),
-            message,
-            body_text,
-            config.template_language(),
-            config
-                .default_identity()
-                .ok()
-                .map(|identity| identity.email.as_str()),
-            MessageSectionRenderOptions {
-                display_offset: Some(&display_offset),
-                output_dir: None,
-                message_link: None,
-                quoted_message_id,
-            },
-        )?,
+        &document,
+        TemplateRenderOptions {
+            timezone_offset: Some(config.resolved_timezone_offset()),
+            output_dir: None,
+        },
     )
 }
 
 pub fn render_message_section_with_options(
     message: &MessageFile,
-    body_text: &str,
     language: TemplateLanguage,
     account_email: Option<&str>,
 ) -> Result<String> {
-    render_message_section_with_root(
-        None,
-        message,
-        body_text,
-        language,
-        account_email,
-        None,
-        None,
-    )
-}
-
-pub(crate) fn render_message_section_with_resolved_quote(
-    root: &Path,
-    message: &MessageFile,
-    body_text: &str,
-    config: &MailConfig,
-    quoted_message_id: Option<&str>,
-) -> Result<String> {
-    let display_offset = config.resolved_timezone_offset();
-    let mut renderer = MarkdownTemplateRenderer::new(root, config.template_language());
-    renderer.render(
-        TemplateKey::MessageSection,
-        &message_section_context_with_options(
-            Some(root),
-            message,
-            body_text,
-            config.template_language(),
-            config
-                .default_identity()
-                .ok()
-                .map(|identity| identity.email.as_str()),
-            MessageSectionRenderOptions {
-                display_offset: Some(&display_offset),
-                output_dir: None,
-                message_link: None,
-                quoted_message_id: message_body_has_visible_quote(body_text)
-                    .then_some(quoted_message_id)
-                    .flatten(),
-            },
-        )?,
-    )
+    render_message_section_with_root(None, message, language, account_email, None, None)
 }
 
 pub(super) fn render_message_section_with_root(
     root: Option<&Path>,
     message: &MessageFile,
-    body_text: &str,
     language: TemplateLanguage,
     account_email: Option<&str>,
     display_offset: Option<&FixedOffset>,
     output_dir: Option<&Path>,
 ) -> Result<String> {
+    let document = build_message_render_document(message, account_email);
     let mut renderer = root.map_or_else(
-        || MarkdownTemplateRenderer::builtin(language),
-        |root| MarkdownTemplateRenderer::new(root, language),
+        || TemplateRenderer::builtin(language),
+        |root| TemplateRenderer::new(root, language),
     );
-    renderer.render(
+    renderer.render_with_options(
         TemplateKey::MessageSection,
-        &message_section_context(
-            root,
-            message,
-            body_text,
-            language,
-            account_email,
-            display_offset,
+        &document,
+        TemplateRenderOptions {
+            timezone_offset: display_offset.copied(),
             output_dir,
-        )?,
-    )
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct MessageSectionRenderOptions<'a> {
-    pub display_offset: Option<&'a FixedOffset>,
-    pub output_dir: Option<&'a Path>,
-    pub message_link: Option<&'a str>,
-    pub quoted_message_id: Option<&'a str>,
-}
-
-pub(super) fn message_section_context(
-    root: Option<&Path>,
-    message: &MessageFile,
-    body_text: &str,
-    language: TemplateLanguage,
-    account_email: Option<&str>,
-    display_offset: Option<&FixedOffset>,
-    output_dir: Option<&Path>,
-) -> Result<Value> {
-    message_section_context_with_options(
-        root,
-        message,
-        body_text,
-        language,
-        account_email,
-        MessageSectionRenderOptions {
-            display_offset,
-            output_dir,
-            message_link: None,
-            quoted_message_id: None,
         },
     )
 }
 
-pub(super) fn message_section_context_with_options(
-    root: Option<&Path>,
+pub(super) fn build_message_render_document(
     message: &MessageFile,
-    body_text: &str,
-    language: TemplateLanguage,
     account_email: Option<&str>,
-    options: MessageSectionRenderOptions<'_>,
-) -> Result<Value> {
-    let timestamp_rfc3339 = message
-        .received_rfc3339
+) -> MessageRenderDocument {
+    let canonical_message = message.clone();
+    let direction = message_thread_direction(&canonical_message);
+    let action = message_thread_action(&canonical_message);
+    let body = body_analysis(&canonical_message.body_text);
+    let from = canonical_message.from.as_deref().unwrap_or_default();
+    let possible_bcc = possible_bcc(&canonical_message, account_email);
+    let reply_to_differs = !canonical_message.reply_to.is_empty()
+        && reply_to_differs_from_from(&canonical_message.reply_to, from);
+    let sender_differs = canonical_message
+        .sender
         .as_deref()
-        .or(message.sent_rfc3339.as_deref())
-        .unwrap_or("");
-    let direction = message_thread_direction(message);
-    let display_time = options
-        .display_offset
-        .and_then(|offset| message_time_datetime(message, offset))
-        .or_else(|| {
-            message
-                .received_rfc3339
-                .as_deref()
-                .or(message.sent_rfc3339.as_deref())
-                .map(ToString::to_string)
-        })
-        .unwrap_or_else(|| "unknown-time".to_string());
-    let counterparty = match direction {
-        ThreadDirection::Received => message.from.clone().unwrap_or_default(),
-        ThreadDirection::Sent => message.to.join(", "),
-    };
-    // Pass structured pieces only; the per-language template builds the heading
-    // ("Received from …" / "收到自 …") and the empty-counterparty word from these.
-    let display_counterparty = markdown_inline(&counterparty);
-    let message_action = match direction {
-        ThreadDirection::Received => "received",
-        ThreadDirection::Sent => "sent",
-    };
-    let from = message.from.as_deref().unwrap_or("");
-    let mut hints = Vec::new();
-    let mut possible_bcc = false;
-    if let Some(account) = account_email
+        .is_some_and(|sender| email_address(sender) != email_address(from));
+    let authentication_check = matches!(direction, ThreadDirection::Received)
+        || canonical_message.authentication.has_results();
+
+    MessageRenderDocument {
+        schema_name: message_document_schema_name(),
+        schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+        content_trust: ContentTrust::UntrustedRemote,
+        content_provenance: ContentProvenance {
+            source: ContentSource::RemoteMail,
+        },
+        analysis: MessageRenderAnalysis {
+            direction: match direction {
+                ThreadDirection::Received => RenderMessageDirection::Inbound,
+                ThreadDirection::Sent => RenderMessageDirection::Outbound,
+            },
+            action: match action {
+                ThreadAction::Message => RenderMessageAction::Message,
+                ThreadAction::Reply => RenderMessageAction::Reply,
+                ThreadAction::Forward => RenderMessageAction::Forward,
+            },
+            body,
+            security: MessageSecurityAnalysis {
+                authentication_warning: authentication_check
+                    && canonical_message.authentication.is_warning(),
+                possible_bcc,
+                reply_to_differs,
+                sender_differs,
+            },
+        },
+        message: canonical_message,
+    }
+}
+
+fn possible_bcc(message: &MessageFile, account_email: Option<&str>) -> bool {
+    let Some(account) = account_email
         .map(email_address)
         .filter(|value| !value.is_empty())
-    {
-        let visible_recipients = message
-            .to
-            .iter()
-            .chain(message.cc.iter())
-            .map(|value| email_address(value))
-            .collect::<BTreeSet<_>>();
-        let routed_to_me = message
-            .delivered_to
-            .iter()
-            .chain(message.x_original_to.iter())
-            .chain(message.envelope_to.iter())
-            .any(|value| email_address(value) == account);
-        if routed_to_me && !visible_recipients.contains(&account) {
-            possible_bcc = true;
-            hints.push(json!({"kind": "possible_bcc"}));
-        }
-    }
-    let reply_to_differs =
-        !message.reply_to.is_empty() && reply_to_differs_from_from(&message.reply_to, from);
-    let reply_to_recipients = message.reply_to.join(", ");
-    if reply_to_differs {
-        hints.push(json!({
-            "kind": "reply_to_differs",
-            "recipients": reply_to_recipients.as_str(),
-        }));
-    }
-    let mut sender_differs = false;
-    let sender = message.sender.as_deref().unwrap_or("");
-    if let Some(sender) = &message.sender
-        && email_address(sender) != email_address(from)
-    {
-        sender_differs = true;
-        hints.push(json!({"kind": "sender_differs", "sender": sender}));
-    }
-    let mailing_list = message.list_id.as_deref().unwrap_or("");
-    let mailing_list_headers = message.mailing_list_headers.join(" | ");
-    if let Some(list_id) = &message.list_id {
-        hints.push(json!({"kind": "mailing_list", "list_id": list_id}));
-    } else if !message.mailing_list_headers.is_empty() {
-        hints.push(json!({
-            "kind": "mailing_list_headers",
-            "headers": mailing_list_headers.as_str(),
-        }));
-    }
-    let auth = &message.authentication;
-    let authentication_check = matches!(direction, ThreadDirection::Received) || auth.has_results();
-    let security = json!({
-        "authentication": {
-            "check": authentication_check,
-            "has_results": auth.has_results(),
-            "spf": auth.spf.as_str(),
-            "dkim": auth.dkim.as_str(),
-            "dmarc": auth.dmarc.as_str(),
-            "dmarc_policy": auth.dmarc_policy.clone(),
-            "authenticated_domain": auth.authenticated_domain.clone(),
-            "from_domain": auth.from_domain.clone(),
-            "alignment": auth.alignment.as_str(),
-        },
-        "possible_bcc": possible_bcc,
-        "reply_to_differs": reply_to_differs,
-        "reply_to_recipients": reply_to_recipients,
-        "sender_differs": sender_differs,
-        "sender": sender,
-        "mailing_list": mailing_list,
-        "mailing_list_headers": mailing_list_headers,
-    });
-    let mut body_text_block = body_text.to_string();
-    if !body_text_block.ends_with('\n') {
-        body_text_block.push('\n');
-    }
-    let visible_body = body_text_visible(body_text);
-    let mut body_text_visible_block = visible_body.visible.clone();
-    if !body_text_visible_block.ends_with('\n') {
-        body_text_visible_block.push('\n');
-    }
-    let body_text_fence = markdown_fence_for(&body_text_visible_block);
-    let quoted_message_id = if visible_body.has_quoted_reply {
-        options.quoted_message_id.unwrap_or_default().to_string()
-    } else {
-        String::new()
+    else {
+        return false;
     };
-    let attachments = message
-        .attachments
+    let visible_recipients = message
+        .to
         .iter()
-        .map(|attachment| {
-            let file_path = attachment.file_path.as_deref().unwrap_or("");
-            let preview_path = if attachment.fetched
-                && !file_path.is_empty()
-                && is_image_content_type(&attachment.content_type)
-            {
-                attachment_markdown_path(root, options.output_dir, file_path)
-            } else {
-                String::new()
-            };
-            json!({
-                "part_id": attachment.part_id.as_str(),
-                "filename": attachment.filename.as_str(),
-                "display_filename": markdown_code_span(&attachment.filename),
-                "image_alt": markdown_image_alt(&attachment.filename),
-                "content_type": attachment.content_type.as_str(),
-                "size_bytes": attachment.size_bytes,
-                "file_path": file_path,
-                "saved_filename": saved_filename_for_attachment(attachment),
-                "source_path": attachment.source_path.as_deref().unwrap_or(""),
-                "fetched": attachment.fetched,
-                "is_image": is_image_content_type(&attachment.content_type),
-                "preview_path": preview_path,
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "message": message_template_value(message)?,
-        "view": {
-            "language": language.as_str(),
-            "timestamp_rfc3339": timestamp_rfc3339,
-            "display_time": display_time,
-            "message_action": message_action,
-            "display_counterparty": display_counterparty,
-            "message_link": options.message_link.unwrap_or(""),
-            "body_text": body_text,
-            "body_text_block": body_text_block,
-            "body_text_visible": visible_body.visible,
-            "body_text_visible_block": body_text_visible_block,
-            "body_text_fence": body_text_fence,
-            "has_quoted_reply": visible_body.has_quoted_reply,
-            "quoted_message_id": quoted_message_id,
-            "quoted_from": visible_body.quoted_from.unwrap_or_default(),
-            "quoted_at": visible_body.quoted_at.unwrap_or_default(),
-            "security": security,
-            "hints": hints,
-            "attachments": attachments,
-        },
-    }))
+        .chain(message.cc.iter())
+        .map(|value| email_address(value))
+        .collect::<BTreeSet<_>>();
+    let routed_to_me = message
+        .delivered_to
+        .iter()
+        .chain(message.x_original_to.iter())
+        .chain(message.envelope_to.iter())
+        .any(|value| email_address(value) == account);
+    routed_to_me && !visible_recipients.contains(&account)
 }
 
 #[derive(Clone, Debug, Default)]
-struct VisibleBodyText {
-    visible: String,
-    has_quoted_reply: bool,
-    quoted_from: Option<String>,
-    quoted_at: Option<String>,
+struct BodySplit {
+    quote_start_bytes: Option<usize>,
 }
 
-fn body_text_visible(body_text: &str) -> VisibleBodyText {
-    let lines = body_text.lines().collect::<Vec<_>>();
-    for (idx, line) in lines.iter().enumerate() {
-        if let Some((quoted_at, quoted_from)) = parse_apple_wrote_line(line) {
-            return VisibleBodyText {
-                visible: lines[..idx].join("\n").trim_end().to_string(),
-                has_quoted_reply: true,
-                quoted_from,
-                quoted_at,
+fn body_analysis(body_text: &str) -> MessageBodyAnalysis {
+    let split = split_body_text(body_text);
+    let authored_source = split
+        .quote_start_bytes
+        .map_or(body_text, |start| &body_text[..start]);
+    let mut segments = Vec::new();
+    let authored_end_bytes = authored_source.trim_end().len();
+    if authored_end_bytes > 0 {
+        segments.push(MessageBodySegment {
+            kind: MessageBodySegmentKind::Authored,
+            start_bytes: 0,
+            end_bytes: authored_end_bytes,
+        });
+    }
+    if let Some(start_bytes) = split.quote_start_bytes {
+        let end_bytes = start_bytes + body_text[start_bytes..].trim_end().len();
+        if end_bytes > start_bytes {
+            segments.push(MessageBodySegment {
+                kind: MessageBodySegmentKind::Quoted,
+                start_bytes,
+                end_bytes,
+            });
+        }
+    }
+    MessageBodyAnalysis { segments }
+}
+
+fn split_body_text(body_text: &str) -> BodySplit {
+    let mut lines = Vec::new();
+    let mut starts = Vec::new();
+    let mut start_bytes = 0usize;
+    for segment in body_text.split_inclusive('\n') {
+        starts.push(start_bytes);
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        lines.push(line.strip_suffix('\r').unwrap_or(line));
+        start_bytes += segment.len();
+    }
+    for (index, line) in lines.iter().enumerate() {
+        if is_apple_wrote_line(line) {
+            return BodySplit {
+                quote_start_bytes: starts.get(index).copied(),
             };
         }
     }
-    if let Some(idx) = trailing_quote_block_start(&lines) {
-        return VisibleBodyText {
-            visible: lines[..idx].join("\n").trim_end().to_string(),
-            has_quoted_reply: true,
-            quoted_from: None,
-            quoted_at: None,
+    if let Some(index) = trailing_quote_block_start(&lines) {
+        return BodySplit {
+            quote_start_bytes: starts.get(index).copied(),
         };
     }
-    VisibleBodyText {
-        visible: body_text.trim_end().to_string(),
-        has_quoted_reply: false,
-        quoted_from: None,
-        quoted_at: None,
+    BodySplit {
+        quote_start_bytes: None,
     }
 }
 
-fn parse_apple_wrote_line(line: &str) -> Option<(Option<String>, Option<String>)> {
+fn is_apple_wrote_line(line: &str) -> bool {
     let trimmed = line.trim();
-    if !trimmed.starts_with("On ") || !trimmed.ends_with(" wrote:") {
-        return None;
-    }
-    let inner = trimmed.strip_prefix("On ")?.strip_suffix(" wrote:")?.trim();
-    let (quoted_at, quoted_from) = inner
-        .rsplit_once(',')
-        .map(|(at, from)| {
-            (
-                Some(at.trim().to_string()).filter(|value| !value.is_empty()),
-                Some(from.trim().to_string()).filter(|value| !value.is_empty()),
-            )
-        })
-        .unwrap_or_else(|| {
-            (
-                Some(inner.to_string()).filter(|value| !value.is_empty()),
-                None,
-            )
-        });
-    Some((quoted_at, quoted_from))
+    trimmed.starts_with("On ") && trimmed.ends_with(" wrote:")
 }
 
 fn trailing_quote_block_start(lines: &[&str]) -> Option<usize> {
-    for idx in 0..lines.len() {
-        let rest = &lines[idx..];
+    for index in 0..lines.len() {
+        let rest = &lines[index..];
         let mut nonblank = rest.iter().filter(|line| !line.trim().is_empty());
         if nonblank
             .clone()
@@ -679,71 +329,130 @@ fn trailing_quote_block_start(lines: &[&str]) -> Option<usize> {
             .is_some_and(|line| line.trim_start().starts_with('>'))
             && nonblank.all(|line| line.trim_start().starts_with('>'))
         {
-            return Some(idx);
+            return Some(index);
         }
     }
     None
 }
 
-pub(super) fn message_body_has_visible_quote(body_text: &str) -> bool {
-    body_text_visible(body_text).has_quoted_reply
-}
-
-pub(super) fn message_template_value(message: &MessageFile) -> Result<Value> {
-    let mut value =
-        serde_json::to_value(message).map_err(|e| AppError::json("serialize message", &e))?;
-    if let Some(object) = value.as_object_mut() {
-        object.insert("content_trust".to_string(), json!("untrusted_remote"));
-        object.insert(
-            "content_provenance".to_string(),
-            json!({ "source": "remote_mail", "message_id": message.message_id }),
-        );
+pub(super) fn collection_render_document(
+    collection: MessageCollection,
+    messages: Vec<MessageRenderDocument>,
+    location: Option<CollectionLocation>,
+) -> CollectionRenderDocument {
+    CollectionRenderDocument {
+        schema_name: collection_document_schema_name(),
+        schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+        collection,
+        messages,
+        location,
     }
-    Ok(value)
 }
 
-pub(super) fn markdown_inline(value: &str) -> String {
-    let inline = value.replace(['\r', '\n'], " ");
-    let mut out = String::new();
-    for ch in inline.trim().chars() {
-        if matches!(
-            ch,
-            '\\' | '`' | '[' | ']' | '(' | ')' | '<' | '>' | '!' | '|'
-        ) {
-            out.push('\\');
-        }
-        out.push(ch);
+pub(super) fn collection_message_render_document(
+    collection: MessageCollection,
+    message: MessageRenderDocument,
+    location: Option<CollectionLocation>,
+) -> CollectionMessageRenderDocument {
+    CollectionMessageRenderDocument {
+        schema_name: collection_message_document_schema_name(),
+        schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+        collection,
+        message,
+        location,
     }
-    out
 }
 
-/// Sanitize a value rendered inside a backtick code span (e.g. attachment
-/// filenames). Strips CR/LF like `markdown_inline`, and replaces backticks so a
-/// crafted filename cannot close the span and smuggle imperative Markdown after
-/// it.
-pub(super) fn markdown_code_span(value: &str) -> String {
-    value.replace(['\r', '\n'], " ").trim().replace('`', "'")
-}
-
-pub(super) fn markdown_image_alt(value: &str) -> String {
-    markdown_inline(value)
-        .replace('\\', "\\\\")
-        .replace('[', "\\[")
-        .replace(']', "\\]")
-}
-
-pub(super) fn markdown_fence_for(value: &str) -> String {
-    let mut max_run = 0usize;
-    let mut current = 0usize;
-    for ch in value.chars() {
-        if ch == '`' {
-            current += 1;
-            max_run = max_run.max(current);
-        } else {
-            current = 0;
-        }
+pub(super) fn triage_render_document(
+    message: MessageRenderDocument,
+    related_messages: Vec<MessageRenderDocument>,
+) -> TriageRenderDocument {
+    TriageRenderDocument {
+        schema_name: triage_document_schema_name(),
+        schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+        context: MessageContextDocument {
+            message,
+            related_messages,
+        },
     }
-    "`".repeat(max_run.max(2) + 1)
+}
+
+pub(super) fn case_collection_location(group: String) -> CollectionLocation {
+    CollectionLocation { group }
+}
+
+impl Workspace {
+    pub(crate) fn case_render_document(&self, case_ref: &str) -> Result<CollectionRenderDocument> {
+        self.require_workspace()?;
+        let resolved = self.resolve_case_any(case_ref)?;
+        let collection = read_case_file(&resolved.path)?;
+        let config = MailConfig::load(&self.root)?;
+        let messages = collection
+            .message_ids()
+            .iter()
+            .map(|message_id| {
+                let message = self.read_message_by_id(message_id)?;
+                self.message_render_document_from_parts(&message, &config)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(collection_render_document(
+            collection,
+            messages,
+            Some(case_collection_location(resolved.group)),
+        ))
+    }
+
+    pub(crate) fn notification_render_document(
+        &self,
+        notification_ref: &str,
+    ) -> Result<CollectionRenderDocument> {
+        self.require_workspace()?;
+        let (notification_uid, _) = self.resolve_notification(notification_ref)?;
+        let collection = self.read_notifications(&notification_uid)?;
+        let config = MailConfig::load(&self.root)?;
+        let messages = collection
+            .message_ids()
+            .iter()
+            .map(|message_id| {
+                let message = self.read_message_by_id(message_id)?;
+                self.message_render_document_from_parts(&message, &config)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(collection_render_document(collection, messages, None))
+    }
+
+    pub(super) fn message_render_document_from_parts(
+        &self,
+        message: &MessageFile,
+        config: &MailConfig,
+    ) -> Result<MessageRenderDocument> {
+        Ok(build_message_render_document(
+            message,
+            Some(config.default_identity()?.email.as_str()),
+        ))
+    }
+
+    pub(super) fn message_render_document_with_context(
+        &self,
+        message: &MessageFile,
+        config: &MailConfig,
+        _render_context: Option<&RenderContext>,
+    ) -> Result<MessageRenderDocument> {
+        self.message_render_document_from_parts(message, config)
+    }
+
+    pub(super) fn message_render_documents_with_context(
+        &self,
+        messages: &[MessageFile],
+        config: &MailConfig,
+        _render_context: Option<&RenderContext>,
+    ) -> Result<Vec<MessageRenderDocument>> {
+        let default_identity_email = config.default_identity()?.email.as_str();
+        Ok(messages
+            .iter()
+            .map(|message| build_message_render_document(message, Some(default_identity_email)))
+            .collect())
+    }
 }
 
 pub(super) fn reply_to_differs_from_from(reply_to: &[String], from: &str) -> bool {
@@ -754,20 +463,12 @@ pub(super) fn reply_to_differs_from_from(reply_to: &[String], from: &str) -> boo
             .is_some_and(|value| email_address(value) != from)
 }
 
-pub(super) fn render_template(
+pub(super) fn render_template<T: Serialize>(
     root: &Path,
     language: TemplateLanguage,
     key: TemplateKey,
-    context: &Value,
+    context: &T,
 ) -> Result<String> {
-    let mut renderer = MarkdownTemplateRenderer::new(root, language);
+    let mut renderer = TemplateRenderer::new(root, language);
     renderer.render(key, context)
-}
-
-pub(super) fn markdown_table_cell(value: &str) -> String {
-    value
-        .replace(['\r', '\n'], " ")
-        .replace('|', "\\|")
-        .trim()
-        .to_string()
 }

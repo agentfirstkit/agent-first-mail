@@ -1,13 +1,1 @@
-# {{ case.collection_name }}
-
-케이스: {{ case.collection_uid }} · 메시지: {{ view.message_count }}
-
-{% if items | length == 0 %}_메시지가 없습니다._
-{% elif view.conversation %}## 대화
-
-<!-- afmail:conversation:start -->
-
-{{ view.conversation }}
-
-<!-- afmail:conversation:end -->
-{% endif %}
+{% import "i18n/catalog.j2" as i18n %}{% include "markdown/case-document.md.j2" %}

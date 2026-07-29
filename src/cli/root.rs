@@ -1,7 +1,5 @@
-#[cfg(feature = "ui")]
-use super::UiCommand;
 use super::{
-    CaseCommand, ConfigAction, ContactCommand, DoctorAction, LogAction, MessageAction,
+    ApiAction, CaseCommand, ConfigAction, ContactCommand, DoctorAction, LogAction, MessageAction,
     NotificationCommand, PurgeAction, PushAction, RemoteAction, RenderAction, SkillAction,
     TriageAction,
 };
@@ -12,6 +10,7 @@ use clap::{Parser, Subcommand};
     name = env!("DISPLAY_NAME"),
     bin_name = "afmail",
     disable_version_flag = true,
+    disable_help_subcommand = true,
     verbatim_doc_comment,
     about = env!("CARGO_PKG_DESCRIPTION"),
 )]
@@ -22,18 +21,19 @@ use clap::{Parser, Subcommand};
 - Message commands use `afmail message ACTION MESSAGE_ID ...`.
 - Case commands use `afmail case ACTION CASE_REF ...`.
 - Active and archived cases are readable with `afmail case show REF`.
-- stdout carries structured Agent-First Data events; stderr is not a protocol channel.
+- `--output-to split` sends results to stdout and errors/logs/progress to stderr.
+- `--output-to stdout|stderr` selects one ordered Agent-First Data event stream.
 
 ### Workspace Shape
 
 ```text
-.afmail/messages/        raw .eml plus durable remote sidecars
+.afmail/messages/        raw .eml plus canonical message metadata
 .afmail/workspace.json   immutable workspace identity used by plan digests
 messages/               rebuildable parsed message cache
 .afmail/logs/events.jsonl append-only audit log
 .afmail/transactions/    transient local write transaction sentinels
 .afmail/cache/progress.json latest push/pull runtime snapshot
-templates/               user-editable generated Markdown templates
+templates/               user-editable Markdown and Review templates
 triage/message_*.md      active unprocessed message views
 spam/*.md                generated spam review views
 trash/*.md               generated trash review views
@@ -53,6 +53,7 @@ notifications/<notification_uid>-<name>/views/ generated notification detail vie
 ```text
 afmail init
 afmail init email-a
+afmail api export --directory openapi --force
 afmail skill status
 afmail skill install --agent codex --scope workspace
 afmail status
@@ -97,7 +98,6 @@ afmail purge deleted
 afmail log list --limit 20
 afmail triage list --limit 10 --details
 afmail message show message_inbox_607146690_21
-afmail message show message_inbox_607146690_21 --meta
 afmail message list --sender alice@example.com --subject-contains invoice --since 2026-05-21 --in all
 afmail message attachment fetch message_inbox_607146690_21 2
 ```
@@ -108,18 +108,30 @@ afmail message attachment fetch message_inbox_607146690_21 2
 - `1`: command failed, including an aggregate command where no item completed successfully
 - `2`: invalid CLI arguments
 - `3`: command completed partially; inspect the canonical error for successful and failed items
-- `4`: canonical stdout output was not fully written
+- `4`: a canonical output event was not fully written
 
 Only completely successful commands emit `kind: result`; their payload has no generic `code`, `ok`,
-or `outcome` field. Any item failure emits `kind: error`. Partial failures use `error.code: partial`,
+or `outcome` field. Typed review results retain `outcome` as a business lifecycle field. Any item
+failure emits `kind: error`. Partial failures use `error.code: partial`,
 and the complete item list is carried in `error.items`; a failed item has an `error` child object.
-Exit code `4` means the command could not deliver a complete stdout protocol event; inspect stderr
-for the non-protocol fallback diagnostic.
+Exit code `4` means the command could not deliver a complete protocol event;
+inspect the selected output sink for the fallback diagnostic.
 "#]
 pub struct Cli {
     /// Output format: json (default), yaml, plain.
     #[arg(long, default_value = "json", global = true)]
     pub output: String,
+
+    /// Where protocol events go: split, stdout, or stderr.
+    ///
+    /// Defaults to split for a finite command, and to stdout for a review or
+    /// serve command, whose ordered event stream must stay on one stream.
+    #[arg(
+        long = "output-to",
+        value_parser = ["split", "stdout", "stderr"],
+        global = true
+    )]
+    pub output_to: Option<String>,
 
     /// Log categories (comma-separated): startup, request, progress, retry.
     #[arg(long, value_delimiter = ',', global = true)]
@@ -146,7 +158,7 @@ pub struct Cli {
     pub request_id: Option<String>,
 
     /// Print structured version event.
-    #[arg(short = 'V', long, global = true)]
+    #[arg(long, global = true)]
     pub version: bool,
 
     #[command(subcommand)]
@@ -155,6 +167,16 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Serve or export the afmail OpenAPI 3.2 contract and JSON Schemas.
+    Api {
+        #[command(subcommand)]
+        action: ApiAction,
+    },
+    /// Create and run a complete local mailbox demo.
+    Demo {
+        #[command(subcommand)]
+        action: crate::cli::DemoAction,
+    },
     /// Initialize the current directory or a child path as an afmail workspace.
     Init {
         /// Optional workspace path to initialize under the current directory.
@@ -259,7 +281,32 @@ pub enum Command {
         #[command(subcommand)]
         action: LogAction,
     },
-    /// Emit or open an Agent-First UI operation surface for this workspace.
-    #[cfg(feature = "ui")]
-    Ui(UiCommand),
+}
+
+/// Whether this command produces more than one caller-needed output over time,
+/// which makes it an AFDATA event stream rather than a finite command.
+///
+/// A `review` reports the URL a human must open, waits an unbounded time, then
+/// reports that human's decision. `api serve` and `demo serve` report the
+/// address to connect to, then keep serving. In each case both outputs are data
+/// the caller acts on, so splitting the stream would leave the first one on
+/// stderr while only an acknowledgement reached stdout.
+pub fn is_event_stream_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Triage {
+            action: TriageAction::Review { .. },
+        } | Command::Case {
+            action: CaseCommand::Review { .. }
+                | CaseCommand::Draft {
+                    action: crate::cli::CaseDraftAction::Review { .. },
+                },
+        } | Command::Notification {
+            action: NotificationCommand::Review { .. },
+        } | Command::Api {
+            action: ApiAction::Serve { .. },
+        } | Command::Demo {
+            action: crate::cli::DemoAction::Serve { .. },
+        }
+    )
 }

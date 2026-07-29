@@ -1,6 +1,6 @@
 # File Formats
 
-This document describes the afmail v1 archive-oriented disk model.
+This document describes the afmail v2 archive-oriented disk model.
 
 Persisted JSON state documents use `schema_name` plus `schema_version` to
 identify their on-disk format. Agent-First Data protocol outputs and audit
@@ -13,18 +13,22 @@ events use `code` instead.
 ```json
 {
   "schema_name": "workspace_identity",
-  "schema_version": 1,
+  "schema_version": 2,
+  "layout_version": 2,
   "workspace_uid": "workspace_0123456789abcdef0123456789abcdef",
   "created_rfc3339": "2026-07-11T08:00:00Z"
 }
 ```
 
 The UID is `workspace_` plus 32 lowercase hex digits generated from 128 bits of
-secure randomness. Init is idempotent and never changes either field. Parsing is
-strict, including unknown fields. Missing and invalid identity files return
+secure randomness. Init is idempotent and never changes the UID or creation
+time. Parsing is strict, including unknown fields. Missing and invalid identity files return
 `workspace_identity_missing` and `workspace_identity_invalid`; afmail never
 silently generates a replacement for a non-empty existing workspace. Preserve
 this file when moving, cloning, or restoring the private mailbox repository.
+A v1 identity or other legacy layout returns `workspace_upgrade_required` from
+ordinary commands. Run `afmail init` once to migrate; runtime readers do not
+support both layouts.
 
 ## Private Git Restore Checks
 
@@ -60,27 +64,36 @@ server. It never disables count/bytes budgets or the declared/actual skip.
 
 ## Message JSON
 
-Raw message evidence lives at `.afmail/messages/<message_id>.eml`. Remote IMAP
-locations live at `.afmail/messages/<message_id>.remote.json` when remote
-metadata exists. Parsed `messages/<message_id>.json` files are rebuildable cache
-with `schema_name: "message"` and `schema_version: 1`; they include headers,
-attachment metadata, `body_text`, remote overlay, workspace overlay materialized
-from durable object collections plus remote metadata, an optional `contact` link
-materialized from the sender address, and inbound identity-match fields
-materialized from configured workspace identities.
+Raw message evidence lives at `.afmail/messages/<message_id>.eml`. Canonical
+message metadata lives beside it at `.afmail/messages/<message_id>.json`; this
+single document owns remote IMAP state plus the current Agent/human suggestion
+round. Parsed root `messages/<message_id>.json` files are rebuildable projections
+with `schema_name: "message"` and `schema_version: 2`; they expose the canonical
+suggestions at the message top level alongside parsed headers, attachment
+metadata, `body_text`, remote and workspace overlays, contact links, and identity
+matches.
 
-Shared reads parse canonical EML/remote evidence and apply workspace, identity,
+Shared reads parse canonical EML/metadata evidence and apply workspace, identity,
 and contact projections in memory without rewriting this cache. Pull, explicit
 mutation/repair, and `afmail render refresh` are the materialization boundaries.
 
 The `contact` field is present only when the `From` address matches a contact
-card. It is a snapshot refreshed at pull/render time and on contact changes:
+card. It contains the exact typed `ContactFrontmatter`, not a separately shaped
+UID/name snapshot, and is refreshed at pull/render time and on contact changes:
 
 ```json
 {
   "contact": {
+    "kind": "contact",
     "contact_uid": "p20260521001",
-    "display_name": "Zhang San"
+    "display_name": "Zhang San",
+    "emails": ["zhangsan@example.com"],
+    "phones": [],
+    "organization": "Example",
+    "role": "Customer",
+    "tags": [],
+    "created_rfc3339": "2026-05-21T10:00:00Z",
+    "updated_rfc3339": "2026-05-21T10:00:00Z"
   }
 }
 ```
@@ -99,26 +112,46 @@ message. Unique matches set `identity`, `identity_email`, and `identity_match`
 }
 ```
 
-Remote sidecar:
+Canonical message metadata:
 
 ```json
 {
-  "schema_name": "message_remote",
-  "schema_version": 1,
+  "schema_name": "message_metadata",
+  "schema_version": 2,
   "message_id": "message_20260521_3af9c1b2e8d04f6a",
-  "locations": [
-    {
-      "mailbox_name": "INBOX",
-      "mailbox_id": "inbox",
-      "uid_validity": 44,
-      "uid": 900,
-      "flags": ["\\Seen"],
-      "observed_rfc3339": "2026-06-01T17:30:00Z",
-      "missing_rfc3339": null
-    }
-  ]
+  "remote": {
+    "locations": [
+      {
+        "mailbox_name": "INBOX",
+        "mailbox_id": "inbox",
+        "uid_validity": 44,
+        "uid": 900,
+        "flags": ["\\Seen"],
+        "observed_rfc3339": "2026-06-01T17:30:00Z",
+        "missing_rfc3339": null
+      }
+    ]
+  },
+  "case_relationship_suggestion": {
+    "case_uids": ["c20260521001"],
+    "evidence": "reply_headers_matched_local_case"
+  },
+  "agent_suggestion": {
+    "agent_suggestion_uid": "agent_suggestion_01",
+    "message_review_base_hash": "52aca0f5",
+    "suggested_action": {"kind": "case_add", "case_ref": "c20260521001"},
+    "reason": "This continues the existing case.",
+    "confidence_percent": 94,
+    "created_rfc3339": "2026-06-01T17:32:00Z"
+  }
 }
 ```
+
+`human_suggestion`, when present, must bind the current
+`agent_suggestion_uid` and the same review hash. `accepted` copies the complete
+Agent action, `changed` stores a complete replacement action, `rejected` stores
+no action and requires a reason, and `deferred` stores no action. A new Agent
+suggestion or explicit clear removes the prior human response.
 
 Triage message:
 
@@ -132,9 +165,9 @@ state sidecars:
 ```json
 {
   "schema_name": "spam",
-  "schema_version": 1,
+  "schema_version": 2,
   "collection_uid": "spam",
-  "collection_name": "Spam",
+  "collection_name": "spam",
   "status": "spam",
   "items": [
     {
@@ -211,10 +244,10 @@ copied into case files by assignment or case creation:
 
 Agent-facing `message show` and generated template message objects mark remote
 mail fields with `content_trust: untrusted_remote` and a
-`content_provenance` object containing `source: remote_mail` plus the stable
-message ID. Markdown templates consume only pre-sanitized `display_*` fields
-for remote headings and table cells; raw headers remain available as evidence
-in JSON but are not rendered as trusted Markdown structure.
+`content_provenance` object containing `source: remote_mail`; the stable message
+ID remains in its one canonical `message_id` field. Markdown templates consume
+canonical fields through output-specific escaping filters, so raw headers stay
+available as evidence without being treated as trusted Markdown structure.
 
 ```json
 {
@@ -224,7 +257,6 @@ in JSON but are not rendered as trusted Markdown structure.
       "filename": "pricing.txt",
       "content_type": "text/plain",
       "size_bytes": 128,
-      "fetched": true,
       "file_path": ".afmail/messages/message_20260521_3af9c1b2e8d04f6a.files/pricing.txt"
     }
   ]
@@ -232,9 +264,9 @@ in JSON but are not rendered as trusted Markdown structure.
 ```
 
 `part_id` is the MIME part id used by
-`afmail message attachment fetch MESSAGE_ID [PART_ID]`. When `fetched` is true,
-`file_path` points to the message-cache copy under
-`.afmail/messages/<message_id>.files/`.
+`afmail message attachment fetch MESSAGE_ID [PART_ID]`. `file_path` is present
+only when a local message-cache copy exists under
+`.afmail/messages/<message_id>.files/`; there is no duplicate `fetched` flag.
 
 The managed `.gitignore` ignores rebuildable `messages/*.json`, generated
 Markdown read views, `.afmail/push/`, `.afmail/logs/`, `.afmail/transactions/`,
@@ -243,17 +275,33 @@ workspace skill directories such as `.codex/skills/agent-first-mail/` or
 `.claude/skills/agent-first-mail/`. It intentionally does not ignore
 `.afmail/messages/`. If you track
 `.afmail/messages/` in git, the repository will contain private mail bodies,
-sidecar metadata, and raw attachment bytes.
+canonical message metadata, and raw attachment bytes.
 `.afmail/cache/` is the only metadata directory that is always safe to remove;
 the other ignored directories contain lossy machine-local state.
 
 ## Triage View
 
 Generated triage views live at `triage/<message_id>.md` and include YAML
-frontmatter with `kind: triage_view`, `message_id`, `message_ids`,
-`message_count`, `attachment_count`, and optional suggestion fields
-(`suggested_case_uids`, `suggested_reason`). Triage views are
-rebuildable and are not a notes surface.
+frontmatter with only `kind: triage_view` and `message_id`. Triage views are
+rebuildable and are not a notes or suggestion surface. Relationship evidence
+lives once in the typed `case_relationship_suggestion` of canonical message
+metadata; the template may render it, but neither suggestions, relationships,
+parallel IDs, nor derived counts are copied into the built-in frontmatter.
+afmail never reads generated Markdown back as state, so workspace templates are
+free to replace or omit that frontmatter.
+
+The Agent reads `review_base_hash` from `afmail message show` and calls
+`afmail triage suggestion set`; afmail writes the typed proposal to canonical
+message metadata and records `agent_suggestion_set`. `suggestion clear` requires
+the current `agent_suggestion_uid` and records `suggestion_cleared`, preventing
+an old review from clearing a newer round. `afmail triage review` accepts no
+caller-owned context file. A submitted review persists `human_suggestion` and
+records `human_suggestion_set` before returning its finite result.
+
+Message actions are a closed enum: `case_create`, `case_add`,
+`notification_create`, `notification_add`, `spam`, and `trash`. These are
+proposals only. Applying one still requires the corresponding canonical domain
+command; remote effects retain their separate preview/confirm boundary.
 
 ## Case Workspace
 
@@ -268,20 +316,17 @@ UID or `UID-any-readable-suffix`; names alone are not valid refs. Human names
 may use Unicode path segments such as Chinese, but they must not contain path
 separators or be dot-only segments.
 
-Case metadata is canonical in `data/case.json`. Older workspaces may contain a
-legacy `thread_count` field; current writers ignore it and do not emit it.
+Case metadata is canonical in `data/case.json`:
 
 ```json
 {
   "schema_name": "case",
-  "schema_version": 1,
+  "schema_version": 3,
   "collection_uid": "c20260521001",
   "collection_name": "应用反馈-肥料登记",
   "tags": [],
   "created_rfc3339": "2026-05-22T09:00:00Z",
   "updated_rfc3339": "2026-05-22T09:00:00Z",
-  "message_count": 1,
-  "attachment_count": 0,
   "items": [
     {
       "message_id": "message_20260521_3af9c1b2e8d04f6a",
@@ -291,6 +336,18 @@ legacy `thread_count` field; current writers ignore it and do not emit it.
   ]
 }
 ```
+
+The collection stores membership once in `items`. It does not persist
+`message_count`, `thread_count`, `attachment_count`, or a derived last-message
+timestamp. Markdown and Review templates derive counts and ordering from the
+contained collection and message documents.
+
+Case-level `agent_suggestion` and `human_suggestion` use
+`case_review_base_hash` and a case-specific action enum (`case_archive`,
+`case_unarchive`, `case_move`, `case_rename`, `case_tag`, `case_untag`,
+`case_trash`, or `case_delete`). They live in this same `case.json`; no separate
+suggestion file exists. Notes and drafts remain their own canonical user files
+and are never copied into the suggestion envelope.
 
 Active cases have an empty `status`; archiving cases use `status: archiving`
 while waiting for queued sends and the independent remote archive push;
@@ -348,7 +405,7 @@ pair after compose. There is deliberately no fallback for pre-schema drafts:
 validation returns `draft_invalid` with an upgrade hint until the file is
 rewritten once into this format.
 
-`draft validate`, list/show output, and AFUI expose
+`draft validate`, list/show output, and draft review expose
 `completeness: complete | incomplete`. Template headings, quoted history, and
 identity footers are outside compose and do not make a draft complete. An
 incomplete draft may be queued with `draft upload`, but `draft send` returns
@@ -359,9 +416,21 @@ are removed from the generated `text/plain` MIME body.
 Draft status is projected from both frontmatter and the matching durable push
 item: `editable | queued_upload | queued_send | pushing | failed`. A queued send
 is never called `sent`; successful push consumes the draft, and the outbound
-message plus audit event record the completed send. `queued_action` is either
-`save_draft`, `send`, or null, and draft output keeps
-`remote_changed: false` before push succeeds.
+message plus audit event record the completed send. Compact `draft list` rows
+also expose operational `queued_action` (`save_draft`, `send`, or null) and
+`remote_changed: false`. `draft show` and Review instead contain the exact
+typed `DraftRenderDocument`: locator data, one canonical
+`draft.frontmatter`/`draft.body_markdown`, and output-neutral analysis. They do
+not repeat the list projection.
+
+Draft review Save writes the canonical draft locally through the Workspace API,
+under an exclusive lock and only when its base hash still matches. Its result
+includes the completed local write in `saved_files`; cancelling, dismissing, or
+finishing the review does not undo it. Case and notification review follow the
+same rule for `notes.md`. Submitting triage, case, or notification review writes
+the hash-bound `human_suggestion` to the canonical JSON and records an audit
+event, but does not execute the suggested domain action or modify notes or
+drafts as part of submission. Review Save never queues, pushes, or sends mail.
 
 `attachments:` is a list of case-relative paths for outbound files. Use
 `afmail case draft attach REF DRAFT_NAME PATH` to populate it. External sources
@@ -425,9 +494,6 @@ tags:
 created_rfc3339: 2026-06-01T17:30:00Z
 updated_rfc3339: 2026-06-01T17:30:00Z
 ---
-
-## Zhang San
-
 Free-form notes.
 ```
 
@@ -435,7 +501,15 @@ Free-form notes.
 Email addresses are globally unique across all contacts. There is no separate
 email→contact index file; the sender→contact link is materialized onto each
 message's `contact` field (see Message JSON) at pull/render time and on contact
-changes.
+changes as the exact typed `ContactFrontmatter`, never as a flattened contact
+summary. The built-in contact scaffold starts with an empty notes body; any body
+text, including a heading added by a workspace scaffold, is canonical
+notes content.
+
+`afmail contact show` and `contact notes show` return one exact typed
+`ContactRenderDocument`: parsed frontmatter at `contact`, raw body at
+`notes_markdown`, and path/group only under `locator`. They do not return the
+whole file again as an opaque `content` string or repeat the contact fields.
 
 ## Notification Collection
 
@@ -444,7 +518,7 @@ changes.
 ```json
 {
   "schema_name": "notification",
-  "schema_version": 1,
+  "schema_version": 3,
   "collection_uid": "n20260521001",
   "collection_name": "服务通知",
   "items": [
@@ -457,35 +531,50 @@ changes.
 }
 ```
 
-`notification.md` is generated and rebuildable. By default it renders each message as
-a numbered heading (the queued action label plus the message summary, or the
-subject when the summary is empty), followed by bullets for the sender, a
-message-id link to the detail view, and the time. The configurable
-`notification.message_index.item_fields` (default time, from, summary) is exposed to
-templates as `view.fields` for custom layouts.
+Notification-level suggestions live in this same JSON and use
+`notification_review_base_hash` with the closed `notification_rename` and
+`notification_delete` action enum. As with messages and cases, a new Agent
+suggestion clears the prior human response and generated Markdown never owns
+this state.
+
+`notification.md` is generated and rebuildable. Its template receives the exact
+canonical notification collection plus contained typed message documents. The
+template alone chooses summary/subject fallback, fields, labels, ordering,
+links, and layout; there is no parallel notification presentation config or
+render-data preference projection.
 Message views live at
 `notifications/<notification_uid>-<name>/views/messages/<message_id>.md` and
 preserve the readable message rendering used elsewhere.
 
-## Generated Templates
+## Generated Markdown and Review Templates
 
-Built-in MiniJinja Markdown templates render generated read views and
-human-facing scaffolds. A workspace can override templates under
-`templates/<language>/`. Legacy `.afmail/templates/` files are ignored.
+One MiniJinja system renders generated Markdown, human-facing scaffolds, and
+Review HTML. A workspace can override language entries under
+`templates/<language>/` and shared layouts under `templates/shared/`. Legacy
+`.afmail/templates/` files are ignored.
 
 Template keys include `case/case.md.j2`, `case/message.md.j2`,
 `notification/notification.md.j2`, `notification/message.md.j2`,
 `triage/view.md.j2`, `message/section.md.j2`, `status/index.md.j2`,
-`status/message.md.j2`, `draft/*.md.j2`, `notes/*.md.j2`, and `workspace/*.j2`.
+`status/message.md.j2`, `contact/default.md.j2`, `draft/*.md.j2`,
+`notes/*.md.j2`, `workspace/DO_NOT_EDIT.txt.j2`, `review/*.html.j2`, and
+`i18n/catalog.j2`. Shared Markdown and Review layouts plus Review CSS live
+under `templates/shared/`.
 
-Generated read-view contexts use explicit namespaces. `message` is the exact
-materialized `messages/<message_id>.json` record, while `view` holds Markdown
-rendering facts such as display titles, security notes, attachment previews, and
-conversation text. Index rows follow the same split with `item.message` and
-`item.view`; container data lives under namespaces such as `frontmatter`,
-`case`, `notification`, `item`, `items`, `messages`, and `config`. Template failures
-return `template_render_failed`; afmail does not fall back to built-ins when a
+Generated Markdown and Review contain the same typed version-3 render
+documents. `document.message` is one exact canonical message record;
+output-independent `document.analysis` adds semantic direction, action, quote
+ranges, and security conclusions without copying body text. Collection and
+Review contexts contain these documents rather than flattening, aliasing, or
+rebuilding them. Templates own all display copy, formatting, escaping,
+fallback, ordering, visibility, and markup. Template failures return
+`template_render_failed`; afmail does not fall back to built-ins when a
 selected-language workspace override exists but is invalid.
+
+Review overrides may contain MiniJinja, HTML, and CSS but no JavaScript or
+inline event handlers. afmail validates their sources and the composed HTML,
+then injects only its trusted behavior runtime. See `docs/templates.md` for the
+complete path, data, multilingual, filter, and Review-hook contract.
 
 `afmail render templates` exports the built-in templates for every supported language.
 Existing language-specific workspace templates are kept unless `--force` is
@@ -494,12 +583,15 @@ used.
 ## Push Items
 
 Push items live in `.afmail/push/<push_id>.json`. Each item uses
-`schema_name: "push_item"` and `schema_version: 1`. Its persisted `kind` is
+`schema_name: "push_item"` and `schema_version: 2`. Its persisted `kind` is
 `draft` (case/draft locator plus optional remote draft UID) or `message` (one
-stable message id). Resolved action steps, outbound MIME, message bytes, and
-hashes are plan-time projections, not editable queue fields. Common durable
-fields include timestamps, `attempt_count`, `step_states`, optional
-`local_stage`, optional `audit_pending`, and `last_error`.
+stable message id plus its canonical `action`). The action is queue intent and
+is never reconstructed from the message's later workspace status. Resolved
+action steps, remote locations, outbound MIME, message bytes, and hashes are
+plan-time projections, not editable queue fields. Common durable fields include
+timestamps, `attempt_count`, `step_states`, optional `local_stage`, optional
+`audit_pending`, and `last_error`. All version-1 push items are rejected; afmail
+does not guess a message action that was never persisted.
 
 After all remote steps and local finalize stages succeed, the item first enters
 `local_stage: "audit_pending"` and persists:
@@ -559,9 +651,9 @@ items. Outbound reply send defaults mark the replied-to message with `\Seen` and
 default.
 
 When a case with queued send drafts is archived locally, the archive move is a
-separate message push item persisted with `kind: "message"`. The case stays lifecycle `archiving` under
+separate message push item persisted with `kind: "message"`. The case stays `status: archiving` under
 `archived-cases/` until outbound pushes have removed their local drafts and the
-archive push has succeeded, then afmail writes lifecycle `archived` and its
+archive push has succeeded, then afmail writes `status: archived` and its
 final timestamp.
 
 ## Local Transactions
@@ -581,7 +673,7 @@ surface mailbox workspace growth without adding another command. The fields are
 best-effort local filesystem totals, not a Git object-size report:
 
 - `raw_bytes` — direct files under `.afmail/messages/`, including raw `.eml`
-  evidence and remote/state sidecars.
+  evidence and canonical message metadata/state files.
 - `cache_bytes` — rebuildable parsed message cache under `messages/` plus
   `.afmail/cache/render-cache.json`.
 - `attachment_bytes` — fetched inbound `*.files/` attachment content and case
@@ -598,6 +690,10 @@ best-effort local filesystem totals, not a Git object-size report:
 Supported non-idempotent local mutations may be run with global
 `--request-id ID`. afmail stores `.afmail/requests/<request_id>.json` with
 `schema_name: "idempotency_request"` and `schema_version: 1`.
+
+Supported commands include triage, case, and notification suggestion `set` and
+`clear`. A caller that may retry one of these commands after interrupted output
+should reuse one request ID only for that exact normalized input.
 
 The record stores the command key, a BLAKE3 hash of normalized inputs, status
 `pending | completed`, timestamps, and the completed command result. It does not

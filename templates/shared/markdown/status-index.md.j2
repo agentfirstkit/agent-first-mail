@@ -1,0 +1,19 @@
+{%- import "i18n/catalog.j2" as i18n -%}
+{% set status_document = document %}{% set collection = status_document.collection %}---
+kind: {% if collection.status == 'spam' %}spam_message_index{% elif collection.status == 'trashed' %}trash_message_index{% else %}deleted_message_index{% endif %}
+status: {{ collection.status }}
+message_count: {{ status_document.messages | length }}
+---
+
+# {% if collection.status == 'spam' %}{{ i18n.t('spam') }}{% elif collection.status == 'trashed' %}{{ i18n.t('trash') }}{% else %}{{ i18n.t('remote_deleted') }}{% endif %}
+
+{% if not status_document.messages %}_{{ i18n.t('no_messages') }}_
+{% else %}{% for message_document in status_document.messages %}{% set mail = message_document.message %}{% set analysis = message_document.analysis %}{% if analysis.direction == 'inbound' %}{% set message_time = mail.received_rfc3339 or mail.sent_rfc3339 %}{% else %}{% set message_time = mail.sent_rfc3339 or mail.received_rfc3339 %}{% endif %}## {{ loop.index }}. {% if analysis.direction == 'inbound' %}← {{ i18n.t('received') }}{% else %}→ {{ i18n.t('sent') }}{% endif %}{% if analysis.action == 'reply' %} {{ i18n.t('reply') }}{% elif analysis.action == 'forward' %} {{ i18n.t('forward') }}{% endif %}{% if mail.subject %}: {{ mail.subject | inline }}{% endif %}
+
+{% if analysis.direction == 'inbound' and mail.from %}- {{ i18n.t('from') }}: {{ mail.from | inline }}
+{% elif analysis.direction == 'outbound' and mail.to %}- {{ i18n.t('to') }}: {{ mail.to | map("inline") | join(", ") }}
+{% endif %}- {{ i18n.t('message') }}: [{{ mail.message_id }}]({{ mail.message_id }}.md)
+- {{ i18n.t('workspace_status') }}: {% if collection.status == 'spam' %}{{ i18n.t('spam') }}{% elif collection.status == 'trashed' %}{{ i18n.t('trash') }}{% else %}{{ i18n.t('remote_deleted') }}{% endif %} (`{{ collection.status }}`)
+{% if message_time %}- {{ i18n.t('time') }}: {{ message_time | datetime }}
+{% endif %}
+{% endfor %}{% endif %}

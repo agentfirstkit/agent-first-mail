@@ -1,11 +1,11 @@
-# Respuesta
+{% set parent = document.message.message %}# Respuesta
 
 <!-- afmail:compose:start -->
 
 <!-- afmail:compose:end -->
 
-En un mensaje anterior, {% if sender %}{{ sender }}{% else %}el remitente{% endif %} escribió:
+En un mensaje anterior, {% if parent.from %}{{ parent.from | inline }}{% else %}el remitente{% endif %} escribió:
 
 <!-- afmail:quote:start -->
-{{ quoted }}
+{{ parent.body_text | markdown_quote }}
 <!-- afmail:quote:end -->

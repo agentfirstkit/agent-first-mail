@@ -146,7 +146,6 @@ pub(super) fn build_push_plan(root: &Path, config: &MailConfig) -> Result<Resolv
         .collect::<BTreeMap<_, _>>();
     let config_effect_id = config_effect_id(config, &identity.workspace_uid)?;
     let mut items = Vec::new();
-    let mut item_views = Vec::new();
     let mut skipped_items = Vec::new();
     let mut skipped_views = Vec::new();
     for mut item in sorted_items(root)? {
@@ -160,7 +159,6 @@ pub(super) fn build_push_plan(root: &Path, config: &MailConfig) -> Result<Resolv
                 )
             })?;
         if plan_item(root, config, &mut item)? {
-            item_views.push(push_plan_item_view(root, config, &item, queue_item_hash)?);
             items.push(item);
         } else {
             skipped_views.push(PushPlanSkippedItem {
@@ -170,6 +168,20 @@ pub(super) fn build_push_plan(root: &Path, config: &MailConfig) -> Result<Resolv
             });
             skipped_items.push(item);
         }
+    }
+    order_items_for_dependencies(&mut items);
+    let mut item_views = Vec::with_capacity(items.len());
+    for item in &items {
+        let queue_item_hash = queue_hashes
+            .get(item.push_id.as_str())
+            .copied()
+            .ok_or_else(|| {
+                AppError::new(
+                    "push_plan_invalid",
+                    format!("queue snapshot is missing push item {}", item.push_id),
+                )
+            })?;
+        item_views.push(push_plan_item_view(root, config, item, queue_item_hash)?);
     }
     let digest = PushPlanDigest {
         schema_name: PUSH_PLAN_SCHEMA_NAME,
@@ -236,6 +248,54 @@ pub(super) fn require_matching_push_plan(
         "remote_calls_started": false,
         "suggested_commands": ["afmail push"]
     })))
+}
+
+fn order_items_for_dependencies(items: &mut Vec<PushItem>) {
+    // Queue order remains FIFO unless one planned effect would invalidate a local
+    // reference needed by another. A case archive can reuse the earlier message
+    // item's enqueue_seq from case.add, so lift its queued reply sends just ahead of
+    // that move. Selecting the first dependency-free item keeps unrelated items stable.
+    let mut remaining = std::mem::take(items);
+    let mut ordered = Vec::with_capacity(remaining.len());
+    while !remaining.is_empty() {
+        let next = remaining
+            .iter()
+            .position(|candidate| {
+                !remaining
+                    .iter()
+                    .any(|item| item_must_run_before(item, candidate))
+            })
+            .unwrap_or(0);
+        ordered.push(remaining.remove(next));
+    }
+    *items = ordered;
+}
+
+fn item_must_run_before(item: &PushItem, candidate: &PushItem) -> bool {
+    let Some(outbound) = item.outbound() else {
+        return false;
+    };
+    if outbound.action != OutboundAction::Send {
+        return false;
+    }
+    let Some(reply_to_message_id) = outbound.reply_to_message_id.as_deref() else {
+        return false;
+    };
+    let Some(message_action) = candidate.message_action() else {
+        return false;
+    };
+    if candidate.has_started_effects()
+        || !matches!(
+            message_action.action,
+            MessagePushAction::Notification | MessagePushAction::Spam | MessagePushAction::Trash
+        )
+    {
+        return false;
+    }
+    message_action
+        .message_ids
+        .iter()
+        .any(|message_id| message_id == reply_to_message_id)
 }
 
 pub(super) fn reconcile_push_plan(root: &Path, plan: &ResolvedPushPlan) -> Result<Vec<String>> {
@@ -456,4 +516,96 @@ fn relative_path(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn push_item(push_id: &str, enqueue_seq: u64, payload: PushPayload) -> PushItem {
+        PushItem {
+            schema_name: "push_item".to_string(),
+            schema_version: PUSH_ITEM_SCHEMA_VERSION,
+            push_id: push_id.to_string(),
+            enqueue_seq,
+            payload,
+            planned_outbound: None,
+            planned_outbound_message: None,
+            planned_message_action: None,
+            planned_message_rfc822: BTreeMap::new(),
+            created_rfc3339: "2026-07-20T00:00:00Z".to_string(),
+            updated_rfc3339: "2026-07-20T00:00:00Z".to_string(),
+            attempt_count: 0,
+            step_states: Vec::new(),
+            local_stage: None,
+            audit_pending: None,
+            last_error: None,
+        }
+    }
+
+    fn reply_send_item(push_id: &str, enqueue_seq: u64, message_id: &str) -> PushItem {
+        let mut item = push_item(
+            push_id,
+            enqueue_seq,
+            PushPayload::Draft(Box::new(DraftPush {
+                case_uid: "c20260720001".to_string(),
+                draft_name: "reply.md".to_string(),
+                draft_uid_validity: None,
+                draft_uid: None,
+            })),
+        );
+        item.planned_outbound = Some(OutboundPush {
+            action: OutboundAction::Send,
+            case_uid: "c20260720001".to_string(),
+            draft_name: "reply.md".to_string(),
+            draft_uid_validity: None,
+            draft_uid: None,
+            steps: Vec::new(),
+            reply_to_message_id: Some(message_id.to_string()),
+        });
+        item
+    }
+
+    fn archive_item(push_id: &str, enqueue_seq: u64, message_id: &str) -> PushItem {
+        let mut item = push_item(
+            push_id,
+            enqueue_seq,
+            PushPayload::Message(MessagePush {
+                message_id: message_id.to_string(),
+                action: MessagePushAction::Notification,
+            }),
+        );
+        item.planned_message_action = Some(crate::types::MessageActionPush {
+            action: MessagePushAction::Notification,
+            message_ids: vec![message_id.to_string()],
+            locations: Vec::new(),
+            steps: Vec::new(),
+            reply_to_message_id: None,
+        });
+        item
+    }
+
+    #[test]
+    fn orders_reply_send_before_related_archive_and_keeps_unrelated_fifo() {
+        let related_message_id = "message_related";
+        let mut items = vec![
+            archive_item("push_archive_related", 1, related_message_id),
+            archive_item("push_archive_unrelated", 2, "message_unrelated"),
+            reply_send_item("push_reply", 3, related_message_id),
+        ];
+
+        order_items_for_dependencies(&mut items);
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.push_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "push_archive_unrelated",
+                "push_reply",
+                "push_archive_related"
+            ]
+        );
+    }
 }

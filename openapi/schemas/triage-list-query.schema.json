@@ -1,0 +1,22 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/triage-list-query.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "details": {
+      "default": false,
+      "type": "boolean"
+    },
+    "limit": {
+      "default": null,
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "title": "TriageListQuery",
+  "type": "object"
+}

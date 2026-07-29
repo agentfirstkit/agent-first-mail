@@ -1,0 +1,189 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/case-suggestion-set-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "agent_suggestion": {
+      "properties": {
+        "agent_suggestion_uid": {
+          "type": "string"
+        },
+        "case_review_base_hash": {
+          "type": "string"
+        },
+        "confidence_percent": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "created_rfc3339": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "suggested_action": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "case_archive",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "group": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "case_unarchive",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "group"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "group": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "case_move",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "group"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "case_name": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "case_rename",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "case_name"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "case_tag",
+                  "type": "string"
+                },
+                "tag": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "tag"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "case_untag",
+                  "type": "string"
+                },
+                "tag": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "tag"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "case_trash",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "allow_notes": {
+                  "type": "boolean"
+                },
+                "kind": {
+                  "const": "case_delete",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "allow_notes"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "agent_suggestion_uid",
+        "case_review_base_hash",
+        "suggested_action",
+        "reason",
+        "created_rfc3339"
+      ],
+      "type": "object"
+    },
+    "case_uid": {
+      "type": "string"
+    },
+    "human_suggestion_cleared": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "case_uid",
+    "agent_suggestion",
+    "human_suggestion_cleared"
+  ],
+  "title": "CaseSuggestionSetResult",
+  "type": "object"
+}

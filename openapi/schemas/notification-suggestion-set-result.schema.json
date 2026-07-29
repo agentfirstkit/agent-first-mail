@@ -1,0 +1,91 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/notification-suggestion-set-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "agent_suggestion": {
+      "properties": {
+        "agent_suggestion_uid": {
+          "type": "string"
+        },
+        "confidence_percent": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "created_rfc3339": {
+          "type": "string"
+        },
+        "notification_review_base_hash": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "suggested_action": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "notification_rename",
+                  "type": "string"
+                },
+                "notification_name": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "notification_name"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "allow_notes": {
+                  "type": "boolean"
+                },
+                "kind": {
+                  "const": "notification_delete",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "allow_notes"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "agent_suggestion_uid",
+        "notification_review_base_hash",
+        "suggested_action",
+        "reason",
+        "created_rfc3339"
+      ],
+      "type": "object"
+    },
+    "human_suggestion_cleared": {
+      "type": "boolean"
+    },
+    "notification_uid": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "notification_uid",
+    "agent_suggestion",
+    "human_suggestion_cleared"
+  ],
+  "title": "NotificationSuggestionSetResult",
+  "type": "object"
+}

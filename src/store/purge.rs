@@ -294,7 +294,6 @@ fn purge_artifacts(root: &Path, message_id: &str) -> Result<Vec<PurgeArtifact>> 
         base.join(format!("{message_id}.json")),
         base.join(format!("{message_id}.eml")),
         base.join(format!("{message_id}.state.json")),
-        base.join(format!("{message_id}.remote.json")),
         base.join(format!("{message_id}.txt")),
     ];
     collect_files(&base.join(format!("{message_id}.files")), &mut paths)?;

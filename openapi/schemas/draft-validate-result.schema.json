@@ -1,0 +1,30 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/draft-validate-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "case_uid": {
+      "type": "string"
+    },
+    "completeness": {
+      "type": "string"
+    },
+    "draft_hash": {
+      "type": "string"
+    },
+    "draft_name": {
+      "type": "string"
+    },
+    "last_validated_rfc3339": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "case_uid",
+    "draft_name",
+    "draft_hash",
+    "completeness",
+    "last_validated_rfc3339"
+  ],
+  "title": "DraftValidateResult",
+  "type": "object"
+}

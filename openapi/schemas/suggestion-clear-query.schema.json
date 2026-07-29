@@ -1,0 +1,16 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/suggestion-clear-query.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "agent_suggestion_uid": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "agent_suggestion_uid"
+  ],
+  "title": "SuggestionClearQuery",
+  "type": "object"
+}

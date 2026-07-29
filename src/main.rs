@@ -9,7 +9,7 @@
     )
 )]
 
-use agent_first_data::{OutputFormat, OutputOptions, build_cli_error, cli_parse_output, render};
+use agent_first_data::{OutputFormat, OutputTo, build_cli_error, cli_parse_output};
 use agent_first_mail::cli;
 use agent_first_mail::runner::output_write_failed_exit_code;
 use agent_first_mail::runner::run_command;
@@ -29,11 +29,8 @@ fn main() {
             let hint = cli::error_hint(&argv);
             let value = cli_error_with_trace(&err, Some(hint.as_str()), elapsed_ms(&started));
             let output = requested_output_format().unwrap_or(OutputFormat::Json);
-            match writeln!(
-                std::io::stdout(),
-                "{}",
-                render(&value, output, &OutputOptions::default())
-            ) {
+            let output_to = requested_output_to().unwrap_or(OutputTo::Split);
+            match emit_value(value, output, output_to) {
                 Ok(()) => std::process::exit(2),
                 Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
             }
@@ -42,22 +39,21 @@ fn main() {
     let cli::ParsedArgs {
         command,
         output,
+        output_to,
         log,
         workspace,
         request_id,
     } = parsed;
     if let Err(err) = apply_explicit_workspace(workspace.as_deref()) {
         let value = cli_error_with_trace(&err, None, elapsed_ms(&started));
-        match writeln!(
-            std::io::stdout(),
-            "{}",
-            render(&value, output, &OutputOptions::default())
-        ) {
+        match emit_value(value, output, output_to) {
             Ok(()) => std::process::exit(1),
             Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
         }
     }
-    std::process::exit(run_command(command, request_id, output, &log, &argv));
+    std::process::exit(run_command(
+        command, request_id, output, output_to, &log, &argv,
+    ));
 }
 
 fn apply_explicit_workspace(workspace: Option<&str>) -> Result<(), String> {
@@ -86,9 +82,10 @@ fn install_stream_redirect_or_exit()
     match agent_first_data::stream_redirect::install_from_raw_args(std::env::args()) {
         Ok(redirect) => redirect,
         Err(err) => {
-            let stdout = std::io::stdout();
-            let mut emitter = agent_first_data::CliEmitter::new(stdout.lock(), OutputFormat::Json)
-                .with_strict_protocol();
+            let output_to = requested_output_to().unwrap_or(OutputTo::Split);
+            let mut emitter =
+                agent_first_data::CliEmitter::from_output_to(output_to, OutputFormat::Json)
+                    .with_strict_protocol();
             match emitter.emit_error("cli_error", &err.to_string()) {
                 Ok(()) => std::process::exit(2),
                 Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
@@ -99,53 +96,83 @@ fn install_stream_redirect_or_exit()
 
 fn handle_help_and_version(started: &Instant) {
     let raw: Vec<String> = std::env::args().collect();
-    match agent_first_data::cli_handle_version_or_continue(
+    let build = match env!("GIT_SHA") {
+        "unknown" => None,
+        sha => Some(sha),
+    };
+    match agent_first_data::cli_handle_version_or_help_or_continue(
         &raw,
+        &cli::command(),
+        &agent_first_data::HelpConfig::output_aware(),
         "afmail",
+        Some(env!("DISPLAY_NAME")),
         env!("CARGO_PKG_VERSION"),
+        build,
     ) {
-        Ok(Some(version)) => match write!(std::io::stdout(), "{version}") {
-            Ok(()) => std::process::exit(0),
-            Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
-        },
-        Ok(None) => {}
-        Err(err) => {
-            let mut err: Value = err.into();
-            attach_trace(&mut err, elapsed_ms(started));
-            match writeln!(
-                std::io::stdout(),
-                "{}",
-                render(&err, OutputFormat::Json, &OutputOptions::default())
-            ) {
-                Ok(()) => std::process::exit(2),
+        Ok(Some(version)) => {
+            match write_result_text(&version, requested_output_to().unwrap_or(OutputTo::Split)) {
+                Ok(()) => std::process::exit(0),
                 Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
             }
         }
-    }
-    match agent_first_data::cli_handle_help_or_continue(
-        &raw,
-        &cli::command(),
-        &agent_first_data::HelpConfig::human_cli_default(),
-    ) {
-        Ok(Some(help)) => match write!(std::io::stdout(), "{help}") {
-            Ok(()) => std::process::exit(0),
-            Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
-        },
         Ok(None) => {}
         Err(err) => {
             let mut err: Value = err;
             attach_trace(&mut err, elapsed_ms(started));
             let output = requested_output_format().unwrap_or(OutputFormat::Json);
-            match writeln!(
-                std::io::stdout(),
-                "{}",
-                render(&err, output, &OutputOptions::default())
-            ) {
+            let output_to = requested_output_to().unwrap_or(OutputTo::Split);
+            match emit_value(err, output, output_to) {
                 Ok(()) => std::process::exit(2),
                 Err(err) => std::process::exit(output_write_failed_exit_code(&err)),
             }
         }
     }
+}
+
+fn requested_output_to() -> Option<OutputTo> {
+    requested_output_to_result().ok().flatten()
+}
+
+fn requested_output_to_result() -> Result<Option<OutputTo>, String> {
+    let raw = std::env::args().collect::<Vec<_>>();
+    let mut output_to = None;
+    let mut iter = raw.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if let Some(value) = arg.strip_prefix("--output-to=") {
+            output_to = Some(OutputTo::parse(value)?);
+            continue;
+        }
+        if arg == "--output-to" {
+            let value = iter.next().ok_or_else(|| {
+                "--output-to requires a value: expected split, stdout, or stderr".to_string()
+            })?;
+            output_to = Some(OutputTo::parse(value)?);
+        }
+    }
+    Ok(output_to)
+}
+
+fn emit_value(
+    value: Value,
+    output: OutputFormat,
+    output_to: OutputTo,
+) -> Result<(), agent_first_data::CliEmitterError> {
+    let mut emitter =
+        agent_first_data::CliEmitter::from_output_to(output_to, output).with_strict_protocol();
+    emitter.emit_validated_value(value)
+}
+
+#[allow(clippy::disallowed_methods)]
+fn write_result_text(text: &str, output_to: OutputTo) -> std::io::Result<()> {
+    let mut writer: Box<dyn Write> = match output_to {
+        OutputTo::Stderr => Box::new(std::io::stderr()),
+        OutputTo::Split | OutputTo::Stdout => Box::new(std::io::stdout()),
+    };
+    writer.write_all(text.as_bytes())?;
+    writer.flush()
 }
 
 fn requested_output_format() -> Option<OutputFormat> {

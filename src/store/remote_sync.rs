@@ -82,7 +82,7 @@ impl Workspace {
         );
         let prepare_started = Instant::now();
         let static_inputs = RenderStaticInputs::load(self, mail_config.clone())?;
-        let preparation = self.prepare_render_context(RenderInvocation::Pull, static_inputs)?;
+        let preparation = self.prepare_render_context(static_inputs)?;
         crate::progress::emit(
             &mut progress,
             "pull_render_prepare_done",
@@ -162,7 +162,6 @@ impl Workspace {
         let render_step_started = Instant::now();
         let notification_refresh = self.refresh_notification_indexes_cached(
             &mut render_cache,
-            false,
             &preparation.context,
             progress.as_deref_mut(),
         )?;
@@ -320,7 +319,7 @@ impl Workspace {
             mark_remote_locations_missing(&mut message, &missing_locations);
             let still_has_active_remote = has_any_active_remote_location(&message);
             if still_has_active_remote {
-                self.persist_message_remote(&message)?;
+                self.persist_message_metadata(&message)?;
                 self.write_message_materialized_cache(&message)?;
                 kept_message_ids.push(message.message_id.clone());
                 continue;
@@ -328,7 +327,7 @@ impl Workspace {
 
             let id = message.message_id.clone();
             if self.message_id_is_referenced(&id)? {
-                self.persist_message_remote(&message)?;
+                self.persist_message_metadata(&message)?;
                 self.write_message_materialized_cache(&message)?;
                 tombstoned_message_ids.push(id);
             } else {
@@ -458,40 +457,6 @@ pub(super) fn has_any_active_remote_location(message: &MessageFile) -> bool {
                 && location.uid.is_some()
         })
     })
-}
-
-pub(super) fn message_remote_flags(message: &MessageFile) -> Vec<String> {
-    let mut flags = Vec::new();
-    if let Some(remote) = &message.remote {
-        for location in &remote.locations {
-            if location.missing_rfc3339.is_none() {
-                flags.extend(location.flags.iter().cloned());
-            }
-        }
-    }
-    canonical_flags(flags)
-}
-
-pub(super) fn message_mailbox_ids(message: &MessageFile, config: &MailConfig) -> Vec<String> {
-    let mut ids = BTreeSet::new();
-    if let Some(remote) = &message.remote {
-        for location in &remote.locations {
-            if location.missing_rfc3339.is_some() {
-                continue;
-            }
-            if let Some(id) = &location.mailbox_id {
-                ids.insert(id.clone());
-                continue;
-            }
-            let matches = config.matching_mailbox_ids_offline(&location.mailbox_name);
-            if matches.is_empty() {
-                ids.insert(location.mailbox_name.clone());
-            } else {
-                ids.extend(matches);
-            }
-        }
-    }
-    ids.into_iter().collect()
 }
 
 pub(super) fn message_remote_missing_since_rfc3339(message: &MessageFile) -> Option<String> {
@@ -647,14 +612,45 @@ impl Workspace {
     pub(crate) fn plan_message_push(
         &self,
         message_id: &str,
+        action: MessagePushAction,
+        allowed_push_path: Option<&Path>,
         config: &crate::config::MailConfig,
     ) -> Result<Option<MessageActionPush>> {
         validate_id("message_id", message_id)?;
         let message = self.read_message_by_id(message_id)?;
         let status = MessageStatus::parse(&message.workspace.status)?;
         let message_ids = vec![message_id.to_string()];
-        match status {
-            MessageStatus::Spam => {
+        let valid_status = match action {
+            MessagePushAction::Spam => status == MessageStatus::Spam,
+            MessagePushAction::Trash => status == MessageStatus::Trashed,
+            MessagePushAction::Unspam | MessagePushAction::Untrash => {
+                status == MessageStatus::Triage
+            }
+            MessagePushAction::CaseAdd => status == MessageStatus::Case,
+            MessagePushAction::Notification => {
+                matches!(
+                    status,
+                    MessageStatus::Notification | MessageStatus::Archived
+                )
+            }
+        };
+        if !valid_status {
+            return Err(AppError::new(
+                "push_state_mismatch",
+                format!(
+                    "queued action {} does not match canonical message status {} for {message_id}",
+                    action.kind(),
+                    status.as_str()
+                ),
+            )
+            .with_details(json!({
+                "message_id": message_id,
+                "action": action.kind(),
+                "status": status.as_str(),
+            })));
+        }
+        match action {
+            MessagePushAction::Spam => {
                 let locations = self.message_remote_locations_except_mailbox_kinds(
                     &message_ids,
                     &[SpecialUseKind::Junk],
@@ -666,7 +662,7 @@ impl Workspace {
                     config.actions.message.spam.steps.clone(),
                 ))
             }
-            MessageStatus::Trashed => {
+            MessagePushAction::Trash => {
                 let locations = self.message_remote_locations_except_mailbox_kinds(
                     &message_ids,
                     &[SpecialUseKind::Trash],
@@ -678,31 +674,31 @@ impl Workspace {
                     config.actions.message.trash.steps.clone(),
                 ))
             }
-            MessageStatus::Triage => {
-                let junk_locations = self.message_remote_locations_for_mailbox_kinds(
+            MessagePushAction::Unspam => {
+                let locations = self.message_remote_locations_for_mailbox_kinds(
                     &message_ids,
                     &[SpecialUseKind::Junk],
                 )?;
-                if !junk_locations.is_empty() {
-                    return Ok(message_action_plan(
-                        MessagePushAction::Unspam,
-                        message_ids,
-                        junk_locations,
-                        config.actions.message.unspam.steps.clone(),
-                    ));
-                }
-                let trash_locations = self.message_remote_locations_for_mailbox_kinds(
+                Ok(message_action_plan(
+                    MessagePushAction::Unspam,
+                    message_ids,
+                    locations,
+                    config.actions.message.unspam.steps.clone(),
+                ))
+            }
+            MessagePushAction::Untrash => {
+                let locations = self.message_remote_locations_for_mailbox_kinds(
                     &message_ids,
                     &[SpecialUseKind::Trash],
                 )?;
                 Ok(message_action_plan(
                     MessagePushAction::Untrash,
                     message_ids,
-                    trash_locations,
+                    locations,
                     config.actions.message.untrash.steps.clone(),
                 ))
             }
-            MessageStatus::Case => {
+            MessagePushAction::CaseAdd => {
                 let locations = self.message_remote_locations_any(&message_ids)?;
                 Ok(message_action_plan(
                     MessagePushAction::CaseAdd,
@@ -711,22 +707,25 @@ impl Workspace {
                     config.actions.case.add.steps.clone(),
                 ))
             }
-            MessageStatus::Notification | MessageStatus::Archived => {
-                self.plan_archive_message_push(message_id, config)
+            MessagePushAction::Notification => {
+                self.plan_archive_message_push(message_id, allowed_push_path, config)
             }
-            MessageStatus::DeletedRemote | MessageStatus::PushQueued => Ok(None),
         }
     }
 
     fn plan_archive_message_push(
         &self,
         message_id: &str,
+        allowed_push_path: Option<&Path>,
         config: &crate::config::MailConfig,
     ) -> Result<Option<MessageActionPush>> {
         let message_ids = vec![message_id.to_string()];
         let archiving_case_uid = self.archiving_case_uid_for_message(message_id)?;
-        let eligibility =
-            self.archive_eligibility_inner(message_id, None, archiving_case_uid.as_deref())?;
+        let eligibility = self.archive_eligibility_inner(
+            message_id,
+            allowed_push_path,
+            archiving_case_uid.as_deref(),
+        )?;
         if !eligibility.eligible {
             return Ok(None);
         }
@@ -781,6 +780,18 @@ impl Workspace {
             if eligibility.eligible {
                 eligible_message_ids.push(message_id.clone());
             }
+        }
+        for message_id in &eligible_message_ids {
+            let removed = crate::push_queue::remove_pending_message_pushes(
+                &self.root,
+                message_id,
+                MessagePushAction::CaseAdd.kind(),
+            )?;
+            let removed_push_ids = removed
+                .iter()
+                .map(|item| item.push_id.clone())
+                .collect::<Vec<_>>();
+            self.clear_message_pending_pushes(message_id, &removed_push_ids, false)?;
         }
         if eligible_message_ids.is_empty() {
             return Ok(ArchiveQueue {
@@ -1130,7 +1141,7 @@ impl Workspace {
                 false
             };
             if changed {
-                self.persist_message_remote(&message)?;
+                self.persist_message_metadata(&message)?;
                 self.write_message_materialized_cache(&message)?;
             }
         }
@@ -1309,7 +1320,10 @@ impl Workspace {
                 continue;
             }
             let item = PushItem::parse_json(&read_to_string(&path, "read push item")?)?;
-            if item.message().is_some() {
+            if item
+                .message()
+                .is_some_and(|message| message.action == MessagePushAction::CaseAdd)
+            {
                 continue;
             }
             if ignored_case_uid
@@ -1322,15 +1336,6 @@ impl Workspace {
             }
         }
         Ok(())
-    }
-
-    pub(super) fn collect_push_references(
-        &self,
-        ids: &BTreeSet<String>,
-        allowed_push_path: Option<&Path>,
-        references: &mut Vec<String>,
-    ) -> Result<()> {
-        self.collect_push_references_except_message_pushes(ids, allowed_push_path, &[], references)
     }
 
     pub(super) fn collect_push_references_except_message_pushes(
@@ -1355,9 +1360,6 @@ impl Workspace {
             }
             let data = read_to_string(&path, "read push item")?;
             let item = PushItem::parse_json(&data)?;
-            if item.message().is_some() {
-                continue;
-            }
             if message_push_action_is_allowed(&item, ids, allowed_push_actions) {
                 continue;
             }
@@ -1414,16 +1416,11 @@ fn message_push_action_is_allowed(
     if allowed_push_actions.is_empty() {
         return false;
     }
-    if item.has_started_steps() {
+    if item.has_started_effects() {
         return false;
     }
-    item.message_action().is_some_and(|payload| {
-        allowed_push_actions.contains(&payload.action)
-            && (payload.message_ids.iter().any(|id| ids.contains(id))
-                || payload
-                    .locations
-                    .iter()
-                    .any(|location| ids.contains(&location.message_id)))
+    item.message().is_some_and(|payload| {
+        allowed_push_actions.contains(&payload.action) && ids.contains(&payload.message_id)
     })
 }
 
@@ -1452,7 +1449,7 @@ mod tests {
 
         let mut message = MessageFile {
             schema_name: "message".to_string(),
-            schema_version: 1,
+            schema_version: MESSAGE_SCHEMA_VERSION,
             message_id: "message_uidvalidity".to_string(),
             rfc822_message_id: Some("<message_uidvalidity@example.com>".to_string()),
             in_reply_to: None,
@@ -1468,6 +1465,9 @@ mod tests {
                     missing_rfc3339: None,
                 }],
             }),
+            agent_suggestion: None,
+            human_suggestion: None,
+            case_relationship_suggestion: None,
             direction: Some("inbound".to_string()),
             subject: Some("UIDVALIDITY".to_string()),
             from: Some("alice@example.com".to_string()),

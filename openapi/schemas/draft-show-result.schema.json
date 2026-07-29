@@ -1,0 +1,205 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/draft-show-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "analysis": {
+      "additionalProperties": false,
+      "properties": {
+        "attachments": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "exists": {
+                "type": "boolean"
+              },
+              "size_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "exists"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "authored_body_range": {
+          "additionalProperties": false,
+          "properties": {
+            "end_bytes": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "start_bytes": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_bytes",
+            "end_bytes"
+          ],
+          "type": "object"
+        },
+        "completeness": {
+          "description": "Whether the typed compose section contains agent/user-authored text.",
+          "enum": [
+            "complete",
+            "incomplete"
+          ],
+          "type": "string"
+        },
+        "push_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "Observable state of a local draft. A successful send consumes the draft, so\nthere is intentionally no `sent` variant here.",
+          "enum": [
+            "editable",
+            "queued_upload",
+            "queued_send",
+            "pushing",
+            "failed"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "authored_body_range",
+        "completeness",
+        "status"
+      ],
+      "type": "object"
+    },
+    "draft": {
+      "additionalProperties": false,
+      "properties": {
+        "body_markdown": {
+          "type": "string"
+        },
+        "frontmatter": {
+          "additionalProperties": false,
+          "description": "Frontmatter of an agent-authored `drafts/*.md`. Shared by draft validation\nand outbound message building so both agree on one schema.",
+          "properties": {
+            "attachments": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "case_uid": {
+              "type": "string"
+            },
+            "cc": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "identity": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reply_to_message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "send_intent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subject": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sync_intent": {
+              "description": "The only remote intent that may be recorded in draft frontmatter.\n\nThis is deliberately distinct from a completed remote outcome: both values\nmean that work is queued locally until a push succeeds.",
+              "enum": [
+                "save_draft",
+                "send",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "case_uid"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "frontmatter",
+        "body_markdown"
+      ],
+      "type": "object"
+    },
+    "locator": {
+      "additionalProperties": false,
+      "properties": {
+        "draft_name": {
+          "type": "string"
+        },
+        "draft_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "draft_name",
+        "draft_path"
+      ],
+      "type": "object"
+    },
+    "schema_name": {
+      "type": "string"
+    },
+    "schema_version": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_name",
+    "schema_version",
+    "locator",
+    "draft",
+    "analysis"
+  ],
+  "title": "DraftShowResult",
+  "type": "object"
+}

@@ -1,7 +1,7 @@
 use agent_first_slug::{AllowedCharacterSet, EmptyOutputPolicy, SlugConfig};
 
 use crate::error::{AppError, Result};
-use crate::store::{clean_body_text, render_message_section};
+use crate::store::clean_body_text;
 use crate::types::{
     AttachmentRef, AuthAlignment, AuthVerdict, ImapRef, MessageAuthentication, MessageFile,
     RemoteLocation, RemoteState, WorkspaceState,
@@ -11,8 +11,6 @@ use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders};
 #[derive(Clone, Debug)]
 pub struct ParsedMail {
     pub message: MessageFile,
-    pub body_text: String,
-    pub conversation: String,
 }
 
 #[derive(Clone, Debug)]
@@ -88,7 +86,6 @@ pub fn parse_message_with_options(
                 .unwrap_or_else(|| format!("part-{part_id}")),
             content_type: content_type_string(part.content_type()),
             size_bytes: part.len() as u64,
-            fetched: false,
             file_path: None,
             source_path: None,
         })
@@ -118,12 +115,15 @@ pub fn parse_message_with_options(
     };
     let message = MessageFile {
         schema_name: "message".to_string(),
-        schema_version: 1,
+        schema_version: crate::types::MESSAGE_SCHEMA_VERSION,
         message_id: message_id.clone(),
         rfc822_message_id,
         in_reply_to,
         references,
         remote: options.remote,
+        agent_suggestion: None,
+        human_suggestion: None,
+        case_relationship_suggestion: None,
         direction: Some(direction),
         subject: parsed.subject().map(ToString::to_string),
         from: parsed.from().and_then(format_first_address),
@@ -154,12 +154,7 @@ pub fn parse_message_with_options(
         observed_recipient_emails: Vec::new(),
         workspace: options.workspace,
     };
-    let conversation = render_message_section(&message, &body_text)?;
-    Ok(ParsedMail {
-        message,
-        body_text,
-        conversation,
-    })
+    Ok(ParsedMail { message })
 }
 
 pub fn parse_outbound_message(
@@ -213,7 +208,6 @@ fn merge_attachment_state(attachments: &mut [AttachmentRef], previous: &[Attachm
         }) else {
             continue;
         };
-        attachment.fetched = prior.fetched;
         attachment.file_path = prior.file_path.clone();
         attachment.source_path = prior.source_path.clone();
     }
@@ -563,16 +557,13 @@ mod tests {
         );
         assert!(parsed.is_ok());
         let parsed = parsed.ok();
-        assert_eq!(parsed.as_ref().map(|p| p.body_text.as_str()), Some("Hello"));
+        assert_eq!(
+            parsed.as_ref().map(|p| p.message.body_text.as_str()),
+            Some("Hello")
+        );
         assert_eq!(
             parsed.as_ref().map(|p| p.message.attachments.len()),
             Some(1)
-        );
-        assert!(
-            parsed
-                .as_ref()
-                .map(|p| p.conversation.contains("```text"))
-                .unwrap_or(false)
         );
     }
 
@@ -771,14 +762,14 @@ mod tests {
             return;
         };
         assert!(
-            parsed.body_text.contains("Bonjour"),
+            parsed.message.body_text.contains("Bonjour"),
             "{:?}",
-            parsed.body_text
+            parsed.message.body_text
         );
         assert!(
-            parsed.body_text.contains("proposition"),
+            parsed.message.body_text.contains("proposition"),
             "{:?}",
-            parsed.body_text
+            parsed.message.body_text
         );
         assert_eq!(parsed.message.attachments.len(), 1);
         assert_eq!(
@@ -813,7 +804,9 @@ mod tests {
             },
         );
         assert!(parsed.is_ok());
-        let body_text = parsed.map(|p| p.body_text).unwrap_or_default();
+        let body_text = parsed
+            .map(|parsed| parsed.message.body_text)
+            .unwrap_or_default();
         assert!(
             !body_text.contains('<'),
             "html-only body should not contain raw HTML tags, got: {body_text:?}"

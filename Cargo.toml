@@ -1,16 +1,16 @@
 [package]
 name = "agent-first-mail"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 description = "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm."
 license = "MIT"
 repository = "https://github.com/agentfirstkit/agent-first-mail"
 readme = "README.md"
 include = [
-    "afui/**",
     "src/**",
     "tests/**",
     "templates/**",
+    "openapi/**",
     "skills/**",
     "docs/**",
     "build.rs",
@@ -21,20 +21,37 @@ include = [
     "clippy.toml",
 ]
 
+[features]
+default = ["api", "demo", "review"]
+api = [
+    "dep:axum",
+    "dep:tokio",
+    "tokio/macros",
+    "tokio/net",
+    "tokio/rt-multi-thread",
+    "tokio/signal",
+]
+demo = [
+    "dep:base64",
+    "dep:tokio",
+    "tokio/macros",
+    "tokio/rt",
+    "tokio/signal",
+    "tokio/sync",
+]
+review = []
+
 [[bin]]
 name = "afmail"
 path = "src/main.rs"
 
-[features]
-default = ["ui"]
-ui = ["dep:agent-first-ui"]
-
 [dependencies]
 # Local monorepo development uses sibling crates where needed; version keys keep
 # packaging tied to the matching published crates.
-agent-first-data = { version = "0.20.0", features = ["cli-help", "cli-help-markdown", "skill-admin", "stream-redirect"] }
-agent-first-slug = "0.3.0"
-agent-first-ui = { version = "0.2.0", optional = true }
+agent-first-data = { version = "0.26.2", features = ["cli-help", "cli-help-markdown", "skill-admin", "stream-redirect"] }
+agent-first-slug = "0.5.0"
+axum = { version = "0.8", optional = true }
+base64 = { version = "0.23", optional = true }
 blake3 = "1.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
@@ -46,7 +63,7 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 mail-parser = { version = "0.11", features = ["full_encoding"] }
 rustls-pemfile = "2.2.0"
 rustls-connector = { version = "0.23", default-features = false, features = ["webpki-root-certs", "rustls--ring"] }
-noyalib = "0.0.15"
+noyalib = "0.0.17"
 minijinja = "2"
 include_dir = "0.7"
 mime_guess = { version = "2", default-features = false }
@@ -54,6 +71,8 @@ fs4 = "1.1"
 atomic-write-file = "0.3"
 ring = "0.17.14"
 sanitize-filename = "0.6"
+schemars = "1.2"
+tokio = { version = "1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 xattr = "1.6.1"
@@ -63,6 +82,8 @@ windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Co
 
 [dev-dependencies]
 imap-codec = "1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
 
 [lints.clippy]
 unwrap_used = "deny"

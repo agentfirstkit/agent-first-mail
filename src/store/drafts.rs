@@ -109,6 +109,15 @@ impl Workspace {
     }
 
     pub fn show_draft(&self, case_ref: &str, draft_name: &str) -> Result<Value> {
+        serde_json::to_value(self.draft_render_document(case_ref, draft_name)?)
+            .map_err(|error| AppError::json("serialize draft render document", &error))
+    }
+
+    pub(crate) fn draft_render_document(
+        &self,
+        case_ref: &str,
+        draft_name: &str,
+    ) -> Result<DraftRenderDocument> {
         self.require_workspace()?;
         validate_file_name("draft_name", draft_name)?;
         let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
@@ -123,6 +132,15 @@ impl Workspace {
         let (fm, body) = read_doc::<DraftFrontmatter>(&text).map_err(|e| {
             AppError::new("draft_invalid", format!("invalid draft frontmatter: {e}"))
         })?;
+        if fm.case_uid != case_uid {
+            return Err(AppError::new(
+                "draft_invalid",
+                format!(
+                    "draft case_uid {} does not match containing case {case_uid}",
+                    fm.case_uid
+                ),
+            ));
+        }
         let content = checked_draft_content(&body)?;
         let queued = crate::push_queue::find_outbound_for_draft(&self.root, &case_uid, draft_name)?;
         let projection = checked_draft_projection(draft_name, fm.sync_intent, queued.as_ref())?;
@@ -130,25 +148,43 @@ impl Workspace {
         let attachments = fm
             .attachments
             .iter()
-            .map(|attachment| draft_attachment_show_value(&case_path, attachment))
-            .collect::<Vec<_>>();
-        Ok(json!({
-            "case_uid": case_uid,
-            "draft_name": draft_name,
-            "draft_path": rel_path(&self.root, &draft_path),
-            "subject": fm.subject,
-            "identity": fm.identity,
-            "to": fm.to,
-            "cc": fm.cc,
-            "attachments": attachments,
-            "body": body,
-            "authored_body": content.authored_text().trim_matches(['\r', '\n']),
-            "completeness": content.completeness(),
-            "status": projection.status,
-            "queued_action": projection.queued_action,
-            "push_id": push_id,
-            "remote_changed": false,
-        }))
+            .map(|attachment| draft_attachment_analysis(&case_path, attachment))
+            .collect::<Result<Vec<_>>>()?;
+        let authored_body_range = content.authored_text_range();
+        let completeness = content.completeness();
+        Ok(DraftRenderDocument {
+            schema_name: draft_document_schema_name(),
+            schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+            locator: DraftLocator {
+                draft_name: draft_name.to_string(),
+                draft_path: rel_path(&self.root, &draft_path),
+            },
+            draft: DraftSourceDocument {
+                frontmatter: fm,
+                body_markdown: body,
+            },
+            analysis: DraftRenderAnalysis {
+                authored_body_range: TextRange {
+                    start_bytes: authored_body_range.start,
+                    end_bytes: authored_body_range.end,
+                },
+                attachments,
+                completeness,
+                status: projection.status,
+                push_id: push_id.map(ToString::to_string),
+            },
+        })
+    }
+
+    pub(crate) fn draft_render_documents(
+        &self,
+        case_ref: &str,
+    ) -> Result<Vec<DraftRenderDocument>> {
+        let (_, case_path) = self.resolve_active_case(case_ref)?;
+        self.local_draft_names(&case_path)?
+            .iter()
+            .map(|draft_name| self.draft_render_document(case_ref, draft_name))
+            .collect()
     }
 
     pub fn validate_draft(&self, case_ref: &str, draft_name: &str) -> Result<Value> {
@@ -472,6 +508,14 @@ impl Workspace {
         let now = now_rfc3339();
         let text = read_to_string(&draft_path, "read draft")?;
         let (mut fm, body) = read_doc::<DraftFrontmatter>(&text)?;
+        let previous_action = fm.sync_intent.map(OutboundAction::from);
+        crate::push_queue::ensure_outbound_requeue_allowed(
+            &self.root,
+            &case_uid,
+            draft_name,
+            previous_action,
+            action,
+        )?;
         fm.sync_intent = Some(action.into());
         let rendered = render_frontmatter(&fm, &body)?;
         let validation = self.validate_draft_bytes_inner(
@@ -493,8 +537,13 @@ impl Workspace {
         )?;
         write_string(&draft_path, &rendered)?;
         write_draft_validation_state(&case_path, draft_name, &validation, &now)?;
-        let mut queued =
-            crate::push_queue::queue_outbound(&self.root, &case_uid, draft_name, action)?;
+        let mut queued = crate::push_queue::queue_outbound(
+            &self.root,
+            &case_uid,
+            draft_name,
+            action,
+            previous_action,
+        )?;
         if let Some(object) = queued.as_object_mut() {
             object.insert(
                 "draft_path".to_string(),
@@ -679,13 +728,7 @@ impl Workspace {
             cc,
             attachments: Vec::new(),
         };
-        let quoted = self.quoted_message_body(&message)?;
-        let scaffold = render_draft_reply_body(
-            &self.root,
-            config.template_language(),
-            message.from.as_deref(),
-            &quoted,
-        )?;
+        let scaffold = render_draft_reply_body(&self.root, &config, &message)?;
         let body = match body_override {
             Some(body) => replace_authored_text(&scaffold, &body).map_err(draft_content_error)?,
             None => scaffold,
@@ -771,22 +814,6 @@ impl Workspace {
             "draft_path": rel_path(&self.root, &draft_path),
             "identity": resolved_identity.identity
         }))
-    }
-
-    fn quoted_message_body(&self, message: &MessageFile) -> Result<String> {
-        let quoted = message
-            .body_text
-            .lines()
-            .map(|line| {
-                if line.is_empty() {
-                    ">".to_string()
-                } else {
-                    format!("> {line}")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok(quoted)
     }
 
     pub fn fetch_message_attachment(
@@ -931,9 +958,7 @@ impl Workspace {
         };
         let attachment = message.attachments[pos].clone();
         create_dir_all(dest_dir)?;
-        if attachment.fetched
-            && let Some(file_path) = attachment.file_path.as_deref()
-        {
+        if let Some(file_path) = attachment.file_path.as_deref() {
             let existing = self.root.join(file_path);
             if existing.is_file() {
                 let size_bytes = fs::metadata(&existing)
@@ -970,7 +995,6 @@ impl Workspace {
         let size_bytes = fs::metadata(&dest)
             .map_err(|e| AppError::io("stat attachment", &e))?
             .len();
-        message.attachments[pos].fetched = true;
         message.attachments[pos].file_path = Some(rel_path(&self.root, &dest));
         self.write_message_materialized_cache(&message)?;
         Ok(SavedAttachment {
@@ -1089,23 +1113,21 @@ fn write_draft_validation_state(
     write_draft_state(case_path, &draft_state)
 }
 
-pub(super) fn draft_attachment_show_value(case_path: &Path, attachment: &str) -> Value {
-    let Ok(path) = draft_attachment_path(case_path, attachment) else {
-        return json!({
-            "path": attachment,
-            "exists": false,
-            "size_bytes": Value::Null,
-        });
+fn draft_attachment_analysis(
+    case_path: &Path,
+    attachment: &str,
+) -> Result<DraftAttachmentAnalysis> {
+    let path = draft_attachment_path(case_path, attachment)?;
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(AppError::io("read draft attachment metadata", &error)),
     };
-    let metadata = fs::metadata(&path).ok();
-    let exists = metadata.as_ref().is_some_and(|metadata| metadata.is_file());
-    let size_bytes = metadata
-        .filter(|metadata| metadata.is_file())
-        .map(|metadata| metadata.len());
-    json!({
-        "path": attachment,
-        "exists": exists,
-        "size_bytes": size_bytes,
+    Ok(DraftAttachmentAnalysis {
+        exists: metadata.as_ref().is_some_and(|metadata| metadata.is_file()),
+        size_bytes: metadata
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len()),
     })
 }
 
@@ -1209,16 +1231,6 @@ fn mark_downloaded(_path: &Path) -> bool {
     false
 }
 
-pub(super) fn saved_filename_for_attachment(attachment: &AttachmentRef) -> String {
-    attachment
-        .file_path
-        .as_deref()
-        .and_then(|path| Path::new(path).file_name())
-        .map(|name| name.to_string_lossy().to_string())
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| safe_attachment_filename(&attachment.filename, &attachment.part_id))
-}
-
 pub(super) fn safe_attachment_filename(filename: &str, part_id: &str) -> String {
     let fallback = format!("part-{part_id}");
     let candidate = filename.trim();
@@ -1241,68 +1253,33 @@ pub(super) fn safe_attachment_filename(filename: &str, part_id: &str) -> String 
     }
 }
 
-pub(super) fn is_image_content_type(content_type: &str) -> bool {
-    content_type
-        .split_once(';')
-        .map(|(mime, _)| mime)
-        .unwrap_or(content_type)
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("image/")
-}
-
-pub(super) fn attachment_markdown_path(
-    root: Option<&Path>,
-    output_dir: Option<&Path>,
-    file_path: &str,
-) -> String {
-    let Some(root) = root else {
-        return file_path.to_string();
-    };
-    let Some(output_dir) = output_dir else {
-        return file_path.to_string();
-    };
-    let Ok(from) = output_dir.strip_prefix(root) else {
-        return file_path.to_string();
-    };
-    let up_count = from
-        .components()
-        .filter(|component| matches!(component, std::path::Component::Normal(_)))
-        .count();
-    let mut parts = Vec::new();
-    parts.extend(std::iter::repeat_n("..", up_count));
-    parts.extend(file_path.split('/').filter(|part| !part.is_empty()));
-    if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    }
-}
-
 pub(super) fn render_draft_new_body(root: &Path, language: TemplateLanguage) -> Result<String> {
     render_template(
         root,
         language,
         TemplateKey::DraftNew,
-        &json!({"language": language.as_str()}),
+        &EmptyRenderDocument {
+            schema_name: "afmail_draft_new_render_document".to_string(),
+            schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+        },
     )
 }
 
 pub(super) fn render_draft_reply_body(
     root: &Path,
-    language: TemplateLanguage,
-    sender: Option<&str>,
-    quoted: &str,
+    config: &MailConfig,
+    message: &MessageFile,
 ) -> Result<String> {
+    let default_identity_email = config.default_identity()?.email.as_str();
     render_template(
         root,
-        language,
+        config.template_language(),
         TemplateKey::DraftReply,
-        &json!({
-            "language": language.as_str(),
-            "sender": sender.unwrap_or(""),
-            "quoted": quoted,
-        }),
+        &DraftReplyRenderDocument {
+            schema_name: "afmail_draft_reply_render_document".to_string(),
+            schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+            message: build_message_render_document(message, Some(default_identity_email)),
+        },
     )
 }
 

@@ -1,7 +1,7 @@
 use super::*;
 use agent_first_data::document::{
-    Document, DocumentError, KeyedList, Value as AfValue, ValueType, add_keyed,
-    coerce_values_toward, get_path, remove_keyed, set_path, value_from_type,
+    Document, DocumentError, KeyedList, Value as AfValue, ValueType, coerce_values_toward,
+    get_path, value_from_type,
 };
 use agent_first_data::normalize_utc_offset;
 use std::path::Path;
@@ -23,85 +23,39 @@ impl MailConfig {
         Ok(Value::from(value))
     }
 
-    /// Set one config key. Keys whose semantics the document layer cannot express — typed
-    /// normalization, mutually-exclusive fields, the `move_to_mailbox_id` alias —
-    /// are handled by `apply_domain_override`; the rest go through the document layer's
-    /// generic coercing setter. Either way the result is re-validated.
+    /// Set one config key. Thin wrapper over [`Self::apply_set`] so the domain
+    /// rules live in exactly one place (the document editors the store commands
+    /// use); this just runs them over the in-memory config instead of a file.
     pub fn set_key(&mut self, key: &str, values: &[String]) -> Result<()> {
-        if values.is_empty() {
-            return Err(AppError::new(
-                "invalid_request",
-                "config set requires at least one value",
-            ));
-        }
-
-        // `none` is a CLI sentinel for "clear this step list"; the document layer has no
-        // such notion, so rewrite it to an explicit empty array before coercion.
-        let cleared;
-        let values = if key.ends_with(".steps") && values == ["none"] {
-            cleared = [String::from("[]")];
-            &cleared[..]
-        } else {
-            values
-        };
-
-        if !self.apply_domain_override(key, values)? {
-            let mut root = self.as_config_value()?;
-            // The document setter no longer coerces CLI strings; coerce them toward the
-            // type already present at the leaf (falling back to String) before setting.
-            let existing = get_path(&root, key, KEYED_LISTS).ok();
-            let new_value = coerce_values_toward(values, existing.as_ref())
-                .map_err(|e| config_key_error(key, e))?;
-            set_path(&mut root, key, &new_value, KEYED_LISTS)
-                .map_err(|e| config_key_error(key, e))?;
-            self.replace_from_value(Value::from(root), key)?;
-        }
-
-        self.validate()?;
-        Ok(())
+        self.mutate_via_document(|doc| Self::apply_set(doc, key, values))
     }
 
-    /// Append an element to a keyed list (only `identities` today). The slug
-    /// becomes the element's `identity`; `fields` are `name=…`, `email=…`,
-    /// `default=…` pairs coerced by the document layer.
+    /// Append a keyed-list element — thin wrapper over [`Self::apply_add`].
     pub fn add_key(&mut self, key: &str, slug: &str, fields: &[(String, String)]) -> Result<()> {
-        let mut config = self.clone();
-        if key == "identities" && identity_fields_set_default(fields) {
-            for identity in &mut config.identities {
-                identity.default = false;
-            }
-        }
-        let mut root = config.as_config_value()?;
-        // `add_keyed` takes typed field values. A freshly-appended element has no
-        // existing leaf to type against, so the caller supplies the type it knows
-        // from the identity schema: `default` is a bool, the rest are strings.
-        // (afdata no longer shape-guesses — a bare value is a string.)
-        let coerced_fields: Vec<(String, AfValue)> = fields
-            .iter()
-            .map(|(name, value)| {
-                let coerced = match name.as_str() {
-                    "default" => value_from_type(ValueType::Bool, Some(value))
-                        .unwrap_or_else(|_| AfValue::String(value.clone())),
-                    _ => AfValue::String(value.clone()),
-                };
-                (name.clone(), coerced)
-            })
-            .collect();
-        add_keyed(&mut root, key, slug, KEYED_LISTS, None, &coerced_fields)
-            .map_err(|e| config_key_error(key, e))?;
-        self.replace_from_value(Value::from(root), key)?;
-        self.validate()?;
-        Ok(())
+        self.mutate_via_document(|doc| Self::apply_add(doc, key, slug, fields))
     }
 
-    /// Remove the keyed-list element whose slug matches.
+    /// Remove a keyed-list element — thin wrapper over [`Self::apply_remove`].
     pub fn remove_key(&mut self, key: &str, slug: &str) -> Result<()> {
-        let mut root = self.as_config_value()?;
-        match remove_keyed(&mut root, key, slug, KEYED_LISTS) {
-            Ok(()) | Err(DocumentError::SlugNotFound { .. }) => {}
-            Err(err) => return Err(config_key_error(key, err)),
-        }
-        self.replace_from_value(Value::from(root), key)?;
+        self.mutate_via_document(|doc| Self::apply_remove(doc, key, slug))
+    }
+
+    /// Serialize the config to its sparse document form, run `edit` through the
+    /// shared `apply_*` rules, re-hydrate `self` from the result, and revalidate.
+    /// The file-less mirror of the `config_set`/`add`/`remove` store handlers, so
+    /// there is a single implementation of the domain rules.
+    fn mutate_via_document<F>(&mut self, edit: F) -> Result<()>
+    where
+        F: FnOnce(&mut Document) -> Result<()>,
+    {
+        let sparse = serde_json::to_string(&self.sparse_value()?)
+            .map_err(|e| AppError::json("serialize config", &e))?;
+        let mut doc = Document::parse(&sparse, agent_first_data::document::Format::Json)
+            .map_err(|e| config_key_error("config", e))?;
+        edit(&mut doc)?;
+        let merged = merge_with_defaults(Value::from(doc.value().clone()))?;
+        *self = serde_json::from_value(merged)
+            .map_err(|e| AppError::new("config_invalid", format!("invalid config schema: {e}")))?;
         self.validate()?;
         Ok(())
     }
@@ -180,6 +134,7 @@ impl MailConfig {
         fields: &[(String, String)],
     ) -> Result<()> {
         let slug_field = keyed_list_slug_field(key)?;
+        materialize_keyed_list(doc, key)?;
         if key == "identities"
             && identity_fields_set_default(fields)
             && let Ok(AfValue::Array(items)) = doc.value_at(key)
@@ -207,6 +162,7 @@ impl MailConfig {
     /// not an error.
     pub fn apply_remove(doc: &mut Document, key: &str, slug: &str) -> Result<()> {
         let slug_field = keyed_list_slug_field(key)?;
+        materialize_keyed_list(doc, key)?;
         match doc.remove(key, slug, slug_field) {
             Ok(()) | Err(DocumentError::SlugNotFound { .. }) => Ok(()),
             Err(err) => Err(config_key_error(key, err)),
@@ -226,56 +182,6 @@ impl MailConfig {
         Ok(())
     }
 
-    /// Handle keys whose behavior the document layer's value-shaped coercion can't capture.
-    /// Returns `true` when the key was consumed here, `false` to fall through to
-    /// the generic setter.
-    fn apply_domain_override(&mut self, key: &str, values: &[String]) -> Result<bool> {
-        match key {
-            // Password source is one-of: setting either side clears the other so
-            // validation can never see both populated.
-            "imap.password_secret" => {
-                self.imap.password_secret = Some(single(values, key)?);
-                self.imap.password_secret_env = None;
-            }
-            "imap.password_secret_env" => {
-                self.imap.password_secret_env = Some(single(values, key)?);
-                self.imap.password_secret = None;
-            }
-            "smtp.password_secret" => {
-                self.smtp.password_secret = Some(single(values, key)?);
-                self.smtp.password_secret_env = None;
-            }
-            "smtp.password_secret_env" => {
-                self.smtp.password_secret_env = Some(single(values, key)?);
-                self.smtp.password_secret = None;
-            }
-            // These accept human inputs (`+0530`, `UTC`, `null`) that have to be
-            // normalized/validated into canonical stored form.
-            "workspace.language_bcp47" => {
-                self.workspace.language_bcp47 =
-                    parse_optional_language_bcp47(&single(values, key)?)?;
-            }
-            "workspace.timezone_utc_offset" => {
-                self.workspace.timezone_utc_offset =
-                    parse_optional_timezone_utc_offset(&single(values, key)?)?;
-            }
-            // Each id is validated and duplicates collapsed — the document layer would store
-            // the raw multi-value array verbatim.
-            "actions.pull.default_mailbox_ids" => {
-                let mut ids = Vec::new();
-                for value in values {
-                    validate_config_id("actions.pull.default_mailbox_ids id", value)?;
-                    if !ids.iter().any(|existing| existing == value) {
-                        ids.push(value.clone());
-                    }
-                }
-                self.actions.pull.default_mailbox_ids = ids;
-            }
-            _ => return Ok(false),
-        }
-        Ok(true)
-    }
-
     /// Serialize the live config to the document layer's value IR. Optional fields carry no
     /// `skip_serializing_if`, so the value is dense (absent → `null`) and every
     /// key is traversable.
@@ -283,18 +189,6 @@ impl MailConfig {
         let json = serde_json::to_value(self)
             .map_err(|e| AppError::new("internal", format!("serialize config: {e}")))?;
         Ok(AfValue::from(json))
-    }
-
-    /// Re-hydrate `self` from a mutated value, surfacing serde type/shape errors
-    /// (e.g. a string coerced where a `u16` was expected) against the key.
-    fn replace_from_value(&mut self, value: Value, key: &str) -> Result<()> {
-        *self = serde_json::from_value(value).map_err(|e| {
-            config_key_error(
-                key,
-                agent_first_data::document::DocumentError::from_serde(key, e),
-            )
-        })?;
-        Ok(())
     }
 }
 
@@ -330,6 +224,20 @@ fn value_is_schema_default(key: &str, value: &AfValue) -> Result<bool> {
     Ok(schema_default_at(key)?.as_ref() == Some(value))
 }
 
+/// Ensure the keyed list at `key` is present before an add/remove. A list equal
+/// to its schema default is stripped from the sparse config, but these verbs
+/// need the full current contents — so seed it from the default with a raw
+/// `set` (bypassing `doc_set`'s unset-if-default collapse).
+fn materialize_keyed_list(doc: &mut Document, key: &str) -> Result<()> {
+    if doc.value_at(key).is_err()
+        && let Some(default) = schema_default_at(key)?
+    {
+        doc.set(key, default)
+            .map_err(|e| config_key_error(key, e))?;
+    }
+    Ok(())
+}
+
 /// Set `key` and clear its mutually-exclusive `sibling` (an idempotent unset),
 /// so validation never sees both populated.
 fn set_exclusive(doc: &mut Document, key: &str, value: String, sibling: &str) -> Result<()> {
@@ -339,14 +247,14 @@ fn set_exclusive(doc: &mut Document, key: &str, value: String, sibling: &str) ->
     Ok(())
 }
 
-/// Set `key`, or clear it when the normalized `value` is `None`.
+/// Set `key`, or clear it to `null` when the normalized `value` is `None`. Uses
+/// `null` rather than unset so it overrides a non-`null` schema default (e.g.
+/// the pinned `workspace.timezone_utc_offset`); `doc_set` still collapses it to
+/// an unset when the default itself is `null`.
 fn set_optional(doc: &mut Document, key: &str, value: Option<String>) -> Result<()> {
     match value {
         Some(value) => doc_set(doc, key, AfValue::String(value)),
-        None => doc
-            .unset(key)
-            .map(|_| ())
-            .map_err(|e| config_key_error(key, e)),
+        None => doc_set(doc, key, AfValue::Null),
     }
 }
 

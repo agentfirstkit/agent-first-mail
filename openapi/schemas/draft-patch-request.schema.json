@@ -1,0 +1,54 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afmail/v1/draft-patch-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "minProperties": 1,
+  "properties": {
+    "body": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cc": {
+      "default": null,
+      "description": "Replacement Cc recipients. An empty list clears Cc.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "identity": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "subject": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "to": {
+      "default": null,
+      "description": "Replacement To recipients. An empty list is rejected.",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": [
+        "array",
+        "null"
+      ]
+    }
+  },
+  "title": "DraftPatchRequest",
+  "type": "object"
+}

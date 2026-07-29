@@ -83,9 +83,14 @@ fn common_item_error(value: &Value) -> Option<(String, String)> {
 
 fn normalize_command_payload(mut value: Value, success: bool) -> Value {
     if let Value::Object(map) = &mut value {
+        let is_typed_review_result = map.contains_key("surface_kind")
+            && map.contains_key("result_kind")
+            && map.contains_key("interaction_id");
         map.remove("code");
         map.remove("ok");
-        map.remove("outcome");
+        if !is_typed_review_result {
+            map.remove("outcome");
+        }
         if let Some(Value::Array(mut items)) = map.remove("results") {
             for item in &mut items {
                 strip_success_markers(item);
@@ -448,6 +453,7 @@ fn is_operational_value_arg_name(arg: &str) -> bool {
     matches!(
         arg,
         "--output"
+            | "--output-to"
             | "--log"
             | "--stdout-file"
             | "--stderr-file"
@@ -469,14 +475,21 @@ fn is_operational_value_arg_name(arg: &str) -> bool {
             | "--skills-dir"
             | "--path"
             | "--port"
+            | "--mode"
+            | "--directory"
             | "--bin"
+            | "--scenario"
+            | "--imap-port"
+            | "--smtp-port"
     )
 }
 
 fn is_command_literal(arg: &str) -> bool {
     matches!(
         arg,
-        "init"
+        "api"
+            | "demo"
+            | "init"
             | "pull"
             | "config"
             | "remote"
@@ -534,6 +547,7 @@ fn is_command_literal(arg: &str) -> bool {
             | "refresh"
             | "open"
             | "serve"
+            | "export"
             | "emit"
             | "email"
             | "phone"
@@ -551,6 +565,8 @@ pub(super) fn output_format_name(output: OutputFormat) -> &'static str {
 
 pub(super) fn command_name(command: &Command) -> &'static str {
     match command {
+        Command::Api { .. } => "api",
+        Command::Demo { .. } => "demo",
         Command::Init { .. } => "init",
         Command::Pull { .. } => "pull",
         Command::Config { .. } => "config",
@@ -567,14 +583,15 @@ pub(super) fn command_name(command: &Command) -> &'static str {
         Command::Notification { .. } => "notification",
         Command::Render { .. } => "render",
         Command::Log { .. } => "log",
-        #[cfg(feature = "ui")]
-        Command::Ui(_) => "ui",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{error_chain_has_broken_pipe, redact_log_fields};
+    use super::{
+        argv_shape, error_chain_has_broken_pipe, normalize_command_payload, redact_argv,
+        redact_log_fields,
+    };
     use serde_json::json;
 
     #[test]
@@ -627,5 +644,59 @@ mod tests {
             "closed",
         ));
         assert!(error_chain_has_broken_pipe(&error));
+    }
+
+    #[test]
+    fn redacts_api_access_token_from_argv() {
+        let argv = vec![
+            "/tmp/afmail".to_string(),
+            "api".to_string(),
+            "serve".to_string(),
+            "--access-token-secret".to_string(),
+            "private-bearer-value".to_string(),
+        ];
+        let redacted = redact_argv(&argv);
+        assert_eq!(redacted[0], "afmail");
+        assert_eq!(redacted[1], "api");
+        assert_eq!(redacted[2], "serve");
+        assert_eq!(redacted[4], "***");
+        assert!(!redacted.join(" ").contains("private-bearer-value"));
+    }
+
+    #[test]
+    fn output_to_value_is_not_counted_as_a_positional() {
+        let argv = vec![
+            "afmail".to_string(),
+            "--output-to".to_string(),
+            "stdout".to_string(),
+            "status".to_string(),
+        ];
+        let shape = argv_shape(&argv);
+        assert_eq!(shape["command_tokens"], json!(["status"]));
+        assert_eq!(shape["flag_names"], json!(["--output-to"]));
+        assert_eq!(shape["positional_count"], 0);
+        assert_eq!(shape["redacted_value_count"], 1);
+    }
+
+    #[test]
+    fn normalization_preserves_only_typed_review_outcome() {
+        let review = normalize_command_payload(
+            json!({
+                "interaction_id":"i1",
+                "surface_kind":"case_review",
+                "result_kind":"case",
+                "outcome":"dismissed",
+                "ok":true
+            }),
+            true,
+        );
+        assert_eq!(review["outcome"], "dismissed");
+        assert!(review.get("ok").is_none());
+
+        let ordinary = normalize_command_payload(
+            json!({"surface_kind":"not_enough","outcome":"generic","ok":true}),
+            true,
+        );
+        assert!(ordinary.get("outcome").is_none());
     }
 }

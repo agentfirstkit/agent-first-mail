@@ -1,11 +1,1 @@
-# 通知訊息：{{ notification.notification_name }}（`{{ notification.notification_uid }}`）
-
-{% if items | length == 0 %}_沒有訊息。_
-{% else %}{% for item in items %}## {{ loop.index }}. {{ item.view.direction_symbol }} {% if item.view.direction_kind == 'received' %}收到{% else %}發送{% endif %}{% if item.view.action == 'reply' %}回覆{% elif item.view.action == 'forward' %}轉寄{% endif %}{% if item.view.display_title %}: {{ item.view.display_title }}{% endif %}
-
-{% if item.view.display_contact %}- {% if item.view.contact_kind == 'from' %}寄件人{% else %}收件人{% endif %}: {{ item.view.display_contact }}
-{% endif %}- 訊息: [{{ item.message.message_id }}]({{ item.view.link }})
-{% if item.view.time.datetime %}- 時間: {{ item.view.time.datetime }}
-{% endif %}
-
-{% endfor %}{% endif %}
+{% import "i18n/catalog.j2" as i18n %}{% include "markdown/notification-index.md.j2" %}

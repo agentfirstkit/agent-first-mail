@@ -1,0 +1,7 @@
+{{ workspace_ref }}에 데모 작업 공간을 만들었습니다.
+
+이 작업 공간은 로컬 모의 메일 서버에만 연결됩니다. 실제 메일함에는 접근할 수 없습니다.
+
+1. 다른 터미널에서 실행: cd {{ workspace_ref }} && afmail demo serve
+2. 그런 다음 에이전트에게 요청:
+   “{{ agent_prompt }}”

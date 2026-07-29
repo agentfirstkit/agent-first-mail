@@ -108,6 +108,26 @@ impl AppError {
     }
 }
 
+#[cfg(any(
+    not(feature = "api"),
+    not(feature = "demo"),
+    not(feature = "review"),
+    test
+))]
+pub(crate) fn feature_disabled(feature: &'static str, command: &'static str) -> AppError {
+    AppError::new(
+        "feature_disabled",
+        format!("`afmail {command}` is unavailable because this binary was built without the `{feature}` feature"),
+    )
+    .with_hint(format!(
+        "Rebuild afmail with `cargo build --features {feature}` or use the default feature set."
+    ))
+    .with_details(serde_json::json!({
+        "feature": feature,
+        "command": command,
+    }))
+}
+
 fn default_hint(error_code: &str) -> Option<&'static str> {
     match error_code {
         "invalid_request" => Some(
@@ -182,7 +202,7 @@ pub type Result<T> = std::result::Result<T, AppError>;
 
 #[cfg(test)]
 mod tests {
-    use super::AppError;
+    use super::{AppError, feature_disabled};
 
     #[test]
     fn protocol_error_flattens_object_details() {
@@ -205,5 +225,19 @@ mod tests {
             .to_protocol_value(1);
         assert_eq!(value["error"]["details"], "specific detail");
         assert!(value["error"]["hint"].is_string());
+    }
+
+    #[test]
+    fn disabled_feature_error_is_self_describing_protocol_data() {
+        let value = feature_disabled("demo", "demo").to_protocol_value(3);
+        assert_eq!(value["kind"], "error");
+        assert_eq!(value["error"]["code"], "feature_disabled");
+        assert_eq!(value["error"]["feature"], "demo");
+        assert_eq!(value["error"]["command"], "demo");
+        assert!(
+            value["error"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("--features demo"))
+        );
     }
 }

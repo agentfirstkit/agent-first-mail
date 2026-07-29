@@ -1,0 +1,12 @@
+{%- import "i18n/catalog.j2" as i18n -%}
+{% set message_document = document %}{% set mail = message_document.message %}---
+kind: {% if mail.workspace.status == 'spam' %}spam_message{% elif mail.workspace.status == 'trashed' %}trash_message{% else %}deleted_message{% endif %}
+message_id: {{ mail.message_id }}
+status: {{ mail.workspace.status }}
+---
+
+# {% if mail.subject %}{{ mail.subject | inline }}{% else %}{% if mail.workspace.status == 'spam' %}{{ i18n.t('spam') }}{% elif mail.workspace.status == 'trashed' %}{{ i18n.t('trash') }}{% else %}{{ i18n.t('remote_deleted') }}{% endif %} {{ i18n.t('message_lower') }}{% endif %}
+
+{{ i18n.t('workspace_status') }}: {% if mail.workspace.status == 'spam' %}{{ i18n.t('spam') }}{% elif mail.workspace.status == 'trashed' %}{{ i18n.t('trash') }}{% else %}{{ i18n.t('remote_deleted') }}{% endif %} (`{{ mail.workspace.status }}`)
+
+{% with document = message_document %}{% include "message/section.md.j2" %}{% endwith %}

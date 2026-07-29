@@ -5,6 +5,7 @@ mod doctor;
 mod drafts;
 mod idempotency;
 mod messages;
+mod migration;
 mod notification;
 mod purge;
 mod push_state;
@@ -13,13 +14,12 @@ mod remote_sync;
 mod render;
 mod render_cache;
 mod storage_usage;
+mod suggestions;
 #[cfg(test)]
 mod tests;
 mod transactions;
 mod triage;
 mod util;
-#[cfg(feature = "ui")]
-mod view_model;
 
 use cases::*;
 pub use contacts::ContactExtractSource;
@@ -33,60 +33,75 @@ use render_cache::*;
 use storage_usage::workspace_storage_usage;
 use util::*;
 
-pub(crate) use render::render_message_section_with_resolved_quote;
 pub use render::{
     clean_body_text, render_message_section, render_message_section_with_config,
     render_message_section_with_options,
 };
+#[cfg(any(feature = "review", test))]
+pub(crate) use suggestions::{
+    CaseHumanSuggestionInput, MessageHumanSuggestionInput, NotificationHumanSuggestionInput,
+};
 pub(crate) use triage::render_triage_view;
 
 use crate::config::{
-    MailConfig, NotificationIndexField, ReasonMode, ResolvedIdentity, SpecialUseKind,
-    TemplateLanguage, match_message_identity_with_profiles,
+    MailConfig, ReasonMode, ResolvedIdentity, SpecialUseKind, TemplateLanguage,
+    match_message_identity_with_profiles,
 };
 use crate::draft_content::{
     DraftContent, DraftContentError, parse_draft_content, replace_authored_text,
 };
 use crate::error::{AppError, Result};
-use crate::frontmatter::{CaseFrontmatter, DraftFrontmatter, TriageFrontmatter};
+use crate::frontmatter::{CaseFrontmatter, DraftFrontmatter};
 use crate::layout;
-use crate::markdown::{parse_frontmatter, read_doc, render_frontmatter};
-use crate::templates::{MarkdownTemplateRenderer, TemplateKey, language_template_path};
+use crate::markdown::{read_doc, render_frontmatter};
+use crate::render_document::{
+    CollectionLocation, CollectionMessageRenderDocument, CollectionRenderDocument,
+    CollectionShowDocument, CollectionShowLocator, ContactLocator, ContactRenderDocument,
+    ContentProvenance, ContentSource, ContentTrust, DraftAttachmentAnalysis, DraftLocator,
+    DraftRenderAnalysis, DraftRenderDocument, DraftReplyRenderDocument, DraftSourceDocument,
+    EmptyRenderDocument, MessageBodyAnalysis, MessageBodySegment, MessageBodySegmentKind,
+    MessageContextDocument, MessageRenderAnalysis, MessageRenderDocument, MessageSecurityAnalysis,
+    MessageShowDocument, NotesMergeRenderDocument, NotesRenderDocument,
+    RENDER_DOCUMENT_SCHEMA_VERSION, RenderMessageAction, RenderMessageDirection, TextRange,
+    TriageRenderDocument, collection_document_schema_name, collection_message_document_schema_name,
+    draft_document_schema_name, message_document_schema_name, notes_document_schema_name,
+    triage_document_schema_name,
+};
+use crate::templates::{
+    TemplateKey, TemplateRenderOptions, TemplateRenderer, ensure_workspace_template_path_safe,
+    language_template_path,
+};
 use crate::types::RemoteSyncState;
 use crate::types::{
-    AttachmentRef, CASE_SCHEMA_NAME, CaseMessages, DraftCompleteness, DraftStateProjection,
-    MESSAGE_COLLECTION_SCHEMA_VERSION, MailDirection, MessageActionPush, MessageCollection,
-    MessageCollectionItem, MessageContact, MessageFile, MessagePushAction, MessageStatus,
+    AttachmentRef, CASE_SCHEMA_NAME, CaseMessages, CaseRelationshipSuggestion, ContactFrontmatter,
+    DraftCompleteness, DraftStateProjection, MESSAGE_COLLECTION_SCHEMA_VERSION,
+    MESSAGE_SCHEMA_VERSION, MailDirection, MessageActionPush, MessageCollection,
+    MessageCollectionItem, MessageFile, MessageMetadata, MessagePushAction, MessageStatus,
     NOTIFICATION_SCHEMA_NAME, NotificationMessageItem, NotificationMessages, OutboundAction,
-    PushItem, PushLocalStage, PushLocation, RemoteLocation, RemoteState, WorkspacePendingPush,
-    WorkspacePushState, WorkspaceState,
+    PushItem, PushLocalStage, PushLocation, RemoteLocation, RemoteState,
+    SUGGESTIBLE_COLLECTION_SCHEMA_VERSION, WorkspacePendingPush, WorkspacePushState,
+    WorkspaceState,
 };
 use crate::util::{
     blake3_fingerprint, blake3_fingerprint_str, canonical_flags, write_json_pretty,
     write_string_atomic,
 };
-use chrono::{DateTime, Datelike, Duration, FixedOffset, SecondsFormat, Timelike, Utc};
+use chrono::{DateTime, Duration, FixedOffset, SecondsFormat, Utc};
 use sanitize_filename::{Options as SanitizeFilenameOptions, sanitize_with_options};
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Instant, UNIX_EPOCH};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RenderInvocation {
-    Pull,
-    Refresh,
-}
+use std::time::Instant;
 
 const AFMAIL_GITIGNORE_BEGIN: &str = "# BEGIN afmail managed";
 const AFMAIL_GITIGNORE_END: &str = "# END afmail managed";
 const AFMAIL_AGENT_GITIGNORE_HEADER: &str =
-    "# Agent-First Mail workspace skill installed by afmail init.";
+    "# Agent-First Mail workspace skill installed by afmail skill install.";
 fn afmail_workspace_gitignore_body() -> String {
     format!(
         r#"# This workspace is meant to live in a PRIVATE repository: pulled mail bodies,
@@ -142,9 +157,6 @@ const AFMAIL_RESERVED_INIT_PATHS: &[&str] = &[
     layout::TRASH,
     layout::DELETED,
 ];
-const AFMAIL_AGENTS_BEGIN: &str = "<!-- BEGIN afmail managed -->";
-const AFMAIL_AGENTS_END: &str = "<!-- END afmail managed -->";
-
 pub(crate) struct DraftChange<'a> {
     pub(crate) subject: Option<&'a str>,
     pub(crate) to: &'a [String],
@@ -153,6 +165,12 @@ pub(crate) struct DraftChange<'a> {
     pub(crate) identity: Option<&'a str>,
     pub(crate) body: Option<&'a str>,
     pub(crate) body_file: Option<&'a str>,
+}
+
+fn review_document_hash<T: Serialize + ?Sized>(label: &str, document: &T) -> Result<String> {
+    let operation = format!("serialize {label} review base");
+    let bytes = serde_json::to_vec(document).map_err(|error| AppError::json(&operation, &error))?;
+    Ok(blake3_fingerprint(&bytes))
 }
 
 pub(crate) struct NewDraft<'a> {
@@ -423,46 +441,6 @@ fn reserved_init_conflicts(root: &Path) -> Vec<String> {
         .collect()
 }
 
-fn agent_workspace_paths(agent_root: &Path, workspace_ref: &str) -> Result<Vec<String>> {
-    let mut paths = read_agent_workspace_paths(agent_root)?;
-    if !paths.iter().any(|path| path == workspace_ref) {
-        paths.push(workspace_ref.to_string());
-    }
-    paths.sort();
-    Ok(paths)
-}
-
-fn read_agent_workspace_paths(agent_root: &Path) -> Result<Vec<String>> {
-    let path = agent_root.join("AGENTS.md");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let text = read_to_string(&path, "read agent instructions")?;
-    let Some(begin_pos) = text.find(AFMAIL_AGENTS_BEGIN) else {
-        return Ok(Vec::new());
-    };
-    let after_begin = begin_pos + AFMAIL_AGENTS_BEGIN.len();
-    let Some(end_rel) = text[after_begin..].find(AFMAIL_AGENTS_END) else {
-        return Ok(Vec::new());
-    };
-    let body = &text[after_begin..after_begin + end_rel];
-    let mut out = Vec::new();
-    for line in body.lines() {
-        let trimmed = line.trim();
-        let Some(rest) = trimmed.strip_prefix("- `") else {
-            continue;
-        };
-        let Some(end) = rest.find('`') else {
-            continue;
-        };
-        let value = &rest[..end];
-        if !value.is_empty() && !out.iter().any(|existing| existing == value) {
-            out.push(value.to_string());
-        }
-    }
-    Ok(out)
-}
-
 #[derive(Clone, Debug)]
 pub struct Workspace {
     root: PathBuf,
@@ -582,17 +560,56 @@ impl Workspace {
 
     pub fn init_command(agent_root: &Path, path: Option<&str>) -> Result<Value> {
         let (workspace_root, workspace_ref) = resolve_init_target(agent_root, path)?;
-        Workspace::at(workspace_root).init_with_agent_root(agent_root, &workspace_ref)
+        Workspace::at(workspace_root).init_with_workspace_ref(&workspace_ref)
+    }
+
+    #[cfg(feature = "demo")]
+    pub(crate) fn init_empty_command(agent_root: &Path, path: &str) -> Result<(Self, Value)> {
+        if Path::new(path)
+            .components()
+            .find_map(|component| match component {
+                std::path::Component::Normal(value) => value.to_str(),
+                _ => None,
+            })
+            .is_some_and(|first| AFMAIL_RESERVED_INIT_PATHS.contains(&first))
+        {
+            return Err(AppError::new(
+                "invalid_request",
+                format!("demo init path uses an afmail-reserved name: {path}"),
+            ));
+        }
+        let (workspace_root, workspace_ref) = resolve_init_target(agent_root, Some(path))?;
+        if workspace_root.is_dir() {
+            let mut entries = fs::read_dir(&workspace_root)
+                .map_err(|error| AppError::io("inspect init target", &error))?;
+            if entries
+                .next()
+                .transpose()
+                .map_err(|error| AppError::io("inspect init target entry", &error))?
+                .is_some()
+            {
+                return Err(AppError::new(
+                    "invalid_request",
+                    format!(
+                        "demo init target must be empty: {}",
+                        path_to_string(&workspace_root)
+                    ),
+                )
+                .with_hint(
+                    "Choose a new empty relative path; demo init never replaces existing files.",
+                ));
+            }
+        }
+        let workspace = Workspace::at(workspace_root);
+        let result = workspace.init_with_workspace_ref(&workspace_ref)?;
+        Ok((workspace, result))
     }
 
     pub fn init(&self) -> Result<Value> {
-        self.init_with_agent_root(&self.root, ".")
+        self.init_with_workspace_ref(".")
     }
 
-    fn init_with_agent_root(&self, agent_root: &Path, workspace_ref: &str) -> Result<Value> {
-        if self.root.join(layout::AFMAIL).is_dir() {
-            self.require_workspace()?;
-        }
+    fn init_with_workspace_ref(&self, workspace_ref: &str) -> Result<Value> {
         let managed_paths = [
             ".afmail",
             ".afmail/workspace.json",
@@ -621,8 +638,10 @@ impl Workspace {
             .collect::<BTreeSet<_>>();
         prepare_init_target(&self.root)?;
         create_dir_all(&self.root.join(".afmail"))?;
-        let workspace_identity =
-            crate::workspace_identity::initialize_workspace_identity(&self.root)?;
+        let identity_state = crate::workspace_identity::workspace_identity_for_init(&self.root)?;
+        let migration = migration::WorkspaceMigration::preflight(&self.root)?;
+        let workspace_upgraded = identity_state.workspace_upgraded || migration.has_legacy_inputs();
+        let migration_counts = migration.apply()?;
         create_dir_all(&self.root.join(".afmail/messages"))?;
         create_dir_all(&self.root.join(layout::afmail_path(layout::AFMAIL_PULL)))?;
         create_dir_all(&self.root.join(layout::afmail_path(layout::AFMAIL_CACHE)))?;
@@ -660,17 +679,11 @@ impl Workspace {
                 .join(layout::afmail_path(layout::AFMAIL_AUDIT_LOG)),
             "",
         )?;
+        crate::workspace_identity::write_workspace_identity(&self.root, &identity_state.identity)?;
         let config = MailConfig::load(&self.root)?;
         let language = config.template_language();
-        let language_bcp47 = config.resolved_language_bcp47().to_string();
         let timezone_utc_offset = config.resolved_timezone_utc_offset();
-        let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
-        let workspace_paths = agent_workspace_paths(agent_root, workspace_ref)?;
-        let template_context = json!({
-            "language": language_bcp47,
-            "workspaces": workspace_paths.clone(),
-        });
-
+        let mut renderer = TemplateRenderer::new(&self.root, language);
         let workspace_gitignore_path = self.root.join(".gitignore");
         let workspace_gitignore_change = ensure_managed_block_file(
             &workspace_gitignore_path,
@@ -682,8 +695,13 @@ impl Workspace {
 
         let do_not_edit_path = self.root.join(".afmail/DO_NOT_EDIT.txt");
         let do_not_edit_created = !do_not_edit_path.exists();
-        let do_not_edit_rendered =
-            renderer.render(TemplateKey::WorkspaceDoNotEdit, &template_context)?;
+        let do_not_edit_rendered = renderer.render(
+            TemplateKey::WorkspaceDoNotEdit,
+            &EmptyRenderDocument {
+                schema_name: "afmail_workspace_warning_render_document".to_string(),
+                schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+            },
+        )?;
         let do_not_edit_updated = fs::read_to_string(&do_not_edit_path)
             .map(|existing| existing != do_not_edit_rendered)
             .unwrap_or(true);
@@ -691,11 +709,24 @@ impl Workspace {
             write_string(&do_not_edit_path, &do_not_edit_rendered)?;
         }
 
+        migration.remove_legacy_message_files()?;
+        // Init is also the restart point for an interrupted upgrade. Always
+        // rebuild projections so a prior run that committed canonical v2 state
+        // but stopped during rendering can safely finish on the next run.
+        self.render_refresh()?;
+
         Ok(json!({
             "workspace_path": path_to_string(&self.root),
             "workspace_ref": workspace_ref,
-            "workspace_uid": workspace_identity.workspace_uid,
-            "created_rfc3339": workspace_identity.created_rfc3339,
+            "workspace_uid": identity_state.identity.workspace_uid,
+            "created_rfc3339": identity_state.identity.created_rfc3339,
+            "workspace_upgraded": workspace_upgraded,
+            "layout_version_before": identity_state.layout_version_before,
+            "layout_version_after": crate::workspace_identity::WORKSPACE_LAYOUT_VERSION,
+            "message_metadata_migrated_count": migration_counts.message_metadata_migrated_count,
+            "case_migrated_count": migration_counts.case_migrated_count,
+            "notification_migrated_count": migration_counts.notification_migrated_count,
+            "disposition_migrated_count": migration_counts.disposition_migrated_count,
             "gitignore_path": rel_path(&self.root, &workspace_gitignore_path),
             "gitignore_created": workspace_gitignore_change.created,
             "gitignore_updated": workspace_gitignore_change.updated,
@@ -707,7 +738,6 @@ impl Workspace {
             "do_not_edit_path": ".afmail/DO_NOT_EDIT.txt",
             "do_not_edit_created": do_not_edit_created,
             "do_not_edit_updated": do_not_edit_updated,
-            "workspace_paths": workspace_paths,
             "language_bcp47": config.workspace.language_bcp47.clone(),
             "resolved_language_bcp47": config.resolved_language_bcp47(),
             "timezone_utc_offset": timezone_utc_offset,
@@ -747,7 +777,6 @@ impl Workspace {
             .copied()
             .collect::<Vec<_>>();
         let special_use_mapping_complete = missing_special_use_mailbox_ids.is_empty();
-        let afui_host_available = crate::runner::afui_host_available();
         let mut missing_config = Vec::new();
         if config.imap.host.is_none() {
             missing_config.push("imap.host");
@@ -802,7 +831,7 @@ impl Workspace {
         let archived_cases = self.archived_case_items()?;
         let archiving_case_count = archived_cases
             .iter()
-            .filter(|case| case["lifecycle"] == "archiving")
+            .filter(|case| case["status"] == "archiving")
             .count();
         let archived_case_count = archived_cases.len() - archiving_case_count;
         let storage = workspace_storage_usage(&self.root)?;
@@ -831,10 +860,8 @@ impl Workspace {
                 "placeholder_identity": placeholder_identity,
                 "missing_special_use_mailbox_ids": missing_special_use_mailbox_ids,
                 "special_use_mapping_complete": special_use_mapping_complete,
-                "afui_host_available": afui_host_available,
                 "missing_config": missing_config,
-                "remote_validation_command": "afmail remote test",
-                "ui_install_hint": if afui_host_available { Value::Null } else { Value::String("Install afui or use `afmail ui snapshot` with a separately installed afui host.".to_string()) }
+                "remote_validation_command": "afmail remote test"
             }
         }))
     }
@@ -983,7 +1010,7 @@ impl Workspace {
         );
         let step_started = Instant::now();
         let static_inputs = RenderStaticInputs::load(self, MailConfig::load(&self.root)?)?;
-        let preparation = self.prepare_render_context(RenderInvocation::Refresh, static_inputs)?;
+        let preparation = self.prepare_render_context(static_inputs)?;
         let cache = &preparation.materialization;
         crate::progress::emit(
             &mut progress,
@@ -1034,7 +1061,7 @@ impl Workspace {
         );
 
         let config = preparation.context.config();
-        let mut renderer = MarkdownTemplateRenderer::new(&self.root, config.template_language());
+        let mut renderer = TemplateRenderer::new(&self.root, config.template_language());
         let mut totals = RenderRefreshTotals::default();
 
         crate::progress::emit(
@@ -1117,7 +1144,6 @@ impl Workspace {
             let refresh = self.refresh_notification_with_cache(
                 &notification_uid,
                 &mut renderer,
-                false,
                 &mut render_cache,
                 &preparation.context,
             )?;
@@ -1215,36 +1241,50 @@ impl Workspace {
         let builtin_count = 0usize;
         let mut workspace_count = 0usize;
 
-        for language in TemplateLanguage::ALL {
-            for key in TemplateKey::ALL {
-                let path = templates_dir.join(language_template_path(language, key));
-                let existed = path.exists();
-                let (source, action) = if force || !existed {
-                    if let Some(parent) = path.parent() {
-                        create_dir_all(parent)?;
-                    }
-                    write_string(&path, key.builtin_text(language))?;
-                    workspace_count += 1;
-                    if existed {
-                        overwritten_count += 1;
-                        ("workspace", "overwritten")
-                    } else {
-                        exported_count += 1;
-                        ("workspace", "exported")
-                    }
+        let targets = TemplateLanguage::ALL
+            .into_iter()
+            .flat_map(|language| {
+                TemplateKey::ALL
+                    .into_iter()
+                    .filter(|key| key.is_language_scoped())
+                    .map(move |key| (Some(language), key))
+            })
+            .chain(
+                TemplateKey::ALL
+                    .into_iter()
+                    .filter(|key| !key.is_language_scoped())
+                    .map(|key| (None, key)),
+            );
+        for (language, key) in targets {
+            let builtin_language = language.unwrap_or(TemplateLanguage::EnUs);
+            let path = templates_dir.join(language_template_path(builtin_language, key));
+            ensure_workspace_template_path_safe(&templates_dir, &path)?;
+            let existed = path.exists();
+            let (source, action) = if force || !existed {
+                if let Some(parent) = path.parent() {
+                    create_dir_all(parent)?;
+                }
+                write_string(&path, key.builtin_text(builtin_language))?;
+                workspace_count += 1;
+                if existed {
+                    overwritten_count += 1;
+                    ("workspace", "overwritten")
                 } else {
-                    workspace_count += 1;
-                    kept_count += 1;
-                    ("workspace", "kept")
-                };
-                items.push(json!({
-                    "language": language.as_str(),
-                    "template_key": key.as_str(),
-                    "path": rel_path(&self.root, &path),
-                    "source": source,
-                    "action": action,
-                }));
-            }
+                    exported_count += 1;
+                    ("workspace", "exported")
+                }
+            } else {
+                workspace_count += 1;
+                kept_count += 1;
+                ("workspace", "kept")
+            };
+            items.push(json!({
+                "language": language.map(|language| language.as_str()),
+                "template_key": key.as_str(),
+                "path": rel_path(&self.root, &path),
+                "source": source,
+                "action": action,
+            }));
         }
 
         Ok(json!({

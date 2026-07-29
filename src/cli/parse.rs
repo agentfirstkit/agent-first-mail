@@ -1,10 +1,13 @@
-use super::{Cli, Command};
-use agent_first_data::{LogFilters, OutputFormat, cli_parse_log_filters, cli_parse_output};
+use super::{Cli, Command, DemoAction};
+use agent_first_data::{
+    LogFilters, OutputFormat, OutputTo, cli_parse_log_filters, cli_parse_output,
+};
 use clap::{CommandFactory, Parser};
 
 pub struct ParsedArgs {
     pub command: Command,
     pub output: OutputFormat,
+    pub output_to: OutputTo,
     pub log: LogFilters,
     pub workspace: Option<String>,
     pub request_id: Option<String>,
@@ -14,18 +17,50 @@ pub fn parse_args() -> Result<ParsedArgs, String> {
     let cli = Cli::try_parse().map_err(|e| e.to_string())?;
     let _stream_redirect_args = (&cli.stdout_file, &cli.stderr_file);
     let output = cli_parse_output(&cli.output)?;
+    let requested_output_to = cli.output_to.as_deref().map(OutputTo::parse).transpose()?;
     let log = normalize_log_filters(&cli.log, cli.verbose)?;
     match cli.command {
-        Some(command) => {
-            if cli.workspace.is_some() && matches!(command, Command::Init { .. }) {
+        Some(mut command) => {
+            if let Command::Demo {
+                action: DemoAction::Serve { verbose },
+            } = &mut command
+            {
+                *verbose = cli.verbose;
+            }
+            if cli.workspace.is_some()
+                && matches!(
+                    command,
+                    Command::Init { .. }
+                        | Command::Demo {
+                            action: DemoAction::Init { .. }
+                        }
+                )
+            {
                 return Err(
-                    "--workspace selects an existing workspace and cannot be used with init"
-                        .to_string(),
+                    "--workspace selects an existing workspace and cannot be used with init or demo init"
+                        .to_string()
                 );
             }
+            // An event-stream command must keep its whole ordered stream on one
+            // destination; splitting it would strand the review URL or the
+            // served address on the diagnostic stream.
+            let event_stream = crate::cli::root::is_event_stream_command(&command);
+            let output_to = match (requested_output_to, event_stream) {
+                (Some(OutputTo::Split), true) => {
+                    return Err(
+                        "--output-to split cannot be used with a review or serve command: it reports an address before its outcome, so the ordered event stream must stay on one stream. Use --output-to stdout (the default here) or --output-to stderr"
+                            .to_string(),
+                    );
+                }
+                (Some(explicit), _) => explicit,
+                (None, true) => OutputTo::Stdout,
+                (None, false) => OutputTo::Split,
+            };
+
             Ok(ParsedArgs {
                 command,
                 output,
+                output_to,
                 log,
                 workspace: cli.workspace,
                 request_id: cli.request_id,

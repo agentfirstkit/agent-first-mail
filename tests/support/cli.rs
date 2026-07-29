@@ -25,14 +25,16 @@ pub fn run(cwd: &Path, args: &[&str]) -> (i32, String) {
         Ok(v) => v,
         Err(_) => return (99, String::new()),
     };
+    let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+    let stderr = String::from_utf8(output.stderr).unwrap_or_default();
     assert!(
-        output.stderr.is_empty(),
-        "stderr must stay empty: {}",
-        String::from_utf8_lossy(&output.stderr)
+        stdout.is_empty() || stderr.is_empty(),
+        "default split routing produced both streams; use --output-to stdout \
+         when the test needs one ordered event stream\nstdout: {stdout}\nstderr: {stderr}"
     );
     (
         output.status.code().unwrap_or(99),
-        String::from_utf8(output.stdout).unwrap_or_default(),
+        if stdout.is_empty() { stderr } else { stdout },
     )
 }
 
@@ -54,9 +56,9 @@ pub fn run_allow_stderr(cwd: &Path, args: &[&str]) -> (i32, String, String) {
     )
 }
 
-pub fn parse_one(stdout: &str) -> Value {
-    let parsed = serde_json::from_str(stdout.trim());
-    assert!(parsed.is_ok(), "stdout was not JSON: {stdout}");
+pub fn parse_one(stream: &str) -> Value {
+    let parsed = serde_json::from_str(stream.trim());
+    assert!(parsed.is_ok(), "protocol stream was not JSON: {stream}");
     match parsed {
         Ok(v) => protocol_payload(v),
         Err(_) => Value::Null,
@@ -92,15 +94,14 @@ pub fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Optio
         "part_id": "2",
         "filename": "pricing.txt",
         "content_type": "text/plain",
-        "size_bytes": 7,
-        "fetched": false
+        "size_bytes": 7
     });
     if let Some(source) = source_path {
         attachment["source_path"] = json!(source);
     }
     let msg = json!({
         "schema_name": "message",
-        "schema_version": 1,
+        "schema_version": 2,
         "message_id": message_id,
         "rfc822_message_id": format!("<{message_id}@example.com>"),
         "remote": {"locations": [{
@@ -124,12 +125,12 @@ pub fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Optio
     });
     write_json(&root.join(format!("messages/{message_id}.json")), &msg);
     write_json(
-        &root.join(format!(".afmail/messages/{message_id}.remote.json")),
+        &root.join(format!(".afmail/messages/{message_id}.json")),
         &json!({
-            "schema_name": "message_remote",
-            "schema_version": 1,
+            "schema_name": "message_metadata",
+            "schema_version": 2,
             "message_id": message_id,
-            "locations": msg["remote"]["locations"].clone()
+            "remote": msg["remote"].clone()
         }),
     );
     assert!(fs::write(
@@ -144,7 +145,7 @@ pub fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Optio
 #[allow(dead_code)]
 pub fn write_triage(root: &Path, message_id: &str, notes: &str) {
     let text = format!(
-        "---\nkind: triage_view\nmessage_id: {message_id}\nmessage_ids:\n  - {message_id}\nmessage_count: 1\nattachment_count: 1\n---\n\n# Contract renewal\n\n<!-- afmail:conversation:start -->\n\n### {message_id} - 2026-05-21T10:00:00Z - Alice <alice@example.com>\n\n```text\nBody for {message_id}\n```\n\n<!-- afmail:conversation:end -->\n"
+        "---\nkind: triage_view\nmessage_id: {message_id}\n---\n\n# Contract renewal\n\n### {message_id} - 2026-05-21T10:00:00Z - Alice <alice@example.com>\n\n```text\nBody for {message_id}\n```\n"
     );
     let _ = notes;
     assert!(fs::write(root.join(format!("triage/{message_id}.md")), text).is_ok());
@@ -157,15 +158,17 @@ pub fn update_message_json(root: &Path, message_id: &str, update: impl FnOnce(&m
     let mut value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     update(&mut value);
     if value.get("remote").is_some() {
-        write_json(
-            &root.join(format!(".afmail/messages/{message_id}.remote.json")),
-            &json!({
-                "schema_name": "message_remote",
-                "schema_version": 1,
+        let metadata_path = root.join(format!(".afmail/messages/{message_id}.json"));
+        let mut metadata = read_json(&metadata_path);
+        if !metadata.is_object() {
+            metadata = json!({
+                "schema_name": "message_metadata",
+                "schema_version": 2,
                 "message_id": message_id,
-                "locations": value["remote"]["locations"].clone()
-            }),
-        );
+            });
+        }
+        metadata["remote"] = value["remote"].clone();
+        write_json(&metadata_path, &metadata);
     }
     write_json(&path, &value);
     rewrite_message_eml_from_json(root, message_id, &value);

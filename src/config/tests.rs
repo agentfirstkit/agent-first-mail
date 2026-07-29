@@ -268,17 +268,6 @@ fn config_set_and_get_key() {
     );
     assert!(
         cfg.set_key(
-            "notification.message_index.item_fields",
-            &["summary".to_string(), "link".to_string()]
-        )
-        .is_ok()
-    );
-    assert_eq!(
-        cfg.get_key("notification.message_index.item_fields"),
-        Ok(json!(["summary", "link"]))
-    );
-    assert!(
-        cfg.set_key(
             "actions.case.add.steps",
             &[r#"[{"append_to_mailbox_id":"drafts"}]"#.to_string()]
         )
@@ -303,8 +292,6 @@ fn config_set_and_get_key() {
     assert!(cfg.set_key("mailboxes", &[mailboxes_json]).is_ok());
     let actions_json = serde_json::to_string(&cfg.actions).unwrap_or_default();
     assert!(cfg.set_key("actions", &[actions_json]).is_ok());
-    let notification_json = serde_json::to_string(&cfg.notification).unwrap_or_default();
-    assert!(cfg.set_key("notification", &[notification_json]).is_ok());
     assert!(
         cfg.set_key("audit.reason_mode", &["optional".to_string()])
             .is_ok()

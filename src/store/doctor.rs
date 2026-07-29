@@ -94,7 +94,7 @@ impl Workspace {
         let cache = self.rebuild_message_cache_from_eml()?;
         for path in message_json_paths(&self.root)? {
             if let Ok(message) = read_message(&path) {
-                self.persist_message_remote(&message)?;
+                self.persist_message_metadata(&message)?;
             }
         }
         let rendered = self.render_refresh()?;
@@ -232,23 +232,16 @@ impl Workspace {
                     Some(rel_path(&self.root, &eml)),
                 ));
             }
-            if message
-                .remote
-                .as_ref()
-                .is_some_and(|remote| !remote.locations.is_empty())
-            {
-                let remote = self.root.join(format!(
-                    ".afmail/messages/{}.remote.json",
-                    message.message_id
+            let metadata = self
+                .root
+                .join(format!(".afmail/messages/{}.json", message.message_id));
+            if !metadata.is_file() {
+                issues.push(DoctorIssue::warning(
+                    "message_metadata_missing",
+                    format!("missing canonical metadata for {}", message.message_id),
+                    Some(rel_path(&self.root, &metadata)),
+                    true,
                 ));
-                if !remote.is_file() {
-                    issues.push(DoctorIssue::warning(
-                        "message_remote_missing",
-                        format!("missing remote sidecar for {}", message.message_id),
-                        Some(rel_path(&self.root, &remote)),
-                        true,
-                    ));
-                }
             }
         }
         for entry in read_optional_dir(&self.root.join(".afmail/messages"), "read message state")? {
@@ -265,13 +258,13 @@ impl Workspace {
                 ));
                 continue;
             }
-            if let Some(message_id) = name.strip_suffix(".remote.json")
+            if let Some(message_id) = name.strip_suffix(".json")
                 && !ids.contains(message_id)
                 && !self.message_path(message_id).is_file()
             {
                 issues.push(DoctorIssue::warning(
-                    "message_sidecar_orphaned",
-                    format!("sidecar has no materialized message cache: {message_id}"),
+                    "message_metadata_orphaned",
+                    format!("metadata has no materialized message cache: {message_id}"),
                     Some(rel_path(&self.root, &path)),
                     true,
                 ));
@@ -477,9 +470,20 @@ impl Workspace {
             ));
         }
         let language = self.template_language()?;
-        let mut renderer = MarkdownTemplateRenderer::new(&self.root, language);
+        let mut renderer = TemplateRenderer::new(&self.root, language);
         for key in TemplateKey::ALL {
-            if let Err(err) = renderer.render(key, &minimal_template_context(language)) {
+            let context = match minimal_template_context(key) {
+                Ok(context) => context,
+                Err(err) => {
+                    issues.push(DoctorIssue::error(
+                        "template_context_failed",
+                        err.message,
+                        Some(key.as_str().to_string()),
+                    ));
+                    continue;
+                }
+            };
+            if let Err(err) = renderer.render(key, &context) {
                 issues.push(DoctorIssue::error(
                     "template_render_failed",
                     err.message,
@@ -526,182 +530,342 @@ fn read_optional_dir(path: &Path, context: &str) -> Result<Vec<fs::DirEntry>> {
 pub(super) const DOCTOR_SMOKE_MESSAGE_ID: &str = "message_doctor_9f3c";
 pub(super) const DOCTOR_SMOKE_CASE_UID: &str = "c20260609001";
 pub(super) const DOCTOR_SMOKE_NOTIFICATION_UID: &str = "n20260609001";
-pub(super) const DOCTOR_SMOKE_LINK: &str = "../../../triage/message_doctor_9f3c.md";
 pub(super) const DOCTOR_SMOKE_CONVERSATION: &str = "Doctor smoke conversation message_doctor_9f3c.";
 pub(super) const DOCTOR_SMOKE_OTHER_CASE_UID: &str = "c20260609002";
 pub(super) const DOCTOR_SMOKE_OTHER_BODY: &str = "Doctor smoke merge body.";
 pub(super) const DOCTOR_SMOKE_QUOTED: &str = "Doctor smoke quoted body.";
 
-// Mirrors the real shape `thread_item_common` (store/render.rs) produces, so
-// every field a locale pack's case/notification/status templates might key
-// off of (direction_kind OR the richer action_kind) is present.
-fn doctor_smoke_item(direction_kind: &str, action: &str) -> Value {
-    let is_received = direction_kind == "received";
-    let action_kind = match (is_received, action) {
-        (true, "reply") => "received_reply",
-        (true, "forward") => "received_forward",
-        (true, _) => "received",
-        (false, "reply") => "sent_reply",
-        (false, "forward") => "sent_forward",
-        (false, _) => "sent",
-    };
-    json!({
-        "message": {"message_id": DOCTOR_SMOKE_MESSAGE_ID},
-        "view": {
-            "direction": if is_received { "inbound" } else { "outbound" },
-            "direction_kind": direction_kind,
-            "direction_symbol": if is_received { "\u{2190}" } else { "\u{2192}" },
-            "action": action,
-            "action_kind": action_kind,
-            "is_reply": action == "reply",
-            "is_forward": action == "forward",
-            "contact_kind": if is_received { "from" } else { "to" },
-            "contact": "doctor-smoke@example.com",
-            "display_contact": "doctor-smoke@example.com",
-            "display_subject": "Doctor smoke subject",
-            "title": "Doctor smoke subject",
-            "display_title": "Doctor smoke subject",
-            "display_status": "triage",
-            "link": DOCTOR_SMOKE_LINK,
-            "time": {"datetime": "2026-06-09T00:00:00Z"},
-            "time_rfc3339": "2026-06-09T00:00:00Z",
-            "display_time": "2026-06-09T00:00:00Z",
+fn doctor_message(status: &str, message_id: &str, body_text: &str) -> MessageFile {
+    MessageFile {
+        schema_name: "message".to_string(),
+        schema_version: MESSAGE_SCHEMA_VERSION,
+        message_id: message_id.to_string(),
+        rfc822_message_id: Some(format!("<{message_id}@example.com>")),
+        in_reply_to: None,
+        references: Vec::new(),
+        remote: None,
+        agent_suggestion: None,
+        human_suggestion: None,
+        case_relationship_suggestion: (message_id == DOCTOR_SMOKE_MESSAGE_ID).then(|| {
+            CaseRelationshipSuggestion {
+                case_uids: vec![DOCTOR_SMOKE_CASE_UID.to_string()],
+                evidence: crate::types::CaseRelationshipEvidence::ReplyHeadersMatchedLocalCase,
+            }
+        }),
+        direction: Some("inbound".to_string()),
+        subject: Some("Doctor smoke subject".to_string()),
+        from: Some("Doctor Smoke Sender <doctor-smoke-from@example.com>".to_string()),
+        to: vec!["doctor-smoke-to@example.com".to_string()],
+        cc: vec!["doctor-smoke-cc@example.com".to_string()],
+        bcc: Vec::new(),
+        reply_to: Vec::new(),
+        sender: None,
+        delivered_to: Vec::new(),
+        x_original_to: Vec::new(),
+        envelope_to: Vec::new(),
+        list_id: None,
+        mailing_list_headers: Vec::new(),
+        authentication: crate::types::MessageAuthentication {
+            spf: crate::types::AuthVerdict::Pass,
+            dkim: crate::types::AuthVerdict::Pass,
+            dmarc: crate::types::AuthVerdict::Pass,
+            dmarc_policy: None,
+            authenticated_domain: Some("example.com".to_string()),
+            from_domain: Some("example.com".to_string()),
+            alignment: crate::types::AuthAlignment::Aligned,
+            raw: vec!["doctor-smoke authentication".to_string()],
         },
+        received_rfc3339: Some("2026-06-09T00:00:00Z".to_string()),
+        sent_rfc3339: None,
+        body_text: body_text.to_string(),
+        eml_path: Some(format!(".afmail/messages/{message_id}.eml")),
+        attachments: vec![AttachmentRef {
+            part_id: "2".to_string(),
+            filename: "doctor-smoke.png".to_string(),
+            content_type: "image/png".to_string(),
+            size_bytes: 128,
+            file_path: Some(format!(
+                ".afmail/messages/{message_id}.files/doctor-smoke.png"
+            )),
+            source_path: None,
+        }],
+        contact: Some(ContactFrontmatter {
+            kind: crate::types::CONTACT_KIND.to_string(),
+            contact_uid: "doctor-smoke-contact".to_string(),
+            display_name: "Doctor Smoke Contact".to_string(),
+            emails: vec!["doctor-smoke-from@example.com".to_string()],
+            phones: Vec::new(),
+            organization: String::new(),
+            role: String::new(),
+            tags: Vec::new(),
+            created_rfc3339: "2026-06-09T00:00:00Z".to_string(),
+            updated_rfc3339: "2026-06-09T00:00:00Z".to_string(),
+        }),
+        identity: Some("me".to_string()),
+        identity_email: Some("me@example.com".to_string()),
+        identity_match: Some("me".to_string()),
+        identity_candidates: vec!["me".to_string()],
+        observed_recipient_emails: vec!["doctor-smoke-to@example.com".to_string()],
+        workspace: WorkspaceState {
+            status: status.to_string(),
+            notification_uid: None,
+            notification_rfc3339: None,
+            origin: None,
+            remote_sync: None,
+            push: None,
+        },
+    }
+}
+
+fn doctor_message_document(status: &str) -> MessageRenderDocument {
+    build_message_render_document(
+        &doctor_message(status, DOCTOR_SMOKE_MESSAGE_ID, DOCTOR_SMOKE_CONVERSATION),
+        Some("me@example.com"),
+    )
+}
+
+fn doctor_reply_message_document() -> MessageRenderDocument {
+    build_message_render_document(
+        &doctor_message("triage", DOCTOR_SMOKE_MESSAGE_ID, DOCTOR_SMOKE_QUOTED),
+        Some("me@example.com"),
+    )
+}
+
+fn doctor_collection(schema_name: &str, uid: &str, status: &str) -> MessageCollection {
+    let timestamp = "2026-06-09T00:00:00Z";
+    let mut collection = match schema_name {
+        CASE_SCHEMA_NAME => MessageCollection::new_case(uid, "Doctor smoke collection", timestamp),
+        NOTIFICATION_SCHEMA_NAME => {
+            MessageCollection::new_notification(uid, "Doctor smoke collection", timestamp)
+        }
+        _ => MessageCollection::new(schema_name, uid, status),
+    };
+    collection.status = status.to_string();
+    collection.tags = vec!["doctor-smoke".to_string()];
+    collection.upsert_item(
+        DOCTOR_SMOKE_MESSAGE_ID,
+        Some("Doctor smoke summary"),
+        timestamp,
+    );
+    collection
+}
+
+fn doctor_collection_location(schema_name: &str) -> Option<CollectionLocation> {
+    (schema_name == CASE_SCHEMA_NAME).then(|| CollectionLocation {
+        group: "support".to_string(),
     })
 }
 
-fn minimal_template_context(language: TemplateLanguage) -> Value {
-    json!({
-        "items": [
-            doctor_smoke_item("received", "reply"),
-            doctor_smoke_item("sent", "forward"),
-        ],
-        "messages": [],
-        "workspaces": ["."],
-        "other_case_uid": DOCTOR_SMOKE_OTHER_CASE_UID,
-        "other_body": DOCTOR_SMOKE_OTHER_BODY,
-        "sender": "Doctor Smoke Sender",
-        "quoted": DOCTOR_SMOKE_QUOTED,
-        "frontmatter": {
-            "kind": "doctor",
-            "message_id": DOCTOR_SMOKE_MESSAGE_ID,
-            "message_ids": [DOCTOR_SMOKE_MESSAGE_ID],
-            "case_uid": DOCTOR_SMOKE_CASE_UID,
-            "case_name": "doctor",
-            "notification_uid": DOCTOR_SMOKE_NOTIFICATION_UID,
-            "notification_name": "doctor",
-            "status": "active",
-            "message_count": 1,
-            "attachment_count": 1,
-            "generated_rfc3339": "2026-06-09T00:00:00Z",
-            "added_rfc3339": "2026-06-09T00:00:00Z",
-            "suggested_case_uids": [DOCTOR_SMOKE_CASE_UID],
-            "suggested_reason": "doctor smoke reason",
-            "suggested_reason_yaml": "doctor smoke reason",
+fn doctor_collection_document(
+    schema_name: &str,
+    uid: &str,
+    status: &str,
+) -> CollectionRenderDocument {
+    let message_status = match schema_name {
+        CASE_SCHEMA_NAME => "case",
+        NOTIFICATION_SCHEMA_NAME => "notification",
+        _ => status,
+    };
+    collection_render_document(
+        doctor_collection(schema_name, uid, status),
+        vec![doctor_message_document(message_status)],
+        doctor_collection_location(schema_name),
+    )
+}
+
+fn doctor_collection_message_document(
+    schema_name: &str,
+    uid: &str,
+) -> CollectionMessageRenderDocument {
+    let status = if schema_name == NOTIFICATION_SCHEMA_NAME {
+        "notification"
+    } else {
+        "case"
+    };
+    collection_message_render_document(
+        doctor_collection(schema_name, uid, "active"),
+        doctor_message_document(status),
+        doctor_collection_location(schema_name),
+    )
+}
+
+fn doctor_draft_document() -> DraftRenderDocument {
+    let authored = "Doctor smoke authored reply.";
+    let body_markdown = format!("{authored}\n{DOCTOR_SMOKE_QUOTED}");
+    DraftRenderDocument {
+        schema_name: draft_document_schema_name(),
+        schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+        locator: DraftLocator {
+            draft_name: "doctor-smoke.md".to_string(),
+            draft_path: "cases/support/c20260609001/drafts/doctor-smoke.md".to_string(),
         },
-        "message": {
-            "schema_name": "message",
-            "schema_version": 1,
-            "message_id": DOCTOR_SMOKE_MESSAGE_ID,
-            "from": "doctor-smoke-from@example.com",
-            "subject": "Doctor smoke subject",
-            "to": ["doctor-smoke-to@example.com"],
-            "cc": ["doctor-smoke-cc@example.com"],
-            "bcc": [],
-            "contact": {"display_name": "Doctor Smoke Contact", "contact_uid": "doctor-smoke-contact"},
-            "identity_match": "me",
-            "identity": "me",
-            "identity_email": "me@example.com",
-            "identity_candidates": ["me"],
-            "observed_recipient_emails": ["doctor-smoke-to@example.com"],
-            "attachments": [],
-            "workspace": {"status": "triage"},
-        },
-        "view": {
-            "language": language.as_str(),
-            "title": "doctor",
-            "display_title": "doctor",
-            "status": "active",
-            "message_count": 1,
-            "attachment_count": 1,
-            "generated_rfc3339": "2026-06-09T00:00:00Z",
-            "added_rfc3339": "2026-06-09T00:00:00Z",
-            "summary": "doctor smoke summary",
-            "conversation": DOCTOR_SMOKE_CONVERSATION,
-            "related_messages": [
-                {
-                    "message": {"message_id": DOCTOR_SMOKE_MESSAGE_ID},
-                    "view": {
-                        "direction": "inbound",
-                        "from": "doctor-smoke-from@example.com",
-                        "display_contact": "doctor-smoke-from@example.com",
-                        "subject": "Doctor smoke subject",
-                        "display_subject": "Doctor smoke subject",
-                        "time": "2026-06-09T00:00:00Z",
-                        "status": "triage",
-                    },
-                },
-            ],
-            "suggested_case_uids": [DOCTOR_SMOKE_CASE_UID],
-            "suggested_reason": "doctor smoke reason",
-            "message_action": "received",
-            "display_counterparty": "Doctor Smoke Counterparty",
-            "display_time": "2026-06-09T00:00:00Z",
-            "body_text_visible_block": "Doctor smoke body.\n",
-            "body_text_fence": "```",
-            "security": {
-                "authentication": {
-                    "check": false,
-                    "has_results": false,
-                    "spf": "missing",
-                    "dkim": "missing",
-                    "dmarc": "missing",
-                    "dmarc_policy": null,
-                    "authenticated_domain": null,
-                    "from_domain": null,
-                    "alignment": "unknown",
-                },
-                "possible_bcc": false,
-                "reply_to_differs": false,
-                "reply_to_recipients": "",
-                "sender_differs": false,
-                "sender": "",
-                "mailing_list": "",
-                "mailing_list_headers": "",
+        draft: DraftSourceDocument {
+            frontmatter: DraftFrontmatter {
+                kind: Some("draft".to_string()),
+                case_uid: DOCTOR_SMOKE_CASE_UID.to_string(),
+                send_intent: None,
+                sync_intent: None,
+                reply_to_message_id: Some(DOCTOR_SMOKE_MESSAGE_ID.to_string()),
+                identity: Some("me".to_string()),
+                subject: Some("Doctor smoke reply".to_string()),
+                to: vec!["doctor-smoke-to@example.com".to_string()],
+                cc: Vec::new(),
+                attachments: Vec::new(),
             },
-            "hints": [],
-            "attachments": [
-                {
-                    "display_filename": "doctor-smoke.png",
-                    "content_type": "image/png",
-                    "size_bytes": 128,
-                    "part_id": "2",
-                    "file_path": ".afmail/messages/message_doctor_9f3c.files/doctor-smoke.png",
-                    "preview_path": "../../../.afmail/messages/message_doctor_9f3c.files/doctor-smoke.png",
-                    "image_alt": "doctor-smoke.png",
-                },
-            ],
+            body_markdown,
         },
-        "config": {
-            "notification": {
-                "message_index": {
-                    "item_fields": [],
-                },
+        analysis: DraftRenderAnalysis {
+            authored_body_range: TextRange {
+                start_bytes: 0,
+                end_bytes: authored.len(),
             },
+            attachments: Vec::new(),
+            completeness: DraftCompleteness::Complete,
+            status: crate::types::DraftStatus::Editable,
+            push_id: None,
         },
-        "notification": {
-            "notification_uid": DOCTOR_SMOKE_NOTIFICATION_UID,
-            "notification_name": "doctor",
+    }
+}
+
+fn doctor_notes_document() -> NotesRenderDocument {
+    NotesRenderDocument {
+        schema_name: notes_document_schema_name(),
+        schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+        notes_path: "cases/support/c20260609001/notes.md".to_string(),
+        text: DOCTOR_SMOKE_OTHER_BODY.to_string(),
+    }
+}
+
+fn doctor_empty_document() -> EmptyRenderDocument {
+    EmptyRenderDocument {
+        schema_name: "afmail_empty_render_document".to_string(),
+        schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+    }
+}
+
+fn doctor_value<T: Serialize>(value: &T) -> Result<Value> {
+    serde_json::to_value(value).map_err(|error| AppError::json("serialize doctor context", &error))
+}
+
+fn doctor_review_context() -> Result<Value> {
+    Ok(json!({
+        "schema_name": "afmail_review_render_document",
+        "schema_version": RENDER_DOCUMENT_SCHEMA_VERSION,
+        "surface_kind": "case_review",
+        "contents": {
+            "collection": doctor_value(&doctor_collection_document(CASE_SCHEMA_NAME, DOCTOR_SMOKE_CASE_UID, "active"))?,
+            "notes": {
+                "document": doctor_value(&doctor_notes_document())?,
+                "base_hash": "doctor-smoke-notes-hash",
+            },
+            "drafts": [{
+                "document": doctor_value(&doctor_draft_document())?,
+                "base_hash": "doctor-smoke-draft-hash",
+            }],
         },
-        "case": {
-            "case_uid": DOCTOR_SMOKE_CASE_UID,
-            "case_name": "doctor",
-            "collection_uid": DOCTOR_SMOKE_CASE_UID,
-            "collection_name": "doctor",
-            "status": "active",
-        },
-        "item": {},
-    })
+    }))
+}
+
+fn minimal_template_context(key: TemplateKey) -> Result<Value> {
+    match key {
+        TemplateKey::NotesMergeSection => doctor_value(&NotesMergeRenderDocument {
+            schema_name: "afmail_notes_merge_render_document".to_string(),
+            schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+            primary: doctor_notes_document(),
+            merged_case_uid: DOCTOR_SMOKE_OTHER_CASE_UID.to_string(),
+            merged: NotesRenderDocument {
+                schema_name: notes_document_schema_name(),
+                schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+                notes_path: "cases/support/c20260609002/notes.md".to_string(),
+                text: DOCTOR_SMOKE_OTHER_BODY.to_string(),
+            },
+        }),
+        TemplateKey::DraftReply => doctor_value(&DraftReplyRenderDocument {
+            schema_name: "afmail_draft_reply_render_document".to_string(),
+            schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+            message: doctor_reply_message_document(),
+        }),
+        TemplateKey::MessageSection | TemplateKey::MarkdownMessageSectionLayout => {
+            doctor_value(&doctor_message_document("triage"))
+        }
+        TemplateKey::TriageView | TemplateKey::MarkdownTriageViewLayout => {
+            let related = build_message_render_document(
+                &doctor_message(
+                    "triage",
+                    "message_doctor_related",
+                    "Doctor smoke related conversation.",
+                ),
+                Some("me@example.com"),
+            );
+            doctor_value(&triage_render_document(
+                doctor_message_document("triage"),
+                vec![related],
+            ))
+        }
+        TemplateKey::CaseDocument | TemplateKey::MarkdownCaseDocumentLayout => doctor_value(
+            &doctor_collection_document(CASE_SCHEMA_NAME, DOCTOR_SMOKE_CASE_UID, "active"),
+        ),
+        TemplateKey::CaseMessage | TemplateKey::MarkdownCaseMessageLayout => doctor_value(
+            &doctor_collection_message_document(CASE_SCHEMA_NAME, DOCTOR_SMOKE_CASE_UID),
+        ),
+        TemplateKey::NotificationIndex | TemplateKey::MarkdownNotificationIndexLayout => {
+            doctor_value(&doctor_collection_document(
+                NOTIFICATION_SCHEMA_NAME,
+                DOCTOR_SMOKE_NOTIFICATION_UID,
+                "active",
+            ))
+        }
+        TemplateKey::NotificationMessage | TemplateKey::MarkdownNotificationMessageLayout => {
+            doctor_value(&doctor_collection_message_document(
+                NOTIFICATION_SCHEMA_NAME,
+                DOCTOR_SMOKE_NOTIFICATION_UID,
+            ))
+        }
+        TemplateKey::StatusIndex | TemplateKey::MarkdownStatusIndexLayout => {
+            doctor_value(&doctor_collection_document("spam", "spam", "spam"))
+        }
+        TemplateKey::StatusMessage | TemplateKey::MarkdownStatusMessageLayout => {
+            doctor_value(&doctor_message_document("spam"))
+        }
+        TemplateKey::ReviewPage | TemplateKey::ReviewPageLayout => doctor_review_context(),
+        TemplateKey::ReviewMessage | TemplateKey::ReviewMessageLayout => Ok(json!({
+            "message_document": doctor_value(&doctor_message_document("triage"))?,
+        })),
+        TemplateKey::ReviewDraftEditor | TemplateKey::ReviewDraftEditorLayout => Ok(json!({
+            "draft_state": {
+                "document": doctor_value(&doctor_draft_document())?,
+                "base_hash": "doctor-smoke-draft-hash",
+            }
+        })),
+        TemplateKey::ReviewNotesEditor | TemplateKey::ReviewNotesEditorLayout => Ok(json!({
+            "notes_state": {
+                "document": doctor_value(&doctor_notes_document())?,
+                "base_hash": "doctor-smoke-notes-hash",
+            }
+        })),
+        TemplateKey::ContactDefault => doctor_value(&ContactRenderDocument {
+            schema_name: "afmail_contact_render_document".to_string(),
+            schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
+            locator: ContactLocator {
+                group: "people".to_string(),
+                contact_path: "contacts/people/p20260609001-doctor-smoke-contact.md".to_string(),
+            },
+            contact: crate::types::ContactFrontmatter::new(
+                "p20260609001",
+                "Doctor Smoke Contact",
+                "2026-06-09T00:00:00Z",
+            ),
+            notes_markdown: DOCTOR_SMOKE_OTHER_BODY.to_string(),
+        }),
+        TemplateKey::WorkspaceDoNotEdit | TemplateKey::NotesDefault | TemplateKey::DraftNew => {
+            doctor_value(&doctor_empty_document())
+        }
+        TemplateKey::DemoHandoff => Ok(json!({
+            "workspace_ref": "afmail-demo/",
+            "agent_prompt": "doctor-smoke-agent-prompt",
+        })),
+        TemplateKey::LocaleCatalog | TemplateKey::ReviewStyle => Ok(json!({})),
+    }
 }
 
 // Sentinel strings a correctly-wired render of `key` must surface. A template
@@ -711,10 +875,9 @@ fn minimal_template_context(language: TemplateLanguage) -> Value {
 #[cfg(test)]
 fn doctor_smoke_expectations(key: TemplateKey) -> &'static [&'static str] {
     match key {
-        TemplateKey::WorkspaceAgents
-        | TemplateKey::WorkspaceDoNotEdit
-        | TemplateKey::NotesDefault
-        | TemplateKey::DraftNew => &[],
+        TemplateKey::WorkspaceDoNotEdit | TemplateKey::NotesDefault | TemplateKey::DraftNew => &[],
+        TemplateKey::DemoHandoff => &["afmail-demo/", "doctor-smoke-agent-prompt"],
+        TemplateKey::ContactDefault => &[DOCTOR_SMOKE_OTHER_BODY],
         TemplateKey::NotesMergeSection => &[DOCTOR_SMOKE_OTHER_CASE_UID, DOCTOR_SMOKE_OTHER_BODY],
         TemplateKey::DraftReply => &[DOCTOR_SMOKE_QUOTED],
         TemplateKey::MessageSection => &[DOCTOR_SMOKE_MESSAGE_ID],
@@ -733,18 +896,32 @@ fn doctor_smoke_expectations(key: TemplateKey) -> &'static [&'static str] {
             DOCTOR_SMOKE_CASE_UID,
             DOCTOR_SMOKE_CONVERSATION,
         ],
-        TemplateKey::NotificationIndex => &[
-            DOCTOR_SMOKE_MESSAGE_ID,
-            DOCTOR_SMOKE_LINK,
-            DOCTOR_SMOKE_NOTIFICATION_UID,
-        ],
+        TemplateKey::NotificationIndex => &[DOCTOR_SMOKE_MESSAGE_ID, DOCTOR_SMOKE_NOTIFICATION_UID],
         TemplateKey::NotificationMessage => &[
             DOCTOR_SMOKE_MESSAGE_ID,
             DOCTOR_SMOKE_NOTIFICATION_UID,
             DOCTOR_SMOKE_CONVERSATION,
         ],
-        TemplateKey::StatusIndex => &[DOCTOR_SMOKE_MESSAGE_ID, DOCTOR_SMOKE_LINK],
+        TemplateKey::StatusIndex => &[DOCTOR_SMOKE_MESSAGE_ID],
         TemplateKey::StatusMessage => &[DOCTOR_SMOKE_MESSAGE_ID, DOCTOR_SMOKE_CONVERSATION],
+        TemplateKey::ReviewPage => &[DOCTOR_SMOKE_MESSAGE_ID, DOCTOR_SMOKE_CASE_UID],
+        TemplateKey::ReviewMessage => &[DOCTOR_SMOKE_MESSAGE_ID],
+        TemplateKey::ReviewDraftEditor => &["doctor-smoke.md"],
+        TemplateKey::ReviewNotesEditor => &[DOCTOR_SMOKE_OTHER_BODY],
+        TemplateKey::ReviewStyle
+        | TemplateKey::LocaleCatalog
+        | TemplateKey::MarkdownMessageSectionLayout
+        | TemplateKey::MarkdownTriageViewLayout
+        | TemplateKey::MarkdownCaseDocumentLayout
+        | TemplateKey::MarkdownCaseMessageLayout
+        | TemplateKey::MarkdownNotificationIndexLayout
+        | TemplateKey::MarkdownNotificationMessageLayout
+        | TemplateKey::MarkdownStatusIndexLayout
+        | TemplateKey::MarkdownStatusMessageLayout
+        | TemplateKey::ReviewPageLayout
+        | TemplateKey::ReviewMessageLayout
+        | TemplateKey::ReviewDraftEditorLayout
+        | TemplateKey::ReviewNotesEditorLayout => &[],
     }
 }
 
@@ -761,9 +938,17 @@ mod tests {
         // context, and confirm the sentinel identifiers this key is expected
         // to surface actually made it into the rendered text.
         for language in TemplateLanguage::ALL {
-            let mut renderer = MarkdownTemplateRenderer::builtin(language);
+            let mut renderer = TemplateRenderer::builtin(language);
             for key in TemplateKey::ALL {
-                let result = renderer.render(key, &minimal_template_context(language));
+                let context = minimal_template_context(key).unwrap_or_else(|error| {
+                    panic!(
+                        "builtin template {}/{} context failed: {}",
+                        language.as_str(),
+                        key.as_str(),
+                        error.message
+                    )
+                });
+                let result = renderer.render(key, &context);
                 assert!(
                     result.is_ok(),
                     "builtin template {}/{} failed to render: {}",

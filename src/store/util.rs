@@ -293,22 +293,6 @@ pub(super) fn read_to_string(path: &Path, context: &str) -> Result<String> {
     fs::read_to_string(path).map_err(|e| AppError::io(context, &e))
 }
 
-pub(super) fn read_generated_view(root: &Path, path: &Path, view_kind: &str) -> Result<String> {
-    fs::read_to_string(path).map_err(|error| {
-        let view_path = rel_path(root, path);
-        AppError::new(
-            "generated_view_unavailable",
-            format!("generated {view_kind} view is unavailable at {view_path}: {error}"),
-        )
-        .with_hint("Run `afmail render refresh` to rebuild generated views, then retry.")
-        .with_details(json!({
-            "view_kind": view_kind,
-            "view_path": view_path,
-            "suggested_command": "afmail render refresh",
-        }))
-    })
-}
-
 pub(super) fn read_existing_notes(root: &Path, path: &Path) -> Result<String> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(text),
@@ -451,7 +435,7 @@ pub(super) fn read_case_file(case_path: &Path) -> Result<CaseFrontmatter> {
     let case: CaseFrontmatter =
         serde_json::from_str(&data).map_err(|e| AppError::json("parse case metadata", &e))?;
     if case.schema_name != CASE_SCHEMA_NAME
-        || case.schema_version != MESSAGE_COLLECTION_SCHEMA_VERSION
+        || case.schema_version != SUGGESTIBLE_COLLECTION_SCHEMA_VERSION
     {
         return Err(AppError::new(
             "case_metadata_invalid",
@@ -461,15 +445,114 @@ pub(super) fn read_case_file(case_path: &Path) -> Result<CaseFrontmatter> {
             ),
         ));
     }
+    validate_case_collection(&case, case_path)?;
+    validate_case_membership(&case, case_path)?;
+    validate_case_status(&case, case_path)?;
+    super::suggestions::validate_case_suggestion_pair(
+        case.agent_suggestion.as_ref(),
+        case.human_suggestion.as_ref(),
+    )
+    .map_err(|error| {
+        AppError::new(
+            "case_metadata_invalid",
+            format!(
+                "invalid suggestion metadata in {}: {error}",
+                rel_path(case_path, &path)
+            ),
+        )
+    })?;
     Ok(case)
 }
 
 pub(super) fn write_case_file(case_path: &Path, case: &CaseFrontmatter) -> Result<()> {
-    let mut normalized = case.clone();
-    let uid = normalized.collection_uid.clone();
-    let name = normalized.collection_name.clone();
-    normalized.normalize(CASE_SCHEMA_NAME, &uid, &name);
-    write_json_pretty(&case_json_path(case_path), &normalized)
+    if case.schema_name != CASE_SCHEMA_NAME
+        || case.schema_version != SUGGESTIBLE_COLLECTION_SCHEMA_VERSION
+    {
+        return Err(AppError::new(
+            "case_metadata_invalid",
+            format!(
+                "invalid case metadata schema: {}",
+                rel_path(case_path, &case_json_path(case_path))
+            ),
+        ));
+    }
+    validate_case_collection(case, case_path)?;
+    validate_case_membership(case, case_path)?;
+    validate_case_status(case, case_path)?;
+    super::suggestions::validate_case_suggestion_pair(
+        case.agent_suggestion.as_ref(),
+        case.human_suggestion.as_ref(),
+    )?;
+    write_json_pretty(&case_json_path(case_path), case)
+}
+
+pub(super) fn validate_case_collection(case: &CaseFrontmatter, case_path: &Path) -> Result<()> {
+    let expected_uid = case_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| parse_case_ref(name).ok());
+    let content_issues = message_collection_content_issues(case);
+    if validate_case_uid(&case.collection_uid).is_ok()
+        && expected_uid.as_deref() == Some(case.collection_uid.as_str())
+        && content_issues.is_empty()
+    {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "case_metadata_invalid",
+        format!(
+            "invalid canonical case collection: {}",
+            path_to_string(&case_json_path(case_path))
+        ),
+    )
+    .with_details(json!({
+        "case_path": path_to_string(case_path),
+        "expected_case_uid": expected_uid,
+        "case_uid": case.collection_uid,
+        "content_issues": content_issues,
+    })))
+}
+
+pub(super) fn validate_case_membership(case: &CaseFrontmatter, case_path: &Path) -> Result<()> {
+    let Some(message_id) = case.duplicate_message_id() else {
+        return Ok(());
+    };
+    Err(AppError::new(
+        "case_metadata_invalid",
+        format!(
+            "case {} contains duplicate canonical membership for {message_id}",
+            case.collection_uid
+        ),
+    )
+    .with_details(json!({
+        "case_uid": case.collection_uid,
+        "message_id": message_id,
+        "case_path": path_to_string(case_path),
+    })))
+}
+
+pub(super) fn validate_case_status(case: &CaseFrontmatter, case_path: &Path) -> Result<()> {
+    let valid = match case.status.as_str() {
+        "" | "archiving" => case.archived_rfc3339.is_none(),
+        "archived" => case.archived_rfc3339.is_some(),
+        _ => false,
+    };
+    if valid {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "case_metadata_invalid",
+        format!(
+            "case {} has inconsistent canonical status {:?} and archived_rfc3339",
+            case.collection_uid, case.status
+        ),
+    )
+    .with_details(json!({
+        "case_uid": case.collection_uid,
+        "status": case.status,
+        "archived_rfc3339": case.archived_rfc3339,
+        "case_path": path_to_string(case_path),
+    })))
 }
 
 pub(super) fn merge_flags(existing: &mut Vec<String>, flags: &[String]) -> bool {
@@ -668,6 +751,58 @@ pub(super) fn validate_uid(label: &str, value: &str, prefix: char) -> Result<()>
         ));
     }
     Ok(())
+}
+
+pub(super) fn message_collection_content_issues(collection: &MessageCollection) -> Vec<String> {
+    let mut issues = Vec::new();
+    if validate_name("collection_name", &collection.collection_name).is_err() {
+        issues.push("collection_name is empty or path-unsafe".to_string());
+    }
+    for (field, value) in [
+        ("created_rfc3339", collection.created_rfc3339.as_deref()),
+        ("updated_rfc3339", collection.updated_rfc3339.as_deref()),
+    ] {
+        if value.is_some_and(|value| DateTime::parse_from_rfc3339(value).is_err()) {
+            issues.push(format!("{field} is not RFC 3339"));
+        }
+    }
+    if collection
+        .archived_rfc3339
+        .as_deref()
+        .is_some_and(|value| DateTime::parse_from_rfc3339(value).is_err())
+    {
+        issues.push("archived_rfc3339 is not RFC 3339".to_string());
+    }
+    let mut tags = BTreeSet::new();
+    for tag in &collection.tags {
+        if validate_id("tag", tag).is_err() {
+            issues.push(format!("invalid tag: {tag}"));
+        } else if !tags.insert(tag.as_str()) {
+            issues.push(format!("duplicate tag: {tag}"));
+        }
+    }
+    for item in &collection.items {
+        if validate_id("message_id", &item.message_id).is_err() {
+            issues.push(format!("invalid message_id: {}", item.message_id));
+        }
+        if DateTime::parse_from_rfc3339(&item.added_rfc3339).is_err() {
+            issues.push(format!(
+                "invalid added_rfc3339 for message {}",
+                item.message_id
+            ));
+        }
+        if item
+            .summary
+            .as_deref()
+            .is_some_and(|summary| summary.is_empty() || summary.trim() != summary)
+        {
+            issues.push(format!(
+                "non-canonical summary for message {}",
+                item.message_id
+            ));
+        }
+    }
+    issues
 }
 
 pub(super) fn notification_uid_from_dir_name(value: &str) -> Option<String> {
@@ -973,7 +1108,7 @@ impl Workspace {
         Ok(MailConfig::load(&self.root)?.resolved_timezone_offset())
     }
 
-    pub(super) fn require_workspace(&self) -> Result<()> {
+    pub(crate) fn require_workspace(&self) -> Result<()> {
         let afmail = self.root.join(layout::AFMAIL);
         if !afmail.is_dir() {
             return Err(AppError::new(
@@ -981,30 +1116,8 @@ impl Workspace {
                 "no .afmail directory found at workspace root",
             ));
         }
-        let legacy = layout::LEGACY_AFMAIL_FILES
-            .iter()
-            .filter(|name| afmail.join(name).exists())
-            .copied()
-            .collect::<Vec<_>>();
-        if legacy.is_empty() {
-            return Ok(());
-        }
-        Err(AppError::new(
-            "workspace_layout_outdated",
-            "workspace uses the obsolete flat .afmail state layout",
-        )
-        .with_hint(
-            "Create .afmail/pull and .afmail/cache, move pull-cursors.json to pull/cursors.json, remove the other reported legacy files, then run `afmail render refresh`.",
-        )
-        .with_details(json!({
-            "legacy_paths": legacy.iter().map(|name| format!(".afmail/{name}")).collect::<Vec<_>>(),
-            "migration": [
-                "mkdir -p .afmail/pull .afmail/cache",
-                "git mv .afmail/pull-cursors.json .afmail/pull/cursors.json",
-                "rm -f .afmail/workspace.lock .afmail/workspace.progress.json .afmail/render-cache.json .afmail/config.example.json",
-                "afmail render refresh"
-            ]
-        })))
+        crate::workspace_identity::load_workspace_identity(&self.root)?;
+        Ok(())
     }
 
     pub(super) fn first_related_message_date(&self, message_id: &str) -> Result<String> {

@@ -11,6 +11,7 @@ fn local_config() -> Value {
     json!({
         "schema_name": "config",
         "schema_version": 1,
+        "workspace": {"timezone_utc_offset": "UTC"},
         "actions": {
             "case": {"add": {"steps": []}},
             "message": {
@@ -81,6 +82,56 @@ fn create_notification(
     let path = value["path"].as_str().unwrap_or_default();
     assert!(!path.is_empty(), "{value}");
     (notification_uid, root.join(path))
+}
+
+#[test]
+fn render_rejects_inconsistent_disposition_status_and_duplicate_membership() {
+    let root = temp_root("render-invalid-disposition-state");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    assert!(fs::create_dir_all(root.join("spam/data")).is_ok());
+    assert!(fs::create_dir_all(root.join("trash/data")).is_ok());
+
+    let item = json!({
+        "message_id": "message_disposition_conflict",
+        "added_rfc3339": "2026-07-22T00:00:00Z"
+    });
+    let mut spam = json!({
+        "schema_name": "spam",
+        "schema_version": 2,
+        "collection_uid": "spam",
+        "collection_name": "spam",
+        "status": "trashed",
+        "created_rfc3339": "2026-07-22T00:00:00Z",
+        "updated_rfc3339": "2026-07-22T00:00:00Z",
+        "items": [item.clone()]
+    });
+    write_json(&root.join("spam/data/spam.json"), &spam);
+
+    let (status, stdout) = run(&root, &["render", "refresh"]);
+    assert_ne!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "disposition_messages_invalid");
+
+    spam["status"] = json!("spam");
+    write_json(&root.join("spam/data/spam.json"), &spam);
+    write_json(
+        &root.join("trash/data/trash.json"),
+        &json!({
+            "schema_name": "trash",
+            "schema_version": 2,
+            "collection_uid": "trash",
+            "collection_name": "trash",
+            "status": "trashed",
+            "created_rfc3339": "2026-07-22T00:00:00Z",
+            "updated_rfc3339": "2026-07-22T00:00:00Z",
+            "items": [item]
+        }),
+    );
+
+    let (status, stdout) = run(&root, &["render", "refresh"]);
+    assert_ne!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "disposition_state_invalid");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -185,5 +236,131 @@ fn render_refresh_rebuilds_generated_views_and_removes_obsolete_case_indexes() {
             .unwrap_or(0),
         0
     );
+
+    let canonical_case_view = fs::read_to_string(active_path.join("case.md")).unwrap_or_default();
+    assert!(fs::write(active_path.join("case.md"), "tampered generated view\n").is_ok());
+    let (status, stdout) = run(&root, &["render", "refresh"]);
+    assert_eq!(status, 0, "{stdout}");
+    let repaired = parse_one(&stdout);
+    assert_eq!(repaired["generated"]["case/case.md.j2"], 1);
+    assert_eq!(
+        fs::read_to_string(active_path.join("case.md")).unwrap_or_default(),
+        canonical_case_view
+    );
+
+    let mut config: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".afmail/config.json")).unwrap_or_default(),
+    )
+    .unwrap_or(Value::Null);
+    config["workspace"]["timezone_utc_offset"] = json!("+08:00");
+    write_json(&root.join(".afmail/config.json"), &config);
+    let (status, stdout) = run(&root, &["render", "refresh"]);
+    assert_eq!(status, 0, "{stdout}");
+    let timezone_refresh = parse_one(&stdout);
+    assert!(
+        timezone_refresh["generated"]["case/case.md.j2"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0
+    );
+    let timezone_case_view = fs::read_to_string(active_path.join("case.md")).unwrap_or_default();
+    assert_ne!(timezone_case_view, canonical_case_view);
+    assert!(
+        timezone_case_view.contains("+08:00"),
+        "{timezone_case_view}"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let outside = root.join("outside-template.j2");
+        assert!(fs::write(&outside, "outside").is_ok());
+        let shared = root.join("templates/shared");
+        assert!(fs::create_dir_all(&shared).is_ok());
+        assert!(symlink(&outside, shared.join("linked-template.j2")).is_ok());
+        let (status, stdout) = run(&root, &["render", "refresh"]);
+        assert_eq!(status, 1, "{stdout}");
+        assert_eq!(parse_one(&stdout)["code"], "template_path_unsafe");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn render_cache_hashes_the_complete_typed_template_document() {
+    let root = temp_root("render-cache-complete-document");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &local_config());
+
+    write_message(&root, "message_case_cache", 91, None);
+    write_triage(&root, "message_case_cache", "case cache");
+    let (_case_uid, case_path) =
+        create_case(&root, "cache-case", "message_case_cache", "case cache");
+
+    write_message(&root, "message_notification_cache", 92, None);
+    write_triage(&root, "message_notification_cache", "notification cache");
+    let (_notification_uid, notification_path) = create_notification(
+        &root,
+        "cache-notification",
+        "message_notification_cache",
+        "notification cache",
+        "notification cache",
+    );
+
+    assert!(fs::create_dir_all(root.join("templates/en-US/case")).is_ok());
+    assert!(fs::create_dir_all(root.join("templates/en-US/notification")).is_ok());
+    assert!(
+        fs::write(
+            root.join("templates/en-US/case/message.md.j2"),
+            "case tags={{ document.collection.tags | join(',') }}\n",
+        )
+        .is_ok()
+    );
+    assert!(
+        fs::write(
+            root.join("templates/en-US/notification/notification.md.j2"),
+            "notification tags={{ document.collection.tags | join(',') }}\n",
+        )
+        .is_ok()
+    );
+
+    let (status, stdout) = run(&root, &["render", "refresh"]);
+    assert_eq!(status, 0, "{stdout}");
+    let (status, stdout) = run(&root, &["render", "refresh"]);
+    assert_eq!(status, 0, "{stdout}");
+    let warm = parse_one(&stdout);
+    assert_eq!(warm["generated"]["case/message.md.j2"], 0);
+    assert_eq!(warm["generated"]["notification/notification.md.j2"], 0);
+
+    let case_json_path = case_path.join("data/case.json");
+    let mut case_data: Value =
+        serde_json::from_str(&fs::read_to_string(&case_json_path).unwrap_or_default())
+            .unwrap_or(Value::Null);
+    case_data["tags"] = json!(["case-tag-from-document"]);
+    write_json(&case_json_path, &case_data);
+
+    let notification_json_path = notification_path.join("data/notification.json");
+    let mut notification_data: Value =
+        serde_json::from_str(&fs::read_to_string(&notification_json_path).unwrap_or_default())
+            .unwrap_or(Value::Null);
+    notification_data["tags"] = json!(["notification-tag-from-document"]);
+    write_json(&notification_json_path, &notification_data);
+
+    let (status, stdout) = run(&root, &["render", "refresh"]);
+    assert_eq!(status, 0, "{stdout}");
+    let refreshed = parse_one(&stdout);
+    assert_eq!(refreshed["generated"]["case/message.md.j2"], 1);
+    assert_eq!(refreshed["generated"]["notification/notification.md.j2"], 1);
+    assert_eq!(
+        fs::read_to_string(case_path.join("views/messages/message_case_cache.md"))
+            .unwrap_or_default(),
+        "case tags=case-tag-from-document"
+    );
+    assert_eq!(
+        fs::read_to_string(notification_path.join("notification.md")).unwrap_or_default(),
+        "notification tags=notification-tag-from-document"
+    );
+
     let _ = fs::remove_dir_all(root);
 }

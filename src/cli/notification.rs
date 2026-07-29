@@ -1,3 +1,4 @@
+use super::common::ReviewMode;
 use clap::{Args, Subcommand};
 
 #[derive(Subcommand, Debug)]
@@ -20,10 +21,23 @@ pub enum NotificationCommand {
     },
     /// List compact notification collections.
     List,
-    /// Show notification collection index and entries.
+    /// Show the exact typed notification document used by Markdown and Review.
     Show {
         /// Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix.
         notification_ref: String,
+    },
+    /// Open a review session for this notification and its persisted suggestion.
+    Review {
+        /// Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix.
+        notification_ref: String,
+        /// Review presentation mode.
+        #[arg(long, value_enum, default_value = "local")]
+        mode: ReviewMode,
+    },
+    /// Set or clear the current typed Agent suggestion for this collection.
+    Suggestion {
+        #[command(subcommand)]
+        action: NotificationSuggestionAction,
     },
     /// Remove a notification message from this collection and return it to triage.
     Remove {
@@ -82,6 +96,49 @@ pub enum NotificationCommand {
     Notes {
         #[command(subcommand)]
         action: NotificationNotesAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum NotificationSuggestionAction {
+    /// Replace the current suggestion and clear any human review of the prior round.
+    Set(NotificationSuggestionSetArgs),
+    /// Clear exactly the current suggestion round.
+    Clear {
+        /// Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix.
+        notification_ref: String,
+        /// UID returned by the current suggestion set command.
+        #[arg(long)]
+        agent_suggestion_uid: String,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct NotificationSuggestionSetArgs {
+    /// Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix.
+    pub notification_ref: String,
+    /// Current hash returned by `afmail notification show`.
+    #[arg(long)]
+    pub notification_review_base_hash: String,
+    /// Why this complete action is being suggested.
+    #[arg(long)]
+    pub reason: String,
+    /// Optional confidence from 0 through 100.
+    #[arg(long)]
+    pub confidence_percent: Option<u8>,
+    #[command(subcommand)]
+    pub action: NotificationSuggestionActionKind,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum NotificationSuggestionActionKind {
+    Rename {
+        #[arg(long)]
+        name: String,
+    },
+    Delete {
+        #[arg(long)]
+        allow_notes: bool,
     },
 }
 
