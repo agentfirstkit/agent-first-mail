@@ -55,6 +55,12 @@ pub struct DraftFrontmatter {
         deserialize_with = "de_null_seq",
         skip_serializing_if = "Vec::is_empty"
     )]
+    pub bcc: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "de_null_seq",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub attachments: Vec<String>,
 }
 
@@ -77,7 +83,7 @@ mod tests {
 
     #[test]
     fn draft_tolerates_empty_arrays() {
-        let text = "---\nkind: draft\ncase_uid: c20260521001\nsubject: Hello\nto:\n  - a@example.com\ncc:\nattachments:\n---\nbody";
+        let text = "---\nkind: draft\ncase_uid: c20260521001\nsubject: Hello\nto:\n  - a@example.com\ncc:\nbcc:\nattachments:\n---\nbody";
         let parsed = read_doc::<DraftFrontmatter>(text);
         assert!(parsed.is_ok(), "{parsed:?}");
         if let Ok((fm, body)) = parsed {
@@ -85,6 +91,7 @@ mod tests {
             assert_eq!(fm.subject.as_deref(), Some("Hello"));
             assert_eq!(fm.to, vec!["a@example.com".to_string()]);
             assert!(fm.cc.is_empty());
+            assert!(fm.bcc.is_empty());
             assert!(fm.attachments.is_empty());
             assert_eq!(body.trim(), "body");
         }

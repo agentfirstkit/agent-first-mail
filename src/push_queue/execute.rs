@@ -284,7 +284,9 @@ pub(super) fn execute_tracked_steps(
                 )?;
             }
             Err(err) => {
-                let err = if step_remote_outcome_unknown(item, index) {
+                let err = if step_remote_outcome_unknown(item, index)
+                    && !remote_calls_not_started(&err)
+                {
                     let unknown =
                         remote_outcome_unknown_error(context.root, item, index, step, Some(&err));
                     mark_step_remote_outcome_unknown(item, index, step, Some(&err));
@@ -316,6 +318,15 @@ pub(super) fn execute_tracked_steps(
         }
     }
     Ok(())
+}
+
+fn remote_calls_not_started(error: &AppError) -> bool {
+    error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("remote_calls_started"))
+        .and_then(Value::as_bool)
+        == Some(false)
 }
 
 fn refresh_after_successful_step(
@@ -654,7 +665,7 @@ pub(super) fn execute_outbound_step(
         context.remote.send_raw_message(
             &prepared.envelope_from,
             &prepared.envelope_to,
-            &prepared.raw,
+            &prepared.delivery_raw,
         )?;
     }
     if let Some(mailbox_id) = &step.append_to_mailbox_id {
@@ -707,6 +718,13 @@ pub(super) fn execute_message_step(
     }
     if let Some(mailbox_id) = &step.move_to_mailbox_id {
         let locations = action_locations(context.root, item, step)?;
+        let target = context.remote.action_mailbox_folder(mailbox_id)?;
+        if locations
+            .iter()
+            .any(|location| location.mailbox_name != target)
+        {
+            persist_remote_outcome_unknown(context.root, item, index, step)?;
+        }
         execute_move(context.root, context.remote, item, &locations, mailbox_id)?;
     }
     if let Some(mailbox_id) = &step.append_to_mailbox_id {
@@ -784,11 +802,17 @@ pub(super) fn execute_add_flags(
     if locations.is_empty() {
         return Ok(());
     }
-    for location in locations {
-        remote.add_flags(&location.mailbox_name, location.uid, flags)?;
-    }
     let workspace = crate::store::Workspace::at(root);
-    workspace.add_remote_flags(locations, flags)
+    for location in locations {
+        remote.add_flags(
+            &location.mailbox_name,
+            location.uid_validity,
+            location.uid,
+            flags,
+        )?;
+        workspace.add_remote_flags(std::slice::from_ref(location), flags)?;
+    }
+    Ok(())
 }
 
 pub(super) fn execute_move(
@@ -803,48 +827,39 @@ pub(super) fn execute_move(
     }
     let workspace = crate::store::Workspace::at(root);
     let mut rfc822_ids = BTreeMap::new();
-    for location in locations {
-        if rfc822_ids.contains_key(&location.message_id) {
+    let mut active_locations: BTreeMap<String, Vec<crate::types::RemoteLocation>> = BTreeMap::new();
+    for message_id in item.message_ids() {
+        if active_locations.contains_key(message_id) {
             continue;
         }
-        let message = workspace.read_message_by_id(&location.message_id)?;
+        let message = workspace.read_message_by_id(message_id)?;
         let Some(rfc822_message_id) = message.rfc822_message_id else {
             return Err(AppError::new(
                 "rfc822_message_id_missing",
                 format!(
                     "message cannot be relocated after remote move without Message-ID: {}",
-                    location.message_id
+                    message_id
                 ),
             ));
         };
-        rfc822_ids.insert(location.message_id.clone(), rfc822_message_id);
+        rfc822_ids.insert(message_id.clone(), rfc822_message_id);
+        active_locations.insert(
+            message_id.clone(),
+            message
+                .remote
+                .map(|remote| {
+                    remote
+                        .locations
+                        .into_iter()
+                        .filter(|location| location.missing_rfc3339.is_none())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        );
     }
     let target = remote.action_mailbox_folder(mailbox_id)?;
-    let mut target_locations: BTreeMap<String, Vec<crate::types::RemoteLocation>> = BTreeMap::new();
-    for message_id in item.message_ids() {
-        let message = workspace.read_message_by_id(message_id)?;
-        if let Some(remote) = message.remote {
-            for location in remote.locations {
-                if location.missing_rfc3339.is_none()
-                    && location.mailbox_name == target
-                    && location.uid_validity.is_some()
-                    && location.uid.is_some()
-                {
-                    target_locations
-                        .entry(message_id.clone())
-                        .or_default()
-                        .push(location);
-                }
-            }
-        }
-    }
-    for message_id in item.message_ids() {
-        if let Some(target_locations) = target_locations.get(message_id) {
-            workspace.relocate_message(message_id, target_locations)?;
-        }
-    }
     for location in locations {
-        if target_locations.contains_key(&location.message_id) {
+        if location.mailbox_name == target {
             continue;
         }
         let rfc822_message_id = rfc822_ids
@@ -852,19 +867,48 @@ pub(super) fn execute_move(
             .ok_or_else(|| AppError::new("rfc822_message_id_missing", "Message-ID missing"))?;
         let outcome = remote.move_message(
             &location.mailbox_name,
+            location.uid_validity,
             location.uid,
             &target,
             Some(rfc822_message_id.as_str()),
         )?;
-        if let Some(target_location) = outcome.target_location {
-            target_locations
-                .entry(location.message_id.clone())
-                .or_default()
-                .push(target_location);
-            if let Some(target_locations) = target_locations.get(&location.message_id) {
-                workspace.relocate_message(&location.message_id, target_locations)?;
-            }
+        let target_location = outcome.target_location.ok_or_else(|| {
+            AppError::new(
+                "push_remote_outcome_unknown",
+                format!(
+                    "remote move completed without a target UID for message {}",
+                    location.message_id
+                ),
+            )
+            .with_hint(
+                "Inspect the source and target mailboxes, then run `afmail pull` before retrying.",
+            )
+        })?;
+        let message_locations =
+            active_locations
+                .get_mut(&location.message_id)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "message_not_found",
+                        format!(
+                            "message not found during remote relocation: {}",
+                            location.message_id
+                        ),
+                    )
+                })?;
+        message_locations.retain(|existing| {
+            !(existing.mailbox_name == location.mailbox_name
+                && existing.uid_validity == Some(location.uid_validity)
+                && existing.uid == Some(location.uid))
+        });
+        if !message_locations.iter().any(|existing| {
+            existing.mailbox_name == target_location.mailbox_name
+                && existing.uid_validity == target_location.uid_validity
+                && existing.uid == target_location.uid
+        }) {
+            message_locations.push(target_location);
         }
+        workspace.relocate_message(&location.message_id, message_locations)?;
     }
     Ok(())
 }
@@ -924,6 +968,41 @@ mod tests {
             updated_rfc3339: "2026-06-09T00:00:00Z".to_string(),
             attempt_count: 0,
             step_states,
+            local_stage: None,
+            audit_pending: None,
+            last_error: None,
+        }
+    }
+
+    fn message_action_item(
+        push_id: &str,
+        action: MessagePushAction,
+        message_ids: Vec<String>,
+        locations: Vec<PushLocation>,
+    ) -> PushItem {
+        PushItem {
+            schema_name: "push_item".to_string(),
+            schema_version: PUSH_ITEM_SCHEMA_VERSION,
+            push_id: push_id.to_string(),
+            enqueue_seq: 1,
+            payload: PushPayload::Message(MessagePush {
+                message_id: message_ids.first().cloned().unwrap_or_default(),
+                action,
+            }),
+            planned_outbound: None,
+            planned_outbound_message: None,
+            planned_message_action: Some(MessageActionPush {
+                action,
+                message_ids,
+                locations,
+                steps: Vec::new(),
+                reply_to_message_id: None,
+            }),
+            planned_message_rfc822: BTreeMap::new(),
+            created_rfc3339: "2026-06-09T00:00:00Z".to_string(),
+            updated_rfc3339: "2026-06-09T00:00:00Z".to_string(),
+            attempt_count: 0,
+            step_states: Vec::new(),
             local_stage: None,
             audit_pending: None,
             last_error: None,
@@ -1211,6 +1290,123 @@ mod tests {
             json!("INBOX")
         );
         assert_eq!(second["remote"]["locations"][0]["uid"], json!(2));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn move_skips_only_the_location_already_in_target_mailbox() {
+        let root = temp_root("move-multiple-locations");
+        write_message_json(&root, "message_multiple", "<multiple@example.com>", 1);
+        let path = root.join("messages/message_multiple.json");
+        let mut message = fs::read_to_string(&path)
+            .ok()
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .unwrap_or(Value::Null);
+        if let Some(locations) = message["remote"]["locations"].as_array_mut() {
+            locations.push(json!({
+                "mailbox_name": "Archive",
+                "uid_validity": 44,
+                "uid": 2,
+                "flags": [],
+                "observed_rfc3339": "2026-06-09T00:00:00Z"
+            }));
+        }
+        assert!(crate::util::write_json_pretty(&path, &message).is_ok());
+        let locations = vec![
+            PushLocation {
+                message_id: "message_multiple".to_string(),
+                mailbox_name: "INBOX".to_string(),
+                uid_validity: 44,
+                uid: 1,
+            },
+            PushLocation {
+                message_id: "message_multiple".to_string(),
+                mailbox_name: "Archive".to_string(),
+                uid_validity: 44,
+                uid: 2,
+            },
+        ];
+        let item = message_action_item(
+            "push_move_multiple",
+            MessagePushAction::CaseAdd,
+            vec!["message_multiple".to_string()],
+            locations.clone(),
+        );
+        let remote = crate::remote::FakeMailRemote::default();
+
+        let result = execute_move(&root, &remote, &item, &locations, "Archive");
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            remote.move_requests.borrow().as_slice(),
+            &[("INBOX".to_string(), 44, 1, "Archive".to_string())]
+        );
+        let message = fs::read_to_string(&path)
+            .ok()
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .unwrap_or(Value::Null);
+        let locations = message["remote"]["locations"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        assert_eq!(locations.len(), 2, "{message}");
+        assert!(
+            locations
+                .iter()
+                .all(|location| location["mailbox_name"] == "Archive"),
+            "{message}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_flags_persists_each_success_before_a_later_failure() {
+        let root = temp_root("flags-partial");
+        write_message_json(&root, "message_one", "<one@example.com>", 1);
+        write_message_json(&root, "message_two", "<two@example.com>", 2);
+        let remote = crate::remote::FakeMailRemote::default();
+        remote.add_flags_results.borrow_mut().extend([
+            Ok(()),
+            Err(AppError::new(
+                "imap_store_failed",
+                "simulated second flag failure",
+            )),
+        ]);
+        let locations = vec![
+            PushLocation {
+                message_id: "message_one".to_string(),
+                mailbox_name: "INBOX".to_string(),
+                uid_validity: 44,
+                uid: 1,
+            },
+            PushLocation {
+                message_id: "message_two".to_string(),
+                mailbox_name: "INBOX".to_string(),
+                uid_validity: 44,
+                uid: 2,
+            },
+        ];
+
+        let result = execute_add_flags(&root, &remote, &locations, &["\\Seen".to_string()]);
+
+        assert_eq!(
+            result.err().map(|error| error.error_code),
+            Some("imap_store_failed")
+        );
+        let first = fs::read_to_string(root.join("messages/message_one.json"))
+            .ok()
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .unwrap_or(Value::Null);
+        let second = fs::read_to_string(root.join("messages/message_two.json"))
+            .ok()
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .unwrap_or(Value::Null);
+        assert_eq!(first["remote"]["locations"][0]["flags"], json!(["\\Seen"]));
+        assert_eq!(second["remote"]["locations"][0]["flags"], json!([]));
+        assert_eq!(
+            remote.add_flags_requests.borrow()[0],
+            ("INBOX".to_string(), 44, 1, vec!["\\Seen".to_string()])
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

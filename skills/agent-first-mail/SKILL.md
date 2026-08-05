@@ -9,9 +9,9 @@ Use this skill when an agent works in an afmail mailbox workspace or needs to
 operate mail with the `afmail` CLI/API. Prefer `afmail` over manually editing
 workspace metadata or using ad hoc IMAP/SMTP scripts.
 
-For flag-level detail, run `afmail --help` or
-`afmail --help --recursive --output markdown`. This skill covers behavior,
-decisions, and recovery only.
+For flag-level detail, run `afmail <command> --help`, which returns every
+legal argument combination of that command at once, or `afmail --docs` for the
+whole reference. This skill covers behavior, decisions, and recovery only.
 
 Automatic discovery of this skill does not authorize an operation. Apply these
 separate boundaries:
@@ -76,21 +76,42 @@ separate boundaries:
   as `spam`/`trashed` and shown in generated `spam/`/`trash/` views, not triage.
 - A normal pull uses the safe initial history/count/bytes budgets reported in
   its result. For a large or unfamiliar mailbox, run `afmail pull --dry-run`
-  first and report `candidate_count`, declared bytes and budget skips. Use
+  first and report `candidate_count`, declared bytes and budget skips. That
+  count is an upper bound (`candidate_count_is_upper_bound`): the same message
+  filed in two mailboxes is recognized from the body, which a dry run does not
+  fetch, so a real pull can store fewer messages than it predicted. Use
   `--all-history` only when the user explicitly requests full history; it does
   not disable `--max-new-messages` or `--max-total-bytes`.
+- A message's identity is the content of its raw RFC822 bytes, not its
+  `Message-ID` header. Two copies of one mail are the same message only if the
+  bytes match: a mailing-list copy that differs by one added header is stored
+  as a second message, and copies that do match are stored once with several
+  remote locations. Never assume a `Message-ID` seen remotely maps to exactly
+  one local message.
 - Remote-deleted unreferenced mail is retained locally as `deleted_remote` and
   shown in generated `deleted/` views until the user asks to purge it.
 - Pull is read-only IMAP and must not mark, move, tag, delete, append, or create
   remote mailboxes. For long pulls or confirmed pushes, poll `afmail status`
   every few seconds when the command is still running; use
-  `afmail --output-to stdout --log progress ...` only when one ordered JSONL
-  progress stream is explicitly useful.
+  `afmail <command> ... --output-to stdout --log progress` only when one
+  ordered JSONL progress stream is explicitly useful. Arguments always follow
+  the command; there are no global flags before it.
 - Interpret afmail exit codes together with the terminal event: `0` is a
-  complete `result`, `1` is an `error`, `2` is a CLI parse error, and `3` is a
-  partial `error` whose `error.code` is `partial`.
+  complete `result`, `1` is an `error`, `2` is a rejected invocation whose
+  `error.code` names the rule it broke (`cli_unknown_command`,
+  `cli_unknown_argument`, `cli_unregistered_combination`,
+  `cli_invalid_argument_value`, and the rest of the `cli_*` set), and `3` is a
+  partial `error` whose `error.code` is `partial`. An exit `2` never ran
+  anything: re-read the command's `--help`, which lists every legal argument
+  combination, and retry with one of them.
   Exit `3` is not success and is not permission to retry an entire batch or
-  push blindly.
+  push blindly. The envelope's `retryable` is always `false` on a partial
+  result for that reason — the effects that landed stay landed. Per-item
+  `retryable` inside `failures` is the field to read: it says which items are
+  worth re-queueing. Exit `4` means afmail could not write its requested output
+  stream or file; do not infer that the underlying command did or did not
+  complete from missing output alone. A reader closing the pipe (`| head`) is
+  not a write failure and exits `0`.
 - If a command returns `workspace_upgrade_required`, run `afmail init` once
   from that workspace root, then retry the original command. Do not hand-edit
   workspace metadata or try to maintain both old and new layouts.
@@ -177,8 +198,9 @@ separate boundaries:
 
 - In this skill, the word `review` always means opening one of afmail's
   interactive UI sessions. Never satisfy a user request to review by only
-  running `show`/`list`, reading workspace files, or summarizing in chat. Use
-  `inspect` for non-interactive reads and `preview` for push or purge plans.
+  running `show`/`list`, reading workspace files, or summarizing in chat.
+  Describe `show`/`list` as non-interactive inspection; bare `push` or `purge`
+  produces a preview plan.
 - Use a review session when the user needs to read a dense mail thread, decide
   among typed suggestions, or precisely edit case notes or a draft. Review
   commands block until the user finishes or closes the review, so always start
@@ -207,10 +229,11 @@ separate boundaries:
 - Before triage review, read `review_base_hash` from
   `afmail message show MESSAGE_ID`, then persist one complete suggestion with
   `afmail triage suggestion set MESSAGE_ID --message-review-base-hash HASH
-  --reason TEXT ACTION...`. Supported actions are `case-create --name NAME
-  --group GROUP`, `case-add CASE_REF`, `notification-create --name NAME
-  --summary TEXT`, `notification-add NOTIFICATION_REF --summary TEXT`, `spam`,
-  and `trash`. afmail generates `agent_suggestion_uid`; never generate it or
+  --reason TEXT --action ACTION ...`. Supported actions are `--action
+  case-create --name NAME --group GROUP`, `--action case-add --case-ref
+  CASE_REF`, `--action notification-create --name NAME --summary TEXT`,
+  `--action notification-add --notification-ref NOTIFICATION_REF --summary
+  TEXT`, `--action spam`, and `--action trash`. afmail generates `agent_suggestion_uid`; never generate it or
   edit `.afmail/messages/*.json` directly. A new Agent suggestion replaces the
   prior round and clears its `human_suggestion`.
 - `afmail triage review` reads persisted suggestions; it never accepts a caller
@@ -224,10 +247,11 @@ separate boundaries:
   round and must use the UID currently returned by `message show`.
 - Case suggestions follow the same rule. Read `review_base_hash` from
   `afmail case show CASE_REF`, then call `afmail case suggestion set CASE_REF
-  --case-review-base-hash HASH --reason TEXT ACTION...` before
-  `afmail case review CASE_REF`. The closed actions are `archive`, `unarchive
-  --group GROUP`, `move --group GROUP`, `rename --name NAME`, `tag TAG`,
-  `untag TAG`, `trash`, and `delete [--allow-notes]`. Review stores case-level
+  --case-review-base-hash HASH --reason TEXT --action ACTION ...` before
+  `afmail case review CASE_REF`. The closed actions are `--action archive`,
+  `--action unarchive --group GROUP`, `--action move --group GROUP`, `--action
+  rename --name NAME`, `--action tag --tag TAG`, `--action untag --tag TAG`,
+  `--action trash`, and `--action delete [--allow-notes]`. Review stores case-level
   human feedback before returning; notes and drafts continue to autosave as
   separate user edits. Use `afmail case suggestion clear CASE_REF
   --agent-suggestion-uid UID` only when abandoning the current review round.
@@ -238,14 +262,14 @@ separate boundaries:
   `review_base_hash` from `afmail notification show
   NOTIFICATION_REF`, call `afmail notification suggestion set
   NOTIFICATION_REF --notification-review-base-hash HASH --reason TEXT
-  rename --name NAME` or `delete [--allow-notes]`, then open `afmail
-  notification review NOTIFICATION_REF`. Use `notification suggestion clear`
+  --action rename --name NAME` or `--action delete [--allow-notes]`, then open
+  `afmail notification review NOTIFICATION_REF`. Use `notification suggestion clear`
   with the current Agent suggestion UID only when abandoning that round.
   Notification delete with `--allow-notes` requires the same separate
   destructive confirmation as case delete.
 - If a suggestion `set` or `clear` may be retried after interrupted output, pass
-  one stable global `--request-id` for that exact command and inputs. Never
-  reuse the request id for a changed suggestion.
+  one stable `--request-id` for that exact command and inputs. Never reuse
+  the request id for a changed suggestion.
 - Treat `review_stale` as a hard conflict. Re-read the affected message, case,
   or notification, rebuild the suggestion with its newly returned review hash,
   and open a new review. Review hashes cover every exact canonical document on
@@ -382,7 +406,9 @@ separate boundaries:
   To drop something from the next push, undo the local action that queued it
   (`message unspam`, `message untrash`, `notification remove`, `case remove`,
   `case unarchive`, or `draft remove`); do not try to remove queue items
-  by push id.
+  by push id. A push id is opaque and not derivable from the case or draft it
+  belongs to — read it from a plan or from `afmail push list`, never construct
+  one.
 - Run `afmail push --confirm PLAN_ID` only when the user explicitly asks to push,
   sync, or apply queued remote effects. First run `afmail push` and summarize
   every queued item that will be applied, not just the count: sends/saves with
@@ -464,8 +490,14 @@ separate boundaries:
   remove, duplicate, reorder, or copy these markers into the response. Reply
   quotes and identity footers are outside compose and must not be moved into it.
 - Create new outbound mail with `afmail case draft new REF --to ... --subject
-  ... [--body TEXT | --body-file PATH]`; the draft Markdown remains the source
-  of truth until push consumes it.
+  ... [--cc ...] [--bcc ...] [--body TEXT | --body-file PATH]`; at least one
+  `--to` or `--bcc` recipient is required, and the draft Markdown remains the
+  source of truth until push consumes it.
+- Bcc recipients stay visible in the local draft, Review UI, push preview, and
+  the sender's private Drafts/Sent evidence. afmail includes them in the SMTP
+  envelope but strips the `Bcc` header from the message delivered to
+  recipients. Never claim that Bcc hides recipients from the sender or mail
+  provider.
 - Use `--identity SLUG` on `case draft new`, `case draft reply`, or
   `case draft change` when the sender persona matters. If omitted, afmail uses
   the configured default identity. Identity footers are inserted visibly into

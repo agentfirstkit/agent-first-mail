@@ -255,10 +255,18 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
     let (status, stdout) = run_confirmed_push(root.path());
     assert_eq!(status, 0, "{stdout}");
     let pushed = parse_one(&stdout);
-    let items = pushed.as_array().cloned().unwrap_or_default();
+    let items = pushed["succeeded_items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert!(!items.is_empty(), "{pushed}");
     assert!(
         items.iter().all(|item| item.get("code").is_none()),
+        "{pushed}"
+    );
+    assert_eq!(
+        pushed["failures"].as_array().map(Vec::len),
+        Some(0),
         "{pushed}"
     );
 
@@ -571,8 +579,15 @@ fn docker_greenmail_pull_reply_send_e2e() {
     let (status, stdout) = run_confirmed_push(root.path());
     assert_eq!(status, 0, "{stdout}");
     let pushed = parse_one(&stdout);
-    assert_eq!(pushed.as_array().map(Vec::len), Some(1));
-    assert!(pushed[0].get("code").is_none(), "{pushed}");
+    assert_eq!(
+        pushed["succeeded_items"].as_array().map(Vec::len),
+        Some(1),
+        "{pushed}"
+    );
+    assert!(
+        pushed["succeeded_items"][0].get("code").is_none(),
+        "{pushed}"
+    );
     assert_eq!(push_json_count(root.path()), 0);
 
     assert!(
@@ -672,8 +687,15 @@ fn docker_greenmail_pull_reply_send_e2e() {
     let (status, stdout) = run_confirmed_push(root.path());
     assert_eq!(status, 0, "{stdout}");
     let pushed_spam = parse_one(&stdout);
-    assert_eq!(pushed_spam.as_array().map(Vec::len), Some(1));
-    assert!(pushed_spam[0].get("code").is_none(), "{pushed_spam}");
+    assert_eq!(
+        pushed_spam["succeeded_items"].as_array().map(Vec::len),
+        Some(1),
+        "{pushed_spam}"
+    );
+    assert!(
+        pushed_spam["succeeded_items"][0].get("code").is_none(),
+        "{pushed_spam}"
+    );
     assert_eq!(push_json_count(root.path()), 0);
 
     assert!(

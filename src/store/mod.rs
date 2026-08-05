@@ -53,7 +53,7 @@ use crate::draft_content::{
 use crate::error::{AppError, Result};
 use crate::frontmatter::{CaseFrontmatter, DraftFrontmatter};
 use crate::layout;
-use crate::markdown::{read_doc, render_frontmatter};
+use crate::markdown::{edit_frontmatter, read_doc, render_frontmatter};
 use crate::render_document::{
     CollectionLocation, CollectionMessageRenderDocument, CollectionRenderDocument,
     CollectionShowDocument, CollectionShowLocator, ContactLocator, ContactRenderDocument,
@@ -162,6 +162,8 @@ pub(crate) struct DraftChange<'a> {
     pub(crate) to: &'a [String],
     pub(crate) cc: &'a [String],
     pub(crate) clear_cc: bool,
+    pub(crate) bcc: &'a [String],
+    pub(crate) clear_bcc: bool,
     pub(crate) identity: Option<&'a str>,
     pub(crate) body: Option<&'a str>,
     pub(crate) body_file: Option<&'a str>,
@@ -176,10 +178,20 @@ fn review_document_hash<T: Serialize + ?Sized>(label: &str, document: &T) -> Res
 pub(crate) struct NewDraft<'a> {
     pub(crate) to: &'a [String],
     pub(crate) cc: &'a [String],
+    pub(crate) bcc: &'a [String],
     pub(crate) subject: &'a str,
     pub(crate) identity: Option<&'a str>,
     pub(crate) body: Option<&'a str>,
     pub(crate) body_file: Option<&'a str>,
+}
+
+pub struct ReplyDraft<'a> {
+    pub message_id: &'a str,
+    pub reply_all: bool,
+    pub bcc: &'a [String],
+    pub identity: Option<&'a str>,
+    pub body: Option<&'a str>,
+    pub body_file: Option<&'a str>,
 }
 
 pub fn now_rfc3339() -> String {
@@ -871,9 +883,12 @@ impl Workspace {
         let config = crate::config::MailConfig::load(&self.root)?;
         let value =
             serde_json::to_value(config).map_err(|e| AppError::json("serialize config", &e))?;
-        Ok(json!({
-            "config": redact_config_secrets(value)
-        }))
+        // Not redacted here: every event leaves through a `CliEmitter` built on
+        // afdata's default redactor, which walks `*_secret` field names itself.
+        // A local pre-pass could only agree with it or be overwritten by it —
+        // and it was overwritten, which is how an unset `password_secret` came
+        // out as `"***"` and told readers a credential was configured.
+        Ok(json!({ "config": value }))
     }
 
     pub fn config_get(&self, key: &str) -> Result<Value> {

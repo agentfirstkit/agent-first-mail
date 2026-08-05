@@ -1029,11 +1029,16 @@ fn save_draft_in_workspace(
     }
     let to_text = values.get("to").map(String::as_str).unwrap_or_default();
     let cc_text = values.get("cc").map(String::as_str).unwrap_or_default();
-    if to_text.trim().is_empty() {
-        return Err(AppError::new("draft_invalid", "draft to is required"));
+    let bcc_text = values.get("bcc").map(String::as_str).unwrap_or_default();
+    if to_text.trim().is_empty() && bcc_text.trim().is_empty() {
+        return Err(AppError::new(
+            "draft_invalid",
+            "draft requires at least one to or bcc recipient",
+        ));
     }
     let to = crate::smtp_send::normalize_recipient_list_text(to_text, "to")?;
     let cc = crate::smtp_send::normalize_recipient_list_text(cc_text, "cc")?;
+    let bcc = crate::smtp_send::normalize_recipient_list_text(bcc_text, "bcc")?;
     let changed = workspace.change_draft(
         case_ref,
         draft_name,
@@ -1042,6 +1047,8 @@ fn save_draft_in_workspace(
             to: &to,
             cc: &cc,
             clear_cc: cc_text.trim().is_empty(),
+            bcc: &bcc,
+            clear_bcc: bcc_text.trim().is_empty(),
             identity: None,
             body: values.get("body").map(String::as_str),
             body_file: None,
@@ -1663,6 +1670,7 @@ mod tests {
                 NewDraft {
                     to: &["customer@example.com".to_string()],
                     cc: &[],
+                    bcc: &[],
                     subject: "Review draft",
                     identity: None,
                     body: Some("Initial authored text"),
@@ -2213,6 +2221,10 @@ mod tests {
                 "\"Doe, Jane\" <jane@example.com>, customer@example.com".to_string(),
             ),
             ("cc".to_string(), "".to_string()),
+            (
+                "bcc".to_string(),
+                "Hidden Reviewer <hidden@example.com>".to_string(),
+            ),
             ("body".to_string(), "Updated authored text".to_string()),
         ]);
         let saved = save_draft_in_workspace(&workspace, &case_ref, &draft_name, &values)
@@ -2235,11 +2247,16 @@ mod tests {
             shown["draft"]["frontmatter"]["to"][0],
             "\"Doe, Jane\" <jane@example.com>"
         );
+        assert_eq!(
+            shown["draft"]["frontmatter"]["bcc"][0],
+            "Hidden Reviewer <hidden@example.com>"
+        );
 
         values.insert("base_hash".to_string(), saved.base_hash);
         values.insert("to".to_string(), String::new());
+        values.insert("bcc".to_string(), String::new());
         let error = save_draft_in_workspace(&workspace, &case_ref, &draft_name, &values)
-            .expect_err("empty To must be rejected");
+            .expect_err("empty recipient set must be rejected");
         assert_eq!(error.error_code, "draft_invalid");
         let unchanged_draft = workspace
             .show_draft(&case_ref, &draft_name)

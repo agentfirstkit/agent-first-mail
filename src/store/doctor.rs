@@ -73,21 +73,10 @@ impl Workspace {
         ))
     }
 
-    pub fn doctor_repair(&self, confirm: bool) -> Result<crate::types::CommandResult> {
+    /// `--confirm` is part of the only registered `doctor repair` shape, so an
+    /// unconfirmed repair never reaches this far.
+    pub fn doctor_repair(&self) -> Result<crate::types::CommandResult> {
         self.require_workspace_directory()?;
-        if !confirm {
-            return Err(AppError::new(
-                "confirm_required",
-                "doctor repair requires --confirm",
-            )
-            .with_hint("Inspect with `afmail doctor`; apply repairs with `afmail doctor repair --confirm`.")
-            .with_details(json!({
-                "suggested_commands": [
-                    "afmail doctor",
-                    "afmail doctor repair --confirm"
-                ]
-            })));
-        }
         let before = self.doctor_issues()?;
         self.repair_incomplete_transactions()?;
         let deprecated_state_removed_count = self.remove_deprecated_message_state_sidecars()?;
@@ -710,6 +699,7 @@ fn doctor_draft_document() -> DraftRenderDocument {
                 subject: Some("Doctor smoke reply".to_string()),
                 to: vec!["doctor-smoke-to@example.com".to_string()],
                 cc: Vec::new(),
+                bcc: Vec::new(),
                 attachments: Vec::new(),
             },
             body_markdown,

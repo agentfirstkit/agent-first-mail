@@ -1369,6 +1369,7 @@ impl Workspace {
         validate_id("message_id", message_id)?;
         let (notification_uid, notification_dir) = self.resolve_notification(notification_ref)?;
         self.ensure_no_related_conversation(message_id)?;
+        self.preflight_archive_actions(&[message_id.to_string()])?;
         let transaction = self.begin_transaction(
             "notification_message_add",
             vec![

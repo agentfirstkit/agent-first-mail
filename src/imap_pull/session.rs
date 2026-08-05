@@ -33,6 +33,7 @@ struct PullMailboxCursor {
 
 #[derive(Clone, Copy, Debug)]
 struct PullCursorView {
+    uid_validity: u64,
     highest_uid: u64,
 }
 
@@ -48,6 +49,7 @@ struct MailboxEnvelopeFetch {
     uid_validity: u64,
     envelopes: Vec<RemoteEnvelope>,
     cursor_used: bool,
+    uid_validity_reset: bool,
     previous_highest_uid: Option<u64>,
 }
 
@@ -101,6 +103,7 @@ fn pull_cursor_for_target(cursors: &PullCursorFile, target: &PullTarget) -> Opti
         return None;
     }
     Some(PullCursorView {
+        uid_validity: cursor.uid_validity,
         highest_uid: cursor.highest_uid,
     })
 }
@@ -164,7 +167,7 @@ pub(super) fn uid_store_flags_with_operation(
         return Ok(());
     }
     let mut session = ImapClientSession::connect(config)?;
-    session.uid_store_flags(source_folder, uid, flags, add)
+    session.uid_store_flags(source_folder, None, uid, flags, add)
 }
 
 pub(super) fn fetch_selected_mailbox_envelopes<T: std::io::Read + std::io::Write>(
@@ -185,13 +188,17 @@ fn fetch_selected_mailbox_envelopes_with_cursor<T: std::io::Read + std::io::Writ
         .examine(mailbox)
         .map_err(|e| AppError::new("imap_select_failed", e.to_string()))?;
     let uid_validity = mailbox_status.uid_validity.unwrap_or(0) as u64;
-    let previous_highest_uid = cursor.map(|cursor| cursor.highest_uid);
-    let sequence = mailbox_uid_sequence(session, since_days, previous_highest_uid)?;
+    let uid_validity_reset = cursor.is_some_and(|cursor| cursor.uid_validity != uid_validity);
+    let valid_cursor = cursor.filter(|cursor| cursor.uid_validity == uid_validity);
+    let previous_highest_uid = valid_cursor.map(|cursor| cursor.highest_uid);
+    let effective_since_days = if uid_validity_reset { None } else { since_days };
+    let sequence = mailbox_uid_sequence(session, effective_since_days, previous_highest_uid)?;
     if sequence.is_empty() {
         return Ok(MailboxEnvelopeFetch {
             uid_validity,
             envelopes: Vec::new(),
-            cursor_used: cursor.is_some(),
+            cursor_used: valid_cursor.is_some(),
+            uid_validity_reset,
             previous_highest_uid,
         });
     }
@@ -220,7 +227,8 @@ fn fetch_selected_mailbox_envelopes_with_cursor<T: std::io::Read + std::io::Writ
     Ok(MailboxEnvelopeFetch {
         uid_validity,
         envelopes: out,
-        cursor_used: cursor.is_some(),
+        cursor_used: valid_cursor.is_some(),
+        uid_validity_reset,
         previous_highest_uid,
     })
 }
@@ -472,7 +480,7 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
     let started = Instant::now();
     let offset = mail_config.resolved_timezone_offset();
     let mut existing = load_existing_remote_index(root)?;
-    let mut ingest_render_context = PullIngestRenderContext::new(root, mail_config, &existing)?;
+    let ingest_render_context = PullIngestRenderContext::new(root, mail_config)?;
     let mut new_message_count = 0usize;
     let mut triage_created_count = 0usize;
     let mut spam_message_count = 0usize;
@@ -489,6 +497,7 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
     let mut stored_new_message_bytes = 0u64;
     let cursors = load_pull_cursors(root);
     let mut cursor_updates = Vec::new();
+    let mut uid_validity_reset_mailbox_ids = Vec::new();
     let mut all_targets_used_incremental = !targets.is_empty();
     for (target_index, target) in targets.iter().enumerate() {
         emit_mailbox_progress(
@@ -508,12 +517,14 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
         )?;
         let uid_validity = envelope_fetch.uid_validity;
         let cursor_used = envelope_fetch.cursor_used;
+        if envelope_fetch.uid_validity_reset {
+            uid_validity_reset_mailbox_ids.push(target.id.clone());
+        }
         all_targets_used_incremental &= cursor_used;
         let previous_highest_uid = envelope_fetch.previous_highest_uid.unwrap_or(0);
         let envelopes = envelope_fetch.envelopes;
         let envelope_count = envelopes.len();
         let mut mailbox_existing_location_count = 0usize;
-        let mut mailbox_updated_location_count = 0usize;
         let mut mailbox_flags_updated_count = 0usize;
         let mut mailbox_blocked_cursor_uid: Option<u64> = None;
         let mut mailbox_highest_observed_uid = previous_highest_uid;
@@ -541,25 +552,6 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
                 }
                 continue;
             }
-            if let Some(rfc822_message_id) = rfc822_message_id(&envelope.header) {
-                let rfc822_key = normalize_message_id(&rfc822_message_id);
-                if let Some(existing_message_id) = existing.rfc822_ids.get(&rfc822_key) {
-                    let update = add_remote_location_from_envelope(
-                        root,
-                        existing_message_id,
-                        &envelope,
-                        Some(target.id.as_str()),
-                    )?;
-                    existing.imap_keys.insert(key);
-                    updated_location_count += 1;
-                    mailbox_updated_location_count += 1;
-                    if update.flags_updated {
-                        flags_updated_count += 1;
-                        mailbox_flags_updated_count += 1;
-                    }
-                    continue;
-                }
-            }
             let budget_size = envelope.size_bytes.unwrap_or(u64::from(MAX_MESSAGE_BYTES));
             if remaining_message_count == 0 || budget_size > remaining_total_bytes {
                 budget_limited = true;
@@ -583,9 +575,12 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
             target_index,
             targets.len(),
             json!({
+                // No `updated_location_count` here: a relocation is recognized
+                // from the body's bytes, which this stage has not fetched. It
+                // reported a constant 0, so a caller watching progress saw
+                // "nothing relocated" all the way to a non-zero final count.
                 "fetched_count": envelope_count,
                 "existing_location_count": mailbox_existing_location_count,
-                "updated_location_count": mailbox_updated_location_count,
                 "flags_updated_count": mailbox_flags_updated_count,
                 "new_candidate_count": new_uids.len(),
             }),
@@ -684,6 +679,36 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
                     uid_validity: remote.uid_validity,
                     uid: remote.uid,
                 };
+                let content_key = message_content_key(&remote.raw_eml);
+                if let Some(existing_message_id) = existing.content_ids.get(&content_key) {
+                    // Identical bytes already stored: this is a second location
+                    // for a message we have, not a new message. Refund what the
+                    // header stage reserved for it — the dedup is only knowable
+                    // after the body arrives, and without the refund a mailbox
+                    // that mirrors another (Gmail's All Mail beside Inbox)
+                    // spends the whole `--max-new-messages` / `--max-total-bytes`
+                    // budget on copies it then discards.
+                    remaining_message_count += 1;
+                    remaining_total_bytes += actual_bytes;
+                    let update = add_remote_location_parts(
+                        root,
+                        existing_message_id,
+                        &remote.mailbox,
+                        remote.uid_validity,
+                        remote.uid,
+                        &remote.flags,
+                        Some(target.id.as_str()),
+                    )?;
+                    existing.imap_keys.insert(key.clone());
+                    existing
+                        .imap_locations
+                        .insert(key, existing_message_id.clone());
+                    updated_location_count += 1;
+                    if update.flags_updated {
+                        flags_updated_count += 1;
+                    }
+                    continue;
+                }
                 let suggestion = existing.suggest_case(&envelope.header);
                 let saved = save_remote_message(
                     root,
@@ -694,15 +719,14 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
                     mail_config,
                     &ingest_render_context,
                 )?;
-                existing.imap_keys.insert(key);
+                existing.imap_keys.insert(key.clone());
                 let saved_message_id = saved.message_id.clone();
-                if let Some(rfc822_message_id) = saved.rfc822_message_id.as_deref() {
-                    existing.rfc822_ids.insert(
-                        normalize_message_id(rfc822_message_id),
-                        saved_message_id.clone(),
-                    );
-                }
-                ingest_render_context.observe(&saved);
+                existing
+                    .imap_locations
+                    .insert(key, saved_message_id.clone());
+                existing
+                    .content_ids
+                    .insert(content_key, saved_message_id.clone());
                 new_message_ids.push(saved_message_id.clone());
                 new_message_count += 1;
                 stored_new_message_bytes += actual_bytes;
@@ -787,6 +811,8 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
         "reclassified_message_count": 0,
         "updated_location_count": updated_location_count,
         "flags_updated_count": flags_updated_count,
+        "uid_validity_reset_count": uid_validity_reset_mailbox_ids.len(),
+        "uid_validity_reset_mailbox_ids": uid_validity_reset_mailbox_ids,
         "mailbox_ids": targets.iter().map(|target| target.id.clone()).collect::<Vec<_>>(),
         "since_days": options.effective_since_days(),
         "all_history": options.all_history,
@@ -849,11 +875,15 @@ pub(super) fn estimate_pull_workspace_session<T: std::io::Read + std::io::Write>
                 uid_validity: envelope.uid_validity,
                 uid: envelope.uid,
             };
+            // Location is all a dry run can check. Cross-mailbox duplicates are
+            // recognized by the bytes of the body, which is exactly what a dry
+            // run does not fetch — so a copy of a message already stored under
+            // another mailbox counts here and drops out during the real pull.
+            // That makes every count below an upper bound, which
+            // `candidate_count_is_upper_bound` says out loud rather than
+            // leaving a caller to discover it by diffing against the pull.
             let known_by_location = existing.imap_keys.contains(&key);
-            let known_by_message_id = rfc822_message_id(&envelope.header)
-                .map(|value| normalize_message_id(&value))
-                .is_some_and(|value| existing.rfc822_ids.contains_key(&value));
-            if known_by_location || known_by_message_id {
+            if known_by_location {
                 continue;
             }
             let budget_size = envelope.size_bytes.unwrap_or(u64::from(MAX_MESSAGE_BYTES));
@@ -885,6 +915,7 @@ pub(super) fn estimate_pull_workspace_session<T: std::io::Read + std::io::Write>
         "max_total_bytes": options.max_total_bytes,
         "remote_envelope_count": remote_envelope_count,
         "candidate_count": candidates.len(),
+        "candidate_count_is_upper_bound": true,
         "candidate_declared_bytes": candidates.iter().filter_map(|item| item["declared_size_bytes"].as_u64()).sum::<u64>(),
         "candidates": candidates,
         "budget_limited": !skipped.is_empty(),

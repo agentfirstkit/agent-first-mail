@@ -730,34 +730,8 @@ impl Workspace {
             return Ok(None);
         }
         let locations = self.message_remote_locations_with_mailbox_ids(&message_ids)?;
-        let mut selected_source_id: Option<String> = None;
-        let mut selected_locations = Vec::new();
-        let mut selected_steps = Vec::new();
-        for location in &locations {
-            let Some(source_id) = resolve_location_mailbox_id(config, location)? else {
-                continue;
-            };
-            let Some(rule) = config
-                .actions
-                .message
-                .notification
-                .by_source_mailbox_id
-                .get(&source_id)
-            else {
-                continue;
-            };
-            if rule.steps.is_empty() {
-                continue;
-            }
-            if selected_source_id
-                .as_deref()
-                .is_none_or(|id| id == source_id)
-            {
-                selected_source_id = Some(source_id);
-                selected_steps = rule.steps.clone();
-                selected_locations.push(location.push.clone());
-            }
-        }
+        let (selected_locations, selected_steps) =
+            resolve_archive_action(config, &locations, message_id)?;
         Ok(message_action_plan(
             MessagePushAction::Notification,
             message_ids,
@@ -781,6 +755,30 @@ impl Workspace {
                 eligible_message_ids.push(message_id.clone());
             }
         }
+        if eligible_message_ids.is_empty() {
+            return Ok(ArchiveQueue {
+                eligible_message_ids,
+                location_count: 0,
+                queued_location_count: 0,
+                items: Vec::new(),
+            });
+        }
+        let config = crate::config::MailConfig::load(&self.root)?;
+        let locations = self.message_remote_locations_with_mailbox_ids(&eligible_message_ids)?;
+        let mut plans = Vec::new();
+        for message_id in &eligible_message_ids {
+            let message_locations = locations
+                .iter()
+                .filter(|location| location.push.message_id == *message_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let (queue_locations, steps) =
+                resolve_archive_action(&config, &message_locations, message_id)?;
+            if !queue_locations.is_empty() && !steps.is_empty() {
+                plans.push((message_id.clone(), queue_locations, steps));
+            }
+        }
+
         for message_id in &eligible_message_ids {
             let removed = crate::push_queue::remove_pending_message_pushes(
                 &self.root,
@@ -793,60 +791,19 @@ impl Workspace {
                 .collect::<Vec<_>>();
             self.clear_message_pending_pushes(message_id, &removed_push_ids, false)?;
         }
-        if eligible_message_ids.is_empty() {
-            return Ok(ArchiveQueue {
-                eligible_message_ids,
-                location_count: 0,
-                queued_location_count: 0,
-                items: Vec::new(),
-            });
-        }
-        let config = crate::config::MailConfig::load(&self.root)?;
-        let locations = self.message_remote_locations_with_mailbox_ids(&eligible_message_ids)?;
-        let mut grouped: BTreeMap<String, Vec<PushLocation>> = BTreeMap::new();
-        for location in &locations {
-            let Some(source_id) = resolve_location_mailbox_id(&config, location)? else {
-                continue;
-            };
-            let Some(rule) = config
-                .actions
-                .message
-                .notification
-                .by_source_mailbox_id
-                .get(&source_id)
-            else {
-                continue;
-            };
-            if rule.steps.is_empty() {
-                continue;
-            }
-            grouped
-                .entry(source_id)
-                .or_default()
-                .push(location.push.clone());
-        }
-        let queued_location_count = grouped.values().map(Vec::len).sum();
+
+        let queued_location_count = plans
+            .iter()
+            .map(|(_, queue_locations, _)| queue_locations.len())
+            .sum();
         let mut items = Vec::new();
-        for (source_id, queue_locations) in grouped {
-            let mut queue_message_ids = Vec::new();
-            for location in &queue_locations {
-                merge_string(&mut queue_message_ids, &location.message_id);
-            }
-            let Some(rule) = config
-                .actions
-                .message
-                .notification
-                .by_source_mailbox_id
-                .get(&source_id)
-            else {
-                continue;
-            };
+        for (message_id, queue_locations, steps) in plans {
             if let Some(item) = crate::push_queue::queue_action_steps(
                 &self.root,
                 "message.notification",
-                &queue_message_ids,
+                std::slice::from_ref(&message_id),
                 &queue_locations,
-                &rule.steps,
+                &steps,
                 None,
             )? {
                 self.record_pending_push_item(&item)?;
@@ -1000,8 +957,23 @@ impl Workspace {
         message_ids: &[String],
         archiving_case_uid: Option<&str>,
     ) -> Result<()> {
+        let mut eligible_message_ids = Vec::new();
         for message_id in message_ids {
-            self.archive_eligibility_inner(message_id, None, archiving_case_uid)?;
+            let eligibility =
+                self.archive_eligibility_inner(message_id, None, archiving_case_uid)?;
+            if eligibility.eligible {
+                eligible_message_ids.push(message_id.clone());
+            }
+        }
+        self.preflight_archive_actions(&eligible_message_ids)
+    }
+
+    pub(super) fn preflight_archive_actions(&self, message_ids: &[String]) -> Result<()> {
+        let config = crate::config::MailConfig::load(&self.root)?;
+        for message_id in message_ids {
+            let locations =
+                self.message_remote_locations_with_mailbox_ids(std::slice::from_ref(message_id))?;
+            resolve_archive_action(&config, &locations, message_id)?;
         }
         Ok(())
     }
@@ -1406,6 +1378,57 @@ fn message_action_plan(
         steps,
         reply_to_message_id: None,
     })
+}
+
+fn resolve_archive_action(
+    config: &crate::config::MailConfig,
+    locations: &[MailboxIdLocation],
+    message_id: &str,
+) -> Result<(Vec<PushLocation>, Vec<crate::config::ActionStep>)> {
+    let mut selected_rule: Option<(String, Vec<crate::config::ActionStep>)> = None;
+    let mut selected_locations = Vec::new();
+    for location in locations {
+        let Some(source_id) = resolve_location_mailbox_id(config, location)? else {
+            continue;
+        };
+        let Some(rule) = config
+            .actions
+            .message
+            .notification
+            .by_source_mailbox_id
+            .get(&source_id)
+        else {
+            continue;
+        };
+        if rule.steps.is_empty() {
+            continue;
+        }
+        if let Some((selected_source_id, selected_steps)) = &selected_rule {
+            if selected_steps != &rule.steps {
+                return Err(AppError::new(
+                    "archive_action_conflict",
+                    format!(
+                        "message {message_id} has remote locations whose archive actions differ"
+                    ),
+                )
+                .with_hint(
+                    "Configure the source mailboxes with the same notification archive steps, or archive the locations manually before retrying.",
+                )
+                .with_details(json!({
+                    "message_id": message_id,
+                    "source_mailbox_ids": [selected_source_id, &source_id],
+                    "remote_calls_started": false,
+                })));
+            }
+        } else {
+            selected_rule = Some((source_id, rule.steps.clone()));
+        }
+        selected_locations.push(location.push.clone());
+    }
+    Ok((
+        selected_locations,
+        selected_rule.map(|(_, steps)| steps).unwrap_or_default(),
+    ))
 }
 
 fn message_push_action_is_allowed(

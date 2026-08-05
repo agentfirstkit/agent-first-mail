@@ -15,9 +15,9 @@ use crate::config::{
 use crate::error::{AppError, Result};
 pub use crate::imap_client::{MailboxInfo, MoveOutcome};
 use crate::imap_client::{
-    append_draft_and_find_uid_session, append_message_session, capability_move, capability_uidplus,
-    list_mailboxes, login_plain, login_tls, require_move, uid_mark_and_move_session,
-    uid_move_session,
+    MoveFlagUpdates, append_draft_and_find_uid_session, append_message_session, capability_move,
+    capability_uidplus, list_mailboxes, login_plain, login_tls, require_move,
+    uid_mark_and_move_session, uid_move_session,
 };
 use crate::mail::parse_inbound_message;
 use crate::progress::ProgressCallback;
@@ -507,11 +507,11 @@ pub fn uid_mark_and_move(
         let result = uid_mark_and_move_session(
             &mut session,
             source_folder,
+            None,
             uid,
             target_folder,
             rfc822_message_id,
-            mark_seen,
-            keyword,
+            MoveFlagUpdates { mark_seen, keyword },
         );
         let _ = session.logout();
         result
@@ -520,11 +520,11 @@ pub fn uid_mark_and_move(
         let result = uid_mark_and_move_session(
             &mut session,
             source_folder,
+            None,
             uid,
             target_folder,
             rfc822_message_id,
-            mark_seen,
-            keyword,
+            MoveFlagUpdates { mark_seen, keyword },
         );
         let _ = session.logout();
         result
@@ -716,7 +716,7 @@ mod tests {
         let _ = fs::create_dir_all(root.join("triage"));
         let raw = b"Message-ID: <m1@example.com>\r\nFrom: Alice <alice@example.com>\r\nTo: Me <me@example.com>\r\nSubject: Hello\r\nContent-Type: text/plain\r\n\r\nHello";
         let config = MailConfig::default();
-        let render_context = PullIngestRenderContext::new(&root, &config, &RemoteIndex::default())?;
+        let render_context = PullIngestRenderContext::new(&root, &config)?;
         let result = save_remote_message(
             &root,
             RemoteMessage {
@@ -796,6 +796,41 @@ mod tests {
         let id = stable_message_id(&root, &remote, plus8);
         assert!(id.starts_with("message_20260415_"), "{id}");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn message_id_distinguishes_duplicate_rfc822_ids_by_content() {
+        let root = temp_root("id-duplicate-rfc822");
+        let offset = chrono::Offset::fix(&chrono::Utc);
+        let first = RemoteMessage {
+            mailbox: "INBOX".to_string(),
+            uid_validity: 1,
+            uid: 1,
+            flags: Vec::new(),
+            raw_eml: b"Message-ID: <duplicate@example.com>\r\nDate: Mon, 16 Jun 2025 02:24:07 +0000\r\nFrom: a@example.com\r\nSubject: first\r\n\r\nfirst"
+                .to_vec(),
+        };
+        let second = RemoteMessage {
+            mailbox: "INBOX".to_string(),
+            uid_validity: 1,
+            uid: 2,
+            flags: Vec::new(),
+            raw_eml: b"Message-ID: <duplicate@example.com>\r\nDate: Mon, 16 Jun 2025 02:24:07 +0000\r\nFrom: a@example.com\r\nSubject: second\r\n\r\nsecond"
+                .to_vec(),
+        };
+        let exact_copy = RemoteMessage {
+            mailbox: "Archive".to_string(),
+            uid_validity: 1,
+            uid: 3,
+            flags: Vec::new(),
+            raw_eml: first.raw_eml.clone(),
+        };
+
+        let first_id = stable_message_id(&root, &first, offset);
+        let second_id = stable_message_id(&root, &second, offset);
+        let copy_id = stable_message_id(&root, &exact_copy, offset);
+        assert_ne!(first_id, second_id);
+        assert_eq!(first_id, copy_id);
     }
 
     #[test]

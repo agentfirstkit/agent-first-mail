@@ -1,412 +1,226 @@
-use clap::{Args, Subcommand};
-
 use super::common::ReviewMode;
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum CaseCommand {
     /// Create a new case and return its stable UID/ref.
     Create(CaseCreateArgs),
     /// List compact case locators.
-    List {
-        /// List archived cases instead of active cases.
-        #[arg(long, conflicts_with_all = ["all"])]
-        archived: bool,
-        /// List active and archived cases together.
-        #[arg(long, conflicts_with_all = ["archived"])]
-        all: bool,
-    },
+    List { archived: bool, all: bool },
     /// Show the exact typed case collection document used by Markdown and Review.
-    Show {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
-        case_ref: String,
-    },
+    Show { case_ref: String },
     /// Open a review session for this case, including editable notes.
-    Review {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
-        case_ref: String,
-        /// Review presentation mode.
-        #[arg(long, value_enum, default_value = "local")]
-        mode: ReviewMode,
-    },
+    Review { case_ref: String, mode: ReviewMode },
     /// Set or clear the current typed Agent suggestion for this case.
-    Suggestion {
-        #[command(subcommand)]
-        action: CaseSuggestionAction,
-    },
+    Suggestion { action: CaseSuggestionAction },
     /// Add a message to this existing case.
     Add {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Message ids to add.
-        #[arg(required = true)]
         message_id: Vec<String>,
-        /// Short summary for this message in the case.
-        #[arg(long)]
         summary: Option<String>,
-        /// Why this message belongs in this case; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
     /// Set or replace one case entry summary.
     SetSummary {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Message id whose summary should be changed.
         message_id: String,
-        /// New summary text.
-        #[arg(long)]
         summary: String,
-        /// Why this summary is useful; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
     /// Remove one message from this case and return it to triage.
     Remove {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Message id to remove.
         message_id: String,
-        /// Why this message does not belong in this case; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
     /// Move this case to another group.
     Move {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Destination group.
-        #[arg(long)]
         group: String,
-        /// Why this group better represents the case; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
     /// Rename this case's human-readable name without changing its UID.
     Rename {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// New human-readable case name.
-        #[arg(long)]
         name: String,
-        /// Why this name better represents the case; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
     /// Show or edit case notes.
-    Notes {
-        #[command(subcommand)]
-        action: CaseNotesAction,
-    },
+    Notes { action: CaseNotesAction },
     /// Archive this active case.
     Archive {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Why this case is ready to archive; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
     /// Move this archived case back to an active case group.
     Unarchive {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Active case group to unarchive into.
-        #[arg(long)]
         group: String,
-        /// Why this case needs active attention again; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
     /// Move every message in this case to local trash and queue Trash moves.
     Trash {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Why this whole case should be discarded; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
     /// Delete an empty case.
     Delete {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Also delete notes.md when it contains user-authored notes.
-        #[arg(long)]
         allow_notes: bool,
-        /// Why this case should be deleted; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
     /// Add a case organization tag.
     Tag {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Case organization tag.
         tag: String,
-        /// Why this tag is useful; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
     /// Remove a case organization tag.
     Untag {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Case organization tag.
         tag: String,
-        /// Why this tag should be removed; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
     /// Create, edit, validate, queue, or remove local case drafts.
-    Draft {
-        #[command(subcommand)]
-        action: CaseDraftAction,
-    },
+    Draft { action: CaseDraftAction },
     /// Merge another case into this case.
     Merge {
-        /// Primary case ref.
         case_ref: String,
-        /// Case ref to merge into the primary case.
         other_case_ref: String,
-        /// Why these cases should be merged; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum CaseSuggestionAction {
     /// Replace the current suggestion and clear any human review of the prior round.
     Set(CaseSuggestionSetArgs),
     /// Clear exactly the current suggestion round.
     Clear {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// UID returned by the current suggestion set command.
-        #[arg(long)]
         agent_suggestion_uid: String,
     },
 }
 
-#[derive(Args, Debug)]
+#[derive(Debug)]
 pub struct CaseSuggestionSetArgs {
-    /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
     pub case_ref: String,
-    /// Current hash returned by `afmail case show`.
-    #[arg(long)]
     pub case_review_base_hash: String,
-    /// Why this complete action is being suggested.
-    #[arg(long)]
     pub reason: String,
-    /// Optional confidence from 0 through 100.
-    #[arg(long)]
     pub confidence_percent: Option<u8>,
-    #[command(subcommand)]
     pub action: CaseSuggestionActionKind,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum CaseSuggestionActionKind {
     Archive,
-    Unarchive {
-        #[arg(long)]
-        group: String,
-    },
-    Move {
-        #[arg(long)]
-        group: String,
-    },
-    Rename {
-        #[arg(long)]
-        name: String,
-    },
-    Tag {
-        tag: String,
-    },
-    Untag {
-        tag: String,
-    },
+    Unarchive { group: String },
+    Move { group: String },
+    Rename { name: String },
+    Tag { tag: String },
+    Untag { tag: String },
     Trash,
-    Delete {
-        #[arg(long)]
-        allow_notes: bool,
-    },
+    Delete { allow_notes: bool },
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct CaseCreateArgs {
     /// Human-readable case name used in case.md and the directory suffix.
-    #[arg(long)]
     pub name: String,
     /// Required case category/group, for example support, invoice, 客服, 发票, 合同, or 退款.
-    #[arg(long, required = true)]
     pub group: Option<String>,
     /// Optional first message to add to the case.
-    #[arg(long)]
     pub message: Option<String>,
     /// Short summary for the first message.
-    #[arg(long)]
     pub summary: Option<String>,
     /// Why this case is being created.
-    #[arg(long)]
     pub reason: Option<String>,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum CaseNotesAction {
     /// Show notes markdown.
-    Show {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
-        case_ref: String,
-    },
+    Show { case_ref: String },
     /// Append text to notes markdown.
-    Append {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
-        case_ref: String,
-        /// Markdown text to append.
-        #[arg(long)]
-        text: String,
-    },
+    Append { case_ref: String, text: String },
     /// Replace notes markdown with text.
-    Replace {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
-        case_ref: String,
-        /// Markdown text to write.
-        #[arg(long)]
-        text: String,
-    },
+    Replace { case_ref: String, text: String },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum CaseDraftAction {
     /// Scaffold a new outbound draft (not a reply) in this case.
     New {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Recipient address. Repeatable.
-        #[arg(long = "to", required = true)]
         to: Vec<String>,
-        /// Cc address. Repeatable.
-        #[arg(long = "cc")]
         cc: Vec<String>,
-        /// Draft subject.
-        #[arg(long)]
+        bcc: Vec<String>,
         subject: String,
-        /// Workspace identity slug to send as. Defaults to the configured default identity.
-        #[arg(long)]
         identity: Option<String>,
-        /// Draft body text.
-        #[arg(long, conflicts_with = "body_file")]
         body: Option<String>,
-        /// Path to a file whose contents become the draft body.
-        #[arg(long = "body-file")]
         body_file: Option<String>,
     },
     /// Scaffold a reply draft to a message, prefilled and quoting the original.
     Reply {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Message id in this case to reply to.
         message_id: String,
-        /// Workspace identity slug to send as. Defaults to the configured default identity.
-        #[arg(long)]
+        bcc: Vec<String>,
         identity: Option<String>,
-        /// Draft body text. Replaces the default reply template when provided.
-        #[arg(long, conflicts_with = "body_file")]
         body: Option<String>,
-        /// Path to a file whose contents become the draft body.
-        #[arg(long = "body-file")]
         body_file: Option<String>,
-        /// Reply to all original recipients (To and Cc), not just the sender.
-        #[arg(long)]
         all: bool,
     },
     /// Change an existing editable draft in place.
     Change {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Draft markdown file under the case drafts directory.
         draft_name: String,
-        /// Replacement subject.
-        #[arg(long)]
         subject: Option<String>,
-        /// Replacement To list. Repeatable; when provided it replaces all To recipients.
-        #[arg(long = "to")]
         to: Vec<String>,
-        /// Replacement Cc list. Repeatable; when provided it replaces all Cc recipients.
-        #[arg(long = "cc", conflicts_with = "clear_cc")]
         cc: Vec<String>,
-        /// Clear all Cc recipients.
-        #[arg(long)]
         clear_cc: bool,
-        /// Change the workspace identity slug used by this draft.
-        #[arg(long)]
+        bcc: Vec<String>,
+        clear_bcc: bool,
         identity: Option<String>,
-        /// Replacement draft body text.
-        #[arg(long, conflicts_with = "body_file")]
         body: Option<String>,
-        /// Path to a file whose contents replace the draft body.
-        #[arg(long = "body-file")]
         body_file: Option<String>,
     },
     /// Show an existing draft as a typed render document.
     Show {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Draft markdown file under the case drafts directory.
         draft_name: String,
     },
     /// Open a review session for this draft.
     Review {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Draft markdown file under the case drafts directory.
         draft_name: String,
-        /// Review presentation mode.
-        #[arg(long, value_enum, default_value = "local")]
         mode: ReviewMode,
     },
     /// Validate a draft under the case drafts directory.
     Validate {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Draft markdown file under the case drafts directory.
         draft_name: String,
     },
     /// List local drafts with their current status.
-    List {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
-        case_ref: String,
-    },
+    List { case_ref: String },
     /// Queue this draft to be uploaded to the remote Drafts mailbox.
     Upload {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Draft markdown file under the case drafts directory.
         draft_name: String,
     },
     /// Queue this draft to be sent and recorded in the case after push succeeds.
     Send {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Draft markdown file under the case drafts directory.
         draft_name: String,
     },
     /// Copy or reference a file and add it to a draft's attachments.
     Attach {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Draft markdown file under the case drafts directory.
         draft_name: String,
-        /// Local file path to attach.
         path: String,
     },
     /// Remove a local draft and any queued outbound item for it.
     Remove {
-        /// Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix.
         case_ref: String,
-        /// Draft markdown file under the case drafts directory.
         draft_name: String,
-        /// Why this draft should be removed; required by default.
-        #[arg(long)]
         reason: Option<String>,
     },
 }

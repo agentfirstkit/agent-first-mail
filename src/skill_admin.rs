@@ -5,19 +5,26 @@
 use crate::cli::{SkillAction, SkillAgentSelection, SkillScope, SkillTargetArgs};
 use crate::error::{AppError, Result};
 use agent_first_data::skill::{
-    self, SkillAction as AfAction, SkillAgentSelection as AfSelection, SkillError, SkillOptions,
-    SkillReport, SkillScope as AfScope, SkillSpec,
+    self, SkillAction as AfAction, SkillAgentSelection as AfSelection, SkillAsset, SkillError,
+    SkillOptions, SkillReport, SkillScope as AfScope, SkillSpec,
 };
 use serde_json::Value;
 use std::path::Path;
 
 /// The embedded skill this binary installs.
+// SKILL.md points agents at these bundled references, so they must install
+// alongside it. Keep this list in step with skills/agent-first-mail/references/.
+const SKILL_ASSETS: &[SkillAsset] = &[SkillAsset {
+    path: "references/http-api.md",
+    contents: include_str!("../skills/agent-first-mail/references/http-api.md"),
+}];
+
 const SPEC: SkillSpec = SkillSpec {
     name: "agent-first-mail",
     source: include_str!("../skills/agent-first-mail/SKILL.md"),
     title: "Agent-First Mail",
     marker_slug: "afmail",
-    assets: &[],
+    assets: SKILL_ASSETS,
 };
 
 pub fn handle_action(action: SkillAction) -> Result<Value> {
@@ -163,6 +170,14 @@ mod tests {
         assert!(install.is_ok());
         let skill_path = dir.join("agent-first-mail").join("SKILL.md");
         assert!(skill_path.is_file());
+        // SKILL.md sends the agent to this file, so installing without it hands
+        // out a broken pointer. Asserted here because `assets: &[]` compiled and
+        // passed every other check while silently dropping it.
+        let reference_path = dir
+            .join("agent-first-mail")
+            .join("references")
+            .join("http-api.md");
+        assert!(reference_path.is_file(), "{reference_path:?}");
 
         let status = handle_action(SkillAction::Status(target_args(
             &dir,

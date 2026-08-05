@@ -72,11 +72,15 @@ fn protocol_v1_streams_are_valid_and_have_one_terminal_event() {
     let (status, stdout) = run(
         &root,
         &[
+            "status",
             "--output-to",
             "stdout",
             "--log",
-            "startup,request,progress",
-            "status",
+            "startup",
+            "--log",
+            "request",
+            "--log",
+            "progress",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
@@ -89,14 +93,16 @@ fn protocol_v1_streams_are_valid_and_have_one_terminal_event() {
             .all(|event| event["trace"]["duration_ms"].as_u64().is_some())
     );
 
+    // A rejected argv never reached a command, so it carries the rule it broke
+    // in `error.code` and no timing for work that never started.
     let (status, stdout) = run(&root, &["unknown-command"]);
     assert_eq!(status, 2, "{stdout}");
     let events = protocol_events(&stdout);
     assert!(agent_first_data::validate_protocol_stream(&events, false).is_ok());
     assert_eq!(events[0]["kind"], "error");
-    assert_eq!(events[0]["error"]["code"], "cli_error");
+    assert_eq!(events[0]["error"]["code"], "cli_unknown_command");
     assert!(events[0]["error"]["message"].as_str().is_some());
-    assert!(events[0]["trace"]["duration_ms"].as_u64().is_some());
+    assert!(events[0]["error"]["hint"].as_str().is_some());
 
     let _ = fs::remove_dir_all(root);
 }
@@ -120,33 +126,36 @@ fn version_uses_afdata_output_formats() {
     let help_result = parse_one(&stdout);
     assert_eq!(help_result["code"], "help");
     let help = &help_result["help"];
-    assert_eq!(help["scope"], "one_level");
+    assert_eq!(help["schema"], "cli-help-v2");
     assert_eq!(help["command_path"], "afmail");
     assert!(help.get("code").is_none());
     assert!(help.get("description").is_none());
     assert!(help.get("description_markdown").is_none());
     assert!(help.get("versions").is_none());
-    let version_argument = help["arguments"]
-        .as_array()
-        .and_then(|arguments| {
-            arguments
-                .iter()
-                .find(|argument| argument["name"] == "--version")
-        })
-        .expect("help must advertise --version without eagerly returning version values");
+    // help-v1's `scope`/`inherited_arguments_from`/`arguments` are gone: a
+    // command answers with every shape it has, and the root has none of its
+    // own, only subcommands.
+    assert!(help.get("scope").is_none());
+    assert!(help.get("inherited_arguments_from").is_none());
+    assert!(help.get("arguments").is_none());
     assert!(
-        version_argument.get("short").is_none(),
-        "--version must not expose a short alias"
+        help["subcommands"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().all(|command| command
+                .as_str()
+                .is_some_and(|command| command.ends_with(" --help")))),
+        "{stdout}"
     );
     assert!(!stdout.contains(env!("CARGO_PKG_VERSION")));
     if let Some(build) = build {
         assert!(!stdout.contains(&build));
     }
 
+    // No short flags exist anywhere in the registry.
     let (status, stdout) = run(&root, &["-V"]);
     assert_eq!(status, 2, "{stdout}");
     let error = parse_one(&stdout);
-    assert_eq!(error["code"], "cli_error");
+    assert_eq!(error["code"], "cli_unknown_argument");
 
     let (status, stdout) = run(&root, &["--version", "--output", "json"]);
     assert_eq!(status, 0, "{stdout}");
@@ -184,7 +193,7 @@ fn version_uses_afdata_output_formats() {
 }
 
 #[test]
-fn removed_flag_and_seen_commands_are_cli_errors() {
+fn removed_flag_and_seen_commands_are_unknown_commands() {
     let root = temp_root("message-seen");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
@@ -193,20 +202,23 @@ fn removed_flag_and_seen_commands_are_cli_errors() {
         let (status, stdout) = run(&root, &["message", action, "message_seen"]);
         assert_eq!(status, 2, "{stdout}");
         let value = parse_one(&stdout);
-        assert_eq!(value["code"], "cli_error");
+        assert_eq!(value["code"], "cli_unknown_command");
     }
 
     let (status, stdout) = run(&root, &["push", "flag"]);
     assert_eq!(status, 2, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
+    assert_eq!(value["code"], "cli_unknown_command");
 
     let _ = fs::remove_dir_all(root);
 }
 
+/// One `--help` call answers a command completely: every legal shape, with
+/// every argument that shape accepts spelled into its usage line. There is no
+/// second call to discover inherited globals, and no recursive mode.
 #[test]
-fn help_progressively_discloses_inherited_global_arguments() {
-    let root = temp_root("help-progressive");
+fn leaf_help_returns_complete_shapes() {
+    let root = temp_root("help-shapes");
     assert!(fs::create_dir_all(&root).is_ok());
 
     let (status, stdout) = run(&root, &["message", "list", "--help"]);
@@ -214,32 +226,44 @@ fn help_progressively_discloses_inherited_global_arguments() {
     let result = parse_one(&stdout);
     let help = &result["help"];
     assert_eq!(result["code"], "help");
+    assert_eq!(help["schema"], "cli-help-v2");
     assert_eq!(help["command_path"], "afmail message list");
-    assert_eq!(
-        help["inherited_arguments_from"],
-        serde_json::json!(["afmail"])
-    );
-    assert!(help["arguments"].as_array().is_some_and(|arguments| {
-        arguments
-            .iter()
-            .any(|argument| argument["name"] == "--sender")
-    }));
+    assert!(help.get("inherited_arguments_from").is_none());
+    let shapes = help["shapes"].as_array().cloned().unwrap_or_default();
+    assert_eq!(shapes.len(), 1, "{stdout}");
+    let usage = shapes[0]["usage"].as_str().unwrap_or_default();
+    for argument in ["--sender", "--workspace", "--output", "--stdout-file"] {
+        assert!(usage.contains(argument), "{usage}");
+    }
+    // A leaf has no children, so the key is simply absent.
+    assert!(help.get("subcommands").is_none(), "{stdout}");
+
+    // A command with more than one shape names each one, and says how it
+    // differs from its siblings.
+    let (status, stdout) = run(&root, &["push", "--help"]);
+    assert_eq!(status, 0, "{stdout}");
+    let shapes = parse_one(&stdout)["help"]["shapes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(shapes.len(), 2, "{stdout}");
     assert!(
-        !stdout.contains("--workspace"),
-        "structured leaf help must reference, not repeat, root globals: {stdout}"
+        shapes.iter().all(|shape| shape["about"]
+            .as_str()
+            .is_some_and(|about| !about.is_empty())),
+        "{stdout}"
     );
 
     let (status, plain) = run(&root, &["message", "list", "--help", "--output", "plain"]);
     assert_eq!(status, 0, "{plain}");
-    assert!(plain.contains("Usage: afmail message list [OPTIONS]"));
-    assert!(plain.contains("--workspace"));
-    assert!(plain.contains("--version"));
+    assert!(plain.contains("afmail message list"), "{plain}");
+    assert!(plain.contains("--workspace"), "{plain}");
 
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn clap_help_pseudo_command_is_a_structured_cli_error() {
+fn help_pseudo_command_is_a_structured_cli_error() {
     let root = temp_root("help-pseudo");
     assert!(fs::create_dir_all(&root).is_ok());
 
@@ -248,7 +272,7 @@ fn clap_help_pseudo_command_is_a_structured_cli_error() {
     let event = protocol_events(&stdout);
     assert_eq!(event.len(), 1, "{event:?}");
     assert_eq!(event[0]["kind"], "error");
-    assert_eq!(event[0]["error"]["code"], "cli_error");
+    assert_eq!(event[0]["error"]["code"], "cli_unknown_command");
 
     let _ = fs::remove_dir_all(root);
 }
@@ -367,10 +391,21 @@ fn case_create_requires_explicit_group() {
             "needs handling",
         ],
     );
-    assert_ne!(status, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(
-        stderr.contains("--group") || stdout.contains("--group"),
+    // `--group` is required by the only registered `case create` shape, so the
+    // mix without it is simply not a shape.
+    assert_eq!(status, 2, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        parse_one(&stderr)["code"],
+        "cli_unregistered_combination",
         "stdout: {stdout}\nstderr: {stderr}"
+    );
+    let (status, help) = run(&root, &["case", "create", "--help"]);
+    assert_eq!(status, 0, "{help}");
+    assert!(
+        parse_one(&help)["help"]["shapes"][0]["usage"]
+            .as_str()
+            .is_some_and(|usage| usage.contains("--group <GROUP>")),
+        "{help}"
     );
 
     let _ = fs::remove_dir_all(root);
@@ -423,8 +458,14 @@ fn event_stream_commands_reject_split_routing() {
     ] {
         let (status, stdout, stderr) = run_allow_stderr(&root, &args);
         assert_eq!(status, 2, "{args:?}: stdout={stdout} stderr={stderr}");
+        // The contract itself has no `split`, so the rejection names the
+        // destinations that are registered.
+        let error = parse_one(&stderr);
+        assert_eq!(error["code"], "cli_invalid_argument_value", "{args:?}");
         assert!(
-            stderr.contains("must stay on one stream"),
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("expected one of stdout, stderr")),
             "{args:?}: {stderr}"
         );
     }

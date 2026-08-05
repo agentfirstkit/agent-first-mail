@@ -98,6 +98,12 @@
               },
               "type": "array"
             },
+            "bcc": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "case_uid": {
               "type": "string"
             },

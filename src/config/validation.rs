@@ -250,18 +250,18 @@ pub(super) fn validate_language_bcp47(
     }
 }
 
+/// Whether `value` is a language tag afmail will store.
+///
+/// Well-formedness is afdata's `is_valid_bcp47`, not a second hand-written
+/// grammar: the tag reaches template selection through the same conventions
+/// everything else here follows, and afmail's own version diverged in both
+/// directions — it accepted `chinese` and `abcdefgh` (stored, then silently
+/// falling back to `en-US` at render time) while rejecting privateuse `x-…`.
+///
+/// The two surrounding rules stay afmail's, because they are about a config
+/// *field* rather than the grammar: a value the user has to look at must not
+/// carry invisible surrounding whitespace, and a config entry gets a length
+/// bound so a pathological tag cannot ride along in every rendered path.
 pub(super) fn is_bcp47_like(value: &str) -> bool {
-    if value.trim() != value || value.is_empty() || value.len() > 64 {
-        return false;
-    }
-    let mut parts = value.split('-');
-    let Some(primary) = parts.next() else {
-        return false;
-    };
-    if !(2..=8).contains(&primary.len()) || !primary.bytes().all(|b| b.is_ascii_alphabetic()) {
-        return false;
-    }
-    parts.all(|part| {
-        (1..=8).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_alphanumeric())
-    })
+    value.trim() == value && value.len() <= 64 && agent_first_data::is_valid_bcp47(value)
 }

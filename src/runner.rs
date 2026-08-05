@@ -2,7 +2,6 @@ pub(crate) mod dispatch;
 mod lock;
 mod output;
 mod purge;
-mod push;
 #[cfg(feature = "review")]
 mod review;
 #[cfg(not(feature = "review"))]
@@ -17,8 +16,7 @@ use crate::progress::{ProgressCallback, object_with_phase};
 use agent_first_data::{CliEmitter, CliEmitterError, LogFilters, OutputFormat, OutputTo};
 use dispatch::execute_command_with_progress;
 use output::{
-    argv_shape, command_name, log_event, output_format_name, progress_event, redact_argv,
-    redact_log_fields,
+    argv_shape, log_event, output_format_name, progress_event, redact_argv, redact_log_fields,
 };
 use serde_json::{Value, json};
 use std::time::Instant;
@@ -46,13 +44,16 @@ pub fn run_command(
     output_to: OutputTo,
     log_filters: &LogFilters,
     argv: &[String],
+    command_path: &[String],
 ) -> i32 {
     let started = Instant::now();
     let mut emitter = CliEmitter::from_output_to(output_to, output).with_strict_protocol();
-    let command_name = command_name(&command).to_string();
+    // The path the registry resolved to, so a diagnostic names `api export`
+    // rather than the `api` group it happens to live under.
+    let command_name = command_path.join(" ");
     if log_filters.enabled("startup") {
-        let argv_shape = argv_shape(argv);
-        let argv = redact_argv(argv);
+        let argv_shape = argv_shape(argv, command_path);
+        let argv = redact_argv(argv, command_path);
         if let Err(err) = emit_log_event(
             &mut emitter,
             log_event(

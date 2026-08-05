@@ -107,7 +107,7 @@ pub fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Optio
         "remote": {"locations": [{
             "mailbox_name": "INBOX",
             "mailbox_id": "inbox",
-            "uid_validity": 1,
+            "uid_validity": 44,
             "uid": uid,
             "flags": [],
             "observed_rfc3339": "2026-05-21T10:00:00Z"

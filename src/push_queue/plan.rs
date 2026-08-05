@@ -76,6 +76,7 @@ struct PushPlanOutbound {
     warnings: Vec<&'static str>,
     to: Vec<String>,
     cc: Vec<String>,
+    bcc: Vec<String>,
     subject: String,
     attachments: Vec<PushPlanAttachment>,
 }
@@ -421,6 +422,7 @@ fn push_plan_outbound(
             warnings: Vec::new(),
             to: Vec::new(),
             cc: Vec::new(),
+            bcc: Vec::new(),
             subject: String::new(),
             attachments: Vec::new(),
         });
@@ -471,6 +473,7 @@ fn push_plan_outbound(
         },
         to: frontmatter.to,
         cc: frontmatter.cc,
+        bcc: frontmatter.bcc,
         subject: frontmatter.subject.unwrap_or_default(),
         attachments,
     })

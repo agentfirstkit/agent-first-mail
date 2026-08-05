@@ -1,7 +1,6 @@
 use crate::config::{ImapConfig, SpecialUseKind};
 use crate::error::{AppError, Result};
 use crate::types::RemoteLocation;
-use mail_parser::MessageParser;
 use rustls_connector::RustlsConnector;
 use rustls_pemfile::certs;
 use serde_json::json;
@@ -27,6 +26,12 @@ pub struct MoveOutcome {
     pub seen_error: Option<String>,
     pub moved: bool,
     pub target_location: Option<RemoteLocation>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MoveFlagUpdates<'a> {
+    pub mark_seen: bool,
+    pub keyword: Option<&'a str>,
 }
 
 pub struct ImapClientSession {
@@ -69,30 +74,30 @@ impl ImapClientSession {
     pub fn uid_mark_and_move(
         &mut self,
         source_folder: &str,
+        expected_uid_validity: Option<u64>,
         uid: u64,
         target_folder: &str,
         rfc822_message_id: Option<&str>,
-        mark_seen: bool,
-        keyword: Option<&str>,
+        flag_updates: MoveFlagUpdates<'_>,
     ) -> Result<MoveOutcome> {
         match self.inner_mut()? {
             ImapClientSessionInner::Plain(session) => uid_mark_and_move_session(
                 session,
                 source_folder,
+                expected_uid_validity,
                 uid,
                 target_folder,
                 rfc822_message_id,
-                mark_seen,
-                keyword,
+                flag_updates,
             ),
             ImapClientSessionInner::Tls(session) => uid_mark_and_move_session(
                 session,
                 source_folder,
+                expected_uid_validity,
                 uid,
                 target_folder,
                 rfc822_message_id,
-                mark_seen,
-                keyword,
+                flag_updates,
             ),
         }
     }
@@ -100,17 +105,28 @@ impl ImapClientSession {
     pub fn uid_store_flags(
         &mut self,
         source_folder: &str,
+        expected_uid_validity: Option<u64>,
         uid: u64,
         flags: &[String],
         add: bool,
     ) -> Result<()> {
         match self.inner_mut()? {
-            ImapClientSessionInner::Plain(session) => {
-                uid_store_flags_session(session, source_folder, uid, flags, add)
-            }
-            ImapClientSessionInner::Tls(session) => {
-                uid_store_flags_session(session, source_folder, uid, flags, add)
-            }
+            ImapClientSessionInner::Plain(session) => uid_store_flags_session(
+                session,
+                source_folder,
+                expected_uid_validity,
+                uid,
+                flags,
+                add,
+            ),
+            ImapClientSessionInner::Tls(session) => uid_store_flags_session(
+                session,
+                source_folder,
+                expected_uid_validity,
+                uid,
+                flags,
+                add,
+            ),
         }
     }
 
@@ -378,21 +394,27 @@ pub(crate) fn uid_move_session<T: std::io::Read + std::io::Write>(
 pub(crate) fn uid_mark_and_move_session<T: std::io::Read + std::io::Write>(
     session: &mut imap::Session<T>,
     source_folder: &str,
+    expected_uid_validity: Option<u64>,
     uid: u64,
     target_folder: &str,
     rfc822_message_id: Option<&str>,
-    mark_seen: bool,
-    keyword: Option<&str>,
+    flag_updates: MoveFlagUpdates<'_>,
 ) -> Result<MoveOutcome> {
     let moved = source_folder != target_folder;
+    let mailbox_status = session
+        .select(source_folder)
+        .map_err(|e| AppError::new("imap_select_failed", e.to_string()))?;
+    ensure_expected_uid_validity(
+        source_folder,
+        uid,
+        expected_uid_validity,
+        mailbox_status.uid_validity.map(u64::from),
+    )?;
     let move_supported = moved && capability_move(session)?;
     if moved && !move_supported {
         require_uidplus_for_precise_move_fallback(session)?;
     }
-    session
-        .select(source_folder)
-        .map_err(|e| AppError::new("imap_select_failed", e.to_string()))?;
-    let (seen_set, seen_error) = if mark_seen {
+    let (seen_set, seen_error) = if flag_updates.mark_seen {
         session
             .uid_store(uid.to_string(), "+FLAGS.SILENT (\\Seen)")
             .map(|_| (true, None))
@@ -400,7 +422,7 @@ pub(crate) fn uid_mark_and_move_session<T: std::io::Read + std::io::Write>(
     } else {
         (false, None)
     };
-    let (keyword_set, keyword_error) = if let Some(keyword) = keyword {
+    let (keyword_set, keyword_error) = if let Some(keyword) = flag_updates.keyword {
         let keyword_result =
             session.uid_store(uid.to_string(), format!("+FLAGS.SILENT ({keyword})"));
         match keyword_result {
@@ -440,13 +462,20 @@ pub(crate) fn uid_mark_and_move_session<T: std::io::Read + std::io::Write>(
 pub(crate) fn uid_store_flags_session<T: std::io::Read + std::io::Write>(
     session: &mut imap::Session<T>,
     source_folder: &str,
+    expected_uid_validity: Option<u64>,
     uid: u64,
     flags: &[String],
     add: bool,
 ) -> Result<()> {
-    session
+    let mailbox_status = session
         .select(source_folder)
         .map_err(|e| AppError::new("imap_select_failed", e.to_string()))?;
+    ensure_expected_uid_validity(
+        source_folder,
+        uid,
+        expected_uid_validity,
+        mailbox_status.uid_validity.map(u64::from),
+    )?;
     let flags = flags.join(" ");
     let operation = if add { "+" } else { "-" };
     session
@@ -456,6 +485,34 @@ pub(crate) fn uid_store_flags_session<T: std::io::Read + std::io::Write>(
         )
         .map_err(|e| AppError::new("imap_store_failed", e.to_string()))?;
     Ok(())
+}
+
+fn ensure_expected_uid_validity(
+    source_folder: &str,
+    uid: u64,
+    expected_uid_validity: Option<u64>,
+    actual_uid_validity: Option<u64>,
+) -> Result<()> {
+    let Some(expected_uid_validity) = expected_uid_validity else {
+        return Ok(());
+    };
+    if actual_uid_validity == Some(expected_uid_validity) {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "imap_uidvalidity_changed",
+        format!("UIDVALIDITY changed for mailbox {source_folder}; refusing to use stale UID {uid}"),
+    )
+    .with_hint(
+        "Run `afmail pull` to reconcile the mailbox, review the new push plan, then confirm that plan.",
+    )
+    .with_details(serde_json::json!({
+        "mailbox_name": source_folder,
+        "uid": uid,
+        "expected_uid_validity": expected_uid_validity,
+        "actual_uid_validity": actual_uid_validity,
+        "remote_calls_started": false,
+    })))
 }
 
 pub(crate) fn require_uidplus_for_precise_move_fallback<T: std::io::Read + std::io::Write>(
@@ -470,7 +527,10 @@ pub(crate) fn require_uidplus_for_precise_move_fallback<T: std::io::Read + std::
         )
         .with_hint(
             "Manually archive the message in the mail client, or use a server that advertises MOVE or UIDPLUS before retrying this remote move.",
-        ))
+        )
+        .with_details(serde_json::json!({
+            "remote_calls_started": false,
+        })))
     }
 }
 
@@ -533,12 +593,8 @@ pub(crate) fn find_uid_by_message_id_session<T: std::io::Read + std::io::Write>(
         .map_err(|e| AppError::new("imap_search_failed", e.to_string()))?
         .into_iter()
         .max()
-        .map(|uid| uid as u64);
-    let uid = match uid {
-        Some(uid) => uid,
-        None => fetch_uid_by_message_id_session(session, rfc822_message_id)?
-            .ok_or_else(|| AppError::new("imap_uid_missing", "moved message uid was not found"))?,
-    };
+        .map(|uid| uid as u64)
+        .ok_or_else(|| AppError::new("imap_uid_missing", "moved message uid was not found"))?;
     Ok(RemoteLocation {
         mailbox_id: None,
         mailbox_name: folder.to_string(),
@@ -550,55 +606,6 @@ pub(crate) fn find_uid_by_message_id_session<T: std::io::Read + std::io::Write>(
     })
 }
 
-pub(crate) fn fetch_uid_by_message_id_session<T: std::io::Read + std::io::Write>(
-    session: &mut imap::Session<T>,
-    rfc822_message_id: &str,
-) -> Result<Option<u64>> {
-    let target = normalize_message_id(rfc822_message_id);
-    let fetches = session
-        .uid_fetch("1:*", "(UID BODY.PEEK[HEADER])")
-        .map_err(|e| AppError::new("imap_fetch_failed", e.to_string()))?;
-    let mut uid = None;
-    for fetch in fetches.iter() {
-        let Some(candidate_uid) = fetch.uid else {
-            continue;
-        };
-        let Some(body) = fetch.header().or_else(|| fetch.body()) else {
-            continue;
-        };
-        if header_body_contains_message_id(body, &target) {
-            uid = Some(candidate_uid as u64);
-        }
-    }
-    Ok(uid)
-}
-
-fn header_body_contains_message_id(body: &[u8], target: &str) -> bool {
-    if let Some(message_id) = rfc822_message_id(body)
-        && normalize_message_id(&message_id) == target
-    {
-        return true;
-    }
-    String::from_utf8_lossy(body)
-        .split(['<', '>', ',', ';', ' ', '\t', '\r', '\n'])
-        .map(normalize_message_id)
-        .any(|message_id| message_id == target)
-}
-
-fn rfc822_message_id(raw_eml: &[u8]) -> Option<String> {
-    MessageParser::default()
-        .parse(raw_eml)
-        .and_then(|message| message.message_id().map(ToString::to_string))
-}
-
-fn normalize_message_id(value: &str) -> String {
-    value
-        .trim()
-        .trim_matches(|ch| matches!(ch, '<' | '>' | ',' | ';'))
-        .trim()
-        .to_ascii_lowercase()
-}
-
 fn special_use_from_attributes(attributes: &[String]) -> Option<SpecialUseKind> {
     crate::config::special_use_kinds()
         .iter()
@@ -608,4 +615,28 @@ fn special_use_from_attributes(attributes: &[String]) -> Option<SpecialUseKind> 
                 .iter()
                 .any(|attribute| attribute.eq_ignore_ascii_case(kind.attribute()))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_expected_uid_validity;
+
+    #[test]
+    fn uid_validity_mismatch_is_a_pre_effect_error() {
+        let error = ensure_expected_uid_validity("INBOX", 7, Some(44), Some(45))
+            .err()
+            .unwrap_or_else(|| {
+                crate::error::AppError::new("test_failure", "expected UIDVALIDITY mismatch")
+            });
+
+        assert_eq!(error.error_code, "imap_uidvalidity_changed");
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("remote_calls_started")),
+            Some(&serde_json::json!(false))
+        );
+        assert!(ensure_expected_uid_validity("INBOX", 7, Some(44), Some(44)).is_ok());
+    }
 }

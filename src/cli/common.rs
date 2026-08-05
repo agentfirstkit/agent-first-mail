@@ -1,6 +1,5 @@
-use clap::{Args, Subcommand, ValueEnum};
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
+/// Review presentation mode.
+#[derive(Clone, Copy, Debug)]
 pub enum ReviewMode {
     /// Open a local review window.
     Local,
@@ -8,7 +7,7 @@ pub enum ReviewMode {
     Lan,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum ConfigAction {
     /// Show effective config after applying built-in defaults.
     Show,
@@ -26,7 +25,7 @@ pub enum ConfigAction {
     Remove { key: String, slug: String },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum RemoteAction {
     /// Test configured IMAP and SMTP access without sending mail.
     Test,
@@ -34,147 +33,96 @@ pub enum RemoteAction {
     Folders,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum TriageAction {
     /// List compact untriaged message locators.
-    List {
-        /// Maximum number of newest triage messages to return.
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Include message metadata, related message ids, and case refs.
-        #[arg(long)]
-        details: bool,
-    },
+    List { limit: Option<usize>, details: bool },
     /// Set or clear the current typed Agent suggestion for a message.
-    Suggestion {
-        #[command(subcommand)]
-        action: TriageSuggestionAction,
-    },
+    Suggestion { action: TriageSuggestionAction },
     /// Open a review session for persisted triage suggestions.
     Review {
-        /// Message ids to review. With none, review every current triage suggestion.
         message_id: Vec<String>,
-        /// Review presentation mode.
-        #[arg(long, value_enum, default_value = "local")]
         mode: ReviewMode,
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum TriageSuggestionAction {
     /// Replace the current suggestion and clear any human review of the prior round.
     Set(TriageSuggestionSetArgs),
     /// Clear exactly the current suggestion round.
     Clear {
-        /// Message id whose current suggestion round should be cleared.
         message_id: String,
-        /// UID returned by the current suggestion set command.
-        #[arg(long)]
         agent_suggestion_uid: String,
     },
 }
 
-#[derive(Args, Debug)]
+#[derive(Debug)]
 pub struct TriageSuggestionSetArgs {
-    /// Message id currently in triage.
     pub message_id: String,
-    /// Current hash returned by `afmail message show`.
-    #[arg(long)]
     pub message_review_base_hash: String,
-    /// Why this complete action is being suggested.
-    #[arg(long)]
     pub reason: String,
-    /// Optional confidence from 0 through 100.
-    #[arg(long)]
     pub confidence_percent: Option<u8>,
-    #[command(subcommand)]
     pub action: MessageSuggestionAction,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum MessageSuggestionAction {
     CaseCreate {
-        #[arg(long)]
         name: String,
-        #[arg(long)]
         group: String,
     },
     CaseAdd {
         case_ref: String,
     },
     NotificationCreate {
-        #[arg(long)]
         name: String,
-        #[arg(long)]
         summary: String,
     },
     NotificationAdd {
         notification_ref: String,
-        #[arg(long)]
         summary: String,
     },
     Spam,
     Trash,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum PushAction {
     /// Preview the complete resolved push plan without writing.
     List,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum DoctorAction {
     /// Repair only unambiguous afmail-generated state.
-    Repair {
-        /// Apply repair actions. Without this flag, repair is refused.
-        #[arg(long)]
-        confirm: bool,
-    },
+    Repair,
 }
 
-#[derive(Subcommand, Debug, Clone)]
+/// Which discard state a purge targets. With none, every discard state is
+/// purged together.
+#[derive(Debug, Clone, Copy)]
 pub enum PurgeAction {
     /// Permanently delete old local spam records.
-    Spam {
-        /// Only purge messages marked spam at least this many days ago. Defaults to 30.
-        #[arg(long = "older-than-days", value_name = "DAYS")]
-        older_than_days: Option<u64>,
-    },
+    Spam,
     /// Permanently delete old local trash records.
-    Trash {
-        /// Only purge messages marked trash at least this many days ago. Defaults to 30.
-        #[arg(long = "older-than-days", value_name = "DAYS")]
-        older_than_days: Option<u64>,
-    },
+    Trash,
     /// Permanently delete old local records whose remote message disappeared.
-    Deleted {
-        /// Only purge messages marked remote-deleted at least this many days ago. Defaults to 30.
-        #[arg(long = "older-than-days", value_name = "DAYS")]
-        older_than_days: Option<u64>,
-    },
+    Deleted,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum RenderAction {
     /// Rebuild generated case and notification read views.
     Refresh,
     /// Export built-in language templates, keeping existing files unless forced.
-    Templates {
-        /// Overwrite existing workspace templates with built-in defaults.
-        #[arg(long)]
-        force: bool,
-    },
+    Templates { force: bool },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum LogAction {
     /// List recent audit events.
-    List {
-        /// Maximum number of events to return.
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
-    },
+    List { limit: usize },
     /// Tail recent audit events as JSON data.
     Tail,
     /// List events for one message id.

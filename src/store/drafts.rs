@@ -273,7 +273,7 @@ impl Workspace {
         let already_present = fm.attachments.iter().any(|item| item == &attachment);
         if !already_present {
             fm.attachments.push(attachment.clone());
-            write_string(&draft_path, &render_frontmatter(&fm, &body)?)?;
+            write_string(&draft_path, &edit_frontmatter(&text, &fm, &body)?)?;
         }
         let size_bytes = fs::metadata(self.root.join(&file_path))
             .or_else(|_| fs::metadata(&source_abs))
@@ -406,6 +406,18 @@ impl Workspace {
                 changed_fields.push("cc".to_string());
             }
         }
+        if change.clear_bcc {
+            if !fm.bcc.is_empty() {
+                fm.bcc.clear();
+                changed_fields.push("bcc".to_string());
+            }
+        } else if !change.bcc.is_empty() {
+            let bcc = normalize_recipient_list(change.bcc, "bcc")?;
+            if fm.bcc != bcc {
+                fm.bcc = bcc;
+                changed_fields.push("bcc".to_string());
+            }
+        }
         if let Some(new_body) = body_override {
             let config = MailConfig::load(&self.root)?;
             let identity = if let Some(identity) = change.identity {
@@ -448,7 +460,7 @@ impl Workspace {
                 }
             }
         }
-        let rendered = render_frontmatter(&fm, &current_body)?;
+        let rendered = edit_frontmatter(&text, &fm, &current_body)?;
         let validation = self.validate_draft_bytes_inner(
             &case_uid,
             draft_name,
@@ -517,7 +529,7 @@ impl Workspace {
             action,
         )?;
         fm.sync_intent = Some(action.into());
-        let rendered = render_frontmatter(&fm, &body)?;
+        let rendered = edit_frontmatter(&text, &fm, &body)?;
         let validation = self.validate_draft_bytes_inner(
             &case_uid,
             draft_name,
@@ -659,8 +671,27 @@ impl Workspace {
         body: Option<&str>,
         body_file: Option<&str>,
     ) -> Result<Value> {
+        self.reply_to_message_with_options(
+            case_ref,
+            ReplyDraft {
+                message_id,
+                reply_all,
+                bcc: &[],
+                identity,
+                body,
+                body_file,
+            },
+        )
+    }
+
+    pub fn reply_to_message_with_options(
+        &self,
+        case_ref: &str,
+        draft: ReplyDraft<'_>,
+    ) -> Result<Value> {
         self.require_workspace()?;
-        let body_override = draft_body_override(body, body_file)?;
+        let body_override = draft_body_override(draft.body, draft.body_file)?;
+        let message_id = draft.message_id;
         validate_id("message_id", message_id)?;
         let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
         let messages = read_case_messages(&case_path, &case_uid)?;
@@ -685,7 +716,7 @@ impl Workspace {
         // recipients into `to` and the original Cc into `cc`, excluding self.
         let config = MailConfig::load(&self.root)?;
         let resolved_identity = config
-            .resolve_identity(&self.root, identity)
+            .resolve_identity(&self.root, draft.identity)
             .map_err(identity_draft_error)?;
         let own_emails = config.identity_emails();
         let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -698,7 +729,7 @@ impl Workspace {
         } else {
             message.reply_to.iter().collect()
         };
-        if reply_all {
+        if draft.reply_all {
             to_sources.extend(message.to.iter());
         }
         for addr in to_sources {
@@ -708,7 +739,7 @@ impl Workspace {
             }
         }
         let mut cc: Vec<String> = Vec::new();
-        if reply_all {
+        if draft.reply_all {
             for addr in &message.cc {
                 let key = email_address(addr);
                 if !key.is_empty() && seen.insert(key) {
@@ -716,6 +747,7 @@ impl Workspace {
                 }
             }
         }
+        let bcc = normalize_recipient_list(draft.bcc, "bcc")?;
         let fm = DraftFrontmatter {
             kind: Some("draft".to_string()),
             case_uid: case_uid.to_string(),
@@ -726,6 +758,7 @@ impl Workspace {
             subject: Some(subject),
             to,
             cc,
+            bcc,
             attachments: Vec::new(),
         };
         let scaffold = render_draft_reply_body(&self.root, &config, &message)?;
@@ -758,10 +791,10 @@ impl Workspace {
         self.require_workspace()?;
         let body_override = draft_body_override(draft.body, draft.body_file)?;
         let (case_uid, case_path) = self.resolve_active_case(case_ref)?;
-        if draft.to.is_empty() {
+        if draft.to.is_empty() && draft.bcc.is_empty() {
             return Err(AppError::new(
                 "invalid_request",
-                "draft requires at least one --to recipient",
+                "draft requires at least one --to or --bcc recipient",
             ));
         }
         let config = MailConfig::load(&self.root)?;
@@ -770,6 +803,7 @@ impl Workspace {
             .map_err(identity_draft_error)?;
         let to = normalize_recipient_list(draft.to, "to")?;
         let cc = normalize_recipient_list(draft.cc, "cc")?;
+        let bcc = normalize_recipient_list(draft.bcc, "bcc")?;
         let fm = DraftFrontmatter {
             kind: Some("draft".to_string()),
             case_uid: case_uid.to_string(),
@@ -780,6 +814,7 @@ impl Workspace {
             subject: Some(draft.subject.to_string()),
             to,
             cc,
+            bcc,
             attachments: Vec::new(),
         };
         let slug = {
@@ -904,11 +939,15 @@ impl Workspace {
         {
             return Err(AppError::new("draft_invalid", "draft subject is required"));
         }
-        if fm.to.is_empty() {
-            return Err(AppError::new("draft_invalid", "draft to is required"));
+        if fm.to.is_empty() && fm.bcc.is_empty() {
+            return Err(AppError::new(
+                "draft_invalid",
+                "draft requires at least one to or bcc recipient",
+            ));
         }
         normalize_recipient_list(&fm.to, "to")?;
         normalize_recipient_list(&fm.cc, "cc")?;
+        normalize_recipient_list(&fm.bcc, "bcc")?;
         let config = MailConfig::load(&self.root)?;
         config
             .resolve_identity(&self.root, fm.identity.as_deref())

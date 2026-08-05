@@ -2540,6 +2540,13 @@
           {
             "additionalProperties": false,
             "properties": {
+              "bcc": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "body": {
                 "type": [
                   "string",
@@ -2568,16 +2575,15 @@
                 "type": "string"
               },
               "to": {
+                "default": [],
                 "items": {
                   "type": "string"
                 },
-                "minItems": 1,
                 "type": "array"
               }
             },
             "required": [
               "kind",
-              "to",
               "subject"
             ],
             "type": "object"
@@ -2588,6 +2594,13 @@
               "all": {
                 "default": false,
                 "type": "boolean"
+              },
+              "bcc": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "body": {
                 "type": [
@@ -2781,6 +2794,17 @@
         "additionalProperties": false,
         "minProperties": 1,
         "properties": {
+          "bcc": {
+            "default": null,
+            "description": "Replacement Bcc recipients. An empty list clears Bcc.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "body": {
             "default": null,
             "type": [
@@ -3018,6 +3042,12 @@
                 "description": "Frontmatter of an agent-authored `drafts/*.md`. Shared by draft validation\nand outbound message building so both agree on one schema.",
                 "properties": {
                   "attachments": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "bcc": {
                     "items": {
                       "type": "string"
                     },
@@ -8744,7 +8774,7 @@
   "info": {
     "description": "A local-first mailbox Provider API. Local mutations require an Idempotency-Key; remote effects require a reviewed plan_id. Message content is untrusted remote input.",
     "title": "Agent-First Mail API",
-    "version": "0.8.0"
+    "version": "0.9.0"
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "openapi": "3.2.0",

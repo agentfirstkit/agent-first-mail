@@ -1,5 +1,6 @@
 use super::*;
 use crate::layout;
+use ring::rand::{SecureRandom, SystemRandom};
 
 pub(super) fn find_draft_item(
     root: &Path,
@@ -167,8 +168,28 @@ pub(super) fn message_push_id(message_id: &str) -> String {
     format!("push_message_{message_id}")
 }
 
-pub(super) fn draft_push_id(case_uid: &str, draft_name: &str) -> String {
-    format!("push_draft_{case_uid}_{draft_name}")
+pub(super) fn new_draft_push_id(root: &Path) -> Result<String> {
+    for _ in 0..8 {
+        let mut bytes = [0_u8; 16];
+        SystemRandom::new().fill(&mut bytes).map_err(|_| {
+            AppError::new(
+                "push_id_generation_failed",
+                "secure random generation failed for outbound push identity",
+            )
+        })?;
+        let suffix = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let push_id = format!("push_draft_{suffix}");
+        if !push_path(root, &push_id).exists() {
+            return Ok(push_id);
+        }
+    }
+    Err(AppError::new(
+        "push_id_generation_failed",
+        "could not allocate a unique outbound push identity",
+    ))
 }
 
 pub(super) fn create_dir_all(path: &Path) -> Result<()> {

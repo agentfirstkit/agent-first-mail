@@ -10,16 +10,12 @@ FILTER="${2:-}"
 check_cli_docs() {
   local binary="$ROOTPATH/target/debug/afmail"
   local doc_path="$ROOTPATH/docs/cli.md"
-  local header body generated existing
+  local generated existing
 
   cargo build --bin afmail --quiet
-  header='<!-- Generated. Do not edit by hand. Regenerate: afmail --help --recursive --output markdown -->
-
-# afmail CLI Reference'
-  body=$("$binary" --help --recursive --output markdown)
-  generated="${header}
-
-${body}"
+  # The registry renders the whole document, title and generated-by marker
+  # included, so there is nothing here to wrap around it.
+  generated=$("$binary" --docs)
   generated="${generated%$'\n'}"
   existing=$(<"$doc_path")
   if [ "$generated" != "$existing" ]; then
@@ -112,9 +108,13 @@ case "$MODE" in
   greenmail-prepare)  "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" prepare ;;
   greenmail-review)   "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" review ;;
   all)           run_static; run_unit; run_minimal ;;
+  # What CI runs, and therefore what a release must survive: `all` plus the
+  # container e2e that `all` omits because it needs Docker. A check that can
+  # fail the release has to be able to fail this gate first.
+  release)       run_static; run_unit; run_minimal; run_e2e ;;
   full)          run_static; run_unit; run_minimal; run_e2e; "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" run ;;
   *)
-    echo "Usage: $0 [static|unit|minimal|cli [FILTER]|request-id [FILTER]|workspace [FILTER]|config [FILTER]|surface [FILTER]|draft [FILTER]|push [FILTER]|pull [FILTER]|notification [FILTER]|case [FILTER]|contact [FILTER]|message [FILTER]|notes [FILTER]|render [FILTER]|render-perf|e2e [FILTER]|greenmail|greenmail-prepare|greenmail-review|all|full]" >&2
+    echo "Usage: $0 [static|unit|minimal|cli [FILTER]|request-id [FILTER]|workspace [FILTER]|config [FILTER]|surface [FILTER]|draft [FILTER]|push [FILTER]|pull [FILTER]|notification [FILTER]|case [FILTER]|contact [FILTER]|message [FILTER]|notes [FILTER]|render [FILTER]|render-perf|e2e [FILTER]|greenmail|greenmail-prepare|greenmail-review|all|release|full]" >&2
     exit 2
     ;;
 esac

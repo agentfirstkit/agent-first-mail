@@ -320,3 +320,171 @@ fn contact_index_fail_closed_on_invalid_and_duplicate_email() {
     assert_eq!(parse_one(&stdout)["code"], "contact_index_invalid");
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn editing_a_contact_leaves_the_authors_own_bytes_alone() {
+    // These files are meant to be edited by hand as well as by afmail, so a
+    // one-field command must not rewrite the whole frontmatter. This asserts
+    // the promise where a user would notice it — through the CLI, on a file
+    // they wrote — rather than on the function that happens to implement it.
+    let root = temp_root("contact-preserves-source");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let created = parse_one(
+        &run(
+            &root,
+            &[
+                "contact",
+                "create",
+                "--name",
+                "Alice Example",
+                "--email",
+                "alice@example.com",
+                "--reason",
+                "source preservation",
+            ],
+        )
+        .1,
+    );
+    let contact_uid = created["contact_uid"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let contact_path = root.join(created["contact_path"].as_str().unwrap_or_default());
+    assert!(!contact_uid.is_empty());
+
+    // Rewrite it the way an author would: a comment, their own key order, a
+    // mixed quote style, and blank lines above the body.
+    let authored = format!(
+        "---\n# Alice is the Q3 contract contact\ndisplay_name: Alice Example\nkind: contact\ncontact_uid: {contact_uid}\nemails:\n  - alice@example.com  # work address\nphones: []\norganization: \"Example Corp\"\nrole: ''\ntags: []\ncreated_rfc3339: \"2026-08-03T00:00:00Z\"\nupdated_rfc3339: \"2026-08-03T00:00:00Z\"\n---\n\n\n# My notes\n\nFirst paragraph.\n"
+    );
+    assert!(fs::write(&contact_path, &authored).is_ok());
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "contact",
+            "tag",
+            &contact_uid,
+            "vip",
+            "--reason",
+            "source preservation",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+
+    let edited = fs::read_to_string(&contact_path).expect("contact file");
+    // The edit itself landed.
+    assert!(edited.contains("tags:\n  - vip\n"), "{edited}");
+    // Everything the author wrote is still there, in their order.
+    assert!(
+        edited.contains("# Alice is the Q3 contract contact"),
+        "{edited}"
+    );
+    assert!(
+        edited.contains("  - alice@example.com  # work address"),
+        "{edited}"
+    );
+    assert!(
+        edited.contains("organization: \"Example Corp\""),
+        "{edited}"
+    );
+    assert!(edited.contains("role: ''"), "{edited}");
+    assert!(
+        edited.contains("---\n\n\n# My notes\n\nFirst paragraph.\n"),
+        "{edited}"
+    );
+    assert!(
+        edited.find("display_name").unwrap_or(usize::MAX) < edited.find("kind:").unwrap_or(0),
+        "author key order was rewritten: {edited}"
+    );
+    // Only the tag and the timestamp moved.
+    let unchanged: Vec<&str> = authored
+        .lines()
+        .filter(|line| !line.starts_with("tags:") && !line.starts_with("updated_rfc3339:"))
+        .collect();
+    for line in unchanged {
+        assert!(edited.contains(line), "lost `{line}` from:\n{edited}");
+    }
+}
+
+#[test]
+fn renaming_a_contact_keeps_the_authors_bytes_too() {
+    // Rename writes to a new file name, so it used to take the "create" branch
+    // and render the whole document from the struct — the one contact command
+    // that still destroyed what its author wrote.
+    let root = temp_root("contact-rename-preserves-source");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let created = parse_one(
+        &run(
+            &root,
+            &[
+                "contact",
+                "create",
+                "--name",
+                "Alice Example",
+                "--email",
+                "alice@example.com",
+                "--reason",
+                "rename preservation",
+            ],
+        )
+        .1,
+    );
+    let contact_uid = created["contact_uid"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let contact_path = root.join(created["contact_path"].as_str().unwrap_or_default());
+
+    let authored = format!(
+        "---\n# Alice is the Q3 contract contact\ndisplay_name: Alice Example\nkind: contact\ncontact_uid: {contact_uid}\nemails:\n  - alice@example.com  # work address\nphones: []\norganization: \"Example Corp\"\nrole: ''\ntags: []\ncreated_rfc3339: \"2026-08-03T00:00:00Z\"\nupdated_rfc3339: \"2026-08-03T00:00:00Z\"\n---\n\nMy own notes.\n"
+    );
+    assert!(fs::write(&contact_path, &authored).is_ok());
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "contact",
+            "rename",
+            &contact_uid,
+            "--name",
+            "Alice Renamed",
+            "--reason",
+            "rename preservation",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    assert!(!contact_path.is_file(), "the old file should be gone");
+
+    let renamed = parse_one(&run(&root, &["contact", "show", &contact_uid]).1);
+    let new_path = root.join(
+        renamed["locator"]["contact_path"]
+            .as_str()
+            .unwrap_or_default(),
+    );
+    let edited = fs::read_to_string(&new_path).expect("renamed contact file");
+    // The written value may or may not be quoted — the CST editor picks that
+    // conservatively for the value it is writing, and either spelling reads
+    // back as the same string. What matters is that nothing else moved.
+    assert!(
+        edited.contains("display_name: Alice Renamed")
+            || edited.contains("display_name: \"Alice Renamed\""),
+        "{edited}"
+    );
+    assert!(
+        edited.contains("# Alice is the Q3 contract contact"),
+        "{edited}"
+    );
+    assert!(
+        edited.contains("  - alice@example.com  # work address"),
+        "{edited}"
+    );
+    assert!(
+        edited.contains("organization: \"Example Corp\""),
+        "{edited}"
+    );
+    assert!(edited.contains("role: ''"), "{edited}");
+    assert!(edited.contains("My own notes."), "{edited}");
+}

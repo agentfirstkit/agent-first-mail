@@ -4,6 +4,17 @@
   "additionalProperties": false,
   "minProperties": 1,
   "properties": {
+    "bcc": {
+      "default": null,
+      "description": "Replacement Bcc recipients. An empty list clears Bcc.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
     "body": {
       "default": null,
       "type": [

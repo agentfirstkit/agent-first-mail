@@ -342,6 +342,8 @@ fn draft_change_updates_requested_fields_and_validates() {
             "alice@example.com",
             "--cc",
             "old-cc@example.com",
+            "--bcc",
+            "old-bcc@example.com",
             "--subject",
             "Old subject",
             "--body",
@@ -367,6 +369,8 @@ fn draft_change_updates_requested_fields_and_validates() {
             "--to",
             "bob@example.com",
             "--clear-cc",
+            "--bcc",
+            "new-bcc@example.com",
             "--body-file",
             "body.txt",
         ],
@@ -375,7 +379,7 @@ fn draft_change_updates_requested_fields_and_validates() {
     let changed = parse_one(&stdout);
     assert_eq!(
         changed["changed_fields"],
-        serde_json::json!(["subject", "to", "cc", "body"])
+        serde_json::json!(["subject", "to", "cc", "bcc", "body"])
     );
     assert!(
         changed["draft_hash"]
@@ -387,6 +391,8 @@ fn draft_change_updates_requested_fields_and_validates() {
     assert!(draft.contains("subject: New subject"));
     assert!(draft.contains("bob@example.com"));
     assert!(!draft.contains("old-cc@example.com"));
+    assert!(!draft.contains("old-bcc@example.com"));
+    assert!(draft.contains("new-bcc@example.com"));
     assert!(draft.contains("Replacement body"));
     let state = read_json(&case_path.join("data/drafts.json"));
     assert_eq!(
@@ -1021,7 +1027,7 @@ fn case_new_and_draft_new_from_scratch() {
             "draft",
             "new",
             &case_uid,
-            "--to",
+            "--bcc",
             "plumber@example.com <plumber@example.com>",
             "--subject",
             "Leak under the sink",
@@ -1036,6 +1042,8 @@ fn case_new_and_draft_new_from_scratch() {
     let draft_text = fs::read_to_string(&draft_path).unwrap_or_default();
     assert!(draft_text.contains("plumber@example.com"));
     assert!(!draft_text.contains("plumber@example.com <plumber@example.com>"));
+    assert!(draft_text.contains("bcc:"));
+    assert!(!draft_text.contains("\nto:"));
 
     // The scaffolded draft validates against the case with no inbound message.
     let (status, stdout) = run(
@@ -1238,7 +1246,7 @@ fn draft_save_send_validate_current_content_without_freshness_gate() {
     let (case_uid, case_path) = create_case(&root, "fresh-thread", "fresh draft case");
     let draft_path = case_path.join("drafts/new.md");
     let draft = draft_with_compose(format!(
-        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"Hello\"\nattachments:\n---\n\nHi Bob\n"
+        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nbcc:\n  - audit@example.com\nsubject: \"Hello\"\nattachments:\n---\n\nHi Bob\n"
     ));
     assert!(fs::write(&draft_path, &draft).is_ok());
 
@@ -1271,6 +1279,10 @@ fn draft_save_send_validate_current_content_without_freshness_gate() {
     assert_eq!(
         push["items"][0]["outbound"]["to"],
         json!(["bob@example.com"])
+    );
+    assert_eq!(
+        push["items"][0]["outbound"]["bcc"],
+        json!(["audit@example.com"])
     );
     assert_eq!(push["items"][0]["outbound"]["subject"], "Hello");
     assert!(

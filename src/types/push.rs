@@ -350,7 +350,10 @@ pub struct OutboundPush {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedOutbound {
     pub message_id: String,
+    /// Private mailbox evidence, including Bcc when present.
     pub raw: Vec<u8>,
+    /// SMTP DATA bytes. Bcc recipients remain in `envelope_to`, never here.
+    pub delivery_raw: Vec<u8>,
     pub envelope_from: String,
     pub envelope_to: Vec<String>,
 }

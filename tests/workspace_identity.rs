@@ -29,7 +29,7 @@ fn explicit_workspace_selects_target_workspace_from_agent_root() {
 
     let (status, stdout) = run(
         &agent_root,
-        &["--workspace", mail_b.to_str().unwrap_or_default(), "status"],
+        &["status", "--workspace", mail_b.to_str().unwrap_or_default()],
     );
     assert_eq!(status, 0, "{stdout}");
     let selected = parse_one(&stdout);
@@ -55,18 +55,22 @@ fn explicit_workspace_cannot_be_combined_with_init() {
     let (status, stdout) = run(
         &agent_root,
         &[
-            "--workspace",
-            workspace.to_str().unwrap_or_default(),
             "init",
             "other",
+            "--workspace",
+            workspace.to_str().unwrap_or_default(),
         ],
     );
+    // `init` creates a workspace, so it has none to select: the registry
+    // simply never declares `--workspace` there.
     assert_eq!(status, 2, "{stdout}");
+    let error = parse_one(&stdout);
+    assert_eq!(error["code"], "cli_unknown_argument", "{error}");
     assert!(
-        parse_one(&stdout)["message"]
+        error["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("cannot be used with init")
+            .contains("--workspace")
     );
 
     let _ = fs::remove_dir_all(agent_root);

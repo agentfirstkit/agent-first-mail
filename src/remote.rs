@@ -1,6 +1,6 @@
 use crate::config::{ImapConfig, MailConfig};
 use crate::error::{AppError, Result};
-use crate::imap_client::{ImapClientSession, MailboxInfo, MoveOutcome};
+use crate::imap_client::{ImapClientSession, MailboxInfo, MoveFlagUpdates, MoveOutcome};
 use crate::types::RemoteLocation;
 use serde_json::Value;
 use std::cell::RefCell;
@@ -16,11 +16,18 @@ pub trait MailRemote {
     fn move_message(
         &self,
         source_folder: &str,
+        expected_uid_validity: u64,
         uid: u64,
         target_folder: &str,
         rfc822_message_id: Option<&str>,
     ) -> Result<MoveOutcome>;
-    fn add_flags(&self, source_folder: &str, uid: u64, flags: &[String]) -> Result<()>;
+    fn add_flags(
+        &self,
+        source_folder: &str,
+        expected_uid_validity: u64,
+        uid: u64,
+        flags: &[String],
+    ) -> Result<()>;
     fn send_raw_message(
         &self,
         envelope_from: &str,
@@ -110,6 +117,7 @@ impl MailRemote for ImapSmtpRemote<'_> {
     fn move_message(
         &self,
         source_folder: &str,
+        expected_uid_validity: u64,
         uid: u64,
         target_folder: &str,
         rfc822_message_id: Option<&str>,
@@ -117,17 +125,25 @@ impl MailRemote for ImapSmtpRemote<'_> {
         self.with_session(|session| {
             session.uid_mark_and_move(
                 source_folder,
+                Some(expected_uid_validity),
                 uid,
                 target_folder,
                 rfc822_message_id,
-                false,
-                None,
+                MoveFlagUpdates::default(),
             )
         })
     }
 
-    fn add_flags(&self, source_folder: &str, uid: u64, flags: &[String]) -> Result<()> {
-        self.with_session(|session| session.uid_store_flags(source_folder, uid, flags, true))
+    fn add_flags(
+        &self,
+        source_folder: &str,
+        expected_uid_validity: u64,
+        uid: u64,
+        flags: &[String],
+    ) -> Result<()> {
+        self.with_session(|session| {
+            session.uid_store_flags(source_folder, Some(expected_uid_validity), uid, flags, true)
+        })
     }
 
     fn send_raw_message(
@@ -150,6 +166,9 @@ impl MailRemote for ImapSmtpRemote<'_> {
 }
 
 #[cfg(test)]
+type AddFlagsRequest = (String, u64, u64, Vec<String>);
+
+#[cfg(test)]
 #[derive(Default)]
 pub struct FakeMailRemote {
     pub append_results: std::cell::RefCell<std::collections::VecDeque<Result<()>>>,
@@ -158,6 +177,8 @@ pub struct FakeMailRemote {
     pub send_results: std::cell::RefCell<std::collections::VecDeque<Result<()>>>,
     pub find_results:
         std::cell::RefCell<std::collections::VecDeque<Result<Option<RemoteLocation>>>>,
+    pub move_requests: std::cell::RefCell<Vec<(String, u64, u64, String)>>,
+    pub add_flags_requests: std::cell::RefCell<Vec<AddFlagsRequest>>,
 }
 
 #[cfg(test)]
@@ -179,11 +200,18 @@ impl MailRemote for FakeMailRemote {
 
     fn move_message(
         &self,
-        _source_folder: &str,
-        _uid: u64,
+        source_folder: &str,
+        expected_uid_validity: u64,
+        uid: u64,
         target_folder: &str,
         _rfc822_message_id: Option<&str>,
     ) -> Result<MoveOutcome> {
+        self.move_requests.borrow_mut().push((
+            source_folder.to_string(),
+            expected_uid_validity,
+            uid,
+            target_folder.to_string(),
+        ));
         self.move_results
             .borrow_mut()
             .pop_front()
@@ -205,7 +233,19 @@ impl MailRemote for FakeMailRemote {
             }))
     }
 
-    fn add_flags(&self, _source_folder: &str, _uid: u64, _flags: &[String]) -> Result<()> {
+    fn add_flags(
+        &self,
+        source_folder: &str,
+        expected_uid_validity: u64,
+        uid: u64,
+        flags: &[String],
+    ) -> Result<()> {
+        self.add_flags_requests.borrow_mut().push((
+            source_folder.to_string(),
+            expected_uid_validity,
+            uid,
+            flags.to_vec(),
+        ));
         self.add_flags_results
             .borrow_mut()
             .pop_front()

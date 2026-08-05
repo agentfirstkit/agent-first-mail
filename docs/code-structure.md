@@ -8,10 +8,11 @@ maintenance guide for contributors; user-facing mailbox behavior is documented i
 
 `afmail` has four main layers:
 
-1. `src/main.rs` handles early CLI bootstrapping: version/help output, parse
-   errors, output-format recovery, and process exit codes.
-2. `src/cli/` defines the Clap contract and parse-time conveniences such as
-   command-specific error hints.
+1. `src/main.rs` binds the registry's actions, resolves argv, installs the
+   resolved output plan, and owns process exit codes.
+2. `src/cli/` holds the closed `cli-spec-v1` registry (`spec.rs`), the resolved
+   command types, and the projection from a resolved invocation onto a
+   `Command` (`build.rs`).
 3. `src/runner/` dispatches parsed commands to workspace operations and owns
    structured command logging/progress output.
 4. `src/api/` defines HTTP DTOs, OpenAPI/JSON Schema generation, bearer/network
@@ -25,8 +26,8 @@ mailbox workspace. Network-facing code stays outside the store in `imap_pull/`,
 
 ```text
 src/
-  main.rs            early CLI bootstrap and exit handling
-  cli/               Clap argument model, parsing, and invalid-command hints
+  main.rs            registry binding, argv resolution, and exit handling
+  cli/               cli-spec-v1 registry, command model, and invocation projection
   runner/            command dispatch, output, locks, push/purge, and blocking review sessions
   api/               HTTP handlers, typed DTOs, OpenAPI/Schema generation and export
   config/            typed config schema, defaults, key access, and validation
@@ -146,8 +147,10 @@ canonical files with `afmail render refresh`.
 
 - Preserve public command names, JSON schemas, stdout event codes, and on-disk
   paths unless a migration is explicitly planned.
-- Add new CLI actions in `src/cli/` first, then dispatch them in `src/runner/`,
-  and keep workspace mutations on `Workspace` methods.
+- Add new CLI actions to the registry in `src/cli/spec.rs` first, give them an
+  arm in `src/cli/build.rs`, then dispatch them in `src/runner/`, and keep
+  workspace mutations on `Workspace` methods. Express a constraint as disjoint
+  combinations rather than as a check in a handler.
 - Use typed structs at module boundaries and for template documents; reserve
   `serde_json::Value` for genuinely dynamic CLI output.
 - Keep generated view code separate from durable state mutation code where

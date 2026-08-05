@@ -1,16 +1,17 @@
 mod api;
+mod build;
 mod cases;
 mod common;
 mod contacts;
 mod demo;
-mod hints;
 mod message;
 mod notification;
-mod parse;
 mod root;
 mod skill;
+mod spec;
 
 pub use api::{ApiAction, ApiMode};
+pub use build::{ActionHandler, ArgumentError, Globals, action_handlers, build_command, globals};
 pub use cases::{
     CaseCommand, CaseCreateArgs, CaseDraftAction, CaseNotesAction, CaseSuggestionAction,
     CaseSuggestionActionKind, CaseSuggestionSetArgs,
@@ -24,13 +25,11 @@ pub use contacts::{
     ContactCommand, ContactCreateArgs, ContactEmailAction, ContactNotesAction, ContactPhoneAction,
 };
 pub use demo::{DemoAction, DemoScenario};
-#[doc(hidden)]
-pub use hints::error_hint;
 pub use message::{MessageAction, MessageAttachmentAction, MessageListScope};
 pub use notification::{
     NotificationCommand, NotificationCreateArgs, NotificationNotesAction,
     NotificationSuggestionAction, NotificationSuggestionActionKind, NotificationSuggestionSetArgs,
 };
-pub use parse::{ParsedArgs, command, parse_args};
-pub use root::{Cli, Command};
+pub use root::Command;
 pub use skill::{SkillAction, SkillAgentSelection, SkillScope, SkillTargetArgs, SkillWriteArgs};
+pub use spec::cli_spec;

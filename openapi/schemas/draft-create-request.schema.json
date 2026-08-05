@@ -5,6 +5,13 @@
     {
       "additionalProperties": false,
       "properties": {
+        "bcc": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "body": {
           "type": [
             "string",
@@ -33,16 +40,15 @@
           "type": "string"
         },
         "to": {
+          "default": [],
           "items": {
             "type": "string"
           },
-          "minItems": 1,
           "type": "array"
         }
       },
       "required": [
         "kind",
-        "to",
         "subject"
       ],
       "type": "object"
@@ -53,6 +59,13 @@
         "all": {
           "default": false,
           "type": "boolean"
+        },
+        "bcc": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "body": {
           "type": [

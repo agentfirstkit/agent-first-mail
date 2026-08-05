@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-mail"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 description = "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm."
 license = "MIT"
@@ -48,13 +48,12 @@ path = "src/main.rs"
 [dependencies]
 # Local monorepo development uses sibling crates where needed; version keys keep
 # packaging tied to the matching published crates.
-agent-first-data = { version = "0.26.2", features = ["cli-help", "cli-help-markdown", "skill-admin", "stream-redirect"] }
-agent-first-slug = "0.5.0"
+agent-first-data = { version = "0.31.0", default-features = false, features = ["cli", "skill-admin", "stream-redirect", "yaml", "toml", "dotenv", "ini"] }
+agent-first-slug = { version = "0.6.2", default-features = false }
 axum = { version = "0.8", optional = true }
 base64 = { version = "0.23", optional = true }
 blake3 = "1.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 imap = { version = "3.0.0-alpha.15", default-features = false }
@@ -63,7 +62,7 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 mail-parser = { version = "0.11", features = ["full_encoding"] }
 rustls-pemfile = "2.2.0"
 rustls-connector = { version = "0.23", default-features = false, features = ["webpki-root-certs", "rustls--ring"] }
-noyalib = "0.0.17"
+noyalib = "0.0.18"
 minijinja = "2"
 include_dir = "0.7"
 mime_guess = { version = "2", default-features = false }

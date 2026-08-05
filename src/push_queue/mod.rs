@@ -50,7 +50,10 @@ pub fn queue_outbound(
         action,
     )?;
     let preserved = existing.as_ref().filter(|_| !reset_progress);
-    let push_id = draft_push_id(case_uid, draft_name);
+    let push_id = match &existing {
+        Some(item) => item.push_id.clone(),
+        None => new_draft_push_id(root)?,
+    };
     let push_dir = root.join(crate::layout::afmail_path(crate::layout::AFMAIL_PUSH));
     create_dir_all(&push_dir)?;
     let now = crate::store::now_rfc3339();
@@ -162,10 +165,10 @@ pub fn queue_action_steps(
     kind: &str,
     message_ids: &[String],
     locations: &[PushLocation],
-    _steps: &[ActionStep],
+    steps: &[ActionStep],
     _reply_to_message_id: Option<String>,
 ) -> Result<Option<PushItem>> {
-    if message_ids.is_empty() {
+    if message_ids.is_empty() || steps.is_empty() {
         return Ok(None);
     }
     let action = MessagePushAction::from_kind(kind).ok_or_else(|| {
@@ -248,7 +251,7 @@ pub fn queue_action_steps(
                     .filter(|location| location.message_id == *message_id)
                     .cloned()
                     .collect(),
-                steps: _steps.to_vec(),
+                steps: steps.to_vec(),
                 reply_to_message_id: _reply_to_message_id.clone(),
             }),
             planned_message_rfc822: BTreeMap::new(),

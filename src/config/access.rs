@@ -1,7 +1,7 @@
 use super::*;
 use agent_first_data::document::{
-    Document, DocumentError, KeyedList, Value as AfValue, ValueType, coerce_values_toward,
-    get_path, value_from_type,
+    Addressing, Document, DocumentError, KeyedList, Value as AfValue, ValueType,
+    coerce_values_toward, get_path, value_from_type,
 };
 use agent_first_data::normalize_utc_offset;
 use std::path::Path;
@@ -19,31 +19,47 @@ impl MailConfig {
     /// Read one config key via the document layer dot-path traversal over the serialized config.
     pub fn get_key(&self, key: &str) -> Result<Value> {
         let root = self.as_config_value()?;
-        let value = get_path(&root, key, KEYED_LISTS).map_err(|e| config_key_error(key, e))?;
-        Ok(Value::from(value))
+        let value = get_path(&root, key, Addressing::keyed(KEYED_LISTS))
+            .map_err(|e| config_key_error(key, e))?;
+        Value::try_from(value).map_err(|e| config_key_error(key, e))
     }
 
-    /// Set one config key. Thin wrapper over [`Self::apply_set`] so the domain
-    /// rules live in exactly one place (the document editors the store commands
-    /// use); this just runs them over the in-memory config instead of a file.
-    pub fn set_key(&mut self, key: &str, values: &[String]) -> Result<()> {
+    /// Set one config key over an in-memory config — test-only, see
+    /// [`Self::mutate_via_document`].
+    #[cfg(test)]
+    pub(super) fn set_key(&mut self, key: &str, values: &[String]) -> Result<()> {
         self.mutate_via_document(|doc| Self::apply_set(doc, key, values))
     }
 
-    /// Append a keyed-list element — thin wrapper over [`Self::apply_add`].
-    pub fn add_key(&mut self, key: &str, slug: &str, fields: &[(String, String)]) -> Result<()> {
+    /// Append a keyed-list element — test-only, see [`Self::mutate_via_document`].
+    #[cfg(test)]
+    pub(super) fn add_key(
+        &mut self,
+        key: &str,
+        slug: &str,
+        fields: &[(String, String)],
+    ) -> Result<()> {
         self.mutate_via_document(|doc| Self::apply_add(doc, key, slug, fields))
     }
 
-    /// Remove a keyed-list element — thin wrapper over [`Self::apply_remove`].
-    pub fn remove_key(&mut self, key: &str, slug: &str) -> Result<()> {
+    /// Remove a keyed-list element — test-only, see [`Self::mutate_via_document`].
+    #[cfg(test)]
+    pub(super) fn remove_key(&mut self, key: &str, slug: &str) -> Result<()> {
         self.mutate_via_document(|doc| Self::apply_remove(doc, key, slug))
     }
 
     /// Serialize the config to its sparse document form, run `edit` through the
     /// shared `apply_*` rules, re-hydrate `self` from the result, and revalidate.
-    /// The file-less mirror of the `config_set`/`add`/`remove` store handlers, so
-    /// there is a single implementation of the domain rules.
+    ///
+    /// Test-only. `config set`/`add`/`remove` do not come through here: they edit
+    /// `.afmail/config.json` as an afdata `DocumentFile` (open, stage, validate,
+    /// atomic save — see the `config_set`/`config_add`/`config_remove` store
+    /// handlers), which preserves the file's own source and never leaves a
+    /// rejected edit on disk. This is the file-less mirror of that sequence, for
+    /// the unit tests that assert the `apply_*` domain rules directly. Keeping it
+    /// out of the published API leaves exactly one way to edit a config: the one
+    /// that writes atomically.
+    #[cfg(test)]
     fn mutate_via_document<F>(&mut self, edit: F) -> Result<()>
     where
         F: FnOnce(&mut Document) -> Result<()>,
@@ -53,10 +69,17 @@ impl MailConfig {
         let mut doc = Document::parse(&sparse, agent_first_data::document::Format::Json)
             .map_err(|e| config_key_error("config", e))?;
         edit(&mut doc)?;
-        let merged = merge_with_defaults(Value::from(doc.value().clone()))?;
-        *self = serde_json::from_value(merged)
+        let edited =
+            Value::try_from(doc.value().clone()).map_err(|e| config_key_error("config", e))?;
+        let merged = merge_with_defaults(edited)?;
+        // Build and validate a candidate before it becomes `self`, matching the
+        // store handlers' validate-before-write. Assigning first left a rejected
+        // edit in place: the caller saw the Err, and every later mutation then
+        // failed on the invalid entry that the rejection had supposedly prevented.
+        let candidate: Self = serde_json::from_value(merged)
             .map_err(|e| AppError::new("config_invalid", format!("invalid config schema: {e}")))?;
-        self.validate()?;
+        candidate.validate()?;
+        *self = candidate;
         Ok(())
     }
 
@@ -173,7 +196,8 @@ impl MailConfig {
     /// validates a freshly-read one — schema, invariants, identity files —
     /// without persisting anything.
     pub fn validate_document(doc: &Document, workspace_root: &Path) -> Result<()> {
-        let raw = Value::from(doc.value().clone());
+        let raw =
+            Value::try_from(doc.value().clone()).map_err(|e| config_key_error("config", e))?;
         reject_legacy_config(&raw)?;
         let config: Self = serde_json::from_value(merge_with_defaults(raw)?)
             .map_err(|e| AppError::new("config_invalid", format!("invalid config schema: {e}")))?;
@@ -204,18 +228,26 @@ fn identity_fields_set_default(fields: &[(String, String)]) -> bool {
 /// Errors map against `key`.
 fn doc_set(doc: &mut Document, key: &str, value: AfValue) -> Result<()> {
     if value_is_schema_default(key, &value)? {
-        doc.unset(key)
-            .map(|_| ())
-            .map_err(|e| config_key_error(key, e))
+        doc_unset(doc, key)
     } else {
         doc.set(key, value).map_err(|e| config_key_error(key, e))
     }
 }
 
+/// Clear `key` if the sparse config carries it.
+///
+/// `Document::unset` is idempotent at any depth, so a key this sparse file
+/// never wrote — at any level — is simply `Ok(false)`, not an error to absorb.
+fn doc_unset(doc: &mut Document, key: &str) -> Result<()> {
+    doc.unset(key)
+        .map(|_removed| ())
+        .map_err(|err| config_key_error(key, err))
+}
+
 /// The schema default value at `key` (dense template), if any.
 fn schema_default_at(key: &str) -> Result<Option<AfValue>> {
     let defaults = AfValue::from(MailConfig::default_template_value()?);
-    Ok(get_path(&defaults, key, KEYED_LISTS).ok())
+    Ok(get_path(&defaults, key, Addressing::keyed(KEYED_LISTS)).ok())
 }
 
 /// Whether `value` equals the schema default at `key`, so it need not be
@@ -242,8 +274,7 @@ fn materialize_keyed_list(doc: &mut Document, key: &str) -> Result<()> {
 /// so validation never sees both populated.
 fn set_exclusive(doc: &mut Document, key: &str, value: String, sibling: &str) -> Result<()> {
     doc_set(doc, key, AfValue::String(value))?;
-    doc.unset(sibling)
-        .map_err(|e| config_key_error(sibling, e))?;
+    doc_unset(doc, sibling)?;
     Ok(())
 }
 

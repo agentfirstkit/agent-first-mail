@@ -442,6 +442,7 @@ fn review_hashes_cover_every_canonical_document_visible_to_review() {
         NewDraft {
             to: &["customer@example.com".to_string()],
             cc: &[],
+            bcc: &[],
             subject: "Hash-bound draft",
             identity: None,
             body: Some("Canonical draft body"),
@@ -2208,6 +2209,14 @@ fn case_add_moves_message_to_case_and_updates_message() {
         Some("case work"),
     );
     assert!(result.is_ok());
+    assert_eq!(
+        result.as_ref().ok().and_then(|value| value.get("queued")),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        result.as_ref().ok().and_then(|value| value.get("push_id")),
+        Some(&Value::Null)
+    );
     let case_uid = result
         .as_ref()
         .ok()
@@ -2238,6 +2247,123 @@ fn case_add_moves_message_to_case_and_updates_message() {
         Some(vec!["message_1".to_string()])
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn archive_plan_keeps_all_locations_with_the_same_action_and_rejects_conflicts() -> Result<()> {
+    let root = temp_root("archive-multiple-source-locations");
+    let ws = Workspace::at(&root);
+    ws.init()?;
+    write_sample_message(&root, "message_multiple_sources");
+    ws.create_notification(
+        "multiple source archive",
+        Some("message_multiple_sources"),
+        Some("archive from every source"),
+        Some("test archive planning"),
+    )?;
+    let path = root.join("messages/message_multiple_sources.json");
+    let message = read_message(&path)?;
+    let mut locations = message
+        .remote
+        .ok_or_else(|| AppError::new("test_failure", "sample message has no remote state"))?
+        .locations;
+    locations.push(RemoteLocation {
+        mailbox_name: "Secondary".to_string(),
+        mailbox_id: Some("secondary".to_string()),
+        uid_validity: Some(2),
+        uid: Some(2),
+        flags: Vec::new(),
+        observed_rfc3339: "2026-08-03T00:00:00Z".to_string(),
+        missing_rfc3339: None,
+    });
+    ws.relocate_message("message_multiple_sources", &locations)?;
+
+    let mut config = MailConfig::load(&root)?;
+    config.mailboxes.insert(
+        "secondary".to_string(),
+        crate::config::ImapMailboxConfig::mailbox_name("Secondary"),
+    );
+    let inbox_rule = config
+        .actions
+        .message
+        .notification
+        .by_source_mailbox_id
+        .get("inbox")
+        .cloned()
+        .ok_or_else(|| AppError::new("test_failure", "missing default inbox archive action"))?;
+    config
+        .actions
+        .message
+        .notification
+        .by_source_mailbox_id
+        .insert("secondary".to_string(), inbox_rule);
+
+    let plan = ws
+        .plan_message_push(
+            "message_multiple_sources",
+            MessagePushAction::Notification,
+            Some(&root.join(".afmail/push/push_message_message_multiple_sources.json")),
+            &config,
+        )?
+        .ok_or_else(|| AppError::new("test_failure", "expected archive action plan"))?;
+    assert_eq!(plan.locations.len(), 2);
+
+    config
+        .actions
+        .message
+        .notification
+        .by_source_mailbox_id
+        .insert(
+            "secondary".to_string(),
+            crate::config::ActionRule {
+                steps: vec![crate::config::ActionStep::add_flags(vec![
+                    "\\Seen".to_string(),
+                ])],
+            },
+        );
+    let conflict = ws
+        .plan_message_push(
+            "message_multiple_sources",
+            MessagePushAction::Notification,
+            Some(&root.join(".afmail/push/push_message_message_multiple_sources.json")),
+            &config,
+        )
+        .err()
+        .map(|error| error.error_code);
+    assert_eq!(conflict, Some("archive_action_conflict"));
+
+    config.write(&root)?;
+    write_sample_message(&root, "message_conflicting_sources");
+    let mut conflicting_locations = ws
+        .read_message_by_id("message_conflicting_sources")?
+        .remote
+        .ok_or_else(|| AppError::new("test_failure", "sample message has no remote state"))?
+        .locations;
+    conflicting_locations.push(RemoteLocation {
+        mailbox_name: "Secondary".to_string(),
+        mailbox_id: Some("secondary".to_string()),
+        uid_validity: Some(2),
+        uid: Some(3),
+        flags: Vec::new(),
+        observed_rfc3339: "2026-08-03T00:00:00Z".to_string(),
+        missing_rfc3339: None,
+    });
+    ws.relocate_message("message_conflicting_sources", &conflicting_locations)?;
+    let create_error = ws
+        .create_notification(
+            "conflicting archive",
+            Some("message_conflicting_sources"),
+            Some("must fail before local changes"),
+            Some("test archive preflight"),
+        )
+        .err()
+        .map(|error| error.error_code);
+    assert_eq!(create_error, Some("archive_action_conflict"));
+    let unchanged = ws.read_message_by_id("message_conflicting_sources")?;
+    assert_eq!(unchanged.workspace.status, MessageStatus::Triage.as_str());
+    assert!(unchanged.workspace.notification_uid.is_none());
+    let _ = fs::remove_dir_all(root);
+    Ok(())
 }
 
 #[test]

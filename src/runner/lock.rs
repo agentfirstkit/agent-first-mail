@@ -75,7 +75,7 @@ fn lock_mode(command: &Command) -> LockMode {
         },
         Command::Status => LockMode::Shared,
         Command::Doctor { action } => match action {
-            Some(DoctorAction::Repair { confirm: true }) => LockMode::Exclusive,
+            Some(DoctorAction::Repair) => LockMode::Exclusive,
             _ => LockMode::Shared,
         },
         Command::Skill { .. } => LockMode::Shared,

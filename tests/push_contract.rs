@@ -13,7 +13,7 @@ use cli::{
     parse_one, read_json, run, temp_root, update_message_json, write_json, write_message,
     write_triage,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 static NETWORK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -126,13 +126,21 @@ fn run_confirmed_push(cwd: &std::path::Path) -> (i32, String) {
     run(cwd, &["push", "--confirm", plan_id.as_str()])
 }
 
+fn confirmed_push_items(value: &Value) -> &[Value] {
+    assert_eq!(value["confirmed"], true, "{value}");
+    value["succeeded_items"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
 fn run_confirmed_push_with_global_args(
     cwd: &std::path::Path,
-    global_args: &[&str],
+    extra_args: &[&str],
 ) -> (i32, String) {
     let plan_id = current_push_plan_id(cwd);
-    let mut args = global_args.to_vec();
-    args.extend(["push", "--confirm", plan_id.as_str()]);
+    let mut args = vec!["push", "--confirm", plan_id.as_str()];
+    args.extend(extra_args);
     run(cwd, &args)
 }
 
@@ -913,10 +921,12 @@ fn push_defaults_to_preview_and_rejects_dry_run_confirm() {
 
     let (status, stdout) = run(&root, &["push", "--dry-run", "--confirm"]);
     assert_eq!(status, 2, "{stdout}");
+    // Previewing and applying are separate registered shapes, so the pair is
+    // rejected by the parser instead of by a hand-written check.
     let plan_id = first["plan_id"].as_str().unwrap_or_default();
     let (status, stdout) = run(&root, &["push", "--dry-run", "--confirm", plan_id]);
-    assert_eq!(status, 1);
-    assert_eq!(parse_one(&stdout)["code"], "invalid_request");
+    assert_eq!(status, 2, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "cli_unregistered_combination");
     let (status, stdout) = run(&root, &["push", "--confirm", "push_plan_wrong"]);
     assert_eq!(status, 1, "{stdout}");
     assert_eq!(parse_one(&stdout)["code"], "push_plan_changed");
@@ -945,7 +955,7 @@ fn push_failure_records_step_level_state() {
     let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 1, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "command_failed");
+    assert_eq!(value["code"], "config_missing");
     assert_eq!(value["partially_applied_count"], 0);
     assert_eq!(value["pushed_count"], 0);
     assert_eq!(value["failed_count"], 1);
@@ -1008,11 +1018,11 @@ fn push_remote_outcome_unknown_without_succeeded_steps_is_partial() {
     assert_eq!(value["failed_count"], 1);
     assert_eq!(value["partially_applied_count"], 1);
     assert_eq!(
-        value["items"][0]["error"]["code"],
+        value["failures"][0]["error"]["code"],
         "push_remote_outcome_unknown"
     );
-    assert_eq!(value["items"][0]["succeeded_step_count"], 0);
-    assert_eq!(value["items"][0]["partially_applied"], true);
+    assert_eq!(value["failures"][0]["succeeded_step_count"], 0);
+    assert_eq!(value["failures"][0]["partially_applied"], true);
     let queued = parse_one(&run(&root, &["push", "list"]).1);
     assert_eq!(
         queued["items"][0]["step_states"][0]["status"],
@@ -1048,13 +1058,13 @@ fn push_spam_rejects_when_message_becomes_referenced_before_sync() {
     let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 1, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "command_failed");
+    assert_eq!(value["code"], "message_referenced");
     assert_eq!(value["partially_applied_count"], 0);
     assert_eq!(value["pushed_count"], 0);
     assert_eq!(value["failed_count"], 1);
-    assert_eq!(value["items"][0]["error"]["code"], "message_referenced");
+    assert_eq!(value["failures"][0]["error"]["code"], "message_referenced");
     assert!(
-        value["items"][0]["error"]["message"]
+        value["failures"][0]["error"]["message"]
             .as_str()
             .is_some_and(|error| error
                 .contains(&format!("cases/support/{case_uid}-case-ref/data/case.json")))
@@ -1374,7 +1384,7 @@ fn push_spam_can_skip_marking_remote_seen_by_config() {
     let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value.as_array().map(Vec::len), Some(1), "{value}");
+    assert_eq!(confirmed_push_items(&value).len(), 1, "{value}");
     assert!(server.handle.join().is_ok());
     let stored = server.stored.lock();
     assert!(stored.is_ok());
@@ -1430,8 +1440,8 @@ fn push_spam_moves_remote_to_junk_keeping_local_id() {
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
     assert!(value.get("outcome").is_none());
-    assert_eq!(value.as_array().map(Vec::len), Some(1));
-    assert!(value[0]["push_id"].as_str().is_some());
+    assert_eq!(confirmed_push_items(&value).len(), 1);
+    assert!(value["succeeded_items"][0]["push_id"].as_str().is_some());
     let progress = read_json(&root.join(".afmail/cache/progress.json"));
     assert_eq!(progress["schema_name"], "workspace_progress");
     assert_eq!(progress["command"], "push");
@@ -1567,7 +1577,8 @@ fn push_archive_and_trash_use_configured_action_steps() {
 
     let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout).as_array().map(Vec::len), Some(2));
+    let value = parse_one(&stdout);
+    assert_eq!(confirmed_push_items(&value).len(), 2, "{value}");
 
     assert!(server.handle.join().is_ok());
     let moved = server.moved.lock();
@@ -1628,7 +1639,7 @@ fn push_archive_falls_back_to_uidplus_copy_delete_when_move_is_unsupported() {
     let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value.as_array().map(Vec::len), Some(1), "{value}");
+    assert_eq!(confirmed_push_items(&value).len(), 1, "{value}");
     assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
 
     assert!(server.handle.join().is_ok());
@@ -1701,16 +1712,16 @@ fn push_archive_without_move_or_uidplus_fails_before_copy_delete_fallback() {
     let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 1, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "command_failed");
+    assert_eq!(value["code"], "imap_uidplus_required");
     assert_eq!(value["partially_applied_count"], 0);
     assert_eq!(value["pushed_count"], 0, "{value}");
     assert_eq!(value["failed_count"], 1, "{value}");
-    assert_eq!(value["items"].as_array().map(Vec::len), Some(1));
-    assert!(value["items"][0]["error"]["code"].as_str().is_some());
-    assert!(value["items"][0]["push_id"].as_str().is_some());
-    assert_eq!(value["items"][0]["error"]["retryable"], false);
-    assert!(value["items"][0]["error"]["hint"].as_str().is_some());
-    assert_eq!(value["items"][0]["partially_applied"], false);
+    assert_eq!(value["failures"].as_array().map(Vec::len), Some(1));
+    assert!(value["failures"][0]["error"]["code"].as_str().is_some());
+    assert!(value["failures"][0]["push_id"].as_str().is_some());
+    assert_eq!(value["failures"][0]["error"]["retryable"], false);
+    assert!(value["failures"][0]["error"]["hint"].as_str().is_some());
+    assert_eq!(value["failures"][0]["partially_applied"], false);
     let push = parse_one(&run(&root, &["push", "list"]).1);
     assert_eq!(push["count"], 1);
     assert_eq!(
@@ -1806,7 +1817,7 @@ fn queued_send_case_archive_transitions_through_archiving_after_push() {
     let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value.as_array().map(Vec::len), Some(2), "{value}");
+    assert_eq!(confirmed_push_items(&value).len(), 2, "{value}");
     assert!(
         smtp.data_rx
             .recv_timeout(Duration::from_secs(5))
@@ -2205,11 +2216,13 @@ fn special_use_push_list_and_push_lock_work() {
     let (status, stdout) = run(&root, &["push", "remove", &push_id]);
     assert_eq!(status, 2);
     let error = parse_one(&stdout);
-    assert_eq!(error["code"], "cli_error");
-    assert!(
-        error["message"]
-            .as_str()
-            .is_some_and(|text| text.contains("unrecognized subcommand 'remove'"))
+    assert_eq!(error["code"], "cli_unknown_command");
+    // The rejection does not quote the token back; what points the caller at
+    // the mistake is the hint naming the command it was written under.
+    assert_eq!(error["message"], "unknown command");
+    assert_eq!(
+        error["hint"],
+        "run `afmail push --help` and choose one registered combination"
     );
 
     let (status, stdout) = run(&root, &["push", "list"]);
@@ -2778,7 +2791,7 @@ fn push_drafts_send_new_message_skips_reply_to_step() {
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
     assert!(value.get("outcome").is_none());
-    assert_eq!(value.as_array().map(Vec::len), Some(1), "{value}");
+    assert_eq!(confirmed_push_items(&value).len(), 1, "{value}");
     assert!(
         smtp.data_rx
             .recv_timeout(Duration::from_secs(5))
@@ -2846,7 +2859,7 @@ fn push_drafts_send_does_not_require_imap_move() {
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
     assert!(value.get("outcome").is_none());
-    assert_eq!(value.as_array().map(Vec::len), Some(1), "{value}");
+    assert_eq!(confirmed_push_items(&value).len(), 1, "{value}");
     assert!(
         smtp.data_rx
             .recv_timeout(Duration::from_secs(5))
@@ -2940,7 +2953,7 @@ fn push_multiple_sends_logs_incremental_refresh_progress() {
         "{stdout}"
     );
     let result = lines.last().cloned().unwrap_or(serde_json::Value::Null);
-    assert_eq!(result.as_array().map(Vec::len), Some(2), "{result}");
+    assert_eq!(confirmed_push_items(&result).len(), 2, "{result}");
     assert!(result.get("render").is_none(), "{result}");
     assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
     let sent_bodies = [
@@ -3012,10 +3025,10 @@ fn push_send_recovers_from_each_local_finalize_stage() {
         assert_eq!(error["code"], "partial");
         assert_eq!(error["partially_applied_count"], 1);
         assert_eq!(
-            error["items"][0]["error"]["code"],
+            error["failures"][0]["error"]["code"],
             "push_local_stage_test_failure"
         );
-        let persistence_failures = error["items"][0]["state_persistence_failures"]
+        let persistence_failures = error["failures"][0]["state_persistence_failures"]
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or_default();
@@ -3043,7 +3056,7 @@ fn push_send_recovers_from_each_local_finalize_stage() {
         let (status, stdout) = run_confirmed_push(&root);
         assert_eq!(status, 0, "{stage}: {stdout}");
         let value = parse_one(&stdout);
-        assert_eq!(value.as_array().map(Vec::len), Some(1), "{stage}: {value}");
+        assert_eq!(confirmed_push_items(&value).len(), 1, "{stage}: {value}");
         assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
         assert!(!draft_path.exists(), "{stage}");
         assert!(
@@ -3147,14 +3160,15 @@ fn push_audit_warning_is_partial_after_remote_effect_succeeds() {
     assert_eq!(status, 0, "{stdout}");
     let recovered = parse_one(&stdout);
     assert!(recovered.get("outcome").is_none());
-    assert_eq!(recovered.as_array().map(Vec::len), Some(1));
-    assert_eq!(recovered[0]["audit_pending"], false);
+    assert_eq!(confirmed_push_items(&recovered).len(), 1);
+    assert_eq!(recovered["succeeded_items"][0]["audit_pending"], false);
     assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
     let audit = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
     let succeeded_events = parse_raw_json_lines(&audit)
         .into_iter()
         .filter(|event| {
-            event["kind"] == "push_succeeded" && event["push_id"] == value["items"][0]["push_id"]
+            event["kind"] == "push_succeeded"
+                && event["push_id"] == value["succeeded_items"][0]["push_id"]
         })
         .count();
     assert_eq!(succeeded_events, 1);
@@ -3220,7 +3234,7 @@ fn push_drafts_send_resumes_after_completed_smtp_step() {
     let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value.as_array().map(Vec::len), Some(1), "{value}");
+    assert_eq!(confirmed_push_items(&value).len(), 1, "{value}");
     let appended = imap.appended.lock();
     assert!(appended.is_ok());
     assert!(
@@ -3281,9 +3295,9 @@ fn push_confirm_stops_after_first_failure() {
     assert_eq!(value["failed_count"], 1, "{value}");
     assert_eq!(value["stopped_after_failure"], true);
     assert_eq!(value["remaining_count"], 1);
-    assert_eq!(value["items"].as_array().map(Vec::len), Some(1));
-    assert_eq!(value["items"][0]["partially_applied"], true);
-    assert_eq!(value["items"][0]["succeeded_step_count"], 1);
+    assert_eq!(value["failures"].as_array().map(Vec::len), Some(1));
+    assert_eq!(value["failures"][0]["partially_applied"], true);
+    assert_eq!(value["failures"][0]["succeeded_step_count"], 1);
     let progress = read_json(&root.join(".afmail/cache/progress.json"));
     assert_eq!(progress["status"], "partial");
     assert!(progress["fields"].get("outcome").is_none());
@@ -3291,11 +3305,11 @@ fn push_confirm_stops_after_first_failure() {
     assert!(progress["result"].get("outcome").is_none());
     assert_eq!(
         progress["error"]["code"],
-        value["items"][0]["error"]["code"]
+        value["failures"][0]["error"]["code"]
     );
     assert_eq!(
         progress["error"]["retryable"],
-        value["items"][0]["error"]["retryable"]
+        value["failures"][0]["error"]["retryable"]
     );
     let (status, stdout) = run(&root, &["status"]);
     assert_eq!(status, 0, "{stdout}");
@@ -3436,11 +3450,19 @@ fn push_reenqueue_preserves_original_enqueue_seq_and_position() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(first_push_id.contains(&case_uid_first), "{first_push_id}");
     assert!(
-        second_push_id.contains(&case_uid_second),
+        first_push_id.strip_prefix("push_draft_").is_some_and(
+            |suffix| suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        ),
+        "{first_push_id}"
+    );
+    assert!(
+        second_push_id.strip_prefix("push_draft_").is_some_and(
+            |suffix| suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        ),
         "{second_push_id}"
     );
+    assert_ne!(first_push_id, second_push_id);
 
     // Re-enqueue the first draft's send (e.g. re-running draft send after an edit).
     // This must preserve the original enqueue_seq, not bump it to the back of the
@@ -3455,5 +3477,50 @@ fn push_reenqueue_preserves_original_enqueue_seq_and_position() {
     assert_eq!(push_after["items"][0]["push_id"], first_push_id);
     assert_eq!(push_after["items"][1]["push_id"], second_push_id);
 
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_new_queue_lifecycle_for_the_same_draft_gets_a_new_outbound_identity() {
+    let root = temp_root("push-new-draft-identity");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    configure_default_identity(&root);
+    let (case_uid, case_path) = create_case(&root, "identity", "identity");
+    let draft = draft_with_compose(format!(
+        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: \"Identity\"\nattachments:\n---\n\nIdentity body\n"
+    ));
+    assert!(fs::write(case_path.join("drafts/new.md"), draft).is_ok());
+    assert_eq!(
+        run(&root, &["case", "draft", "send", &case_uid, "new.md"]).0,
+        0
+    );
+    let first = parse_one(&run(&root, &["push", "list"]).1);
+    let first_push_id = first["items"][0]["push_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        fs::remove_file(
+            root.join(".afmail/push")
+                .join(format!("{first_push_id}.json"))
+        )
+        .is_ok()
+    );
+
+    assert_eq!(
+        run(&root, &["case", "draft", "send", &case_uid, "new.md"]).0,
+        0
+    );
+    let second = parse_one(&run(&root, &["push", "list"]).1);
+    let second_push_id = second["items"][0]["push_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert_ne!(first_push_id, second_push_id);
+    assert_ne!(
+        sent_message_id_for_push_id(&first_push_id),
+        sent_message_id_for_push_id(&second_push_id)
+    );
     let _ = fs::remove_dir_all(root);
 }

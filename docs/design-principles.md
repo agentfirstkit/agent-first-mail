@@ -159,5 +159,6 @@ design.
 `skills/agent-first-mail/SKILL.md` is loaded by Codex and Claude Code as the agent's
 behavior contract when operating afmail. Keep behavior rules, decision rules,
 non-obvious defaults, and recovery guidance in the skill. Keep flag
-enumerations, option matrices, and full command references in `afmail --help`
-and `docs/cli.md` so the skill stays small and does not rot across releases.
+enumerations, option matrices, and full command references in
+`afmail <command> --help` and `docs/cli.md` (rendered by `afmail --docs`) so the
+skill stays small and does not rot across releases.

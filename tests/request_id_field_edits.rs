@@ -201,8 +201,9 @@ fn create_notification(root: &Path, name: &str, message_id: Option<&str>) -> Str
 }
 
 fn run_twice(root: &Path, request_id: &str, args: Vec<String>, _code: &str, id_key: &str) {
-    let mut command = vec!["--request-id".to_string(), request_id.to_string()];
-    command.extend(args);
+    // Arguments follow the command; the idempotency key is one of them.
+    let mut command = args;
+    command.extend(["--request-id".to_string(), request_id.to_string()]);
     let command_refs = command.iter().map(String::as_str).collect::<Vec<_>>();
     let (status, stdout) = run(root, &command_refs);
     assert_eq!(status, 0, "{stdout}");
@@ -243,8 +244,6 @@ fn request_id_replays_create_and_notes_without_duplicate_effects() {
     assert_eq!(run(&root, &["init"]).0, 0);
 
     let args = [
-        "--request-id",
-        "req_case_1",
         "case",
         "create",
         "--name",
@@ -253,6 +252,8 @@ fn request_id_replays_create_and_notes_without_duplicate_effects() {
         "support",
         "--reason",
         "seed case",
+        "--request-id",
+        "req_case_1",
     ];
     let (status, stdout) = run(&root, &args);
     assert_eq!(status, 0, "{stdout}");
@@ -272,8 +273,6 @@ fn request_id_replays_create_and_notes_without_duplicate_effects() {
     let (status, stdout) = run(
         &root,
         &[
-            "--request-id",
-            "req_case_1",
             "case",
             "create",
             "--name",
@@ -282,20 +281,22 @@ fn request_id_replays_create_and_notes_without_duplicate_effects() {
             "support",
             "--reason",
             "seed case",
+            "--request-id",
+            "req_case_1",
         ],
     );
     assert_eq!(status, 1, "{stdout}");
     assert_eq!(parse_one(&stdout)["code"], "idempotency_conflict");
 
     let note_args = [
-        "--request-id",
-        "req_note_1",
         "case",
         "notes",
         "append",
         &case_uid,
         "--text",
         "private note text",
+        "--request-id",
+        "req_note_1",
     ];
     let (status, stdout) = run(&root, &note_args);
     assert_eq!(status, 0, "{stdout}");
@@ -316,14 +317,14 @@ fn request_id_replays_create_and_notes_without_duplicate_effects() {
     assert!(request_record.contains("\"status\": \"completed\""));
 
     let replace_args = [
-        "--request-id",
-        "req_note_replace_1",
         "case",
         "notes",
         "replace",
         &case_uid,
         "--text",
         "replacement private note",
+        "--request-id",
+        "req_note_replace_1",
     ];
     let (status, stdout) = run(&root, &replace_args);
     assert_eq!(status, 0, "{stdout}");
@@ -347,9 +348,11 @@ fn request_id_replays_create_and_notes_without_duplicate_effects() {
     let audit = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
     assert_eq!(audit.matches("\"kind\":\"case_notes_replaced\"").count(), 1);
 
-    let (status, stdout) = run(&root, &["--request-id", "req_status_1", "status"]);
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "request_id_not_supported");
+    // Only a non-idempotent local mutation declares `--request-id`, so a read
+    // rejects the flag as unknown rather than accepting and refusing it.
+    let (status, stdout) = run(&root, &["status", "--request-id", "req_status_1"]);
+    assert_eq!(status, 2, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "cli_unknown_argument");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -360,8 +363,6 @@ fn request_id_blocks_retry_after_effect_before_record_completion() {
     assert_eq!(run(&root, &["init"]).0, 0);
 
     let args = [
-        "--request-id",
-        "req_case_pending",
         "case",
         "create",
         "--name",
@@ -370,6 +371,8 @@ fn request_id_blocks_retry_after_effect_before_record_completion() {
         "support",
         "--reason",
         "seed case",
+        "--request-id",
+        "req_case_pending",
     ];
     let (status, stdout) = run_with_env(
         &root,
@@ -845,11 +848,12 @@ fn request_id_replays_membership_edits_without_duplicate_audit() {
         "notification_uid",
     );
 
+    // A request id names one stored result, so it cannot cover a batch. That
+    // is a count, which no argument type expresses, so it stays a value check
+    // reported under the parser's own classification.
     let (status, stdout) = run(
         &root,
         &[
-            "--request-id",
-            "req_case_add_batch",
             "case",
             "add",
             "c00000000000",
@@ -859,10 +863,12 @@ fn request_id_replays_membership_edits_without_duplicate_audit() {
             "batch add summary",
             "--reason",
             "batch add",
+            "--request-id",
+            "req_case_add_batch",
         ],
     );
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "request_id_not_supported");
+    assert_eq!(status, 2, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "cli_invalid_argument_value");
 
     let audit = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
     for code in [
@@ -910,14 +916,14 @@ fn request_id_replays_draft_edits_without_duplicate_audit() {
     assert!(fs::write(&attachment_path, "attachment body").is_ok());
     let attachment_arg = attachment_path.to_string_lossy().to_string();
     let command = [
-        "--request-id".to_string(),
-        "req_draft_attach".to_string(),
         "case".to_string(),
         "draft".to_string(),
         "attach".to_string(),
         case_uid.clone(),
         draft_name.clone(),
         attachment_arg,
+        "--request-id".to_string(),
+        "req_draft_attach".to_string(),
     ];
     let command_refs = command.iter().map(String::as_str).collect::<Vec<_>>();
     let (status, stdout) = run(&root, &command_refs);
@@ -1115,18 +1121,18 @@ fn request_id_replays_message_dispositions_without_duplicate_audit() {
     let (status, stdout) = run(
         &root,
         &[
-            "--request-id",
-            "req_message_spam_batch",
             "message",
             "spam",
             "message_spam_batch_a",
             "message_spam_batch_b",
             "--reason",
             "batch spam",
+            "--request-id",
+            "req_message_spam_batch",
         ],
     );
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "request_id_not_supported");
+    assert_eq!(status, 2, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "cli_invalid_argument_value");
 
     let audit = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap_or_default();
     for (code, expected_count) in [
@@ -1168,6 +1174,7 @@ fn request_id_replays_suggestion_set_and_clear_without_replacing_the_review_roun
             message_hash,
             "--reason".to_string(),
             "retry-safe suggestion".to_string(),
+            "--action".to_string(),
             "spam".to_string(),
         ],
         "agent_suggestion_set",
@@ -1211,6 +1218,7 @@ fn request_id_replays_suggestion_set_and_clear_without_replacing_the_review_roun
             case_hash,
             "--reason".to_string(),
             "retry-safe case suggestion".to_string(),
+            "--action".to_string(),
             "archive".to_string(),
         ],
         "agent_suggestion_set",
@@ -1235,6 +1243,7 @@ fn request_id_replays_suggestion_set_and_clear_without_replacing_the_review_roun
             notification_hash,
             "--reason".to_string(),
             "retry-safe notification suggestion".to_string(),
+            "--action".to_string(),
             "rename".to_string(),
             "--name".to_string(),
             "Renamed Notification".to_string(),

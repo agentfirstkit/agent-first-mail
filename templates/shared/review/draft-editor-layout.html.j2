@@ -8,6 +8,7 @@
   <div class="field-grid">
     <label><span>{{ i18n.t('to') }}</span><input name="to" value="{{ frontmatter.to | join(', ') }}" autocomplete="off"></label>
     <label><span>{{ i18n.t('cc') }}</span><input name="cc" value="{{ frontmatter.cc | join(', ') }}" autocomplete="off"></label>
+    <label><span>{{ i18n.t('bcc') }}</span><input name="bcc" value="{{ frontmatter.bcc | join(', ') }}" autocomplete="off"></label>
   </div>
   <label><span>{{ i18n.t('subject') }}</span><input name="subject" value="{{ frontmatter.subject or '' }}"></label>
   <label><span>{{ i18n.t('message_editor') }}</span><textarea class="editor-body" name="body">{{ source.body_markdown | text_range(analysis.authored_body_range.start_bytes, analysis.authored_body_range.end_bytes) }}</textarea></label>

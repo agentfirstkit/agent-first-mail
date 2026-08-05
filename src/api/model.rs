@@ -674,10 +674,12 @@ pub fn notification_suggestion_clear_command(
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DraftCreateRequest {
     New {
-        #[schemars(length(min = 1))]
+        #[serde(default)]
         to: Vec<String>,
         #[serde(default)]
         cc: Vec<String>,
+        #[serde(default)]
+        bcc: Vec<String>,
         #[schemars(length(min = 1))]
         subject: String,
         identity: Option<String>,
@@ -686,6 +688,8 @@ pub enum DraftCreateRequest {
     Reply {
         #[schemars(length(min = 1))]
         message_id: String,
+        #[serde(default)]
+        bcc: Vec<String>,
         identity: Option<String>,
         body: Option<String>,
         #[serde(default)]
@@ -699,20 +703,22 @@ impl DraftCreateRequest {
             Self::New {
                 to,
                 cc,
+                bcc,
                 subject,
                 identity,
                 body,
             } => {
-                if to.is_empty() {
+                if to.is_empty() && bcc.is_empty() {
                     return Err(AppError::new(
                         "invalid_request",
-                        "a new draft requires at least one to recipient",
+                        "a new draft requires at least one to or bcc recipient",
                     ));
                 }
                 CaseDraftAction::New {
                     case_ref,
                     to,
                     cc,
+                    bcc,
                     subject,
                     identity,
                     body,
@@ -721,12 +727,14 @@ impl DraftCreateRequest {
             }
             Self::Reply {
                 message_id,
+                bcc,
                 identity,
                 body,
                 all,
             } => CaseDraftAction::Reply {
                 case_ref,
                 message_id,
+                bcc,
                 identity,
                 body,
                 body_file: None,
@@ -749,6 +757,8 @@ pub struct DraftPatchRequest {
     pub to: Option<Vec<String>>,
     /// Replacement Cc recipients. An empty list clears Cc.
     pub cc: Option<Vec<String>>,
+    /// Replacement Bcc recipients. An empty list clears Bcc.
+    pub bcc: Option<Vec<String>>,
     pub identity: Option<String>,
     pub body: Option<String>,
 }
@@ -758,6 +768,7 @@ impl DraftPatchRequest {
         if self.subject.is_none()
             && self.to.is_none()
             && self.cc.is_none()
+            && self.bcc.is_none()
             && self.identity.is_none()
             && self.body.is_none()
         {
@@ -781,6 +792,11 @@ impl DraftPatchRequest {
             Some(cc) => (cc, false),
             None => (Vec::new(), false),
         };
+        let (bcc, clear_bcc) = match self.bcc {
+            Some(bcc) if bcc.is_empty() => (Vec::new(), true),
+            Some(bcc) => (bcc, false),
+            None => (Vec::new(), false),
+        };
         Ok(Command::Case {
             action: CaseCommand::Draft {
                 action: CaseDraftAction::Change {
@@ -790,6 +806,8 @@ impl DraftPatchRequest {
                     to,
                     cc,
                     clear_cc,
+                    bcc,
+                    clear_bcc,
                     identity: self.identity,
                     body: self.body,
                     body_file: None,

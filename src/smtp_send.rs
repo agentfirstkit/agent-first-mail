@@ -53,9 +53,13 @@ pub fn prepare_outbound(
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
+    let mut delivery_message = message;
+    delivery_message.headers_mut().remove::<header::Bcc>();
+    let delivery_raw = delivery_message.formatted();
     Ok(PreparedOutbound {
         message_id,
         raw,
+        delivery_raw,
         envelope_from,
         envelope_to,
     })
@@ -95,11 +99,21 @@ pub fn mark_sent_and_append_case(
     )?;
     let messages_dir = root.join(".afmail/messages");
     fs::create_dir_all(&messages_dir).map_err(|e| AppError::io("create messages dir", &e))?;
-    write_bytes_atomic(
-        &messages_dir.join(format!("{message_id}.eml")),
-        raw,
-        "write sent eml",
-    )?;
+    let eml_path = messages_dir.join(format!("{message_id}.eml"));
+    if eml_path.is_file() {
+        let existing =
+            fs::read(&eml_path).map_err(|error| AppError::io("read existing sent eml", &error))?;
+        if existing != raw {
+            return Err(sent_message_id_conflict(message_id));
+        }
+    } else {
+        let metadata_path = messages_dir.join(format!("{message_id}.json"));
+        let materialized_path = root.join("messages").join(format!("{message_id}.json"));
+        if metadata_path.exists() || materialized_path.exists() {
+            return Err(sent_message_id_conflict(message_id));
+        }
+        write_bytes_atomic(&eml_path, raw, "write sent eml")?;
+    }
     let workspace = crate::store::Workspace::at(root);
     workspace.write_message_artifacts(&parsed.message)?;
     let added_rfc3339 = parsed
@@ -114,6 +128,19 @@ pub fn mark_sent_and_append_case(
         parsed.message.subject.as_deref(),
         &added_rfc3339,
     )
+}
+
+fn sent_message_id_conflict(message_id: &str) -> AppError {
+    AppError::new(
+        "message_id_conflict",
+        format!("sent message id already belongs to different local content: {message_id}"),
+    )
+    .with_hint(
+        "Keep the existing sent message evidence and requeue the draft so afmail can allocate a new outbound identity.",
+    )
+    .with_details(serde_json::json!({
+        "message_id": message_id,
+    }))
 }
 
 pub fn send_raw_message(
@@ -222,6 +249,13 @@ fn build_message(
     for cc in &fm.cc {
         builder = builder.cc(parse_mailbox(cc, "cc")?);
     }
+    for bcc in &fm.bcc {
+        builder = builder.bcc(parse_mailbox(bcc, "bcc")?);
+    }
+    // Keep Bcc in the private Drafts/Sent evidence. `prepare_outbound` derives
+    // separate SMTP DATA bytes by removing this header while preserving the
+    // envelope recipients that lettre computed from it.
+    builder = builder.keep_bcc();
     if let Some(reply_id) = fm.reply_to_message_id.as_ref() {
         let headers = reply_headers(root, reply_id)?;
         builder = builder
@@ -513,6 +547,56 @@ mod tests {
         std::env::temp_dir().join(format!("afmail-smtp-{name}-{}-{stamp}", std::process::id()))
     }
 
+    #[test]
+    fn sent_message_record_is_idempotent_but_never_overwrites_different_raw() {
+        let root = temp_root("sent-message-conflict");
+        assert!(crate::store::Workspace::at(&root).init().is_ok());
+        let case_uid = "c202608030001";
+        let case_path = root.join(format!("cases/general/{case_uid}-test"));
+        assert!(fs::create_dir_all(case_path.join("data")).is_ok());
+        let case = crate::types::CaseMessages::new_case(case_uid, "test", "2026-08-03T00:00:00Z");
+        assert!(crate::util::write_json_pretty(&case_path.join("data/case.json"), &case,).is_ok());
+        let config = MailConfig::default();
+        let raw = b"Message-ID: <message_sent_test@afmail.local>\r\nFrom: a@example.com\r\nTo: b@example.com\r\nSubject: first\r\n\r\nfirst";
+        let changed = b"Message-ID: <message_sent_test@afmail.local>\r\nFrom: a@example.com\r\nTo: b@example.com\r\nSubject: second\r\n\r\nsecond";
+
+        let first = mark_sent_and_append_case(
+            &root,
+            &case_path,
+            case_uid,
+            "message_sent_test",
+            raw,
+            &config,
+        );
+        assert!(first.is_ok(), "{first:?}");
+        let retry = mark_sent_and_append_case(
+            &root,
+            &case_path,
+            case_uid,
+            "message_sent_test",
+            raw,
+            &config,
+        );
+        assert!(retry.is_ok(), "{retry:?}");
+        let conflict = mark_sent_and_append_case(
+            &root,
+            &case_path,
+            case_uid,
+            "message_sent_test",
+            changed,
+            &config,
+        );
+        assert_eq!(
+            conflict.err().map(|error| error.error_code),
+            Some("message_id_conflict")
+        );
+        assert_eq!(
+            fs::read(root.join(".afmail/messages/message_sent_test.eml")).ok(),
+            Some(raw.to_vec())
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn draft(text: &str) -> DraftFrontmatter {
         crate::markdown::parse_frontmatter(text).unwrap_or_default()
     }
@@ -560,6 +644,56 @@ mod tests {
         assert!(raw.contains("Subject: Hello"));
         assert!(raw.contains("Hi"));
         assert!(raw.contains("Message-ID: <msg@example.com>"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bcc_is_in_the_envelope_and_private_evidence_but_not_smtp_data() {
+        let root = temp_root("bcc-delivery");
+        let case_uid = "c20260521001";
+        let case_path = root.join(format!("cases/support/{case_uid}"));
+        let drafts_path = case_path.join("drafts");
+        assert!(fs::create_dir_all(&drafts_path).is_ok());
+        let draft_name = "new-private.md";
+        let draft_text = format!(
+            "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nsubject: Private update\nto: []\ncc: []\nbcc:\n  - Hidden One <hidden-one@example.com>\n  - hidden-two@example.com\nattachments: []\n---\n<!-- afmail:compose:start -->\nPrivate body\n<!-- afmail:compose:end -->\n"
+        );
+        assert!(fs::write(drafts_path.join(draft_name), draft_text).is_ok());
+
+        let prepared = prepare_outbound(
+            &root,
+            &case_path,
+            case_uid,
+            draft_name,
+            &MailConfig::default(),
+            Some("message_sent_bcc"),
+            Some("2026-05-21T10:00:00Z"),
+        );
+        assert!(prepared.is_ok(), "{prepared:?}");
+        let prepared = prepared.unwrap_or_else(|_| PreparedOutbound {
+            message_id: String::new(),
+            raw: Vec::new(),
+            delivery_raw: Vec::new(),
+            envelope_from: String::new(),
+            envelope_to: Vec::new(),
+        });
+        assert_eq!(
+            prepared.envelope_to,
+            vec![
+                "hidden-one@example.com".to_string(),
+                "hidden-two@example.com".to_string()
+            ]
+        );
+        let private_raw = String::from_utf8(prepared.raw).unwrap_or_default();
+        let delivery_raw = String::from_utf8(prepared.delivery_raw).unwrap_or_default();
+        assert!(private_raw.contains("Bcc:"));
+        assert!(private_raw.contains("hidden-one@example.com"));
+        assert!(private_raw.contains("hidden-two@example.com"));
+        assert!(!delivery_raw.contains("\r\nBcc:"));
+        assert!(!delivery_raw.starts_with("Bcc:"));
+        assert!(!delivery_raw.contains("hidden-one@example.com"));
+        assert!(!delivery_raw.contains("hidden-two@example.com"));
+        assert!(delivery_raw.contains("Private body"));
         let _ = fs::remove_dir_all(root);
     }
 

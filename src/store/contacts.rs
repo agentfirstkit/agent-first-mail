@@ -270,9 +270,13 @@ impl Workspace {
 
         let new_file_name = format!("{}.md", contact_file_name(&uid, new_name));
         let dest_path = src_path.parent().unwrap_or(&self.root).join(&new_file_name);
-        write_contact_md(&dest_path, &fm, &body)?;
+        // Edit first, then move. Writing straight to `dest_path` would find no
+        // file there and fall back to rendering the whole document from the
+        // struct — so renaming a contact, alone among the contact commands,
+        // would throw away the comments and layout its author wrote.
+        write_contact_md(&src_path, &fm, &body)?;
         if src_path != dest_path {
-            remove_file(&src_path)?;
+            fs::rename(&src_path, &dest_path).map_err(|e| AppError::io("rename contact", &e))?;
         }
         self.append_audit_event(
             "contact_renamed",
@@ -992,7 +996,13 @@ pub(super) fn contact_for_from(
 }
 
 fn write_contact_md(path: &Path, fm: &ContactFrontmatter, body: &str) -> Result<()> {
-    let rendered = crate::markdown::render_frontmatter(fm, body)?;
+    // A contact file is the user's: they add notes to the body and comments to
+    // the frontmatter. Editing an existing one keeps their bytes; only a file
+    // that does not exist yet is rendered from the struct.
+    let rendered = match read_optional_to_string(path, "read contact")? {
+        Some(source) => crate::markdown::edit_frontmatter(&source, fm, body)?,
+        None => crate::markdown::render_frontmatter(fm, body)?,
+    };
     write_string(path, &rendered)
 }
 

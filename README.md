@@ -156,6 +156,10 @@ unfinished draft may be uploaded to the remote Drafts mailbox, but it cannot be
 queued for sending until that compose section contains authored text. The local
 state is then `queued_send`, not `sent`; afmail revalidates the latest file at
 push time and strips editor-only markers from the outgoing plain-text message.
+Drafts accept `To`, `Cc`, and `Bcc` recipients. Bcc addresses remain visible in
+the local draft, Review UI, push preview, and the sender's private Drafts/Sent
+evidence, but afmail removes the `Bcc` header from SMTP DATA while keeping those
+addresses in the SMTP envelope.
 
 Pushing is the moment your real mailbox changes. Bare `afmail push` is a pure
 preview containing the complete resolved queue and a workspace-bound `plan_id`;
@@ -311,7 +315,7 @@ the formal action ran and not authorization for push or send; those still use
 the normal commands and preview/confirm flow.
 
 If a suggestion `set` or `clear` may be retried after interrupted output, use a
-stable global `--request-id` for that exact command and inputs. Case and
+stable `--request-id` for that exact command and inputs. Case and
 notification review hashes include every canonical document visible to Review.
 Message hashes include the exact message context and related messages; case
 hashes include the exact collection, contained messages, current notes, and

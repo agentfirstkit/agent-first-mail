@@ -1,6 +1,5 @@
 use super::lock::{command_lock, workspace_progress_command};
 use super::purge::{ResolvedPurgeAction, resolve_purge_action};
-use super::push::push_plan_confirmation;
 use crate::cli::{
     CaseCommand, CaseDraftAction, CaseNotesAction, CaseSuggestionAction, CaseSuggestionActionKind,
     Command, ConfigAction, ContactCommand, ContactEmailAction, ContactNotesAction,
@@ -11,7 +10,7 @@ use crate::cli::{
 };
 use crate::error::{AppError, Result};
 use crate::progress::{ProgressCallback, WorkspaceProgressSink};
-use crate::store::{DraftChange, NewDraft, Workspace};
+use crate::store::{DraftChange, NewDraft, ReplyDraft, Workspace};
 use crate::types::{
     CaseSuggestedAction, CommandResult, MessageSuggestedAction, NotificationSuggestedAction,
 };
@@ -214,20 +213,19 @@ fn execute_command_unlocked(
             }
         }
         Command::Push {
-            dry_run,
+            dry_run: _,
             confirm,
             action,
         } => {
             let ws = Workspace::discover(cwd)?;
             match action {
                 Some(PushAction::List) => ws.push_list(),
-                None => {
-                    let confirm_plan_id = push_plan_confirmation(dry_run, confirm.as_deref())?;
-                    take_command_result(
-                        ws.push_with_progress(confirm_plan_id, progress),
-                        &mut counts,
-                    )
-                }
+                // `--dry-run` and `--confirm` are separate registered shapes, so
+                // a plan id here always means "apply exactly this plan".
+                None => take_command_result(
+                    ws.push_with_progress(confirm.as_deref(), progress),
+                    &mut counts,
+                ),
             }
         }
         Command::Status => execute_status(cwd),
@@ -235,9 +233,7 @@ fn execute_command_unlocked(
             let ws = Workspace::discover(cwd)?;
             match action {
                 None => take_command_result(ws.doctor(), &mut counts),
-                Some(DoctorAction::Repair { confirm }) => {
-                    take_command_result(ws.doctor_repair(confirm), &mut counts)
-                }
+                Some(DoctorAction::Repair) => take_command_result(ws.doctor_repair(), &mut counts),
             }
         }
         Command::Purge {
@@ -246,7 +242,7 @@ fn execute_command_unlocked(
             confirm,
         } => {
             let ws = Workspace::discover(cwd)?;
-            match resolve_purge_action(action, older_than_days, confirm)? {
+            match resolve_purge_action(action, older_than_days, confirm) {
                 ResolvedPurgeAction::Spam {
                     older_than_days,
                     confirm,
@@ -696,6 +692,7 @@ fn execute_command_unlocked(
                         case_ref,
                         to,
                         cc,
+                        bcc,
                         subject,
                         identity,
                         body,
@@ -708,6 +705,7 @@ fn execute_command_unlocked(
                             "case_ref": case_ref,
                             "to": to,
                             "cc": cc,
+                            "bcc": bcc,
                             "subject": subject,
                             "identity": identity,
                             "body": body,
@@ -719,6 +717,7 @@ fn execute_command_unlocked(
                                 NewDraft {
                                     to: &to,
                                     cc: &cc,
+                                    bcc: &bcc,
                                     subject: &subject,
                                     identity: identity.as_deref(),
                                     body: body.as_deref(),
@@ -730,6 +729,7 @@ fn execute_command_unlocked(
                     CaseDraftAction::Reply {
                         case_ref,
                         message_id,
+                        bcc,
                         identity,
                         body,
                         body_file,
@@ -741,19 +741,23 @@ fn execute_command_unlocked(
                         json!({
                             "case_ref": case_ref,
                             "message_id": message_id,
+                            "bcc": bcc,
                             "all": all,
                             "identity": identity,
                             "body": body,
                             "body_file": body_file,
                         }),
                         || {
-                            ws.reply_to_message(
+                            ws.reply_to_message_with_options(
                                 &case_ref,
-                                &message_id,
-                                all,
-                                identity.as_deref(),
-                                body.as_deref(),
-                                body_file.as_deref(),
+                                ReplyDraft {
+                                    message_id: &message_id,
+                                    reply_all: all,
+                                    bcc: &bcc,
+                                    identity: identity.as_deref(),
+                                    body: body.as_deref(),
+                                    body_file: body_file.as_deref(),
+                                },
                             )
                         },
                     ),
@@ -764,6 +768,8 @@ fn execute_command_unlocked(
                         to,
                         cc,
                         clear_cc,
+                        bcc,
+                        clear_bcc,
                         identity,
                         body,
                         body_file,
@@ -778,6 +784,8 @@ fn execute_command_unlocked(
                             "to": to,
                             "cc": cc,
                             "clear_cc": clear_cc,
+                            "bcc": bcc,
+                            "clear_bcc": clear_bcc,
                             "identity": identity,
                             "body": body,
                             "body_file": body_file,
@@ -791,6 +799,8 @@ fn execute_command_unlocked(
                                     to: &to,
                                     cc: &cc,
                                     clear_cc,
+                                    bcc: &bcc,
+                                    clear_bcc,
                                     identity: identity.as_deref(),
                                     body: body.as_deref(),
                                     body_file: body_file.as_deref(),

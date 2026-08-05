@@ -293,6 +293,17 @@ pub(super) fn read_to_string(path: &Path, context: &str) -> Result<String> {
     fs::read_to_string(path).map_err(|e| AppError::io(context, &e))
 }
 
+/// Read a file that a caller is about to overwrite, distinguishing "not there
+/// yet" from a real read failure — an edit-in-place path needs the current
+/// bytes, and a create path must not be turned into an error by their absence.
+pub(super) fn read_optional_to_string(path: &Path, context: &str) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(AppError::io(context, &err)),
+    }
+}
+
 pub(super) fn read_existing_notes(root: &Path, path: &Path) -> Result<String> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(text),
@@ -866,6 +877,13 @@ pub(super) fn parse_field_assignments(fields: &[String]) -> Result<Vec<(String, 
         .collect()
 }
 
+/// Mask a single config value read out from under its key.
+///
+/// The emitter's redactor walks *field names*, and these land under the payload
+/// key `value`, which tells it nothing — so this is the one place afmail must
+/// make the secret decision itself. A null stays null: an unset secret is not a
+/// configured one, and reporting it as `"***"` would send a caller looking for
+/// a credential that was never set.
 pub(super) fn config_value_for_output(key: &str, value: Value) -> Value {
     if config_key_is_secret(key) && !value.is_null() {
         json!("***")
@@ -874,36 +892,19 @@ pub(super) fn config_value_for_output(key: &str, value: Value) -> Value {
     }
 }
 
+/// Whether a dot-path config key addresses a secret.
+///
+/// Splitting the path is afmail's business; deciding what a secret *name* looks
+/// like is not. Deferring the suffix rule to afdata keeps this from drifting
+/// away from the convention every other redaction path in the process follows.
 pub(super) fn config_key_is_secret(key: &str) -> bool {
     key.rsplit('.')
         .next()
-        .is_some_and(|leaf| leaf.ends_with("_secret"))
+        .is_some_and(|leaf| agent_first_data::Redactor::new().is_secret_name(leaf))
 }
 
 pub(super) fn config_write_error(err: agent_first_data::document::DocumentError) -> AppError {
     AppError::new("config_invalid", format!("write config: {err}"))
-}
-
-/// Recursively redact every `*_secret` field in a serialized config tree to
-/// `"***"`, leaving non-null values masked. Used so `config show` cannot leak an
-/// inline `password_secret` the way `config get`/`set` already guard single
-/// keys. `*_secret_env` keys hold env var names, not values, and are left as-is.
-pub(super) fn redact_config_secrets(value: Value) -> Value {
-    match value {
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(key, val)| {
-                    if key.ends_with("_secret") && !val.is_null() {
-                        (key, json!("***"))
-                    } else {
-                        (key, redact_config_secrets(val))
-                    }
-                })
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.into_iter().map(redact_config_secrets).collect()),
-        other => other,
-    }
 }
 
 fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {

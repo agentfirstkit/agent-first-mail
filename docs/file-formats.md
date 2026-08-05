@@ -62,6 +62,33 @@ bytes afterward. This preserves interoperability but trusts the server not to
 lie so severely that one response exhausts memory; enable it only for a trusted
 server. It never disables count/bytes budgets or the declared/actual skip.
 
+## Message identity
+
+A message's identity is derived from its raw RFC822 bytes, not from its
+`Message-ID` header. Two remote copies collapse into one local message only when
+those bytes are identical; a copy that differs by a single added header — a
+mailing-list `List-Id`, a per-folder `X-` header — is a second message with its
+own id and its own evidence. This is why identity is byte-exact rather than
+header-based: a `Message-ID` is supplied by the sender, is not unique in
+practice, and a mailbox that rewrites headers per folder would otherwise make
+two materially different documents share one identity.
+
+The practical consequences:
+
+- One message can hold several remote locations (Inbox and All Mail, say). Those
+  are recorded on the one message record, and `pull` reports them as
+  `updated_location_count` rather than as new messages.
+- Because the check needs the body, a duplicate is only recognized after it is
+  fetched. `pull` refunds that message's count and byte budget when it turns out
+  to be a copy, but `pull --dry-run` cannot know in advance — its
+  `candidate_count` is an upper bound, flagged by
+  `candidate_count_is_upper_bound`.
+- `message_already_exists` reports a message whose bytes are already stored;
+  `message_id_conflict` reports the same id arriving with different bytes.
+- A mailbox whose server resets `UIDVALIDITY` is re-anchored rather than
+  re-imported: `pull` reports `imap_uidvalidity_changed` along with
+  `uid_validity_reset_count` and `uid_validity_reset_mailbox_ids`.
+
 ## Message JSON
 
 Raw message evidence lives at `.afmail/messages/<message_id>.eml`. Canonical
@@ -367,7 +394,8 @@ frontmatter), and links to messages from the case root as
 `data/case.json` and message evidence/cache.
 
 Draft Markdown files use frontmatter fields `kind`, `case_uid`, `send_intent`,
-`reply_to_message_id`, `identity`, `subject`, `to`, `cc`, and `attachments`.
+`reply_to_message_id`, `identity`, `subject`, `to`, `cc`, `bcc`, and
+`attachments`.
 When queued, afmail also manages `sync_intent`, whose only values are
 `save_draft` and `send`:
 
@@ -382,6 +410,8 @@ subject: "Re: Contract renewal"
 to:
   - alice@example.com
 cc: []
+bcc:
+  - finance-audit@example.com
 attachments:
   - files/pricing.txt
 ---
@@ -412,6 +442,12 @@ incomplete draft may be queued with `draft upload`, but `draft send` returns
 `draft_incomplete` without creating or changing a push item. Push validates the
 latest draft again before any remote step. Editor-only headings and marker lines
 are removed from the generated `text/plain` MIME body.
+
+At least one `to` or `bcc` recipient is required. Bcc addresses remain part of
+the canonical local draft and the sender's private Drafts/Sent evidence, and
+they are shown in push preview for confirmation. SMTP submission includes them
+as envelope recipients but removes the `Bcc` header from the DATA bytes
+delivered to recipients.
 
 Draft status is projected from both frontmatter and the matching durable push
 item: `editable | queued_upload | queued_send | pushing | failed`. A queued send

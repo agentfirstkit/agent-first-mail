@@ -56,6 +56,7 @@ fn case_review_rejects_a_stale_persisted_suggestion_before_opening_a_session() {
             &case_hash,
             "--reason",
             "This case is complete",
+            "--action",
             "archive",
         ],
     );
@@ -110,6 +111,7 @@ fn triage_review_rejects_request_ids_and_stale_suggestions_before_opening_a_sess
             "A reply is needed",
             "--confidence-percent",
             "90",
+            "--action",
             "notification-create",
             "--name",
             "contract-follow-up",
@@ -124,20 +126,22 @@ fn triage_review_rejects_request_ids_and_stale_suggestions_before_opening_a_sess
         "notification_create"
     );
 
+    // A review is not a mutation, so the registry never declares an
+    // idempotency key on it; the parser rejects the flag outright.
     let (status, stdout) = run(
         &root,
         &[
-            "--request-id",
-            "review-request-id-is-not-supported",
             "triage",
             "review",
             message_id,
             "--mode",
             "lan",
+            "--request-id",
+            "review-request-id-is-not-supported",
         ],
     );
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "request_id_not_supported");
+    assert_eq!(status, 2, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "cli_unknown_argument");
 
     update_message_json(&root, message_id, |message| {
         message["subject"] = json!("Changed after review context");
@@ -183,6 +187,7 @@ fn triage_review_lan_outputs_a_reachable_url_and_self_describing_submit_result()
             &base_hash,
             "--reason",
             "Review this message from another LAN device",
+            "--action",
             "trash",
         ],
     );
@@ -194,13 +199,13 @@ fn triage_review_lan_outputs_a_reachable_url_and_self_describing_submit_result()
     let child = Command::new(bin())
         .current_dir(&root)
         .args([
-            "--output-to",
-            "stdout",
             "triage",
             "review",
             message_id,
             "--mode",
             "lan",
+            "--output-to",
+            "stdout",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -399,7 +404,7 @@ fn review_headless_mode_is_not_a_public_cli_option() {
         &["triage", "review", "message_example", "--mode", "headless"],
     );
     assert_eq!(status, 2, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "cli_error");
+    assert_eq!(parse_one(&stdout)["code"], "cli_invalid_argument_value");
 }
 
 impl TestImapMessages {
@@ -486,6 +491,14 @@ fn current_push_plan_id(cwd: &Path) -> String {
 fn run_confirmed_push(cwd: &Path) -> (i32, String) {
     let plan_id = current_push_plan_id(cwd);
     run(cwd, &["push", "--confirm", plan_id.as_str()])
+}
+
+fn confirmed_push_items(value: &Value) -> &[Value] {
+    assert_eq!(value["confirmed"], true, "{value}");
+    value["succeeded_items"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
 }
 
 fn command_output(output: std::io::Result<std::process::Output>) -> (i32, String) {
@@ -757,7 +770,7 @@ fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Option<&s
         "remote": {"locations": [{
             "mailbox_name": "INBOX",
             "mailbox_id": "inbox",
-            "uid_validity": 1,
+            "uid_validity": 44,
             "uid": uid,
             "flags": [],
             "observed_rfc3339": "2026-05-21T10:00:00Z"
@@ -2052,7 +2065,7 @@ impl DemoServerProcess {
     fn start(workspace: &Path) -> std::io::Result<Self> {
         let mut child = Command::new(bin())
             .current_dir(workspace)
-            .args(["--output-to", "stdout", "demo", "serve"])
+            .args(["demo", "serve", "--output-to", "stdout"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -2107,15 +2120,18 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(fs::create_dir_all(&root).is_ok());
     let (status, stdout) = run(&root, &["--help"]);
     assert_eq!(status, 0);
-    assert!(stdout.contains("Agent-First Mail"));
     let help_result = parse_one(&stdout);
     assert_eq!(help_result["code"], "help");
     let help = &help_result["help"];
+    assert_eq!(help["schema"], "cli-help-v2");
     assert!(help.get("description").is_none());
+    // help-v2 subcommands are ready-to-run discovery calls, not names.
     let subcommands = help["subcommands"].as_array().cloned().unwrap_or_default();
     for name in ["case", "pull", "push"] {
         assert!(
-            subcommands.iter().any(|command| command["name"] == name),
+            subcommands
+                .iter()
+                .any(|command| command == &Value::String(format!("afmail {name} --help"))),
             "root help omitted {name}: {stdout}"
         );
     }
@@ -2127,7 +2143,7 @@ fn init_status_and_afdata_output_formats_work() {
     let (status, stdout) = run(&root, &["outbox", "list"]);
     assert_eq!(status, 2);
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
+    assert_eq!(value["code"], "cli_unknown_command");
     let (status, stdout) = run(&root, &["message", "--help"]);
     assert_eq!(status, 0);
     assert!(!stdout.contains("ignore"));
@@ -2141,13 +2157,17 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(stdout.contains("--subject-contains"));
     assert!(stdout.contains("--since"));
     let message_list_help = parse_one(&stdout);
-    let in_argument = message_list_help["help"]["arguments"]
-        .as_array()
-        .and_then(|arguments| arguments.iter().find(|argument| argument["name"] == "--in"));
+    // One shape, and its usage line spells out the closed scope set rather
+    // than a placeholder the caller would have to look up.
+    let usage = message_list_help["help"]["shapes"][0]["usage"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     assert!(
-        in_argument.is_some_and(|argument| argument["value"] == "SCOPE"),
-        "{stdout}"
+        usage.contains("[--in <triage|case|notification|all>]"),
+        "{usage}"
     );
+    assert_eq!(message_list_help["help"]["defaults"]["--in"], "all");
     let (status, stdout) = run(&root, &["case", "add", "--help"]);
     assert_eq!(status, 0);
     assert!(stdout.contains("<MESSAGE_ID>..."));
@@ -2191,34 +2211,32 @@ fn init_status_and_afdata_output_formats_work() {
     assert_eq!(status, 0);
     assert!(stdout.contains("--group"));
     assert!(stdout.contains("--reason"));
-    let (status, stdout) = run(&root, &["archive", "case", "show", "c20260603001"]);
-    assert_eq!(status, 2);
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
-    let (status, stdout) = run(&root, &["message", "ignore", "message_001"]);
-    assert_eq!(status, 2);
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
-    let (status, stdout) = run(&root, &["message", "message_001", "show"]);
-    assert_eq!(status, 2);
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
-    let (status, stdout) = run(&root, &["case", "c20260603001", "add", "message_001"]);
-    assert_eq!(status, 2);
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
-    let (status, stdout) = run(&root, &["--help", "--output", "markdown"]);
+    for argv in [
+        vec!["archive", "case", "show", "c20260603001"],
+        vec!["message", "ignore", "message_001"],
+        vec!["message", "message_001", "show"],
+        vec!["case", "c20260603001", "add", "message_001"],
+    ] {
+        let (status, stdout) = run(&root, &argv);
+        assert_eq!(status, 2, "{argv:?}: {stdout}");
+        assert_eq!(
+            parse_one(&stdout)["code"],
+            "cli_unknown_command",
+            "{argv:?}"
+        );
+    }
+    // `--docs` renders the whole registry offline; there is no recursive help
+    // mode, and no `markdown` output format.
+    let (status, stdout) = run(&root, &["--docs"]);
     assert_eq!(status, 0);
-    assert!(stdout.contains("# afmail"));
-    assert!(stdout.contains("afmail case show c20260603001"));
-    assert!(stdout.contains("afmail case show REF"));
-    assert!(stdout.contains("afmail notification show n20260603001"));
+    assert!(stdout.contains("# afmail CLI reference"));
+    assert!(stdout.contains("afmail case show"));
+    assert!(stdout.contains("afmail notification show"));
     assert!(!stdout.contains("afmail message ignore"));
-    assert!(!stdout.contains("--mode"));
     let (status, stdout) = run(&root, &["--mode", "pipe"]);
     assert_eq!(status, 2);
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
+    assert_eq!(value["code"], "cli_unknown_argument");
     assert!(!stdout.to_ascii_lowercase().contains("bucket"));
 
     let (status, stdout) = run(&root, &["init"]);
@@ -2341,7 +2359,7 @@ fn init_status_and_afdata_output_formats_work() {
     );
     assert_eq!(status, 2);
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
+    assert_eq!(value["code"], "cli_unknown_command");
     let config = fs::read_to_string(root.join(".afmail/config.json")).unwrap_or_default();
     let config_json: Value = serde_json::from_str(&config).unwrap_or(Value::Null);
     assert_eq!(config_json, json!({}));
@@ -2355,7 +2373,7 @@ fn init_status_and_afdata_output_formats_work() {
     let (status, stdout) = run(&root, &["config", "pull", "add", "Sent"]);
     assert_eq!(status, 2);
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
+    assert_eq!(value["code"], "cli_unknown_command");
     let (status, stdout) = run(
         &root,
         &["config", "get", "actions.pull.default_mailbox_ids"],
@@ -2435,7 +2453,7 @@ fn init_status_and_afdata_output_formats_work() {
         "default audit mode should not be persisted: {config}"
     );
 
-    let (status, stdout) = run(&root, &["--output", "plain", "status"]);
+    let (status, stdout) = run(&root, &["status", "--output", "plain"]);
     assert_eq!(status, 0);
     assert!(stdout.contains("kind=result"));
     assert!(stdout.contains("triage_count=0"));
@@ -2443,11 +2461,15 @@ fn init_status_and_afdata_output_formats_work() {
     let (status, stdout) = run(
         &root,
         &[
+            "status",
             "--output-to",
             "stdout",
             "--log",
-            "startup,request,progress",
-            "status",
+            "startup",
+            "--log",
+            "request",
+            "--log",
+            "progress",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
@@ -2468,7 +2490,23 @@ fn init_status_and_afdata_output_formats_work() {
     assert!(lines[2]["message"].as_str().is_some(), "{stdout}");
     assert!(lines[3].get("outcome").is_none());
 
-    let (status, stdout) = run(&root, &["--output-to", "stdout", "--verbose", "status"]);
+    // `--verbose` is gone as a cross-command synonym; the categories are named.
+    let (status, stdout) = run(
+        &root,
+        &[
+            "status",
+            "--output-to",
+            "stdout",
+            "--log",
+            "startup",
+            "--log",
+            "request",
+            "--log",
+            "progress",
+            "--log",
+            "retry",
+        ],
+    );
     assert_eq!(status, 0, "{stdout}");
     let lines = parse_lines(&stdout);
     assert!(
@@ -2480,14 +2518,14 @@ fn init_status_and_afdata_output_formats_work() {
     let (status, stdout) = run(
         &root,
         &[
-            "--output-to",
-            "stdout",
-            "--log",
-            "startup",
             "config",
             "set",
             "imap.password_secret",
             "log-secret",
+            "--output-to",
+            "stdout",
+            "--log",
+            "startup",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
@@ -2499,10 +2537,6 @@ fn init_status_and_afdata_output_formats_work() {
     let (status, stdout) = run(
         &root,
         &[
-            "--output-to",
-            "stdout",
-            "--log",
-            "startup",
             "case",
             "draft",
             "new",
@@ -2513,6 +2547,10 @@ fn init_status_and_afdata_output_formats_work() {
             "--subject",
             "Private payroll thread",
             "--body=Please review the private numbers.",
+            "--output-to",
+            "stdout",
+            "--log",
+            "startup",
         ],
     );
     assert_ne!(status, 2, "{stdout}");
@@ -2555,10 +2593,6 @@ fn init_status_and_afdata_output_formats_work() {
     let (status, stdout) = run(
         &root,
         &[
-            "--output-to",
-            "stdout",
-            "--log",
-            "startup",
             "notification",
             "create",
             "--name",
@@ -2569,6 +2603,10 @@ fn init_status_and_afdata_output_formats_work() {
             "Private subscription summary",
             "--reason",
             "Private filing reason",
+            "--output-to",
+            "stdout",
+            "--log",
+            "startup",
         ],
     );
     assert_ne!(status, 2, "{stdout}");
@@ -2587,16 +2625,16 @@ fn init_status_and_afdata_output_formats_work() {
     let (status, stdout) = run(
         &root,
         &[
-            "--output-to",
-            "stdout",
-            "--log",
-            "startup",
             "case",
             "notes",
             "append",
             "c20260711001-private-customer",
             "--text",
             "Private note body with customer context",
+            "--output-to",
+            "stdout",
+            "--log",
+            "startup",
         ],
     );
     assert_ne!(status, 2, "{stdout}");
@@ -2630,45 +2668,39 @@ fn init_status_and_afdata_output_formats_work() {
         "{stdout}"
     );
 
-    let (status, stdout) = run(&root, &["--log", "bogus", "status"]);
-    assert_eq!(status, 2);
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
+    // `--log` is a closed enum in the registry, so an unknown category is a
+    // parser rejection that names the legal set — no hand-written check.
+    for category in ["bogus", "redirect"] {
+        let (status, stdout) = run(&root, &["status", "--log", category]);
+        assert_eq!(status, 2, "{stdout}");
+        let value = parse_one(&stdout);
+        assert_eq!(value["code"], "cli_invalid_argument_value");
+        let error = value["message"].as_str().unwrap_or_default();
+        assert!(error.contains("`--log`"), "{stdout}");
+        assert!(
+            error.contains("expected one of startup, request, progress, retry"),
+            "{stdout}"
+        );
+    }
 
-    let (status, stdout) = run(&root, &["--log", "redirect", "status"]);
+    let (status, stdout) = run(&root, &["status", "--output", "xml"]);
     assert_eq!(status, 2);
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
-    let error = value["message"].as_str().unwrap_or_default();
-    assert!(
-        error.contains("--log unsupported category 'redirect'"),
-        "{stdout}"
-    );
-    assert!(
-        error.contains("expected one of: startup, request, progress, retry"),
-        "{stdout}"
-    );
-    assert!(!error.contains("retry, redirect"), "{stdout}");
-
-    let (status, stdout) = run(&root, &["--output", "xml", "status"]);
-    assert_eq!(status, 2);
-    let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
-    let (status, stdout) = run(&root, &["--output", "yaml", "nope"]);
-    assert_eq!(status, 2);
-    assert!(stdout.starts_with("---\n"), "{stdout}");
-    assert!(stdout.contains("kind: \"error\""), "{stdout}");
-    assert!(stdout.contains("code: \"cli_error\""), "{stdout}");
-    // Structure-preserving YAML keeps the raw `duration_ms` key (the lossy
-    // suffix-stripped `duration` form now lives only in plain output).
-    assert!(stdout.contains("duration_ms:"), "{stdout}");
-    assert!(!stdout.contains("error_code:"), "{stdout}");
-    let (status, stdout) = run(&root, &["--output=plain", "nope"]);
-    assert_eq!(status, 2);
-    assert!(stdout.contains("kind=error"), "{stdout}");
-    assert!(stdout.contains("error.code=cli_error"), "{stdout}");
-    assert!(stdout.contains("trace.duration="), "{stdout}");
-    assert!(!stdout.contains("error_code="), "{stdout}");
+    assert_eq!(value["code"], "cli_invalid_argument_value");
+    // An argv the parser rejected never selected a command, so it never
+    // selected an output contract either: the diagnostic is always one JSON
+    // protocol event, whatever `--output` asked for.
+    for argv in [
+        vec!["nope", "--output", "yaml"],
+        vec!["nope", "--output=plain"],
+    ] {
+        let (status, stdout) = run(&root, &argv);
+        assert_eq!(status, 2, "{argv:?}: {stdout}");
+        let value = parse_one(&stdout);
+        assert_eq!(value["code"], "cli_unknown_command", "{argv:?}");
+        assert!(value["hint"].as_str().is_some(), "{argv:?}: {stdout}");
+        assert!(value.get("error_code").is_none(), "{argv:?}");
+    }
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2711,7 +2743,7 @@ fn status_progress_uses_progress_percent_field() {
         "{stdout}"
     );
 
-    let (status, stdout) = run(&root, &["--output", "plain", "status"]);
+    let (status, stdout) = run(&root, &["status", "--output", "plain"]);
     assert_eq!(status, 0, "{stdout}");
     assert!(stdout.contains("progress.progress=25%"), "{stdout}");
 
@@ -2789,16 +2821,18 @@ fn doctor_reports_and_repairs_afmail_state_only() {
             .any(|issue| issue["code"] == "message_state_deprecated")
     );
 
-    let (status, yaml) = run(&root, &["--output", "yaml", "doctor"]);
+    let (status, yaml) = run(&root, &["doctor", "--output", "yaml"]);
     assert_eq!(status, 3, "{yaml}");
     assert!(yaml.contains("kind: \"error\""), "{yaml}");
-    let (status, plain) = run(&root, &["--output", "plain", "doctor"]);
+    let (status, plain) = run(&root, &["doctor", "--output", "plain"]);
     assert_eq!(status, 3, "{plain}");
     assert!(plain.contains("kind=error"), "{plain}");
 
+    // `--confirm` is part of the only registered `doctor repair` shape, so an
+    // unconfirmed repair is rejected by the parser instead of by the store.
     let (status, stdout) = run(&root, &["doctor", "repair"]);
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "confirm_required");
+    assert_eq!(status, 2, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "cli_unregistered_combination");
 
     let (status, stdout) = run(&root, &["doctor", "repair", "--confirm"]);
     assert_eq!(status, 0, "{stdout}");
@@ -2844,10 +2878,10 @@ fn incomplete_transaction_blocks_writers_and_doctor_reports_it() {
             .any(|issue| issue["code"] == "transaction_incomplete")
     );
 
-    let (status, yaml) = run(&root, &["--output", "yaml", "doctor"]);
+    let (status, yaml) = run(&root, &["doctor", "--output", "yaml"]);
     assert_eq!(status, 1, "{yaml}");
     assert!(yaml.contains("kind: \"error\""), "{yaml}");
-    let (status, plain) = run(&root, &["--output", "plain", "doctor"]);
+    let (status, plain) = run(&root, &["doctor", "--output", "plain"]);
     assert_eq!(status, 1, "{plain}");
     assert!(plain.contains("kind=error"), "{plain}");
 
@@ -3212,11 +3246,30 @@ fn pull_imports_imap_mail_with_codec_backed_test_server() {
     assert_eq!(value["triage_written_count"], 0);
     assert_eq!(value["triage_unchanged_count"], 1);
     assert_eq!(value["checked_location_count"], 0);
+    assert_eq!(value["uid_validity_reset_count"], 0);
+    assert_eq!(value["uid_validity_reset_mailbox_ids"], json!([]));
     let cursor = read_json(&root.join(".afmail/pull/cursors.json"));
     assert_eq!(cursor["mailboxes"]["inbox"]["highest_uid"], 7);
     assert_eq!(
         cursor["mailboxes"]["inbox"]["pull_count_since_full_reconcile"],
         1
+    );
+
+    let mut stale_cursor = cursor;
+    stale_cursor["mailboxes"]["inbox"]["uid_validity"] = json!(43);
+    write_json(&root.join(".afmail/pull/cursors.json"), &stale_cursor);
+    let (status, stdout) = run(&root, &["pull", "inbox"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["new_message_count"], 0);
+    assert_eq!(value["uid_validity_reset_count"], 1);
+    assert_eq!(value["uid_validity_reset_mailbox_ids"], json!(["inbox"]));
+    assert_eq!(value["checked_location_count"], 1);
+    let cursor = read_json(&root.join(".afmail/pull/cursors.json"));
+    assert_eq!(cursor["mailboxes"]["inbox"]["uid_validity"], 44);
+    assert_eq!(
+        cursor["mailboxes"]["inbox"]["pull_count_since_full_reconcile"],
+        0
     );
     assert!(server.handle.join().is_ok());
     let commands = server.commands.lock();
@@ -3230,9 +3283,88 @@ fn pull_imports_imap_mail_with_codec_backed_test_server() {
             .iter()
             .filter(|cmd| cmd.as_str() == "FETCH")
             .count(),
-        5
+        7
     );
     assert!(!commands.iter().any(|cmd| cmd == "STORE"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pull_keeps_distinct_messages_that_reuse_the_same_rfc822_message_id() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("pull-duplicate-rfc822-id");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let first = concat!(
+        "Message-ID: <duplicate@example.com>\r\n",
+        "From: Alice <alice@example.com>\r\n",
+        "To: Me <me@example.com>\r\n",
+        "Date: Thu, 21 May 2026 10:00:00 +0000\r\n",
+        "Subject: First duplicate\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n",
+        "first body\r\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let second = concat!(
+        "Message-ID: <duplicate@example.com>\r\n",
+        "From: Alice <alice@example.com>\r\n",
+        "To: Me <me@example.com>\r\n",
+        "Date: Thu, 21 May 2026 10:00:00 +0000\r\n",
+        "Subject: Second duplicate\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n",
+        "second body\r\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let server = start_imap_server(vec![(7, first), (8, second)], 4);
+    let Some(server) = server else {
+        return;
+    };
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+
+    let (status, stdout) = run(&root, &["pull", "inbox"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["new_message_count"], 2, "{value}");
+    let mut messages = fs::read_dir(root.join("messages"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+                })
+                .map(|entry| read_json(&entry.path()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    messages.sort_by(|left, right| {
+        left["message_id"]
+            .as_str()
+            .cmp(&right["message_id"].as_str())
+    });
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert_ne!(messages[0]["message_id"], messages[1]["message_id"]);
+    assert!(
+        messages
+            .iter()
+            .all(|message| message["rfc822_message_id"] == "duplicate@example.com"),
+        "{messages:?}"
+    );
+    let bodies = messages
+        .iter()
+        .filter_map(|message| message["body_text"].as_str())
+        .collect::<Vec<_>>();
+    assert!(bodies.iter().any(|body| body.contains("first body")));
+    assert!(bodies.iter().any(|body| body.contains("second body")));
+    assert!(server.handle.join().is_ok());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -3268,12 +3400,12 @@ fn pull_progress_logs_real_phases_when_requested() {
     let (status, stdout) = run(
         &root,
         &[
+            "pull",
+            "inbox",
             "--output-to",
             "stdout",
             "--log",
             "progress",
-            "pull",
-            "inbox",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
@@ -3395,12 +3527,12 @@ fn pull_body_progress_reports_fetch_batches() {
     let (status, stdout) = run(
         &root,
         &[
+            "pull",
+            "inbox",
             "--output-to",
             "stdout",
             "--log",
             "progress",
-            "pull",
-            "inbox",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
@@ -4349,7 +4481,7 @@ fn imap_connect_failure_is_retryable_and_emits_retry_log() {
 
     let (status, stdout) = run(
         &root,
-        &["--output-to", "stdout", "--log", "retry", "remote", "test"],
+        &["remote", "test", "--output-to", "stdout", "--log", "retry"],
     );
     assert_eq!(status, 1, "{stdout}");
     let lines = parse_lines(&stdout);
@@ -4393,7 +4525,7 @@ fn smtp_remote_test_failure_is_retryable_and_emits_retry_log() {
 
     let (status, stdout) = run(
         &root,
-        &["--output-to", "stdout", "--log", "retry", "remote", "test"],
+        &["remote", "test", "--output-to", "stdout", "--log", "retry"],
     );
     assert_eq!(status, 1, "{stdout}");
     let lines = parse_lines(&stdout);
@@ -4426,16 +4558,16 @@ fn message_batch_partial_and_failed_outcomes_preserve_all_item_results() {
     let (status, stdout) = run(
         &root,
         &[
-            "--output-to",
-            "stdout",
-            "--log",
-            "progress",
             "message",
             "spam",
             "message_batch_ok",
             "message_batch_missing",
             "--reason",
             "verify partial outcome",
+            "--output-to",
+            "stdout",
+            "--log",
+            "progress",
         ],
     );
     assert_eq!(status, 3, "{stdout}");
@@ -4503,11 +4635,11 @@ fn stdout_file_rejects_non_regular_target() {
     assert!(fs::create_dir_all(&target).is_ok());
     let target_arg = target.to_string_lossy().to_string();
     let (status, stdout, stderr) =
-        run_allow_stderr(&root, &["--stdout-file", target_arg.as_str(), "status"]);
+        run_allow_stderr(&root, &["status", "--stdout-file", target_arg.as_str()]);
     assert_eq!(status, 2, "stdout={stdout} stderr={stderr}");
     assert!(stdout.is_empty(), "stdout={stdout}");
     let value = parse_one(&stderr);
-    assert_eq!(value["code"], "cli_error", "{value}");
+    assert_eq!(value["code"], "cli_invalid_argument_value", "{value}");
     assert!(
         value["message"]
             .as_str()
@@ -4519,10 +4651,10 @@ fn stdout_file_rejects_non_regular_target() {
     // it stays covered where the platform provides one.
     if Path::new("/dev/full").exists() {
         let (status, stdout, stderr) =
-            run_allow_stderr(&root, &["--stdout-file", "/dev/full", "status"]);
+            run_allow_stderr(&root, &["status", "--stdout-file", "/dev/full"]);
         assert_eq!(status, 2, "stdout={stdout} stderr={stderr}");
         assert!(stdout.is_empty(), "stdout={stdout}");
-        assert_eq!(parse_one(&stderr)["code"], "cli_error");
+        assert_eq!(parse_one(&stderr)["code"], "cli_invalid_argument_value");
     }
     let _ = fs::remove_dir_all(root);
 }
@@ -4538,12 +4670,12 @@ fn render_refresh_progress_logs_render_substages() {
     let (status, stdout) = run(
         &root,
         &[
+            "render",
+            "refresh",
             "--output-to",
             "stdout",
             "--log",
             "progress",
-            "render",
-            "refresh",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
@@ -6095,7 +6227,7 @@ fn triage_assign_move_draft_and_send_contract_work() {
     let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value.as_array().map(Vec::len), Some(1));
+    assert_eq!(confirmed_push_items(&value).len(), 1);
     assert!(!waiting_path.join("drafts/reply.md").exists());
     let staged_count = fs::read_dir(root.join("messages"))
         .map(|entries| {
@@ -6143,7 +6275,7 @@ fn triage_assign_move_draft_and_send_contract_work() {
     let (status, stdout) = run_confirmed_push(&root);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value.as_array().map(Vec::len), Some(1), "{value}");
+    assert_eq!(confirmed_push_items(&value).len(), 1, "{value}");
     assert!(!waiting_path.join("drafts/reply.md").exists());
     assert!(
         root.join(format!(".afmail/messages/{message_id}.eml"))
@@ -6237,7 +6369,7 @@ fn triage_assign_attachment_fetch_work() {
     );
     assert_eq!(status, 2);
     let value = parse_one(&stdout);
-    assert_eq!(value["code"], "cli_error");
+    assert_eq!(value["code"], "cli_unknown_argument");
 
     let (status, stdout) = run(
         &root,

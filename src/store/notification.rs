@@ -105,6 +105,7 @@ impl Workspace {
         let date = workspace_local_date(&self.workspace_date_offset()?);
         if let Some(message_id) = message_id {
             self.ensure_no_related_conversation(message_id)?;
+            self.preflight_archive_actions(&[message_id.to_string()])?;
         }
         let notification_uid = self.next_notification_uid(&date)?;
         let notification_dir = self.notification_dir_for_name(&notification_uid, name);
