@@ -61,14 +61,12 @@ pub(crate) fn init(
     config.imap.tls = false;
     config.imap.username = Some(DEMO_USERNAME.to_string());
     config.imap.password_secret = Some(password_secret.clone());
-    config.imap.password_secret_env = None;
     config.smtp.host = Some("127.0.0.1".to_string());
     config.smtp.port = smtp_port;
     config.smtp.starttls = false;
     config.smtp.tls_wrapper = false;
     config.smtp.username = Some(DEMO_USERNAME.to_string());
     config.smtp.password_secret = Some(password_secret);
-    config.smtp.password_secret_env = None;
     config.identities = vec![IdentityConfig {
         identity: "founder".to_string(),
         name: DEMO_IDENTITY_NAME.to_string(),

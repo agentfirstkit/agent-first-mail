@@ -1,5 +1,5 @@
 use super::*;
-use agent_first_data::normalize_utc_offset;
+use agent_first_data::{SourceSet, ValueSource, normalize_utc_offset};
 
 pub(super) fn reject_legacy_config(raw: &Value) -> Result<()> {
     let Some(obj) = raw.as_object() else {
@@ -41,76 +41,52 @@ pub(super) fn reject_legacy_config(raw: &Value) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn resolve_optional_password_secret(
-    secret_label: &str,
-    secret: Option<&str>,
-    env_label: &str,
-    env_name: Option<&str>,
-) -> Result<Option<String>> {
-    validate_password_secret_source(secret_label, secret, env_label, env_name)?;
-    if let Some(secret) = secret {
-        return Ok(Some(secret.to_string()));
-    }
-    env_name
-        .map(|name| resolve_secret_env(env_label, name))
-        .transpose()
+/// The sources a configured password may name.
+///
+/// No stream sources: a config file is read long after the shell that wrote it
+/// is gone, so `stdin`, `fd:N`, and `prompt` have nothing to read from.
+pub(super) fn password_sources() -> SourceSet {
+    SourceSet::config()
 }
 
-pub(super) fn resolve_password_secret(
-    secret_label: &str,
-    secret: Option<&str>,
-    env_label: &str,
-    env_name: Option<&str>,
-) -> Result<String> {
-    resolve_optional_password_secret(secret_label, secret, env_label, env_name)?.ok_or_else(|| {
-        AppError::new(
-            "config_missing",
-            format!("{secret_label} or {env_label} is required"),
-        )
-    })
-}
-
-pub(super) fn resolve_secret_env(label: &str, name: &str) -> Result<String> {
-    std::env::var(name).map_err(|_| {
-        AppError::new(
-            "config_missing",
-            format!("{label} references unset environment variable: {name}"),
-        )
-    })
-}
-
-pub(super) fn validate_password_secret_source(
-    secret_label: &str,
-    secret: Option<&str>,
-    env_label: &str,
-    env_name: Option<&str>,
-) -> Result<()> {
-    if secret.is_some() && env_name.is_some() {
-        return Err(AppError::new(
-            "config_invalid",
-            format!("{secret_label} and {env_label} cannot both be set"),
-        ));
-    }
-    if let Some(secret) = secret {
-        validate_inline_secret(secret_label, secret, env_label)?;
-    }
-    if let Some(name) = env_name {
-        validate_secret_env_name(env_label, name)?;
+/// Check the source is well formed without reading it.
+///
+/// Config validation runs on every load, including `config set`, and must not
+/// depend on the environment or filesystem of whoever happens to be editing —
+/// so this is the parse only. The read happens where a connection needs it.
+pub(super) fn validate_password_secret_source(label: &str, value: Option<&str>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let source = password_sources()
+        .parse(value)
+        .map_err(|error| AppError::new("config_invalid", format!("{label} {error}")))?;
+    // afmail's own rule on top of the shared grammar: a variable that holds a
+    // credential says so in its name, the same way every other AFDATA field does.
+    if let ValueSource::Env(name) = &source {
+        validate_secret_env_name(label, name)?;
     }
     Ok(())
 }
 
-pub(super) fn validate_inline_secret(label: &str, value: &str, env_label: &str) -> Result<()> {
-    if value.starts_with("env:") || value.starts_with("literal:") {
-        Err(AppError::new(
-            "config_invalid",
-            format!(
-                "{label} stores the literal secret; remove env:/literal: prefixes or use {env_label}"
-            ),
-        ))
-    } else {
-        Ok(())
-    }
+pub(super) fn resolve_optional_password_secret(
+    label: &str,
+    value: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    validate_password_secret_source(label, Some(value))?;
+    password_sources()
+        .parse(value)
+        .and_then(|source| source.read_secret())
+        .map(|secret| Some(secret.expose_secret().to_string()))
+        .map_err(|error| AppError::new("config_missing", format!("{label} {error}")))
+}
+
+pub(super) fn resolve_password_secret(label: &str, value: Option<&str>) -> Result<String> {
+    resolve_optional_password_secret(label, value)?
+        .ok_or_else(|| AppError::new("config_missing", format!("{label} is required")))
 }
 
 pub(super) fn validate_secret_env_name(label: &str, name: &str) -> Result<()> {
@@ -126,7 +102,7 @@ pub(super) fn validate_secret_env_name(label: &str, name: &str) -> Result<()> {
     } else {
         Err(AppError::new(
             "config_invalid",
-            format!("{label} env var must be UPPER_SNAKE_CASE and end with _SECRET"),
+            format!("{label} env: variable must be UPPER_SNAKE_CASE and end with _SECRET"),
         ))
     }
 }

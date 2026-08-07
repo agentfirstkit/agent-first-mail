@@ -291,9 +291,11 @@ separate boundaries:
   reason, so stop that recommendation and respond to the user's concern before
   proposing another action.
 - `outcome: cancelled` is an explicit refusal; do not immediately ask the same
-  question another way. `outcome: dismissed` is unresolved and may be proposed
-  again when useful. Do not execute any triage mutation before a complete
-  `submitted` result.
+  question another way. `outcome: dismissed` means the review was closed without
+  an answer — unresolved, and may be proposed again when useful. `outcome:
+  expired` means a LAN review URL lapsed before anyone opened it, so offering
+  the same review again is fine. Do not execute any triage mutation before a
+  complete `submitted` result.
 - Notes and drafts are the deliberate exception to result-only review: edits
   automatically save the canonical workspace file after a short idle period,
   under a hash check, and the terminal result reports every saved file even if
@@ -444,10 +446,18 @@ separate boundaries:
 - Run `afmail render refresh` to rebuild generated triage, spam/trash/deleted,
   case, and notification read views after template edits or suspected generated-view drift.
 - Run `afmail render templates` when the user wants to create or inspect
-  `templates/` workspace overrides; use `--force` only when they ask to reset
-  templates to built-in defaults. Language entries live under
-  `templates/<language>/`; shared Markdown/Review layouts live under
-  `templates/shared/`.
+  content overrides; use `--force` only when they ask to reset templates to
+  built-in defaults. Language entries live under `templates/<language>/`;
+  shared Markdown layouts live under `templates/shared/`.
+- The Review UI is replaced somewhere else: an AFUI frontend at
+  `.afui/frontends/afmail/<ui_kind>/`, created with `afui frontend init` and
+  inert until `afui frontend enable` trusts its exact contents. Editing it
+  revokes that trust, so re-enable after every change. Never author Review
+  templates under `templates/` — afmail does not read them there.
+- A review command that fails with `review_frontend_unreadable` or
+  `review_frontend_incompatible` is reporting the user's own Review UI, not an
+  afmail fault. Fix the frontend, or rerun with `AFUI_SAFE_MODE=1` to open the
+  built-in UI. Never treat it as a reason to stop reviewing.
 - Add/remove/move/archive/tag/untag cases and use notification commands for
   local notification filing.
 - When the user asks to classify, file, archive, spam, or trash locally, act

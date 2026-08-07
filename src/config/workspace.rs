@@ -69,7 +69,6 @@ pub struct SmtpSection {
     pub tls_wrapper: bool,
     pub username: Option<String>,
     pub password_secret: Option<String>,
-    pub password_secret_env: Option<String>,
 }
 
 impl Default for SmtpSection {
@@ -81,7 +80,6 @@ impl Default for SmtpSection {
             tls_wrapper: false,
             username: None,
             password_secret: None,
-            password_secret_env: None,
         }
     }
 }

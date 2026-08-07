@@ -260,7 +260,7 @@ fn collect_template_files(
     directory: &Path,
     files: &mut Vec<(String, String)>,
 ) -> Result<()> {
-    ensure_workspace_template_path_safe(templates_root, directory)?;
+    ensure_template_path_safe(templates_root, directory)?;
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),

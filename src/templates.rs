@@ -1,5 +1,6 @@
 use crate::config::TemplateLanguage;
 use crate::error::{AppError, Result};
+use agent_first_ui::{reject_frontend_script, reject_rendered_script};
 use chrono::{DateTime, FixedOffset, SecondsFormat};
 use include_dir::{Dir, include_dir};
 use minijinja::value::Value as MiniValue;
@@ -153,10 +154,21 @@ impl TemplateKey {
     }
 
     fn is_review(self) -> bool {
+        self.is_review_ui() || matches!(self, Self::LocaleCatalog)
+    }
+
+    /// The templates that are the Review UI itself.
+    ///
+    /// These are the only templates a user replaces through an AFUI frontend
+    /// (`.afui/frontends/afmail/<ui_kind>/templates/`). Everything else is
+    /// content — mail, drafts, notes, generated Markdown — and stays in the
+    /// workspace `templates/` tree. The split is the point: each template has
+    /// exactly one place it can be overridden from, so there is never a second
+    /// entry point competing to change the same page.
+    pub fn is_review_ui(self) -> bool {
         matches!(
             self,
-            Self::LocaleCatalog
-                | Self::ReviewPage
+            Self::ReviewPage
                 | Self::ReviewMessage
                 | Self::ReviewDraftEditor
                 | Self::ReviewNotesEditor
@@ -353,6 +365,7 @@ impl TemplateRenderStats {
         let counts = self.counts.entry(key.as_str()).or_default();
         match source {
             TemplateSourceKind::Builtin => counts.builtin += 1,
+            TemplateSourceKind::Frontend => counts.frontend += 1,
             TemplateSourceKind::Workspace => counts.workspace += 1,
         }
     }
@@ -365,6 +378,7 @@ impl TemplateRenderStats {
                 key.as_str().to_string(),
                 json!({
                     "builtin": counts.builtin,
+                    "frontend": counts.frontend,
                     "workspace": counts.workspace,
                 }),
             );
@@ -376,12 +390,14 @@ impl TemplateRenderStats {
 #[derive(Clone, Debug, Default)]
 struct TemplateSourceCounts {
     builtin: usize,
+    frontend: usize,
     workspace: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
 enum TemplateSourceKind {
     Builtin,
+    Frontend,
     Workspace,
 }
 
@@ -391,8 +407,41 @@ struct TemplateSource {
     label: String,
 }
 
+/// Which override tree a renderer reads, and therefore which templates it is
+/// allowed to read from disk at all.
+///
+/// Content templates come from the workspace `templates/` tree; the Review UI
+/// comes from the AFUI frontend a user installed for that surface. Encoding
+/// that here is what stops the two from becoming two ways to change one page:
+/// a workspace-rooted renderer cannot reach a Review UI template, and a
+/// frontend-rooted one cannot reach a content template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TemplateTree {
+    Workspace,
+    Frontend,
+}
+
+impl TemplateTree {
+    fn serves(self, key: TemplateKey) -> bool {
+        match self {
+            Self::Workspace => !key.is_review_ui(),
+            // The locale catalog is copy rather than layout, and a Review UI
+            // renders without the workspace tree in reach, so a frontend that
+            // rewords itself overrides the catalog in its own directory.
+            Self::Frontend => key.is_review_ui() || matches!(key, TemplateKey::LocaleCatalog),
+        }
+    }
+
+    fn source_kind(self) -> TemplateSourceKind {
+        match self {
+            Self::Workspace => TemplateSourceKind::Workspace,
+            Self::Frontend => TemplateSourceKind::Frontend,
+        }
+    }
+}
+
 pub struct TemplateRenderer<'a> {
-    root: Option<&'a Path>,
+    root: Option<(&'a Path, TemplateTree)>,
     language: TemplateLanguage,
     stats: TemplateRenderStats,
 }
@@ -400,7 +449,17 @@ pub struct TemplateRenderer<'a> {
 impl<'a> TemplateRenderer<'a> {
     pub fn new(root: &'a Path, language: TemplateLanguage) -> Self {
         Self {
-            root: Some(root),
+            root: Some((root, TemplateTree::Workspace)),
+            language,
+            stats: TemplateRenderStats::default(),
+        }
+    }
+
+    /// Render from a user's own Review UI, rooted at the frontend directory
+    /// AFUI resolved and trusted.
+    pub fn frontend(root: &'a Path, language: TemplateLanguage) -> Self {
+        Self {
+            root: Some((root, TemplateTree::Frontend)),
             language,
             stats: TemplateRenderStats::default(),
         }
@@ -446,8 +505,8 @@ impl<'a> TemplateRenderer<'a> {
         } else {
             env.set_auto_escape_callback(default_auto_escape_callback);
         }
-        add_template_filters(&mut env, self.root, options);
-        add_workspace_template_loader(&mut env, self.root, self.language, key.is_review());
+        add_template_filters(&mut env, self.root.map(|(root, _)| root), options);
+        add_template_loader(&mut env, self.root, self.language, key.is_review());
         for (source_key, source) in &sources {
             env.add_template_owned(source_key.as_str().to_string(), source.text.clone())
                 .map_err(|error| {
@@ -482,19 +541,21 @@ impl<'a> TemplateRenderer<'a> {
     }
 
     fn template_source(&self, key: TemplateKey) -> Result<TemplateSource> {
-        if let Some(root) = self.root {
+        if let Some((root, tree)) = self.root
+            && tree.serves(key)
+        {
             let rel = PathBuf::from("templates").join(language_template_path(self.language, key));
             let path = root.join(&rel);
-            ensure_workspace_template_path_safe(&root.join("templates"), &path)?;
+            ensure_template_path_safe(&root.join("templates"), &path)?;
             if path.exists() {
                 let text = fs::read_to_string(&path)
                     .map_err(|error| AppError::io("read template", &error))?;
                 if key.is_review() {
-                    validate_workspace_review_template(key.as_str(), &text)?;
+                    validate_review_template_text(key.as_str(), &text)?;
                 }
                 return Ok(TemplateSource {
                     text,
-                    kind: TemplateSourceKind::Workspace,
+                    kind: tree.source_kind(),
                     label: path_to_string(&rel),
                 });
             }
@@ -545,13 +606,14 @@ fn add_template_filters(
     });
 }
 
-fn add_workspace_template_loader(
+fn add_template_loader(
     env: &mut Environment<'_>,
-    root: Option<&Path>,
+    root: Option<(&Path, TemplateTree)>,
     language: TemplateLanguage,
     review_render: bool,
 ) {
-    let Some(templates_root) = root.map(|root| root.join("templates")) else {
+    let Some((templates_root, tree)) = root.map(|(root, tree)| (root.join("templates"), tree))
+    else {
         return;
     };
     env.set_loader(move |name| {
@@ -562,9 +624,15 @@ fn add_workspace_template_loader(
             )
         })?;
         if let Some(key) = TemplateKey::from_name(name) {
+            // The same split as `template_source`: an include cannot reach a
+            // template this tree is not allowed to serve, or a workspace could
+            // change the Review UI through a partial after being told it could
+            // not change it directly.
+            if !tree.serves(key) {
+                return Ok(Some(key.builtin_text(language).to_string()));
+            }
             let path = templates_root.join(language_template_path(language, key));
-            ensure_workspace_template_path_safe(&templates_root, &path)
-                .map_err(template_loader_error)?;
+            ensure_template_path_safe(&templates_root, &path).map_err(template_loader_error)?;
             if path.is_file() {
                 let text = fs::read_to_string(&path).map_err(|error| {
                     MiniError::new(
@@ -590,8 +658,7 @@ fn add_workspace_template_loader(
             ]
         };
         for path in paths {
-            ensure_workspace_template_path_safe(&templates_root, &path)
-                .map_err(template_loader_error)?;
+            ensure_template_path_safe(&templates_root, &path).map_err(template_loader_error)?;
             if !path.is_file() {
                 continue;
             }
@@ -626,10 +693,7 @@ fn safe_template_name(name: &str) -> Option<PathBuf> {
     Some(path.to_path_buf())
 }
 
-pub(crate) fn ensure_workspace_template_path_safe(
-    templates_root: &Path,
-    path: &Path,
-) -> Result<()> {
+pub(crate) fn ensure_template_path_safe(templates_root: &Path, path: &Path) -> Result<()> {
     let relative = path.strip_prefix(templates_root).map_err(|_| {
         AppError::new(
             "template_path_unsafe",
@@ -659,12 +723,12 @@ fn reject_template_symlink(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(AppError::new(
             "template_path_unsafe",
-            format!("workspace template path {} is a symlink", path.display()),
+            format!("template path {} is a symlink", path.display()),
         )
         .with_hint("Use regular files and directories inside templates/; symlinks are rejected.")),
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(AppError::io("inspect workspace template path", &error)),
+        Err(error) => Err(AppError::io("inspect template path", &error)),
     }
 }
 
@@ -672,206 +736,36 @@ fn template_loader_error(error: AppError) -> MiniError {
     MiniError::new(MiniErrorKind::InvalidOperation, error.message)
 }
 
-fn validate_workspace_review_template(label: &str, text: &str) -> Result<()> {
-    validate_review_template_text(label, text)
-}
-
+/// Refuse a Review template that could run code.
+///
+/// The rule lives in AFUI, not here. afmail wrote it first, but afpsql and
+/// afterminal need the identical rule for the identical reason — each one binds
+/// its own behaviour to its own page under a nonce, which is worth nothing if
+/// the page can ship code beside it — and a security check with four
+/// implementations is a security check that drifts. This is the call, and the
+/// hint afmail attaches to it is the only part that is afmail's.
+///
+/// It covers markup (`<script>`, `<iframe>`, an inline `onclick=`, a
+/// `javascript:` URL through the character references that hide one) and the
+/// MiniJinja directives that switch escaping off, which is the other way a
+/// template turns a message body into markup.
 fn validate_review_template_text(label: &str, text: &str) -> Result<()> {
-    let lower = text.to_ascii_lowercase();
-    let compact = lower
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace())
-        .collect::<String>();
-    let forbidden = ["<script", "</script", "<iframe", "<object", "<embed"];
-    let violation = forbidden
-        .iter()
-        .find(|needle| lower.contains(**needle))
-        .copied()
-        .or_else(|| dangerous_review_url_scheme(&lower))
-        .or_else(|| compact.contains("|safe").then_some("|safe"))
-        .or_else(|| {
-            compact
-                .contains("filtersafe")
-                .then_some("filter safe block")
-        })
-        .or_else(|| compact.contains("autoescape").then_some("autoescape block"))
-        .or_else(|| review_html_tag_violation(&lower));
-    if let Some(violation) = violation {
-        return Err(unsafe_review_template_error(label, violation));
-    }
-    Ok(())
+    reject_frontend_script(label, text).map_err(unsafe_review_template_error)
 }
 
+/// The same guard on what the template produced, deliberately narrower.
+///
+/// A rendered Review page carries subject lines and message bodies, so
+/// `data:` inside one of those is text a person is meant to read rather than a
+/// URL a browser will fetch. AFUI draws that line; afmail only says where.
 fn validate_rendered_review_html(label: &str, text: &str) -> Result<()> {
-    let lower = text.to_ascii_lowercase();
-    let forbidden_elements = ["<script", "</script", "<iframe", "<object", "<embed"];
-    if let Some(violation) = forbidden_elements
-        .iter()
-        .find(|needle| lower.contains(**needle))
-        .copied()
-    {
-        return Err(unsafe_review_template_error(label, violation));
-    }
-
-    if let Some(violation) = review_html_tag_violation(&lower) {
-        return Err(unsafe_review_template_error(label, violation));
-    }
-    Ok(())
+    reject_rendered_script(label, text).map_err(unsafe_review_template_error)
 }
 
-fn review_html_tag_violation(text: &str) -> Option<&'static str> {
-    let mut remaining = text;
-    while let Some(start) = remaining.find('<') {
-        let tag_and_rest = &remaining[start..];
-        let Some(end) = tag_and_rest.find('>') else {
-            break;
-        };
-        let tag = &tag_and_rest[..=end];
-        let violation = if contains_inline_event_handler(tag) {
-            Some("inline event handler")
-        } else {
-            dangerous_review_url_scheme(tag)
-        };
-        if let Some(violation) = violation {
-            return Some(violation);
-        }
-        remaining = &tag_and_rest[end + 1..];
-    }
-    None
-}
-
-fn dangerous_review_url_scheme(text: &str) -> Option<&'static str> {
-    let decoded = decode_html_character_references(text);
-    let compact = decoded
-        .chars()
-        .filter(|character| !character.is_whitespace() && !character.is_control())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    if compact.contains("javascript:") {
-        Some("javascript:")
-    } else if compact.contains("vbscript:") {
-        Some("vbscript:")
-    } else if compact.contains("data:") {
-        Some("data:")
-    } else {
-        None
-    }
-}
-
-fn decode_html_character_references(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut index = 0usize;
-    while index < text.len() {
-        let remaining = &text[index..];
-        if let Some((character, consumed)) = decode_numeric_character_reference(remaining) {
-            output.push(character);
-            index += consumed;
-            continue;
-        }
-        let named = [
-            ("&colon;", ':'),
-            ("&colon", ':'),
-            ("&tab;", '\t'),
-            ("&tab", '\t'),
-            ("&newline;", '\n'),
-            ("&newline", '\n'),
-        ]
-        .into_iter()
-        .find(|(entity, _)| {
-            remaining
-                .get(..entity.len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(entity))
-        });
-        if let Some((entity, character)) = named {
-            output.push(character);
-            index += entity.len();
-            continue;
-        }
-        let Some(character) = remaining.chars().next() else {
-            break;
-        };
-        output.push(character);
-        index += character.len_utf8();
-    }
-    output
-}
-
-fn decode_numeric_character_reference(text: &str) -> Option<(char, usize)> {
-    let (digits_start, radix) = if text
-        .get(..3)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("&#x"))
-    {
-        (3, 16)
-    } else if text.starts_with("&#") {
-        (2, 10)
-    } else {
-        return None;
-    };
-    let digits_len = text[digits_start..]
-        .bytes()
-        .take_while(|byte| match radix {
-            16 => byte.is_ascii_hexdigit(),
-            _ => byte.is_ascii_digit(),
-        })
-        .count();
-    if digits_len == 0 {
-        return None;
-    }
-    let digits_end = digits_start + digits_len;
-    let value = u32::from_str_radix(&text[digits_start..digits_end], radix).ok()?;
-    let character = char::from_u32(value)?;
-    let consumed = digits_end + usize::from(text[digits_end..].starts_with(';'));
-    Some((character, consumed))
-}
-
-fn unsafe_review_template_error(label: &str, violation: &str) -> AppError {
-    AppError::new(
-        "review_template_unsafe",
-        format!(
-            "workspace Review template {label} contains forbidden JavaScript-capable content: {violation}"
-        ),
-    )
-    .with_hint(
+fn unsafe_review_template_error(error: agent_first_ui::Error) -> AppError {
+    AppError::new("review_template_unsafe", error.to_string()).with_hint(
         "Keep Review templates to MiniJinja, HTML, and CSS. afmail supplies the behavior-only JavaScript runtime.",
     )
-}
-
-fn contains_inline_event_handler(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if !bytes[index].is_ascii_whitespace() && !matches!(bytes[index], b'/' | b'<') {
-            index += 1;
-            continue;
-        }
-        let mut cursor = index + 1;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        if cursor + 2 > bytes.len() || &bytes[cursor..cursor + 2] != b"on" {
-            index = cursor;
-            continue;
-        }
-        cursor += 2;
-        let name_start = cursor;
-        while cursor < bytes.len()
-            && (bytes[cursor].is_ascii_alphanumeric() || matches!(bytes[cursor], b'-' | b'_'))
-        {
-            cursor += 1;
-        }
-        if cursor == name_start {
-            index = cursor;
-            continue;
-        }
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        if bytes.get(cursor) == Some(&b'=') {
-            return true;
-        }
-        index = cursor;
-    }
-    false
 }
 
 fn template_error(
@@ -1348,43 +1242,40 @@ mod tests {
     }
 
     #[test]
-    fn workspace_review_templates_reject_javascript() {
-        let error = validate_workspace_review_template(
+    fn review_ui_templates_reject_javascript() {
+        let error = validate_review_template_text(
             TemplateKey::ReviewPage.as_str(),
             "<button onclick=\"run()\">x</button>",
         )
         .expect_err("inline JavaScript must be rejected");
         assert_eq!(error.error_code, "review_template_unsafe");
         assert!(
-            validate_workspace_review_template(
+            validate_review_template_text(
                 TemplateKey::ReviewPage.as_str(),
                 "<svg/onload=\"run()\"></svg>",
             )
             .is_err()
         );
         assert!(
-            validate_workspace_review_template(
-                TemplateKey::ReviewPage.as_str(),
-                "{{ value |   safe }}",
-            )
-            .is_err()
+            validate_review_template_text(TemplateKey::ReviewPage.as_str(), "{{ value |   safe }}",)
+                .is_err()
         );
         assert!(
-            validate_workspace_review_template(
+            validate_review_template_text(
                 TemplateKey::ReviewPage.as_str(),
                 "{% filter safe %}{{ value }}{% endfilter %}",
             )
             .is_err()
         );
         assert!(
-            validate_workspace_review_template(
+            validate_review_template_text(
                 TemplateKey::ReviewPage.as_str(),
                 "{% autoescape\nfalse %}unsafe{% endautoescape %}",
             )
             .is_err()
         );
         assert!(
-            validate_workspace_review_template(
+            validate_review_template_text(
                 TemplateKey::ReviewPage.as_str(),
                 "<main>{{ review.contents }}</main>",
             )
@@ -1399,7 +1290,7 @@ mod tests {
             "<a href=\"data&colon;application/xhtml+xml;base64,AAAA\">x</a>",
         ] {
             assert!(
-                validate_workspace_review_template(TemplateKey::ReviewPage.as_str(), encoded_url,)
+                validate_review_template_text(TemplateKey::ReviewPage.as_str(), encoded_url,)
                     .is_err(),
                 "encoded executable URL must be rejected: {encoded_url}"
             );
@@ -1413,13 +1304,13 @@ mod tests {
             "<scr{% if true %}ipt{% endif %}>run()</scr{% if true %}ipt{% endif %}>",
         )
         .expect("split script Review template");
-        let error = TemplateRenderer::new(&root, TemplateLanguage::EnUs)
+        let error = TemplateRenderer::frontend(&root, TemplateLanguage::EnUs)
             .render(TemplateKey::ReviewPage, &json!({}))
             .expect_err("rendered script element must be rejected");
         assert_eq!(error.error_code, "review_template_unsafe");
         fs::write(review_root.join("page.html.j2"), "<main>{{ body }}</main>")
             .expect("plain-text Review template");
-        let rendered = TemplateRenderer::new(&root, TemplateLanguage::EnUs)
+        let rendered = TemplateRenderer::frontend(&root, TemplateLanguage::EnUs)
             .render(
                 TemplateKey::ReviewPage,
                 &json!({"body": "plain javascript: text onclick=example data:text/html"}),
@@ -1431,7 +1322,7 @@ mod tests {
             "<a href=\"java{% if true %}&#x73;{% endif %}cript:alert(1)\">x</a>",
         )
         .expect("split URL scheme Review template");
-        let error = TemplateRenderer::new(&root, TemplateLanguage::EnUs)
+        let error = TemplateRenderer::frontend(&root, TemplateLanguage::EnUs)
             .render(TemplateKey::ReviewPage, &json!({}))
             .expect_err("rendered entity-obfuscated script URL must be rejected");
         assert_eq!(error.error_code, "review_template_unsafe");
@@ -1440,7 +1331,7 @@ mod tests {
             "{% set filter_name = 'sa' ~ 'fe' %}{{ values | map(filter_name) | join }}",
         )
         .expect("dynamic safe-filter Review template");
-        let error = TemplateRenderer::new(&root, TemplateLanguage::EnUs)
+        let error = TemplateRenderer::frontend(&root, TemplateLanguage::EnUs)
             .render(
                 TemplateKey::ReviewPage,
                 &json!({"values": ["<script>alert(1)</script>"]}),
@@ -1456,7 +1347,7 @@ mod tests {
         .expect("cross-suffix Review include");
         fs::write(partial_root.join("body.md.j2"), "<p>{{ body }}</p>")
             .expect("Markdown-suffixed Review partial");
-        let rendered = TemplateRenderer::new(&root, TemplateLanguage::EnUs)
+        let rendered = TemplateRenderer::frontend(&root, TemplateLanguage::EnUs)
             .render(
                 TemplateKey::ReviewPage,
                 &json!({"body": "<b>untrusted</b>"}),
@@ -1464,6 +1355,46 @@ mod tests {
             .expect("all Review partial values are HTML-escaped");
         assert!(rendered.contains("&lt;b&gt;untrusted&lt;&#x2f;b&gt;"));
         assert!(!rendered.contains("<b>untrusted</b>"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A frontend supplies the Review UI and nothing else. Letting it reach a
+    /// content template would make `.afui/frontends/` a second way to change
+    /// mail, drafts and Markdown — which is the duplication the split exists to
+    /// remove.
+    #[test]
+    fn a_frontend_cannot_replace_content_templates() {
+        let root = temp_template_root("frontend-content");
+        let content_root = root.join("templates/en-US/case");
+        fs::create_dir_all(&content_root).expect("content template directory");
+        fs::write(content_root.join("case.md.j2"), "FRONTEND CONTENT")
+            .expect("content template in a frontend");
+        let mut renderer = TemplateRenderer::frontend(&root, TemplateLanguage::EnUs);
+        let rendered = renderer
+            .render(TemplateKey::CaseDocument, &json!({}))
+            .unwrap_or_default();
+        assert!(!rendered.contains("FRONTEND CONTENT"), "{rendered}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// …and the reverse. The workspace `templates/` tree used to be able to
+    /// replace the Review UI; now `.afui/frontends/` is the only entry point,
+    /// so a file left behind in the old place changes nothing.
+    #[test]
+    fn the_workspace_content_tree_can_no_longer_replace_the_review_ui() {
+        let root = temp_template_root("workspace-review");
+        let review_root = root.join("templates/en-US/review");
+        fs::create_dir_all(&review_root).expect("Review template directory");
+        fs::write(
+            review_root.join("page.html.j2"),
+            "<main>WORKSPACE REVIEW</main>",
+        )
+        .expect("Review template in the content tree");
+        let mut renderer = TemplateRenderer::new(&root, TemplateLanguage::EnUs);
+        let rendered = renderer
+            .render(TemplateKey::ReviewPage, &json!({}))
+            .unwrap_or_default();
+        assert!(!rendered.contains("WORKSPACE REVIEW"), "{rendered}");
         let _ = fs::remove_dir_all(root);
     }
 

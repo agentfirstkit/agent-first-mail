@@ -19,7 +19,7 @@
 //!   and `--help` shows every legal mix at once.
 
 use agent_first_data::{
-    ArgSpec, BuiltCliSpec, CliSpec, CliSpecError, Combination, CommandSpec, OutputSpec,
+    ArgSpec, BuiltCliSpec, CliSpec, CliSpecError, Combination, CommandSpec, OutputSpec, SourceSet,
     build_afdata_cli,
 };
 
@@ -174,6 +174,14 @@ impl Leaf {
 
 fn shape(id: &str, action: &str, about: &str) -> Combination {
     Combination::new(id).action(action).about(about)
+}
+
+/// The sources a credential argument accepts.
+///
+/// No stream sources: `afmail` reads message bodies and patches on stdin, and
+/// a prompt would block a server an agent started.
+pub(crate) fn secret_sources() -> SourceSet {
+    SourceSet::config()
 }
 
 fn reason_arg(about: &str) -> ArgSpec {
@@ -1872,9 +1880,11 @@ fn api_commands() -> Vec<CommandSpec> {
                 .default_i64(9417)
                 .about("TCP port. Use 0 to let the operating system choose an available port."),
         )
-        .opt(ArgSpec::option("--access-token-secret", "TOKEN").about(
-            "Bearer credential. Prefer AFMAIL_API_ACCESS_TOKEN_SECRET to avoid argv exposure.",
-        ))
+        .opt(
+            ArgSpec::option("--access-token-secret", "SOURCE")
+                .about("Bearer credential; falls back to AFMAIL_API_ACCESS_TOKEN_SECRET.")
+                .sources(secret_sources()),
+        )
         .one("api_serve"),
         Leaf::new(
             ["api", "export"],

@@ -152,7 +152,7 @@ afmail api export [--workspace <PATH>] [--log <startup|request|progress|retry>..
 Serve the typed afmail HTTP API and its OpenAPI/JSON Schema documents.
 
 ```
-afmail api serve [--workspace <PATH>] [--log <startup|request|progress|retry>...] [--mode <local|lan>] [--port <PORT>] [--access-token-secret <TOKEN>]
+afmail api serve [--workspace <PATH>] [--log <startup|request|progress|retry>...] [--mode <local|lan>] [--port <PORT>] [--access-token-secret <SOURCE>]
 ```
 
 Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-to` stdout/stderr (default `stdout`); redirect with `--stdout-file` or `--stderr-file`.
@@ -163,7 +163,7 @@ Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-
 | `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
 | `--mode` | Network exposure mode |
 | `--port` | TCP port. Use 0 to let the operating system choose an available port. |
-| `--access-token-secret` | Bearer credential. Prefer AFMAIL_API_ACCESS_TOKEN_SECRET to avoid argv exposure. |
+| `--access-token-secret` | Bearer credential; falls back to AFMAIL_API_ACCESS_TOKEN_SECRET. (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 
 ### `afmail case add`
 

@@ -45,6 +45,7 @@ src/
   draft_content.rs   typed compose/quote boundaries, completeness, and outbound projection
   render_document.rs versioned output-neutral documents shared by Markdown and Review
   templates.rs       shared Markdown/HTML MiniJinja loading, filters, and Review safety checks
+  review_frontend.rs discovery, version, and trust of a user's own Review UI
   skill_admin.rs     skill install/status backing `afmail skill`
   progress.rs        workspace progress snapshot sink and status projection
   error.rs           AppError type with structured error codes and hints
@@ -89,23 +90,43 @@ high-level wiring. Sibling modules add focused `impl Workspace` blocks:
 Keep new store behavior near the durable state it changes. Prefer another small
 module only when a concern has its own file format, lifecycle, or command group.
 
-`runner/review.rs` owns local, blocking review sessions for triage, cases,
-notifications, and drafts. It contains the same typed render documents used by
-Markdown, renders the page through `TemplateRenderer` while holding only a
-shared lock, then returns one AFDATA result when the reviewer submits, cancels,
-or dismisses the window. Triage, case, and notification review persist typed,
-hash-bound human
-suggestion state before returning a submitted result, but never apply the
-suggested domain action. Case-note, notification-note, and draft edits debounce
-into automatic saves that acquire an exclusive lock, verify the base hash, and
-call the canonical Workspace API; the result lists each completed write in
-`saved_files`. Review never queues, pushes, or sends remote effects, and closing
-the window does not roll back saved local changes.
+`runner/review.rs` owns the review domain for triage, cases, notifications, and
+drafts. It contains the same typed render documents used by Markdown, renders
+the page through `TemplateRenderer` while holding only a shared lock, then
+returns one AFDATA result naming how the review ended. Triage, case, and
+notification review persist typed, hash-bound human suggestion state before
+returning a submitted result, but never apply the suggested domain action.
+Case-note, notification-note, and draft edits debounce into automatic saves that
+acquire an exclusive lock, verify the base hash, and call the canonical
+Workspace API; the result lists each completed write in `saved_files`. Review
+never queues, pushes, or sends remote effects, and ending a session without a
+decision does not roll back saved local changes.
 
-The old Review-specific HTML/CSS/DOM-rendering bundle does not exist. Workspace
-Review templates own server-rendered structure, style, and localized copy;
-`runner/review_runtime.js` is an afmail-owned behavior-only runtime. Workspace
+`runner/review/host.rs` is the only place that domain meets `agent-first-ui`.
+AFUI owns delivery — the listener, the credential in the URL path, the LAN
+expiry, the security headers and CSP nonce, the exact-`Host` and `Origin`
+checks, the isolated browser window on a disposable profile, and shutdown — so
+afmail hosts nothing itself. The host module contributes an Axum router with one
+route per thing the page can say (`GET /`, `POST /notes`, `POST /draft`,
+`POST /submit`, `POST /cancel`) and maps AFUI's outcome onto the result:
+`submitted` and `cancelled` are decisions the page reached, `dismissed` means
+the person closed the window, and `expired` means a LAN URL lapsed unopened.
+Saved files are reported for all four, because the session's saved-file list
+outlives the session.
+
+The old Review-specific HTML/CSS/DOM-rendering bundle does not exist. Review
+templates own server-rendered structure, style, and localized copy;
+`runner/review_runtime.js` is an afmail-owned behavior-only runtime. Review
 templates cannot supply JavaScript.
+
+`review_frontend.rs` is where a person's own Review UI comes from.
+`agent-first-ui` owns the location, the lookup order, safe mode, and the trust
+gate; this module names afmail's provider id, the `ui_kind` per surface, and
+the Review UI API version afmail implements, and turns a frontend that cannot
+be loaded into an explicit error rather than a quiet built-in page. Only Review
+UI templates come from there — content templates stay in the workspace
+`templates/` tree, and `templates.rs` refuses to serve either one from the
+other's tree.
 
 `api/server.rs` owns the Axum boundary but not domain behavior. Handlers reject
 malformed typed JSON, authenticate, obtain any required idempotency key, convert

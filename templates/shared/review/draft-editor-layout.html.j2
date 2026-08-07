@@ -1,6 +1,5 @@
 {%- import "i18n/catalog.j2" as i18n -%}
-{% set draft = draft_state.document %}{% set locator = draft.locator %}{% set source = draft.draft %}{% set frontmatter = source.frontmatter %}{% set analysis = draft.analysis %}<form class="panel" data-afmail-autosave>
-  <input type="hidden" name="action" value="save_draft">
+{% set draft = draft_state.document %}{% set locator = draft.locator %}{% set source = draft.draft %}{% set frontmatter = source.frontmatter %}{% set analysis = draft.analysis %}<form class="panel" data-afmail-autosave="draft">
   <input type="hidden" name="base_hash" value="{{ draft_state.base_hash }}" data-afmail-base-hash>
   <input type="hidden" name="draft_name" value="{{ locator.draft_name }}">
   <h2>{{ i18n.t('reply_title') }}</h2>

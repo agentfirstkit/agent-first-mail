@@ -96,6 +96,32 @@ fn opt_text(invocation: &ResolvedInvocation, id: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Read a credential the caller named a source for.
+///
+/// The registry refused an unacceptable source while resolving argv; what can
+/// still fail here is the read — an unset variable, an unreadable file — and
+/// that is an argument error too. `read_secret` keeps whatever went wrong out
+/// of the message.
+fn read_secret_arg(
+    invocation: &ResolvedInvocation,
+    id: &str,
+) -> Result<Option<String>, ArgumentError> {
+    let Some(raw) = opt_text(invocation, id) else {
+        return Ok(None);
+    };
+    let flag = format!("--{}", id.replace('_', "-"));
+    super::spec::secret_sources()
+        .parse(&raw)
+        .and_then(|source| source.read_secret())
+        .map(|secret| Some(secret.expose_secret().to_string()))
+        .map_err(|error| {
+            ArgumentError::new(
+                format!("{flag} {error}"),
+                format!("run `afmail api serve --help` and check {flag}"),
+            )
+        })
+}
+
 fn flag(invocation: &ResolvedInvocation, id: &str) -> bool {
     invocation
         .optional(id)
@@ -837,7 +863,7 @@ pub fn build_command(invocation: &ResolvedInvocation) -> Result<Command, Argumen
                     _ => ApiMode::Local,
                 },
                 port: bounded_u16(invocation, "port", "--port")?.unwrap_or(9417),
-                access_token_secret: opt_text(invocation, "access_token_secret"),
+                access_token_secret: read_secret_arg(invocation, "access_token_secret")?,
             },
         },
         "api_export" => Command::Api {

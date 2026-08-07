@@ -100,18 +100,6 @@ impl MailConfig {
             return doc_set(doc, key, AfValue::Array(Vec::new()));
         }
         match key {
-            "imap.password_secret" => {
-                set_exclusive(doc, key, single(values, key)?, "imap.password_secret_env")
-            }
-            "imap.password_secret_env" => {
-                set_exclusive(doc, key, single(values, key)?, "imap.password_secret")
-            }
-            "smtp.password_secret" => {
-                set_exclusive(doc, key, single(values, key)?, "smtp.password_secret_env")
-            }
-            "smtp.password_secret_env" => {
-                set_exclusive(doc, key, single(values, key)?, "smtp.password_secret")
-            }
             "workspace.language_bcp47" => set_optional(
                 doc,
                 key,
@@ -272,12 +260,6 @@ fn materialize_keyed_list(doc: &mut Document, key: &str) -> Result<()> {
 
 /// Set `key` and clear its mutually-exclusive `sibling` (an idempotent unset),
 /// so validation never sees both populated.
-fn set_exclusive(doc: &mut Document, key: &str, value: String, sibling: &str) -> Result<()> {
-    doc_set(doc, key, AfValue::String(value))?;
-    doc_unset(doc, sibling)?;
-    Ok(())
-}
-
 /// Set `key`, or clear it to `null` when the normalized `value` is `None`. Uses
 /// `null` rather than unset so it overrides a non-`null` schema default (e.g.
 /// the pinned `workspace.timezone_utc_offset`); `doc_set` still collapses it to

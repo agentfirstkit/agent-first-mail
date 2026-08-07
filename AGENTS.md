@@ -34,10 +34,20 @@
 - Keep render data output-neutral. Markdown and Review templates must select and
   format the same raw or semantic values rather than consuming separate
   Markdown-shaped and HTML-shaped projections.
-- Workspace Review templates may provide MiniJinja, HTML, and CSS, but never
+- Content templates are overridden in the workspace `templates/` tree and the
+  Review UI is overridden in an AFUI frontend
+  (`.afui/frontends/afmail/<ui_kind>/`). Never add a second way to override
+  either one, and never let one tree serve the other's templates.
+- Review UI templates may provide MiniJinja, HTML, and CSS, but never
   JavaScript. afmail-owned trusted JavaScript may implement interaction
   behavior only; it must not construct rendered page structure or contain
-  user-facing copy that belongs in language templates.
+  user-facing copy that belongs in language templates. A user frontend is
+  presentation only: it never gains a route, a validation exemption, or a way
+  to skip the base-hash check, the workspace lock, or the save/submit contract.
+- A Review UI frontend that cannot load, or that declares an unsupported
+  `ui_api_version`, is an explicit error naming `AFUI_SAFE_MODE=1`. Never fall
+  back to the built-in UI: a silent substitution is indistinguishable from the
+  override having worked.
 - Treat the typed template context as a versioned compatibility contract.
   Context changes must update every built-in language pack and include tests
   proving that Markdown and Review receive the same contained render documents,

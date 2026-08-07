@@ -25,6 +25,8 @@ pub(crate) mod progress;
 pub mod push_queue;
 pub mod remote;
 pub(crate) mod render_document;
+#[cfg(feature = "review")]
+pub(crate) mod review_frontend;
 pub mod runner;
 pub mod skill_admin;
 mod slug;

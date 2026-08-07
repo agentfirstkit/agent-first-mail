@@ -321,18 +321,19 @@ fn config_set_and_get_key() {
             .is_ok()
     );
     assert_eq!(cfg.get_key("imap.password_secret"), Ok(json!("secret")));
+    // The same key names where the secret is, so switching source is a set,
+    // not a move to a sibling key.
     assert!(
         cfg.set_key(
-            "imap.password_secret_env",
-            &["AFMAIL_IMAP_PASSWORD_SECRET".to_string()]
+            "imap.password_secret",
+            &["env:AFMAIL_IMAP_PASSWORD_SECRET".to_string()]
         )
         .is_ok()
     );
     assert_eq!(
-        cfg.get_key("imap.password_secret_env"),
-        Ok(json!("AFMAIL_IMAP_PASSWORD_SECRET"))
+        cfg.get_key("imap.password_secret"),
+        Ok(json!("env:AFMAIL_IMAP_PASSWORD_SECRET"))
     );
-    assert_eq!(cfg.get_key("imap.password_secret"), Ok(Value::Null));
     assert!(cfg
         .set_key(
             "identities",
@@ -470,51 +471,30 @@ fn empty_mailboxes_cannot_default_pull() {
 
 #[test]
 fn password_secret_sources_are_explicit_by_field() {
-    assert!(
-        validate_password_secret_source(
-            "imap.password_secret",
-            Some("secret"),
-            "imap.password_secret_env",
-            None
-        )
-        .is_ok()
-    );
-    assert!(
-        validate_password_secret_source(
-            "imap.password_secret",
-            None,
-            "imap.password_secret_env",
-            Some("AFMAIL_IMAP_PASSWORD_SECRET")
-        )
-        .is_ok()
-    );
-    assert!(
-        validate_password_secret_source(
-            "imap.password_secret",
-            Some("secret"),
-            "imap.password_secret_env",
-            Some("AFMAIL_IMAP_PASSWORD_SECRET")
-        )
-        .is_err()
-    );
-    assert!(
-        validate_password_secret_source(
-            "imap.password_secret",
-            Some("literal:secret"),
-            "imap.password_secret_env",
-            None
-        )
-        .is_err()
-    );
-    assert!(
-        validate_password_secret_source(
-            "imap.password_secret",
-            None,
-            "imap.password_secret_env",
-            Some("IMAP_PASSWORD")
-        )
-        .is_err()
-    );
+    let valid = |value: &str| validate_password_secret_source("imap.password_secret", Some(value));
+
+    // The secret itself, or where it is.
+    assert!(valid("secret").is_ok());
+    assert!(valid("env:AFMAIL_IMAP_PASSWORD_SECRET").is_ok());
+    assert!(valid("file:/etc/afmail/creds.json#imap.password_secret").is_ok());
+    // The escape hatch, for a password that starts with a scheme prefix. This
+    // used to be a hard error telling the caller to use a second key.
+    assert!(valid("literal:env:not-a-source").is_ok());
+
+    // afmail's own rule survives the move: a variable holding a credential
+    // says so in its name.
+    assert!(valid("env:IMAP_PASSWORD").is_err());
+    assert!(valid("env:lower_secret").is_err());
+
+    // A malformed source is a config error, named as one.
+    let error = valid("file:/etc/afmail/creds.json").expect_err("no dot path");
+    assert_eq!(error.error_code, "config_invalid");
+    assert!(error.message.contains("imap.password_secret"), "{error:?}");
+
+    // A stream source has nothing to read from in a config file.
+    for raw in ["stdin", "prompt", "fd:3"] {
+        assert!(valid(raw).is_err(), "{raw}");
+    }
 }
 
 #[test]

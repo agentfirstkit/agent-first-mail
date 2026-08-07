@@ -1,19 +1,25 @@
 //! Local, blocking review sessions. The page is deliberately a thin renderer:
 //! it receives a fixed typed Review document and can only save notes or a draft
 //! locally.
+//!
+//! This module owns the review domain: the typed documents a surface shows, the
+//! hash-checked saves it allows, and the decision it returns. AFUI owns the
+//! delivery — the listener, the credential, expiry, the isolated window — and
+//! [`host`] is the only place the two meet.
+
+mod host;
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
-use std::process::{Child, Command as ProcessCommand};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::io::Write;
+use std::net::Ipv4Addr;
+use std::time::Instant;
 
 use agent_first_data::{CliEmitter, CliEmitterError};
 use ring::rand::{SecureRandom, SystemRandom};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use self::host::run_session;
 use super::output::progress_event;
 use crate::cli::{
     CaseCommand, CaseDraftAction, Command, NotificationCommand, ReviewMode, TriageAction,
@@ -24,6 +30,7 @@ use crate::render_document::{
     CollectionRenderDocument, DraftRenderDocument, NotesRenderDocument,
     RENDER_DOCUMENT_SCHEMA_VERSION, TriageRenderDocument,
 };
+use crate::review_frontend::review_frontend;
 use crate::store::{
     CaseHumanSuggestionInput, DraftChange, MessageHumanSuggestionInput,
     NotificationHumanSuggestionInput, Workspace,
@@ -411,6 +418,37 @@ enum ReviewSurface {
     },
 }
 
+/// One notes-editor save, exactly as the review page sends it.
+#[derive(Debug, Default, Deserialize)]
+struct NotesEdit {
+    #[serde(default)]
+    base_hash: String,
+    #[serde(default)]
+    text: String,
+}
+
+/// One draft-editor save.
+///
+/// `draft_name` names which of a case review's listed drafts this is; the draft
+/// surface shows exactly one draft and ignores it. `subject` and `body` are
+/// optional because an absent field leaves that part of the draft alone, while
+/// an empty `cc`/`bcc` clears that recipient list.
+#[derive(Debug, Default, Deserialize)]
+struct DraftEdit {
+    #[serde(default)]
+    base_hash: String,
+    #[serde(default)]
+    draft_name: String,
+    subject: Option<String>,
+    #[serde(default)]
+    to: String,
+    #[serde(default)]
+    cc: String,
+    #[serde(default)]
+    bcc: String,
+    body: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct SavedFile {
     kind: &'static str,
@@ -491,141 +529,53 @@ fn review_envelope(
     .map_err(|error| AppError::json("serialize review result", &error))
 }
 
-fn run_session<W: Write>(
-    workspace: &Workspace,
-    surface: ReviewSurface,
-    model: ReviewRenderDocument,
-    mode: ReviewMode,
-    emitter: &mut CliEmitter<W>,
-    started: Instant,
-) -> ReviewRunResult<Value> {
-    let mut state = ReviewSessionState::default();
-    let bind_host = if matches!(mode, ReviewMode::Lan) {
-        Ipv4Addr::UNSPECIFIED
-    } else {
-        Ipv4Addr::LOCALHOST
-    };
-    let listener = TcpListener::bind((bind_host, 0))
-        .map_err(|error| review_bind_error(mode, bind_host, &error))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| AppError::io("configure local review server", &error))?;
-    let address = listener
-        .local_addr()
-        .map_err(|error| AppError::io("read local review address", &error))?;
-    let token = session_token()?;
-    let path = format!("/{token}");
-    let (expected_host, mut browser) = if matches!(mode, ReviewMode::Lan) {
-        let lan_ip = primary_lan_ipv4()?;
-        let expected_host = format!("{lan_ip}:{}", address.port());
-        let review_url = format!("http://{expected_host}{path}");
-        emit_review_ready(emitter, &model, mode, Some(&review_url), started)?;
-        (expected_host, None)
-    } else {
-        let expected_host = address.to_string();
-        let browser = open_app_window(&format!("http://{expected_host}{path}"))?;
-        emit_review_ready(emitter, &model, mode, None, started)?;
-        (expected_host, Some(browser))
-    };
-    let session_started = Instant::now();
-    loop {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                configure_review_stream(&stream)?;
-                if let Some(result) = handle_request(
-                    &mut stream,
-                    workspace,
-                    &surface,
-                    &model,
-                    &mut state,
-                    &path,
-                    &expected_host,
-                )? {
-                    return Ok(result);
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => {
-                return Err(AppError::io("accept local review connection", &error).into());
-            }
-        }
-        if let Some(browser) = browser.as_mut()
-            && let Some(status) = browser
-                .child
-                .try_wait()
-                .map_err(|error| AppError::io("wait for review window", &error))?
-        {
-            if status.success() {
-                return Ok(review_envelope(
-                    &model,
-                    "dismissed",
-                    &state,
-                    ReviewPayload::Empty,
-                )?);
-            }
-            return Err(browser_exit_error(status.code()).into());
-        }
-        if matches!(mode, ReviewMode::Lan)
-            && session_started.elapsed() >= Duration::from_secs(LAN_REVIEW_EXPIRES_IN_S)
-        {
-            return Ok(review_envelope(
-                &model,
-                "dismissed",
-                &state,
-                ReviewPayload::Empty,
-            )?);
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-}
-
+/// Announce the open review, and say whose UI is serving it.
+///
+/// `review_frontend_id` is absent when the built-in UI is serving. An Agent
+/// that installed a frontend can tell from this alone whether the page it is
+/// pointing a person at is the one they wrote or the one afmail ships — which
+/// is the only way an untrusted frontend, the one case that is deliberately
+/// silent, becomes visible without opening the window.
 fn emit_review_ready<W: Write>(
     emitter: &mut CliEmitter<W>,
     model: &ReviewRenderDocument,
     mode: ReviewMode,
     review_url: Option<&str>,
+    frontend_id: Option<&str>,
     started: Instant,
 ) -> std::result::Result<(), CliEmitterError> {
-    let progress = match review_url {
-        Some(review_url) => json!({
-            "phase": "review_ready",
-            "message": "Open this short-lived review URL from a device on the trusted local network.",
-            "review_url": review_url,
-            "expires_in_s": LAN_REVIEW_EXPIRES_IN_S,
-            "review_mode": review_mode_name(mode),
-            "surface_kind": model.surface_kind,
-            "subject_refs": &model.subject_refs,
-        }),
-        None => json!({
-            "phase": "review_ready",
-            "message": "The local review window is open.",
-            "review_mode": review_mode_name(mode),
-            "surface_kind": model.surface_kind,
-            "subject_refs": &model.subject_refs,
-        }),
-    };
+    let mut progress = serde_json::Map::new();
+    progress.insert("phase".to_string(), json!("review_ready"));
+    match review_url {
+        Some(review_url) => {
+            progress.insert(
+                "message".to_string(),
+                json!(
+                    "Open this short-lived review URL from a device on the trusted local network."
+                ),
+            );
+            progress.insert("review_url".to_string(), json!(review_url));
+            progress.insert("expires_in_s".to_string(), json!(LAN_REVIEW_EXPIRES_IN_S));
+        }
+        None => {
+            progress.insert(
+                "message".to_string(),
+                json!("The local review window is open."),
+            );
+        }
+    }
+    progress.insert("review_mode".to_string(), json!(review_mode_name(mode)));
+    progress.insert("surface_kind".to_string(), json!(model.surface_kind));
+    progress.insert("subject_refs".to_string(), json!(&model.subject_refs));
+    if let Some(frontend_id) = frontend_id {
+        progress.insert("review_frontend_id".to_string(), json!(frontend_id));
+    }
+    let progress = Value::Object(progress);
     emitter.emit(
         agent_first_data::json_progress(progress_event(progress))
             .trace(json!({"duration_ms": started.elapsed().as_millis() as u64}))
             .build(),
     )
-}
-
-fn review_bind_error(mode: ReviewMode, bind_host: Ipv4Addr, error: &std::io::Error) -> AppError {
-    AppError::retryable(
-        "review_bind_failed",
-        format!(
-            "could not bind the {} review server on {bind_host}: {error}",
-            review_mode_name(mode)
-        ),
-    )
-    .with_hint(
-        "Allow afmail to bind a local TCP listener and retry; in a sandbox, grant local listen/network permission or run this review command outside the sandbox.",
-    )
-    .with_details(json!({
-        "review_mode": review_mode_name(mode),
-        "bind_host": bind_host.to_string(),
-    }))
 }
 
 fn review_mode_name(mode: ReviewMode) -> &'static str {
@@ -666,199 +616,6 @@ fn primary_lan_ipv4() -> Result<Ipv4Addr> {
     })
 }
 
-fn configure_review_stream(stream: &TcpStream) -> Result<()> {
-    // Accepted sockets can inherit the listener's nonblocking mode on some
-    // platforms. Chrome may connect before sending request bytes, so restore
-    // blocking reads and bound them with a timeout before parsing the request.
-    stream
-        .set_nonblocking(false)
-        .map_err(|error| AppError::io("configure review connection blocking mode", &error))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| AppError::io("configure review read timeout", &error))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| AppError::io("configure review write timeout", &error))
-}
-
-fn handle_request(
-    stream: &mut TcpStream,
-    workspace: &Workspace,
-    surface: &ReviewSurface,
-    model: &ReviewRenderDocument,
-    state: &mut ReviewSessionState,
-    path: &str,
-    expected_host: &str,
-) -> Result<Option<Value>> {
-    let request = read_http_request(stream)?;
-    let mut parts = request.splitn(2, "\r\n\r\n");
-    let header = parts.next().unwrap_or_default();
-    let body = parts.next().unwrap_or_default();
-    let request_path = header.split_whitespace().nth(1).unwrap_or_default();
-    let method = header.split_whitespace().next().unwrap_or_default();
-    if method != "GET" && method != "POST" {
-        write_response(
-            stream,
-            "405 Method Not Allowed",
-            "text/plain",
-            "method not allowed",
-        )?;
-        return Ok(None);
-    }
-    let host = header
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("Host:")
-                .or_else(|| line.strip_prefix("host:"))
-        })
-        .map(str::trim)
-        .unwrap_or_default();
-    if host != expected_host {
-        write_response(stream, "403 Forbidden", "text/plain", "invalid host")?;
-        return Ok(None);
-    }
-    if method == "POST"
-        && header
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("Origin:")
-                    .or_else(|| line.strip_prefix("origin:"))
-            })
-            .is_some_and(|origin| origin.trim() != format!("http://{expected_host}"))
-    {
-        write_response(stream, "403 Forbidden", "text/plain", "invalid origin")?;
-        return Ok(None);
-    }
-    if request_path != path {
-        write_response(stream, "404 Not Found", "text/plain", "not found")?;
-        return Ok(None);
-    }
-    if header.starts_with("GET ") {
-        let page = render_page(workspace, model)?;
-        return write_review_response(
-            stream,
-            "200 OK",
-            "text/html; charset=utf-8",
-            &page.html,
-            &page.nonce,
-        )
-        .map(|()| None);
-    }
-    let values = parse_form(body);
-    let action = values.get("action").map(String::as_str).unwrap_or_default();
-    match action {
-        "save_notes" => {
-            if matches!(
-                surface,
-                ReviewSurface::Case { .. } | ReviewSurface::Notification { .. }
-            ) {
-                match save_notes(
-                    surface,
-                    values.get("text").map(String::as_str).unwrap_or_default(),
-                    values
-                        .get("base_hash")
-                        .map(String::as_str)
-                        .unwrap_or_default(),
-                )? {
-                    Ok(saved_file) => {
-                        let base_hash = saved_file.base_hash.clone();
-                        state.saved_files.push(saved_file);
-                        write_response(
-                            stream,
-                            "200 OK",
-                            "application/json",
-                            &json!({"saved":true,"base_hash":base_hash}).to_string(),
-                        )?
-                    }
-                    Err(hash) => write_response(
-                        stream,
-                        "409 Conflict",
-                        "application/json",
-                        &json!({"saved":false,"code":"review_stale","base_hash":hash}).to_string(),
-                    )?,
-                }
-            } else {
-                write_response(
-                    stream,
-                    "400 Bad Request",
-                    "application/json",
-                    r#"{"saved":false}""#,
-                )?;
-            }
-            Ok(None)
-        }
-        "save_draft" => {
-            match saved_draft_target(surface, model, &values) {
-                Ok((case_ref, draft_name)) => match save_draft(&case_ref, &draft_name, &values) {
-                    Ok(Ok(saved_file)) => {
-                        let base_hash = saved_file.base_hash.clone();
-                        state.saved_files.push(saved_file);
-                        write_response(
-                            stream,
-                            "200 OK",
-                            "application/json",
-                            &json!({"saved":true,"base_hash":base_hash}).to_string(),
-                        )?
-                    }
-                    Ok(Err(hash)) => write_response(
-                        stream,
-                        "409 Conflict",
-                        "application/json",
-                        &json!({"saved":false,"code":"review_stale","base_hash":hash}).to_string(),
-                    )?,
-                    Err(error) if review_input_error(&error) => write_response(
-                        stream,
-                        "400 Bad Request",
-                        "application/json",
-                        &json!({"saved":false,"code":error.error_code}).to_string(),
-                    )?,
-                    Err(error) => return Err(error),
-                },
-                Err(error) => write_response(
-                    stream,
-                    "400 Bad Request",
-                    "application/json",
-                    &json!({"saved":false,"code":error.error_code}).to_string(),
-                )?,
-            }
-            Ok(None)
-        }
-        "submit" => match submitted_result(surface, model, state, &values) {
-            Ok(result) => {
-                write_response(
-                    stream,
-                    "200 OK",
-                    "application/json",
-                    &json!({"submitted":true}).to_string(),
-                )?;
-                Ok(Some(result))
-            }
-            Err(error) => {
-                write_response(
-                    stream,
-                    "400 Bad Request",
-                    "application/json",
-                    &json!({"submitted":false,"code":error.error_code}).to_string(),
-                )?;
-                Ok(None)
-            }
-        },
-        "cancel" => {
-            write_response(
-                stream,
-                "200 OK",
-                "application/json",
-                &json!({"cancelled":true}).to_string(),
-            )?;
-            review_envelope(model, "cancelled", state, ReviewPayload::Empty).map(Some)
-        }
-        _ => {
-            write_response(stream, "404 Not Found", "text/plain", "not found")?;
-            Ok(None)
-        }
-    }
-}
-
 fn review_input_error(error: &AppError) -> bool {
     matches!(
         error.error_code,
@@ -866,86 +623,21 @@ fn review_input_error(error: &AppError) -> bool {
     )
 }
 
-fn browser_exit_error(code: Option<i32>) -> AppError {
-    let status = code
-        .map(|code| code.to_string())
-        .unwrap_or_else(|| "a signal".to_string());
-    AppError::new(
-        "review_browser_failed",
-        format!("local review window exited with {status}"),
-    )
-}
-
-fn read_http_request(stream: &mut TcpStream) -> Result<String> {
-    let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let count = stream
-            .read(&mut buffer)
-            .map_err(|error| AppError::io("read review request", &error))?;
-        if count == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buffer[..count]);
-        if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
-            let header = String::from_utf8_lossy(&bytes[..end + 4]);
-            let method = header.split_whitespace().next().unwrap_or_default();
-            let content_len = header
-                .lines()
-                .find_map(|line| {
-                    line.strip_prefix("Content-Length:")
-                        .or_else(|| line.strip_prefix("content-length:"))
-                        .map(|value| value.trim().parse::<usize>())
-                })
-                .transpose()
-                .map_err(|error| AppError::new("review_request_invalid", error.to_string()))?
-                .unwrap_or(0);
-            if method == "POST"
-                && !header.lines().any(|line| {
-                    line.strip_prefix("Content-Length:")
-                        .or_else(|| line.strip_prefix("content-length:"))
-                        .is_some()
-                })
-            {
-                return Err(AppError::new(
-                    "review_request_invalid",
-                    "POST review requests require Content-Length",
-                ));
-            }
-            if content_len > 2 * 1024 * 1024 {
-                return Err(AppError::new(
-                    "review_request_too_large",
-                    "local review request exceeds 2 MiB",
-                ));
-            }
-            if bytes.len() >= end + 4 + content_len {
-                bytes.truncate(end + 4 + content_len);
-                break;
-            }
-        }
-        if bytes.len() > 2 * 1024 * 1024 {
-            return Err(AppError::new(
-                "review_request_too_large",
-                "local review request exceeds 2 MiB",
-            ));
-        }
-    }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
 fn save_notes(
     surface: &ReviewSurface,
-    text: &str,
-    base_hash: &str,
+    edit: &NotesEdit,
 ) -> Result<std::result::Result<SavedFile, String>> {
     let workspace = current_workspace()?;
     match surface {
         ReviewSurface::Case { case_ref } => {
-            save_notes_in_workspace(&workspace, case_ref, text, base_hash)
+            save_notes_in_workspace(&workspace, case_ref, &edit.text, &edit.base_hash)
         }
-        ReviewSurface::Notification { notification_ref } => {
-            save_notification_notes_in_workspace(&workspace, notification_ref, text, base_hash)
-        }
+        ReviewSurface::Notification { notification_ref } => save_notification_notes_in_workspace(
+            &workspace,
+            notification_ref,
+            &edit.text,
+            &edit.base_hash,
+        ),
         ReviewSurface::Triage | ReviewSurface::Draft { .. } => Err(AppError::new(
             "review_save_invalid",
             "this review surface does not allow notes saves",
@@ -1004,53 +696,45 @@ fn save_notification_notes_in_workspace(
 fn save_draft(
     case_ref: &str,
     draft_name: &str,
-    values: &HashMap<String, String>,
+    edit: &DraftEdit,
 ) -> Result<std::result::Result<SavedFile, String>> {
     let workspace = current_workspace()?;
-    save_draft_in_workspace(&workspace, case_ref, draft_name, values)
+    save_draft_in_workspace(&workspace, case_ref, draft_name, edit)
 }
 
 fn save_draft_in_workspace(
     workspace: &Workspace,
     case_ref: &str,
     draft_name: &str,
-    values: &HashMap<String, String>,
+    edit: &DraftEdit,
 ) -> Result<std::result::Result<SavedFile, String>> {
     let _lock = acquire_review_write_lock(workspace)?;
     let current = workspace.draft_render_document(case_ref, draft_name)?;
     let current_hash = value_hash(&current)?;
-    if current_hash
-        != values
-            .get("base_hash")
-            .map(String::as_str)
-            .unwrap_or_default()
-    {
+    if current_hash != edit.base_hash {
         return Ok(Err(current_hash));
     }
-    let to_text = values.get("to").map(String::as_str).unwrap_or_default();
-    let cc_text = values.get("cc").map(String::as_str).unwrap_or_default();
-    let bcc_text = values.get("bcc").map(String::as_str).unwrap_or_default();
-    if to_text.trim().is_empty() && bcc_text.trim().is_empty() {
+    if edit.to.trim().is_empty() && edit.bcc.trim().is_empty() {
         return Err(AppError::new(
             "draft_invalid",
             "draft requires at least one to or bcc recipient",
         ));
     }
-    let to = crate::smtp_send::normalize_recipient_list_text(to_text, "to")?;
-    let cc = crate::smtp_send::normalize_recipient_list_text(cc_text, "cc")?;
-    let bcc = crate::smtp_send::normalize_recipient_list_text(bcc_text, "bcc")?;
+    let to = crate::smtp_send::normalize_recipient_list_text(&edit.to, "to")?;
+    let cc = crate::smtp_send::normalize_recipient_list_text(&edit.cc, "cc")?;
+    let bcc = crate::smtp_send::normalize_recipient_list_text(&edit.bcc, "bcc")?;
     let changed = workspace.change_draft(
         case_ref,
         draft_name,
         DraftChange {
-            subject: values.get("subject").map(String::as_str),
+            subject: edit.subject.as_deref(),
             to: &to,
             cc: &cc,
-            clear_cc: cc_text.trim().is_empty(),
+            clear_cc: edit.cc.trim().is_empty(),
             bcc: &bcc,
-            clear_bcc: bcc_text.trim().is_empty(),
+            clear_bcc: edit.bcc.trim().is_empty(),
             identity: None,
-            body: values.get("body").map(String::as_str),
+            body: edit.body.as_deref(),
             body_file: None,
         },
     )?;
@@ -1081,7 +765,7 @@ fn saved_path(value: &Value, field: &str) -> Result<String> {
 fn saved_draft_target(
     surface: &ReviewSurface,
     model: &ReviewRenderDocument,
-    values: &HashMap<String, String>,
+    requested: &str,
 ) -> Result<(String, String)> {
     match surface {
         ReviewSurface::Draft {
@@ -1089,10 +773,6 @@ fn saved_draft_target(
             draft_name,
         } => Ok((case_ref.clone(), draft_name.clone())),
         ReviewSurface::Case { case_ref } => {
-            let requested = values
-                .get("draft_name")
-                .map(String::as_str)
-                .unwrap_or_default();
             let is_listed = match &model.contents {
                 ReviewContents::Case(contents) => contents
                     .drafts
@@ -1124,11 +804,17 @@ fn value_hash<T: Serialize + ?Sized>(value: &T) -> Result<String> {
         .map_err(|error| AppError::json("serialize review hash", &error))
 }
 
+/// The decision fields the review page submits.
+///
+/// Triage names one decision and one reason per message, so the field names are
+/// the message ids themselves and no fixed struct can describe the payload.
+type SubmittedFields = HashMap<String, String>;
+
 fn submitted_result(
     surface: &ReviewSurface,
     model: &ReviewRenderDocument,
     state: &ReviewSessionState,
-    values: &HashMap<String, String>,
+    values: &SubmittedFields,
 ) -> Result<Value> {
     match surface {
         ReviewSurface::Triage => {
@@ -1405,150 +1091,6 @@ fn acquire_review_write_lock(workspace: &Workspace) -> Result<WorkspaceLock> {
     Ok(lock)
 }
 
-fn write_response(
-    stream: &mut TcpStream,
-    status: &str,
-    content_type: &str,
-    body: &str,
-) -> Result<()> {
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'none'; style-src 'none'; connect-src 'self'; form-action 'self'; base-uri 'none'\r\n\r\n{body}",
-        body.len()
-    );
-    stream
-        .write_all(response.as_bytes())
-        .map_err(|error| AppError::io("write review response", &error))
-}
-
-fn write_review_response(
-    stream: &mut TcpStream,
-    status: &str,
-    content_type: &str,
-    body: &str,
-    nonce: &str,
-) -> Result<()> {
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'\r\n\r\n{body}",
-        body.len()
-    );
-    stream
-        .write_all(response.as_bytes())
-        .map_err(|error| AppError::io("write review response", &error))
-}
-
-fn parse_form(body: &str) -> HashMap<String, String> {
-    body.split('&')
-        .filter_map(|pair| {
-            pair.split_once('=')
-                .map(|(key, value)| (url_decode(key), url_decode(value)))
-        })
-        .collect()
-}
-
-fn url_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'+' => {
-                out.push(b' ');
-                index += 1;
-            }
-            b'%' if index + 2 < bytes.len() => {
-                if let Ok(hex) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                    out.push(hex);
-                    index += 3;
-                } else {
-                    out.push(bytes[index]);
-                    index += 1;
-                }
-            }
-            byte => {
-                out.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-struct ReviewBrowser {
-    child: Child,
-    profile: std::path::PathBuf,
-}
-
-impl Drop for ReviewBrowser {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = remove_review_profile(&self.profile);
-    }
-}
-
-fn remove_review_profile(profile: &std::path::Path) -> Result<()> {
-    let temp_dir = std::env::temp_dir();
-    let valid_name = profile
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("afmail-review-"));
-    if profile.parent() != Some(temp_dir.as_path()) || !valid_name {
-        return Err(AppError::new(
-            "review_profile_invalid",
-            "refusing to remove a non-review browser profile",
-        ));
-    }
-    std::fs::remove_dir_all(profile)
-        .map_err(|error| AppError::io("remove review browser profile", &error))
-}
-
-fn open_app_window(url: &str) -> Result<ReviewBrowser> {
-    let profile = std::env::temp_dir().join(format!("afmail-review-{}", session_token()?));
-    std::fs::create_dir_all(&profile)
-        .map_err(|error| AppError::io("create review browser profile", &error))?;
-    #[cfg(target_os = "macos")]
-    {
-        for binary in [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        ] {
-            if let Ok(child) = ProcessCommand::new(binary)
-                .arg(format!("--app={url}"))
-                .arg("--no-first-run")
-                .arg("--no-default-browser-check")
-                .arg("--disable-background-mode")
-                .arg(format!("--user-data-dir={}", profile.display()))
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                return Ok(ReviewBrowser { child, profile });
-            }
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    for binary in ["google-chrome", "chromium", "chromium-browser"] {
-        if let Ok(child) = ProcessCommand::new(binary)
-            .arg(format!("--app={url}"))
-            .arg("--no-first-run")
-            .arg("--no-default-browser-check")
-            .arg("--disable-background-mode")
-            .arg(format!("--user-data-dir={}", profile.display()))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            return Ok(ReviewBrowser { child, profile });
-        }
-    }
-    #[allow(unreachable_code)]
-    let _ = remove_review_profile(&profile);
-    Err(AppError::new(
-        "review_browser_not_found",
-        "Chrome or Chromium is required for local review",
-    ))
-}
-
 fn review_render_document(
     workspace: &Workspace,
     surface_kind: ReviewSurfaceKind,
@@ -1560,7 +1102,7 @@ fn review_render_document(
     Ok(ReviewRenderDocument {
         schema_name: "afmail_review_render_document".to_string(),
         schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
-        interaction_id: session_token()?,
+        interaction_id: interaction_id()?,
         workspace_uid: identity.workspace_uid,
         surface_kind,
         subject_refs,
@@ -1596,26 +1138,50 @@ fn subject_refs(contents: &ReviewContents) -> Vec<String> {
     }
 }
 
-fn session_token() -> Result<String> {
+/// Mint the identifier the Agent correlates this review's result with.
+///
+/// This is a domain fact carried in the result envelope, not a credential:
+/// AFUI mints the session's access credential and its CSP nonce, and neither
+/// is ever this value.
+fn interaction_id() -> Result<String> {
     let mut bytes = [0_u8; 16];
     SystemRandom::new().fill(&mut bytes).map_err(|_| {
         AppError::new(
             "review_random_failed",
-            "could not generate a local review session token",
+            "could not generate a review interaction id",
         )
     })?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-#[derive(Debug)]
-struct RenderedReviewPage {
-    html: String,
-    nonce: String,
+/// Render the review page, binding the trusted runtime to the session's nonce.
+///
+/// The nonce comes from the host because the header that authorizes it does:
+/// a page rendered against any other nonce would have its own script refused.
+///
+/// The templates come from the person's own frontend when they installed one
+/// for this surface, and from afmail's built-ins otherwise. The choice is made
+/// per request rather than once per session, because trust is a fact about the
+/// exact bytes on disk: editing a trusted frontend mid-review revokes it, and
+/// the next page must already be the built-in one.
+fn render_page(workspace: &Workspace, model: &ReviewRenderDocument, nonce: &str) -> Result<String> {
+    let frontend = review_frontend(workspace.root(), host::review_ui_kind(model.surface_kind))?;
+    render_page_from(workspace, model, nonce, frontend.as_ref())
 }
 
-fn render_page(workspace: &Workspace, model: &ReviewRenderDocument) -> Result<RenderedReviewPage> {
+/// Render one review page from a Review UI that has already been resolved.
+fn render_page_from(
+    workspace: &Workspace,
+    model: &ReviewRenderDocument,
+    nonce: &str,
+    frontend: Option<&agent_first_ui::FrontendLocation>,
+) -> Result<String> {
     let config = MailConfig::load(workspace.root())?;
-    let mut renderer = TemplateRenderer::new(workspace.root(), config.template_language());
+    let language = config.template_language();
+    let mut renderer = match frontend {
+        Some(location) => TemplateRenderer::frontend(&location.root, language),
+        None => TemplateRenderer::builtin(language),
+    };
     let mut html = renderer.render_with_options(
         TemplateKey::ReviewPage,
         model,
@@ -1624,7 +1190,6 @@ fn render_page(workspace: &Workspace, model: &ReviewRenderDocument) -> Result<Re
             output_dir: None,
         },
     )?;
-    let nonce = session_token()?;
     let runtime = format!(
         "<script nonce=\"{nonce}\">{}</script>",
         include_str!("review_runtime.js")
@@ -1639,7 +1204,7 @@ fn render_page(workspace: &Workspace, model: &ReviewRenderDocument) -> Result<Re
         ));
     }
     html = html.replacen(TRUSTED_RUNTIME_MARKER, &runtime, 1);
-    Ok(RenderedReviewPage { html, nonce })
+    Ok(html)
 }
 
 #[cfg(test)]
@@ -1648,6 +1213,9 @@ mod tests {
     use crate::store::NewDraft;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Stands in for the per-session nonce AFUI mints for the live host.
+    const TEST_NONCE: &str = "0123456789abcdef0123456789abcdef";
 
     fn temp_workspace(name: &str) -> (PathBuf, Workspace, String, String) {
         let stamp = SystemTime::now()
@@ -1749,7 +1317,7 @@ mod tests {
                 },
             ],
         };
-        for outcome in ["submitted", "cancelled", "dismissed"] {
+        for outcome in ["submitted", "cancelled", "dismissed", "expired"] {
             let result = review_envelope(&model, outcome, &state, ReviewPayload::Empty)
                 .expect("test review envelope must serialize");
             assert_eq!(result["outcome"], outcome);
@@ -1758,6 +1326,51 @@ mod tests {
             assert_eq!(result["saved_files"][2]["path"], "cases/c1/drafts/reply.md");
             assert_eq!(result["saved_files"][2]["base_hash"], "d1");
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A closed window and a lapsed URL are different answers.
+    ///
+    /// AFUI's contract says so — `Closed` is someone declining to act and
+    /// `Expired` is nobody having looked — and the Agent reads the difference:
+    /// a dismissal should not be re-proposed at once, a lapse can be.
+    #[test]
+    fn a_closed_window_and_a_lapsed_url_do_not_report_the_same_outcome() {
+        let (root, workspace, case_ref, _) = temp_workspace("ended-outcomes");
+        let model = case_review_document(&workspace, &case_ref);
+        let state = ReviewSessionState {
+            saved_files: vec![SavedFile {
+                kind: "notes",
+                case_ref: Some("c1".to_string()),
+                notification_ref: None,
+                draft_name: None,
+                path: "cases/c1/notes.md".to_string(),
+                base_hash: "n1".to_string(),
+            }],
+        };
+        let closed = host::ended_envelope(&model, &state, agent_first_ui::Outcome::Closed)
+            .expect("closed envelope must serialize");
+        assert_eq!(closed["outcome"], "dismissed");
+        let expired = host::ended_envelope(&model, &state, agent_first_ui::Outcome::Expired)
+            .expect("expired envelope must serialize");
+        assert_eq!(expired["outcome"], "expired");
+        // Whatever ended the session, the files it wrote are still reported.
+        for ended in [&closed, &expired] {
+            assert_eq!(ended["saved_count"], 1);
+            assert_eq!(ended["saved_files"][0]["path"], "cases/c1/notes.md");
+        }
+        // A decision the page reached is passed through untouched.
+        let submitted = review_envelope(&model, "submitted", &state, ReviewPayload::Empty)
+            .expect("submitted envelope must serialize");
+        assert_eq!(
+            host::ended_envelope(
+                &model,
+                &ReviewSessionState::default(),
+                agent_first_ui::Outcome::Completed(submitted.clone()),
+            )
+            .expect("completed envelope passes through"),
+            submitted
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1791,9 +1404,7 @@ mod tests {
         assert!(render_value.get("workspace_uid").is_none());
         assert!(render_value.get("subject_refs").is_none());
         assert!(render_value.get("base_hash").is_none());
-        let page = render_page(&workspace, &model)
-            .expect("case Review page renders")
-            .html;
+        let page = render_page(&workspace, &model, TEST_NONCE).expect("case Review page renders");
         assert!(page.contains("This case is complete"));
         let ReviewContents::Case(contents) = model.contents else {
             panic!("case Review must contain case contents");
@@ -1828,9 +1439,8 @@ mod tests {
             }),
         )
         .expect("draft Review document");
-        let page = render_page(&workspace, &review_document)
-            .expect("draft Review page renders")
-            .html;
+        let page = render_page(&workspace, &review_document, TEST_NONCE)
+            .expect("draft Review page renders");
         assert!(page.contains("Review draft"));
         assert!(page.contains("Autosaves to this workspace."));
         assert!(page.contains("Quoted history and attachments remain unchanged."));
@@ -1886,9 +1496,8 @@ mod tests {
             }),
         )
         .expect("triage Review document");
-        let page = render_page(&workspace, &review_document)
-            .expect("triage Review page renders")
-            .html;
+        let page = render_page(&workspace, &review_document, TEST_NONCE)
+            .expect("triage Review page renders");
         assert!(page.contains("Create notification"));
         assert!(page.contains("contract-follow-up"));
         assert!(page.contains("A reply is needed"));
@@ -1940,9 +1549,8 @@ mod tests {
             }),
         )
         .expect("notification Review document");
-        let page = render_page(&workspace, &review_document)
-            .expect("notification Review page renders")
-            .html;
+        let page = render_page(&workspace, &review_document, TEST_NONCE)
+            .expect("notification Review page renders");
         assert!(page.contains("Shared notification"));
         assert!(page.contains("Use a clearer collection name"));
         assert!(page.contains("Notification review"));
@@ -1997,9 +1605,8 @@ mod tests {
             unreachable!();
         };
         contents.collection.messages.push(message_document);
-        let page = render_page(&workspace, &model)
-            .expect("typed Review template renders")
-            .html;
+        let page =
+            render_page(&workspace, &model, TEST_NONCE).expect("typed Review template renders");
         assert!(page.contains("Notes"));
         assert!(page.contains("Reply"));
         assert!(page.contains("Readable human message"));
@@ -2018,36 +1625,32 @@ mod tests {
         );
         assert!(page.contains("beforeunload"));
         assert!(page.contains("Quoted history and attachments remain unchanged."));
-        assert!(page.contains("data-afmail-autosave"));
+        // Each editor names the route its save posts to, and the page's own
+        // runtime resolves that route against the session root. The single-path
+        // `action=` form the host used to demultiplex is gone.
+        assert!(page.contains(r#"data-afmail-autosave="notes""#));
+        assert!(!page.contains(r#"name="action""#));
+        assert!(page.contains("post(form.dataset.afmailAutosave"));
+        assert!(page.contains("fetch(sessionRoot + route"));
         assert!(page.contains("data-afmail-submit-field"));
 
-        let allowed = HashMap::from([(String::from("draft_name"), draft_name.clone())]);
         assert!(
             saved_draft_target(
                 &ReviewSurface::Case {
                     case_ref: case_ref.clone()
                 },
                 &model,
-                &allowed,
+                &draft_name,
             )
             .is_ok()
         );
-        let blocked = HashMap::from([(String::from("draft_name"), String::from("../other.md"))]);
         assert_eq!(
-            saved_draft_target(&ReviewSurface::Case { case_ref }, &model, &blocked,)
+            saved_draft_target(&ReviewSurface::Case { case_ref }, &model, "../other.md")
                 .expect_err("unlisted draft must fail")
                 .error_code,
             "review_draft_not_allowed"
         );
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn browser_exit_status_distinguishes_normal_close_from_failure() {
-        assert_eq!(
-            browser_exit_error(Some(1)).error_code,
-            "review_browser_failed"
-        );
     }
 
     #[test]
@@ -2063,6 +1666,7 @@ mod tests {
                 &model,
                 ReviewMode::Local,
                 None,
+                None,
                 Instant::now(),
             )
             .expect("local ready progress emits");
@@ -2074,65 +1678,28 @@ mod tests {
         assert_eq!(event["progress"]["review_mode"], "local");
         assert_eq!(event["progress"]["surface_kind"], "case_review");
         assert!(event["progress"].get("review_url").is_none());
+        // Nothing to say when the built-in UI is serving, so nothing is said.
+        assert!(event["progress"].get("review_frontend_id").is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A surface's `ui_kind` is the override key, and the list of kinds a
+    /// person can install a frontend for is written down separately from the
+    /// mapping. Neither is allowed to grow a name the other does not have.
     #[test]
-    fn review_bind_failures_have_a_specific_code_and_actionable_hint() {
-        let error = review_bind_error(
-            ReviewMode::Local,
-            Ipv4Addr::LOCALHOST,
-            &std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-        );
-        assert_eq!(error.error_code, "review_bind_failed");
-        assert!(error.retryable);
-        assert!(
-            error
-                .hint
-                .as_deref()
-                .is_some_and(|hint| hint.contains("sandbox"))
-        );
-        assert_eq!(
-            error
-                .details
-                .as_ref()
-                .and_then(|details| details["review_mode"].as_str()),
-            Some("local")
-        );
-    }
-
-    #[test]
-    fn accepted_review_stream_waits_for_delayed_request_bytes() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener must bind");
-        let address = listener
-            .local_addr()
-            .expect("listener address must resolve");
-        let client = thread::spawn(move || {
-            let mut stream = TcpStream::connect(address).expect("client must connect");
-            thread::sleep(Duration::from_millis(50));
-            stream
-                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                .expect("request must write");
-        });
-        let (mut stream, _) = listener.accept().expect("server must accept");
-        stream
-            .set_nonblocking(true)
-            .expect("test stream must become nonblocking");
-        configure_review_stream(&stream).expect("review stream must become blocking");
-
-        let request = read_http_request(&mut stream).expect("delayed request must be read");
-        client.join().expect("client thread must finish");
-        assert!(request.starts_with("GET / HTTP/1.1\r\n"));
-    }
-
-    #[test]
-    fn review_profile_cleanup_only_removes_its_explicit_temp_child() {
-        let profile =
-            std::env::temp_dir().join(format!("afmail-review-test-{}", std::process::id()));
-        std::fs::create_dir_all(&profile).expect("test profile must create");
-        remove_review_profile(&profile).expect("review profile must remove");
-        assert!(!profile.exists());
-        assert!(remove_review_profile(std::env::temp_dir().as_path()).is_err());
+    fn every_review_surface_has_exactly_one_installable_ui_kind() {
+        let mapped = [
+            ReviewSurfaceKind::Triage,
+            ReviewSurfaceKind::Case,
+            ReviewSurfaceKind::Notification,
+            ReviewSurfaceKind::Draft,
+        ]
+        .map(host::review_ui_kind);
+        let mut mapped = mapped.to_vec();
+        mapped.sort_unstable();
+        let mut declared = crate::review_frontend::UI_KINDS.to_vec();
+        declared.sort_unstable();
+        assert_eq!(mapped, declared);
     }
 
     #[test]
@@ -2213,21 +1780,16 @@ mod tests {
         let initial_hash = value_hash(&initial).expect("draft hash");
         let initial_text =
             std::fs::read_to_string(root.join(&initial.locator.draft_path)).expect("read draft");
-        let mut values = HashMap::from([
-            ("base_hash".to_string(), initial_hash.clone()),
-            ("subject".to_string(), "Updated subject".to_string()),
-            (
-                "to".to_string(),
-                "\"Doe, Jane\" <jane@example.com>, customer@example.com".to_string(),
-            ),
-            ("cc".to_string(), "".to_string()),
-            (
-                "bcc".to_string(),
-                "Hidden Reviewer <hidden@example.com>".to_string(),
-            ),
-            ("body".to_string(), "Updated authored text".to_string()),
-        ]);
-        let saved = save_draft_in_workspace(&workspace, &case_ref, &draft_name, &values)
+        let mut edit = DraftEdit {
+            base_hash: initial_hash.clone(),
+            draft_name: draft_name.clone(),
+            subject: Some("Updated subject".to_string()),
+            to: "\"Doe, Jane\" <jane@example.com>, customer@example.com".to_string(),
+            cc: String::new(),
+            bcc: "Hidden Reviewer <hidden@example.com>".to_string(),
+            body: Some("Updated authored text".to_string()),
+        };
+        let saved = save_draft_in_workspace(&workspace, &case_ref, &draft_name, &edit)
             .expect("draft save")
             .expect("draft must not be stale");
         let updated_text =
@@ -2252,10 +1814,10 @@ mod tests {
             "Hidden Reviewer <hidden@example.com>"
         );
 
-        values.insert("base_hash".to_string(), saved.base_hash);
-        values.insert("to".to_string(), String::new());
-        values.insert("bcc".to_string(), String::new());
-        let error = save_draft_in_workspace(&workspace, &case_ref, &draft_name, &values)
+        edit.base_hash = saved.base_hash.clone();
+        edit.to = String::new();
+        edit.bcc = String::new();
+        let error = save_draft_in_workspace(&workspace, &case_ref, &draft_name, &edit)
             .expect_err("empty recipient set must be rejected");
         assert_eq!(error.error_code, "draft_invalid");
         let unchanged_draft = workspace
@@ -2269,10 +1831,11 @@ mod tests {
         );
         let updated_text =
             std::fs::read_to_string(root.join(&saved.path)).expect("read unchanged draft");
-        values.insert("base_hash".to_string(), initial_hash);
-        values.insert("body".to_string(), "Stale authored text".to_string());
+        edit.base_hash = initial_hash;
+        edit.to = "customer@example.com".to_string();
+        edit.body = Some("Stale authored text".to_string());
         assert!(
-            save_draft_in_workspace(&workspace, &case_ref, &draft_name, &values)
+            save_draft_in_workspace(&workspace, &case_ref, &draft_name, &edit)
                 .expect("stale draft result")
                 .is_err()
         );
@@ -2339,41 +1902,94 @@ mod tests {
         .expect_err("missing destructive confirmation must fail");
         assert_eq!(error.error_code, "invalid_case_decision");
         assert!(
-            render_page(&workspace, &model)
+            render_page(&workspace, &model, TEST_NONCE)
                 .expect("Review template renders")
-                .html
                 .contains("permanently delete")
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A frontend the person installed, already resolved and trusted.
+    ///
+    /// Discovery, the trust gate and safe mode belong to AFUI and are driven
+    /// end to end in `tests/review_frontend.rs`; these tests are about what
+    /// afmail does with a frontend once it has one.
+    fn frontend_at(root: &std::path::Path) -> agent_first_ui::FrontendLocation {
+        std::fs::create_dir_all(root.join("templates/en-US/review"))
+            .expect("frontend Review directory");
+        agent_first_ui::FrontendLocation {
+            scope: agent_first_ui::FrontendScope::Workspace,
+            root: root.to_path_buf(),
+            manifest: agent_first_ui::FrontendManifest {
+                frontend_id: "test_review_ui".to_string(),
+                ui_api_version: crate::review_frontend::UI_API_VERSION.to_string(),
+            },
+        }
     }
 
     #[test]
     fn custom_review_page_must_place_exactly_one_trusted_runtime_marker() {
         let (root, workspace, case_ref, _) = temp_workspace("trusted-runtime-marker");
         let model = case_review_document(&workspace, &case_ref);
-        let review_root = root.join("templates/en-US/review");
-        std::fs::create_dir_all(&review_root).expect("Review template directory");
+        let frontend = frontend_at(&root.join("frontend"));
+        let page_path = frontend.root.join("templates/en-US/review/page.html.j2");
         std::fs::write(
-            review_root.join("page.html.j2"),
+            &page_path,
             "<!doctype html><html><body><main>custom</main></body></html>",
         )
         .expect("custom Review page");
-        let error = render_page(&workspace, &model)
+        let error = render_page_from(&workspace, &model, TEST_NONCE, Some(&frontend))
             .expect_err("Review page without a trusted runtime marker must fail");
         assert_eq!(error.error_code, "review_template_invalid");
 
         std::fs::write(
-            review_root.join("page.html.j2"),
+            &page_path,
             "<!doctype html><html><body><main>custom</main><!-- afmail:trusted-runtime --></body></html>",
         )
         .expect("custom Review page with marker");
-        let page = render_page(&workspace, &model).expect("trusted runtime marker renders");
-        assert!(page.html.contains("<script nonce=\""));
-        assert!(!page.html.contains(TRUSTED_RUNTIME_MARKER));
+        let page = render_page_from(&workspace, &model, TEST_NONCE, Some(&frontend))
+            .expect("trusted runtime marker renders");
+        // The page's script runs only because the session's own policy names
+        // this nonce; a page rendered against any other value is inert.
+        assert!(page.contains(&format!("<script nonce=\"{TEST_NONCE}\"")));
+        assert!(!page.contains(TRUSTED_RUNTIME_MARKER));
         assert!(
-            page.html.find("<script nonce=").unwrap_or_default()
-                < page.html.find("</body>").unwrap_or_default()
+            page.find("<script nonce=").unwrap_or_default()
+                < page.find("</body>").unwrap_or_default()
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A frontend supplies presentation. It does not get its own escaping
+    /// rules, its own JavaScript, or a way to make the page say a save
+    /// happened — everything the built-in UI is held to still holds.
+    #[test]
+    fn a_frontend_is_held_to_the_same_review_contract_as_the_builtin_ui() {
+        let (root, workspace, case_ref, _) = temp_workspace("frontend-contract");
+        let model = case_review_document(&workspace, &case_ref);
+        let frontend = frontend_at(&root.join("frontend"));
+        let page_path = frontend.root.join("templates/en-US/review/page.html.j2");
+
+        std::fs::write(
+            &page_path,
+            "<html><body><script>fetch('/submit')</script><!-- afmail:trusted-runtime --></body></html>",
+        )
+        .expect("frontend Review page with JavaScript");
+        let error = render_page_from(&workspace, &model, TEST_NONCE, Some(&frontend))
+            .expect_err("a frontend may not ship JavaScript");
+        assert_eq!(error.error_code, "review_template_unsafe");
+
+        // Values a frontend prints are escaped by the same rules, so a case
+        // subject cannot become markup just because the UI is custom.
+        std::fs::write(
+            &page_path,
+            "<html><body><main>{{ contents.collection.collection.collection_name }}</main>\
+             <!-- afmail:trusted-runtime --></body></html>",
+        )
+        .expect("frontend Review page");
+        let page = render_page_from(&workspace, &model, TEST_NONCE, Some(&frontend))
+            .expect("frontend Review page renders");
+        assert!(page.contains("<main>Review</main>"), "{page}");
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -16,8 +16,15 @@
 
   const copy = key => root.dataset[key] || '';
 
-  async function post(body) {
-    return fetch(location.pathname, {
+  // Every route is relative to the session root, and the session root is the
+  // path the browser was given — it always ends in a slash so that a relative
+  // reference resolves inside the session rather than above it.
+  const sessionRoot = location.pathname.endsWith('/')
+    ? location.pathname
+    : `${location.pathname}/`;
+
+  async function post(route, body) {
+    return fetch(sessionRoot + route, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
@@ -65,7 +72,7 @@
     setSaveState(form, 'saving', 'copySaving');
     updateDone();
     try {
-      const response = await post(new URLSearchParams(new FormData(form)));
+      const response = await post(form.dataset.afmailAutosave, new URLSearchParams(new FormData(form)));
       const result = await response.json();
       if (!response.ok || !result.saved) {
         setSaveState(
@@ -136,10 +143,11 @@
     if (complete) complete.hidden = false;
   }
 
-  async function submit(action) {
+  async function finish(route) {
     if (done) done.disabled = true;
     if (submitStatus) submitStatus.textContent = copy('copyFinishing');
-    if (action === 'submit') {
+    const body = new URLSearchParams();
+    if (route === 'submit') {
       for (const form of [...dirty]) {
         if (!await persist(form)) return;
       }
@@ -147,16 +155,13 @@
         updateDone();
         return;
       }
-    }
-    const body = new URLSearchParams({ action });
-    if (action === 'submit') {
       for (const field of root.querySelectorAll('[data-afmail-submit-field][name]')) {
         if ((field.type === 'checkbox' || field.type === 'radio') && !field.checked) continue;
         body.append(field.name, field.value);
       }
     }
     try {
-      const response = await post(body);
+      const response = await post(route, body);
       const result = await response.json();
       if (response.ok && (result.submitted || result.cancelled)) {
         showComplete();
@@ -169,8 +174,8 @@
     updateDone();
   }
 
-  done?.addEventListener('click', () => submit('submit'));
-  cancel?.addEventListener('click', () => submit('cancel'));
+  done?.addEventListener('click', () => finish('submit'));
+  cancel?.addEventListener('click', () => finish('cancel'));
   window.addEventListener('beforeunload', event => {
     if (!dirty.size) return;
     event.preventDefault();

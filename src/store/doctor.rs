@@ -460,27 +460,92 @@ impl Workspace {
         }
         let language = self.template_language()?;
         let mut renderer = TemplateRenderer::new(&self.root, language);
-        for key in TemplateKey::ALL {
-            let context = match minimal_template_context(key) {
-                Ok(context) => context,
-                Err(err) => {
-                    issues.push(DoctorIssue::error(
-                        "template_context_failed",
-                        err.message,
-                        Some(key.as_str().to_string()),
-                    ));
-                    continue;
+        for key in TemplateKey::ALL
+            .into_iter()
+            .filter(|key| !key.is_review_ui())
+        {
+            smoke_render(&mut renderer, key, None, issues);
+        }
+        self.check_review_ui_templates(language, issues);
+        Ok(())
+    }
+
+    /// Smoke-render the Review UI that would actually serve each surface.
+    ///
+    /// A person who installed a frontend wants to hear about a broken one here,
+    /// before a review command opens a window on it. Discovery failures are
+    /// reported rather than propagated so that one unloadable frontend does not
+    /// hide every other thing doctor has to say.
+    #[cfg(feature = "review")]
+    fn check_review_ui_templates(&self, language: TemplateLanguage, issues: &mut Vec<DoctorIssue>) {
+        let mut builtin = TemplateRenderer::builtin(language);
+        let mut checked_builtin = false;
+        for ui_kind in crate::review_frontend::UI_KINDS {
+            match crate::review_frontend::review_frontend(&self.root, ui_kind) {
+                Ok(Some(location)) => {
+                    let mut renderer = TemplateRenderer::frontend(&location.root, language);
+                    for key in review_ui_keys() {
+                        smoke_render(&mut renderer, key, Some(ui_kind), issues);
+                    }
                 }
-            };
-            if let Err(err) = renderer.render(key, &context) {
-                issues.push(DoctorIssue::error(
-                    "template_render_failed",
-                    err.message,
-                    Some(key.as_str().to_string()),
-                ));
+                Ok(None) if !checked_builtin => {
+                    checked_builtin = true;
+                    for key in review_ui_keys() {
+                        smoke_render(&mut builtin, key, None, issues);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => issues.push(DoctorIssue::error(
+                    error.error_code,
+                    error.message,
+                    Some(ui_kind.to_string()),
+                )),
             }
         }
-        Ok(())
+    }
+
+    #[cfg(not(feature = "review"))]
+    fn check_review_ui_templates(&self, language: TemplateLanguage, issues: &mut Vec<DoctorIssue>) {
+        let mut builtin = TemplateRenderer::builtin(language);
+        for key in review_ui_keys() {
+            smoke_render(&mut builtin, key, None, issues);
+        }
+    }
+}
+
+fn review_ui_keys() -> impl Iterator<Item = TemplateKey> {
+    TemplateKey::ALL
+        .into_iter()
+        .filter(|key| key.is_review_ui())
+}
+
+fn smoke_render(
+    renderer: &mut TemplateRenderer<'_>,
+    key: TemplateKey,
+    ui_kind: Option<&str>,
+    issues: &mut Vec<DoctorIssue>,
+) {
+    let subject = match ui_kind {
+        Some(ui_kind) => format!("{ui_kind}:{}", key.as_str()),
+        None => key.as_str().to_string(),
+    };
+    let context = match minimal_template_context(key) {
+        Ok(context) => context,
+        Err(err) => {
+            issues.push(DoctorIssue::error(
+                "template_context_failed",
+                err.message,
+                Some(subject),
+            ));
+            return;
+        }
+    };
+    if let Err(err) = renderer.render(key, &context) {
+        issues.push(DoctorIssue::error(
+            "template_render_failed",
+            err.message,
+            Some(subject),
+        ));
     }
 }
 

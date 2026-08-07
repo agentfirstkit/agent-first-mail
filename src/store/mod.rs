@@ -68,7 +68,7 @@ use crate::render_document::{
     triage_document_schema_name,
 };
 use crate::templates::{
-    TemplateKey, TemplateRenderOptions, TemplateRenderer, ensure_workspace_template_path_safe,
+    TemplateKey, TemplateRenderOptions, TemplateRenderer, ensure_template_path_safe,
     language_template_path,
 };
 use crate::types::RemoteSyncState;
@@ -768,10 +768,9 @@ impl Workspace {
         self.require_workspace()?;
         let workspace_identity = crate::workspace_identity::load_workspace_identity(&self.root)?;
         let config = MailConfig::load(&self.root)?;
-        let imap_credentials_configured =
-            config.imap.password_secret.is_some() || config.imap.password_secret_env.is_some();
-        let smtp_credentials_configured =
-            config.smtp.password_secret.is_some() || config.smtp.password_secret_env.is_some();
+        // One key now, whether it holds the secret or names where it is.
+        let imap_credentials_configured = config.imap.password_secret.is_some();
+        let smtp_credentials_configured = config.smtp.password_secret.is_some();
         let imap_ready = config.imap.host.is_some()
             && config.imap.username.is_some()
             && imap_credentials_configured;
@@ -1250,67 +1249,68 @@ impl Workspace {
         create_dir_all(&templates_dir)?;
 
         let mut items = Vec::new();
-        let mut exported_count = 0usize;
-        let mut overwritten_count = 0usize;
-        let mut kept_count = 0usize;
-        let builtin_count = 0usize;
-        let mut workspace_count = 0usize;
+        let mut counts = ExportCounts::default();
 
-        let targets = TemplateLanguage::ALL
-            .into_iter()
-            .flat_map(|language| {
-                TemplateKey::ALL
-                    .into_iter()
-                    .filter(|key| key.is_language_scoped())
-                    .map(move |key| (Some(language), key))
-            })
-            .chain(
-                TemplateKey::ALL
-                    .into_iter()
-                    .filter(|key| !key.is_language_scoped())
-                    .map(|key| (None, key)),
-            );
-        for (language, key) in targets {
+        // Content only. The Review UI is exported into the frontend
+        // directories below, because that is the one place afmail reads it
+        // from; writing it here too would leave files that look like an
+        // override and change nothing.
+        for (language, key) in export_targets().filter(|(_, key)| !key.is_review_ui()) {
             let builtin_language = language.unwrap_or(TemplateLanguage::EnUs);
             let path = templates_dir.join(language_template_path(builtin_language, key));
-            ensure_workspace_template_path_safe(&templates_dir, &path)?;
-            let existed = path.exists();
-            let (source, action) = if force || !existed {
-                if let Some(parent) = path.parent() {
-                    create_dir_all(parent)?;
-                }
-                write_string(&path, key.builtin_text(builtin_language))?;
-                workspace_count += 1;
-                if existed {
-                    overwritten_count += 1;
-                    ("workspace", "overwritten")
-                } else {
-                    exported_count += 1;
-                    ("workspace", "exported")
-                }
-            } else {
-                workspace_count += 1;
-                kept_count += 1;
-                ("workspace", "kept")
-            };
+            ensure_template_path_safe(&templates_dir, &path)?;
+            let action = export_template(&path, key, builtin_language, force)?;
+            counts.record(action);
+            counts.workspace += 1;
             items.push(json!({
                 "language": language.map(|language| language.as_str()),
                 "template_key": key.as_str(),
                 "path": rel_path(&self.root, &path),
-                "source": source,
+                "source": "workspace",
                 "action": action,
             }));
+        }
+
+        #[cfg(feature = "review")]
+        for ui_kind in crate::review_frontend::UI_KINDS {
+            // Only into a frontend the person already created with
+            // `afui frontend init`. Creating one here would install an override
+            // nobody asked for, and would make every workspace look like it has
+            // a custom Review UI.
+            let frontend_root =
+                crate::review_frontend::workspace_frontend_root(&self.root, ui_kind)?;
+            if !frontend_root.join("frontend.json").is_file() {
+                continue;
+            }
+            let frontend_templates = frontend_root.join(layout::TEMPLATES);
+            for (language, key) in export_targets().filter(|(_, key)| key.is_review_ui()) {
+                let builtin_language = language.unwrap_or(TemplateLanguage::EnUs);
+                let path = frontend_templates.join(language_template_path(builtin_language, key));
+                ensure_template_path_safe(&frontend_templates, &path)?;
+                let action = export_template(&path, key, builtin_language, force)?;
+                counts.record(action);
+                counts.frontend += 1;
+                items.push(json!({
+                    "language": language.map(|language| language.as_str()),
+                    "template_key": key.as_str(),
+                    "path": rel_path(&self.root, &path),
+                    "source": "frontend",
+                    "ui_kind": ui_kind,
+                    "action": action,
+                }));
+            }
         }
 
         Ok(json!({
             "template_dir": "templates",
             "template_dir_created": !existed_before,
             "force": force,
-            "exported_count": exported_count,
-            "overwritten_count": overwritten_count,
-            "kept_count": kept_count,
-            "builtin_count": builtin_count,
-            "workspace_count": workspace_count,
+            "exported_count": counts.exported,
+            "overwritten_count": counts.overwritten,
+            "kept_count": counts.kept,
+            "builtin_count": 0,
+            "workspace_count": counts.workspace,
+            "frontend_count": counts.frontend,
             "items": items,
         }))
     }
@@ -1364,6 +1364,65 @@ impl Workspace {
             "warnings": audit.warnings,
         }))
     }
+}
+
+/// What one `render templates` run did, per destination and per file.
+#[derive(Default)]
+struct ExportCounts {
+    exported: usize,
+    overwritten: usize,
+    kept: usize,
+    workspace: usize,
+    frontend: usize,
+}
+
+impl ExportCounts {
+    fn record(&mut self, action: &str) {
+        match action {
+            "overwritten" => self.overwritten += 1,
+            "kept" => self.kept += 1,
+            _ => self.exported += 1,
+        }
+    }
+}
+
+/// Write one built-in template out, and say what that did.
+fn export_template(
+    path: &Path,
+    key: TemplateKey,
+    language: TemplateLanguage,
+    force: bool,
+) -> Result<&'static str> {
+    let existed = path.exists();
+    if !force && existed {
+        return Ok("kept");
+    }
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
+    write_string(path, key.builtin_text(language))?;
+    Ok(if existed { "overwritten" } else { "exported" })
+}
+
+/// Every built-in template, once per language pack it varies by.
+///
+/// `None` is a template that does not vary by language and is exported once
+/// into the shared tree.
+fn export_targets() -> impl Iterator<Item = (Option<TemplateLanguage>, TemplateKey)> {
+    TemplateLanguage::ALL
+        .into_iter()
+        .flat_map(|language| {
+            TemplateKey::ALL
+                .into_iter()
+                .filter(|key| key.is_language_scoped())
+                .map(move |key| (Some(language), key))
+        })
+        .chain(
+            TemplateKey::ALL
+                .into_iter()
+                .filter(|key| !key.is_language_scoped())
+                .map(|key| (None, key)),
+        )
 }
 
 fn merge_reconciliation_into_pull(pull: &mut Value, reconciliation: &Value) {

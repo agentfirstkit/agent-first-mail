@@ -5,7 +5,14 @@ scaffolds, and Review HTML. Markdown and Review contain the same versioned,
 typed render documents. Review does not build an HTML-specific copy of message,
 collection, draft, notes, suggestion, or attachment data.
 
-## Workspace Paths
+## Two Trees, One Override Point Each
+
+Content — mail, drafts, notes, contacts, generated Markdown — is overridden in
+the workspace `templates/` tree. The Review UI is overridden in an AFUI
+frontend. Neither tree can serve the other's templates, so every template has
+exactly one place it can be replaced from.
+
+## Content Paths
 
 Export the built-ins with:
 
@@ -32,10 +39,6 @@ templates/<language>/
   notes/default.md.j2
   notes/merge-section.md.j2
   workspace/DO_NOT_EDIT.txt.j2
-  review/page.html.j2
-  review/message.html.j2
-  review/draft-editor.html.j2
-  review/notes-editor.html.j2
 ```
 
 Language-independent composition lives under:
@@ -43,8 +46,6 @@ Language-independent composition lives under:
 ```text
 templates/shared/
   markdown/*.md.j2
-  review/*-layout.html.j2
-  review/style.css.j2
 ```
 
 Complete built-in packs ship for `en-US`, `de-DE`, `es-ES`, `fr-FR`, `ja-JP`,
@@ -54,16 +55,104 @@ translated copy, punctuation, singular/plural decisions, and other
 language-specific macros.
 
 A built-in language entry normally imports its catalog and includes a shared
-layout. That is only the default composition. A workspace override may replace
-the whole entry, override a shared layout, add partials, hide or reorder facts,
-or use a completely different Markdown/HTML structure. Additional includes
-resolve under `templates/<language>/` first and `templates/shared/` second;
-prefix an include with `shared/` to select the shared tree explicitly.
+layout. That is only the default composition. An override may replace the whole
+entry, override a shared layout, add partials, hide or reorder facts, or use a
+completely different Markdown/HTML structure. Additional includes resolve under
+`<language>/` first and `shared/` second within the same tree; prefix an
+include with `shared/` to select the shared tree explicitly.
 
-Template paths must be ordinary files and directories inside `templates/`.
+Template paths must be ordinary files and directories inside their tree.
 Absolute paths, `..`, backslash traversal, and symlinks are rejected. If a
 selected override is invalid, afmail reports the error and never silently falls
 back to the built-in version.
+
+## Review UI Frontends
+
+A custom Review UI is an AFUI frontend, keyed by afmail's provider id and the
+`ui_kind` of the surface it replaces:
+
+```text
+.afui/frontends/afmail/<ui_kind>/
+  frontend.json
+  templates/
+  assets/
+```
+
+`ui_kind` is one of `triage_review`, `case_review`, `notification_review`, or
+`draft_review`. One frontend replaces one surface. The same layout under the
+user's AFUI config directory installs a frontend for every workspace; the
+workspace directory wins when both exist.
+
+`frontend.json` declares the implementation and the contract version it was
+written against:
+
+```json
+{
+  "frontend_id": "my_mail_review",
+  "ui_api_version": "1"
+}
+```
+
+afmail implements Review UI API version `1`. That number covers the typed
+Review render document, the template keys below, the trusted-runtime marker,
+and the `data-afmail-*` and `data-copy-*` attributes the runtime reads. A
+frontend declaring any other version is rejected.
+
+`templates/` inside a frontend has the same shape as the content tree, holding
+only Review UI keys:
+
+```text
+templates/<language>/
+  i18n/catalog.j2
+  review/page.html.j2
+  review/message.html.j2
+  review/draft-editor.html.j2
+  review/notes-editor.html.j2
+templates/shared/
+  review/page-layout.html.j2
+  review/message-layout.html.j2
+  review/draft-editor-layout.html.j2
+  review/notes-editor-layout.html.j2
+  review/style.css.j2
+```
+
+Every file is optional: anything a frontend does not supply comes from
+afmail's built-in pack for the active language, so a frontend that replaces
+only `review/page.html.j2` keeps localized messages and editors in all nine
+languages. `afmail render templates` seeds every workspace frontend directory
+that already exists with the built-in Review UI to start from; it never creates
+a frontend and never overwrites files that are already there.
+
+Create, inspect, trust, and compare frontends with `afui frontend`:
+
+```bash
+afui frontend init    --provider-id afmail --ui-kind case_review --frontend-id my_mail_review
+afui frontend check   --provider-id afmail --ui-kind case_review
+afui frontend enable  --provider-id afmail --ui-kind case_review
+afui frontend disable --provider-id afmail --ui-kind case_review
+```
+
+A workspace frontend does nothing until `afui frontend enable` records its
+exact contents. Editing any file in it revokes that trust, and afmail serves
+its built-in UI again until the frontend is enabled anew — trust is a statement
+about bytes, not about a directory. `afmail case review` reports the frontend
+that is serving as `review_frontend_id` in its `review_ready` progress event,
+and reports nothing there when the built-in UI is serving.
+
+A frontend that cannot be loaded, or that declares a different
+`ui_api_version`, fails the review command with `review_frontend_unreadable` or
+`review_frontend_incompatible`. afmail does not quietly substitute its built-in
+UI, because that is indistinguishable from the override having worked. Set
+`AFUI_SAFE_MODE=1` to ignore every user frontend and open the built-in UI; safe
+mode is honoured before any frontend file is read, so a frontend cannot break
+the way out of itself. `afmail doctor` smoke-renders whichever Review UI would
+actually serve each surface.
+
+A frontend supplies presentation and nothing else. It cannot bypass typed
+validation, the base-hash concurrency check, the workspace lock, or the
+save/submit contract: those answers come from afmail's own routes for a custom
+UI exactly as they do for the built-in one, so a Review page that claims a save
+succeeded has not made it so.
 
 ## Render Document Contract
 
@@ -170,12 +259,12 @@ Useful filters include `datetime`, `bytes`, `text_range`, `chronological`,
 
 ## Review HTML and JavaScript
 
-Workspace Review templates may contain MiniJinja, HTML, and CSS. They may not
-contain JavaScript, inline event handlers, executable URL schemes, active
-embedded content, disabled autoescaping, `safe` output (including filter
-blocks), or any `data:` URL. afmail validates
-workspace Review sources, every included partial, and the final composed HTML.
-Review forces HTML autoescaping regardless of a partial's filename suffix.
+Review templates may contain MiniJinja, HTML, and CSS. They may not contain
+JavaScript, inline event handlers, executable URL schemes, active embedded
+content, disabled autoescaping, `safe` output (including filter blocks), or any
+`data:` URL. afmail validates every frontend Review source, every included
+partial, and the final composed HTML. Review forces HTML autoescaping
+regardless of a partial's filename suffix.
 
 afmail injects one trusted behavior-only runtime after server-side rendering.
 A custom `review/page.html.j2` must contain exactly one marker where that runtime
@@ -211,12 +300,19 @@ field in the documented context without stale cache hits. A cache hit also
 hashes the actual generated file, so hand-edited or corrupted output is
 rebuilt.
 
+Review is not cached; each request renders the page and re-resolves the
+frontend, so a template edit and a revoked trust both take effect on the next
+page load of a live session.
+
 After editing templates:
 
 1. Run `afmail render refresh` for generated Markdown.
 2. Run `afmail doctor` to compile and smoke-render every template in the active
-   language with typed fixture documents.
+   language with typed fixture documents, including the Review UI that would
+   actually serve each surface.
 3. Open the relevant Review command to verify interactive layout changes.
 
 Use `afmail render templates --force` only when intentionally replacing every
-workspace override with the current built-ins.
+override — content and Review UI alike — with the current built-ins. Forcing
+it over a trusted frontend changes those files, which revokes the frontend's
+trust until `afui frontend enable` is run again.

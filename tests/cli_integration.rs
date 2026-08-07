@@ -232,23 +232,57 @@ fn triage_review_lan_outputs_a_reachable_url_and_self_describing_submit_result()
         .as_str()
         .unwrap_or_default();
     let address_and_path = review_url.strip_prefix("http://").unwrap_or_default();
-    let (authority, path_tail) = address_and_path.split_once('/').unwrap_or_default();
-    let path = format!("/{path_tail}");
+    let (authority, session_tail) = address_and_path.split_once('/').unwrap_or_default();
+    // The credential lives in the URL path and the trailing slash is load
+    // bearing: every route the page posts to is resolved relative to it.
+    let session_root = format!("/{session_tail}");
     assert!(!authority.is_empty(), "{progress}");
-    assert!(path.len() > 2, "{progress}");
+    assert!(review_url.ends_with('/'), "{progress}");
+    assert!(
+        session_root
+            .trim_matches('/')
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()),
+        "{progress}"
+    );
 
     let get_response = review_http_request(
         authority,
-        &format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"),
+        &format!("GET {session_root} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"),
     );
     assert!(get_response.contains("200 OK"), "{get_response}");
     assert!(get_response.contains("Review this message from another LAN device"));
+    // The page's own script is the only one the session authorizes.
+    assert!(
+        get_response.contains("content-security-policy: default-src 'none'; script-src 'nonce-"),
+        "{get_response}"
+    );
 
-    let body = format!("action=submit&decision%3A{message_id}=accept&reason%3A{message_id}=");
+    // A name that resolves to this socket still arrives with its own Host, and
+    // the session refuses it rather than rendering private mail for it.
+    let rebound = review_http_request(
+        authority,
+        &format!(
+            "GET {session_root} HTTP/1.1\r\nHost: rebound.example\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(!rebound.contains("200 OK"), "{rebound}");
+
+    // An unknown credential is not a session, and saying so would confirm one
+    // is hosted here.
+    let unknown = review_http_request(
+        authority,
+        &format!(
+            "GET /0123456789abcdef/ HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(unknown.contains("404 Not Found"), "{unknown}");
+
+    let body = format!("decision%3A{message_id}=accept&reason%3A{message_id}=");
     let post_response = review_http_request(
         authority,
         &format!(
-            "POST {path} HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "POST {session_root}submit HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         ),
     );
@@ -2410,20 +2444,27 @@ fn init_status_and_afdata_output_formats_work() {
         parse_one(&stdout)["config"]["imap"]["password_secret"],
         "***"
     );
+    // One key holds the credential however it is supplied, so switching to an
+    // environment variable is a set on the same key. The slot stays redacted
+    // either way: it is a `_secret` field, and a reader cannot be trusted to
+    // know whether this particular value is the password or an address for it.
     let (status, stdout) = run(
         &root,
         &[
             "config",
             "set",
-            "imap.password_secret_env",
-            "AFMAIL_IMAP_PASSWORD_SECRET",
+            "imap.password_secret",
+            "env:AFMAIL_IMAP_PASSWORD_SECRET",
         ],
     );
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["value"], "AFMAIL_IMAP_PASSWORD_SECRET");
+    assert_eq!(parse_one(&stdout)["value"], "***");
     let (status, stdout) = run(&root, &["config", "get", "imap.password_secret"]);
     assert_eq!(status, 0, "{stdout}");
-    assert_eq!(parse_one(&stdout)["value"], Value::Null);
+    assert_eq!(parse_one(&stdout)["value"], "***");
+    // A source this key does not accept is refused as a config error.
+    let (status, stdout) = run(&root, &["config", "set", "imap.password_secret", "prompt"]);
+    assert_ne!(status, 0, "{stdout}");
     let (status, stdout) = run(
         &root,
         &[
@@ -4868,18 +4909,18 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
     let value = parse_one(&stdout);
     assert_eq!(value["template_dir"], "templates");
     assert_eq!(value["template_dir_created"], false);
-    assert_eq!(value["exported_count"], 193);
-    assert_eq!(value["workspace_count"], 193);
+    assert_eq!(value["exported_count"], 152);
+    assert_eq!(value["workspace_count"], 152);
     assert!(root.join("templates/en-US/case/case.md.j2").is_file());
     assert!(
         root.join("templates/zh-CN/notification/message.md.j2")
             .is_file()
     );
-    assert!(root.join("templates/zh-CN/review/page.html.j2").is_file());
-    assert!(
-        root.join("templates/shared/review/page-layout.html.j2")
-            .is_file()
-    );
+    // The Review UI is not content: it is exported into an installed AFUI
+    // frontend, never into the workspace content tree. tests/review_frontend.rs
+    // drives that half.
+    assert!(!root.join("templates/zh-CN/review").exists());
+    assert!(!root.join("templates/shared/review").exists());
 
     assert!(
         fs::write(
@@ -4891,7 +4932,7 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
     let (status, stdout) = run(&root, &["render", "templates"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["kept_count"], 193);
+    assert_eq!(value["kept_count"], 152);
     assert_eq!(
         fs::read_to_string(root.join("templates/en-US/case/case.md.j2")).unwrap_or_default(),
         "CUSTOM {{ document.collection.collection_uid }}\n"
@@ -4905,8 +4946,8 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
     let (status, stdout) = run(&other, &["render", "templates"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["exported_count"], 193);
-    assert_eq!(value["workspace_count"], 193);
+    assert_eq!(value["exported_count"], 152);
+    assert_eq!(value["workspace_count"], 152);
     assert_eq!(value["builtin_count"], 0);
     assert_eq!(value["items"][0]["source"], "workspace");
     assert_eq!(value["items"][0]["language"], "en-US");
@@ -4914,7 +4955,7 @@ fn render_templates_exports_lists_and_force_overwrites_defaults() {
     let (status, stdout) = run(&root, &["render", "templates", "--force"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["overwritten_count"], 193);
+    assert_eq!(value["overwritten_count"], 152);
     assert!(
         fs::read_to_string(root.join("templates/en-US/case/case.md.j2"))
             .unwrap_or_default()

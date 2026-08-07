@@ -181,14 +181,10 @@ impl MailConfig {
         validate_password_secret_source(
             "imap.password_secret",
             self.imap.password_secret.as_deref(),
-            "imap.password_secret_env",
-            self.imap.password_secret_env.as_deref(),
         )?;
         validate_password_secret_source(
             "smtp.password_secret",
             self.smtp.password_secret.as_deref(),
-            "smtp.password_secret_env",
-            self.smtp.password_secret_env.as_deref(),
         )?;
         Ok(())
     }
@@ -214,8 +210,6 @@ impl MailConfig {
             password_secret: resolve_password_secret(
                 "imap.password_secret",
                 self.imap.password_secret.as_deref(),
-                "imap.password_secret_env",
-                self.imap.password_secret_env.as_deref(),
             )?,
             tls_root_cert_path: self.imap.tls_root_cert_path.clone(),
             allow_unbounded_body_fetch: self.imap.allow_unbounded_body_fetch,
@@ -237,8 +231,6 @@ impl MailConfig {
             password_secret: resolve_optional_password_secret(
                 "smtp.password_secret",
                 self.smtp.password_secret.as_deref(),
-                "smtp.password_secret_env",
-                self.smtp.password_secret_env.as_deref(),
             )?,
         })
     }

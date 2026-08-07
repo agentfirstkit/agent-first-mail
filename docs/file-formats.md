@@ -607,14 +607,16 @@ fallback, ordering, visibility, and markup. Template failures return
 `template_render_failed`; afmail does not fall back to built-ins when a
 selected-language workspace override exists but is invalid.
 
-Review overrides may contain MiniJinja, HTML, and CSS but no JavaScript or
-inline event handlers. afmail validates their sources and the composed HTML,
-then injects only its trusted behavior runtime. See `docs/templates.md` for the
-complete path, data, multilingual, filter, and Review-hook contract.
+Review overrides live in an AFUI frontend, not in `templates/`, and may contain
+MiniJinja, HTML, and CSS but no JavaScript or inline event handlers. afmail
+validates their sources and the composed HTML, then injects only its trusted
+behavior runtime. See `docs/templates.md` for the complete path, data,
+multilingual, filter, and Review-hook contract.
 
-`afmail render templates` exports the built-in templates for every supported language.
-Existing language-specific workspace templates are kept unless `--force` is
-used.
+`afmail render templates` exports the built-in content templates for every
+supported language into `templates/`, and the built-in Review UI into each
+`.afui/frontends/afmail/<ui_kind>/` directory that already exists. Existing
+files are kept unless `--force` is used.
 
 ## Push Items
 

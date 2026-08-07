@@ -15,7 +15,6 @@ pub struct ImapSection {
     pub allow_unbounded_body_fetch: bool,
     pub username: Option<String>,
     pub password_secret: Option<String>,
-    pub password_secret_env: Option<String>,
 }
 
 impl Default for ImapSection {
@@ -28,7 +27,6 @@ impl Default for ImapSection {
             allow_unbounded_body_fetch: false,
             username: None,
             password_secret: None,
-            password_secret_env: None,
         }
     }
 }

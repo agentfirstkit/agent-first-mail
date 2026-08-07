@@ -328,9 +328,9 @@ Generated message views live under
 ## Markdown and Review Templates
 
 Built-in MiniJinja templates render generated Markdown, human-facing scaffolds,
-and Review HTML. A workspace can override language entry templates under
-`templates/<language>/` and shared Markdown/Review layouts under
-`templates/shared/`. Legacy `.afmail/templates/` files are ignored.
+and Review HTML. A workspace can override content entry templates under
+`templates/<language>/` and shared Markdown layouts under `templates/shared/`.
+Legacy `.afmail/templates/` files are ignored.
 
 Common generated-view template keys include:
 
@@ -338,8 +338,11 @@ Common generated-view template keys include:
 - `notification/notification.md.j2` and `notification/message.md.j2`
 - `triage/view.md.j2` and `message/section.md.j2`
 - `contact/default.md.j2`, `draft/*.md.j2`, and `notes/*.md.j2`
-- `review/page.html.j2`, `review/message.html.j2`, and the Review editors
 - `i18n/catalog.j2` for localized copy and punctuation
+
+The Review UI is not part of this tree. It is replaced through an AFUI
+frontend at `.afui/frontends/afmail/<ui_kind>/`, which afmail loads only after
+`afui frontend enable` trusts it; see `docs/templates.md`.
 
 Run `afmail render templates` to export built-ins, then `afmail render refresh`
 to rebuild generated Markdown after template edits. Review loads its templates
