@@ -15,11 +15,12 @@ use super::{
     DemoAction, DemoScenario, DoctorAction, LogAction, MessageAction, MessageAttachmentAction,
     MessageListScope, MessageSuggestionAction, NotificationCommand, NotificationCreateArgs,
     NotificationNotesAction, NotificationSuggestionAction, NotificationSuggestionActionKind,
-    NotificationSuggestionSetArgs, PurgeAction, PushAction, RemoteAction, RenderAction, ReviewMode,
+    NotificationSuggestionSetArgs, PurgeAction, PushAction, RemoteAction, RenderAction,
     SkillAction, SkillAgentSelection, SkillScope, SkillTargetArgs, SkillWriteArgs, TriageAction,
     TriageSuggestionAction, TriageSuggestionSetArgs,
 };
 use agent_first_data::{BuiltCliSpec, CliValue, LogFilters, ResolvedInvocation};
+use agent_first_ui::UiDeliveryMode;
 
 pub type ActionHandler = fn(&ResolvedInvocation) -> Result<Command, ArgumentError>;
 
@@ -177,11 +178,21 @@ fn bounded_u16(
     Ok(bounded(invocation, id, flag_name, u64::from(u16::MAX))?.map(|value| value as u16))
 }
 
-fn review_mode(invocation: &ResolvedInvocation) -> ReviewMode {
-    match opt_text(invocation, "mode").as_deref() {
-        Some("lan") => ReviewMode::Lan,
-        _ => ReviewMode::Local,
-    }
+/// `--mode`, parsed but not yet resolved against `AFUI_DELIVERY` — `None`
+/// when the flag was not given at all.
+///
+/// The registry already validated the value against `mode_arg`'s three words,
+/// which are AFUI's own, so the parse below cannot fail; an unreachable
+/// mismatch is returned rather than folded into `window`: a typo that reads as
+/// an explicit delivery is exactly the failure `AFUI_DELIVERY` exists to
+/// prevent, and this used to swallow one.
+fn review_mode(invocation: &ResolvedInvocation) -> Result<Option<UiDeliveryMode>, ArgumentError> {
+    agent_first_ui::cli::delivery_of(invocation, "mode").map_err(|error| {
+        ArgumentError::new(
+            error.to_string(),
+            "run the command with `--help` and choose one of the deliveries it lists",
+        )
+    })
 }
 
 /// Message ids for a disposition that also accepts an idempotency key.
@@ -434,7 +445,7 @@ pub fn build_command(invocation: &ResolvedInvocation) -> Result<Command, Argumen
         "triage_review" => Command::Triage {
             action: TriageAction::Review {
                 message_id: strings(invocation, "message_id"),
-                mode: review_mode(invocation),
+                mode: review_mode(invocation)?,
             },
         },
         "message_show" => message(MessageAction::Show {
@@ -489,7 +500,7 @@ pub fn build_command(invocation: &ResolvedInvocation) -> Result<Command, Argumen
         }),
         "case_review" => case(CaseCommand::Review {
             case_ref: text(invocation, "case_ref"),
-            mode: review_mode(invocation),
+            mode: review_mode(invocation)?,
         }),
         "case_suggestion_set" => case(CaseCommand::Suggestion {
             action: CaseSuggestionAction::Set(CaseSuggestionSetArgs {
@@ -622,7 +633,7 @@ pub fn build_command(invocation: &ResolvedInvocation) -> Result<Command, Argumen
         "case_draft_review" => case_draft(CaseDraftAction::Review {
             case_ref: text(invocation, "case_ref"),
             draft_name: text(invocation, "draft_name"),
-            mode: review_mode(invocation),
+            mode: review_mode(invocation)?,
         }),
         "case_draft_validate" => case_draft(CaseDraftAction::Validate {
             case_ref: text(invocation, "case_ref"),
@@ -764,7 +775,7 @@ pub fn build_command(invocation: &ResolvedInvocation) -> Result<Command, Argumen
         }),
         "notification_review" => notification(NotificationCommand::Review {
             notification_ref: text(invocation, "notification_ref"),
-            mode: review_mode(invocation),
+            mode: review_mode(invocation)?,
         }),
         "notification_suggestion_set" => notification(NotificationCommand::Suggestion {
             action: NotificationSuggestionAction::Set(NotificationSuggestionSetArgs {

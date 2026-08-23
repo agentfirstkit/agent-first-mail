@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-mail",
   "name": "Agent-First Mail",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.",
@@ -14,25 +14,30 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Move the human review window onto agent-first-ui: afmail's own TcpListener loop, request parser, urlencoded decoder, Chromium launcher, and profile guard are deleted, and the single action= form path becomes typed routes",
-    "Give each review surface its own ui_kind (triage_review, case_review, notification_review, draft_review) so replacing one frontend cannot silently replace the other three",
-    "Replace Review UI template overrides under workspace templates/ with AFUI frontends at .afui/frontends/afmail/<ui_kind>/, declared against Review UI API version 1, with per-file fallback to the built-in localized pack; content templates stay in the workspace tree",
-    "Report a LAN review plan that lapses unopened as outcome expired instead of dismissed, and record cancel as a completed decision, so a caller can tell 'nobody was there' from 'someone declined to answer'",
-    "Extend afmail doctor to smoke-render the Review UI that would actually serve each surface, reporting a broken or unloadable user frontend as its own issue rather than failing every other check",
-    "Collapse imap.password_secret_env and smtp.password_secret_env into imap.password_secret and smtp.password_secret, which now take the AFDATA source grammar (the value, env:NAME, file:PATH#DOT_PATH, literal:VALUE); stream sources are refused in config and afmail's credential-naming rule still applies to env sources",
-    "Accept the same source grammar for afmail api serve --access-token-secret",
-    "Upgrade agent-first-data to 0.32.1 and agent-first-ui to 0.3.1"
+    "Settle each review item the moment a person decides it, so closing the window ends the session instead of discarding unsettled work, and re-read the terminal result from the workspace afterwards — a process killed mid-session loses nothing already settled",
+    "Drop the session-level submitted/cancelled/dismissed vocabulary and the Deferred outcome, add Decided for a disposition the agent never proposed, and check the three outcome invariants right after deserialization instead of leaving each writer to remember them",
+    "Move stale-suggestion detection from a whole-session gate to a per-item flag, so one item whose message has moved on no longer refuses to open the rest of the queue",
+    "Open a draft's attachments through one primitive that checks the directory and the file separately, refuses non-regular files before any open, and compares the opened handle's identity with what was checked — a symlink under files/ can no longer be read, hashed and attached while the push plan shows a harmless case-relative path",
+    "Switch review delivery to AFUI's window|link|session and delete afmail's own LAN implementation and discovery, keeping the one-shot fifteen-minute link expiry and review_ready carrying review_url",
+    "Render the real page in doctor, one render per surface, so a frontend called healthy cannot still fail the escaping policy, rendered-markup guard and element contract that only the serving side applied",
+    "Declare the four review hooks a page cannot render without and check them before a window opens, leaving the other twenty-one undeclared because they belong to surfaces that legitimately lack them",
+    "Put the review page's routing, session channel and unload guard on AFUI's page kernel, keeping only what is afmail's: which update ends a turn, flushing dirty editors before a send, and selection clamping",
+    "Stop drawing a second head inside a framed session — the page hides its brand and saving line and sends up only what a frame cannot know, keeping the local-workspace pill",
+    "Bound triage review with no message ids to the current queue newest-first and say in the result whether any were left out, instead of implying every current suggestion is included",
+    "Pin the IMAP push contract with a recording test server, and pin the per-file locale overlay so a frontend overriding one template still gets the rest of the active language pack rather than falling back to English",
+    "Stop quoting values from credential-bearing arguments in error events, and run the local container gates on Apple's container runtime as well as Docker",
+    "Upgrade Agent-First Data to 0.34.0, Agent-First UI to 0.5.0 and Agent-First Slug to 0.7.1"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.XWoP3CQVfssQGj63azRQnNKkSBEDVmaK5gdNHHAxffc",
+      "uri": "cmn://agentfirstkit.com/b3.BmXjdNCjzm7ChFXVQ6FeKzfhuSjt3HvfGRbfCepefMUR",
       "id": "agent-first-data",
       "reason": "All structured output, field suffixes, secret handling, and JSONL events follow Agent-First Data conventions"
     },
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.5iZ2WdpykUx7nsmRuswsiXLWft6GE6yoLoJMToTnm4rP",
+      "uri": "cmn://agentfirstkit.com/b3.4sTciwy86YHMLDRNQrmmbQcCZQNuK8diafTpdZzL5ibV",
       "id": "agent-first-slug",
       "reason": "Path/URL slug generation and path-segment validation use Agent-First Slug"
     }

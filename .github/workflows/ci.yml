@@ -29,6 +29,15 @@ jobs:
             target
           key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
+      # The runner images ship whatever ShellCheck their distribution packages
+      # — Ubuntu 24.04's is 0.9.0, two majors behind — and its rules differ from
+      # the pinned one's on real code. Provision the pin so this leg judges the
+      # tree by the same rules the local gate does.
+      - name: Setup ShellCheck
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./scripts/install-shellcheck.sh --install
+
       - name: Install afdata skill validator
         run: cargo install agent-first-data --locked --features skill
 
@@ -57,6 +66,8 @@ jobs:
           key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: GreenMail container e2e
+        env:
+          AFMAIL_TEST_CONTAINER_RUNTIME: docker
         run: |
           docker version
           docker pull greenmail/standalone:2.1.8

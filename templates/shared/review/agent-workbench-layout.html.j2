@@ -1,0 +1,113 @@
+{%- import "i18n/catalog.j2" as i18n -%}
+<section class="panel suggestion agent-workbench" aria-labelledby="agent-workbench-heading" data-afmail-agent-workbench>
+  <div class="agent-workbench-heading">
+    <div>
+      <h2 id="agent-workbench-heading">{{ i18n.t('agent_suggestion') }}</h2>
+      <p class="muted">{{ i18n.t('work_with_agent_description') }}</p>
+    </div>
+  </div>
+  <div class="agent-suggestion-content" data-afmail-agent-suggestion-content>
+    {% if surface_kind == 'triage_review' %}
+      {% if contents.items %}
+        {% for item in contents.items %}
+          {% set document = item.document %}
+          {% set mail = document.context.message.message %}
+          {% set message_id = mail.message_id %}
+          {% set agent_suggestion = mail.agent_suggestion %}
+          {% set human_suggestion = mail.human_suggestion %}
+          <div class="agent-suggestion-item">
+            {% if contents.items | length > 1 %}<p class="agent-suggestion-context"><strong>{{ mail.subject or message_id }}</strong></p>{% endif %}
+            {% if item.stale %}<p class="authentication-warning" role="note">{{ i18n.t('suggestion_stale_notice') }}</p>{% endif %}
+            {% if human_suggestion %}<p class="settled-summary" data-afmail-settled-summary>{{ i18n.t('settled_label') }}: {% if human_suggestion.outcome == 'accepted' %}{{ i18n.t('outcome_accepted') }}{% elif human_suggestion.outcome == 'changed' %}{{ i18n.t('outcome_changed') }}{% elif human_suggestion.outcome == 'rejected' %}{{ i18n.t('outcome_rejected') }}{% else %}{{ i18n.t('outcome_decided') }}{% endif %}</p>{% endif %}
+            {% if agent_suggestion %}
+              {% set action_kind = agent_suggestion.suggested_action.kind %}
+              {% set known_action = action_kind == 'case_create' or action_kind == 'case_add' or action_kind == 'notification_create' or action_kind == 'notification_add' or action_kind == 'spam' or action_kind == 'trash' %}
+              {% if known_action %}
+                <p><strong>{% if action_kind == 'case_create' %}{{ i18n.t('create_case') }} “{{ agent_suggestion.suggested_action.case_name }}” · {{ agent_suggestion.suggested_action.group }}{% elif action_kind == 'case_add' %}{{ i18n.t('add_to_case') }} {{ agent_suggestion.suggested_action.case_ref }}{% elif action_kind == 'notification_create' %}{{ i18n.t('create_notification') }} “{{ agent_suggestion.suggested_action.notification_name }}”{% elif action_kind == 'notification_add' %}{{ i18n.t('add_to_notification') }} {{ agent_suggestion.suggested_action.notification_ref }}{% elif action_kind == 'spam' %}{{ i18n.t('mark_spam') }}{% elif action_kind == 'trash' %}{{ i18n.t('move_trash') }}{% endif %}</strong></p>
+                <blockquote>{{ agent_suggestion.reason }}</blockquote>
+                {% if agent_suggestion.confidence_percent is defined and agent_suggestion.confidence_percent is not none %}<p class="muted">{{ i18n.t('confidence') }}: {{ agent_suggestion.confidence_percent }}%</p>{% endif %}
+                <form data-afmail-settle="message">
+                  <input type="hidden" name="message_id" value="{{ message_id }}">
+                  <label><span>{{ i18n.t('decision') }}</span><select name="decision" data-afmail-decision>
+                    <option value="accept">{{ i18n.t('accept_suggestion') }}</option>
+                    <option value="reject">{{ i18n.t('reject') }}</option>
+                    {% if action_kind != 'spam' %}<option value="override_spam">{{ i18n.t('mark_spam_instead') }}</option>{% endif %}
+                    {% if action_kind != 'trash' %}<option value="override_trash">{{ i18n.t('move_trash_instead') }}</option>{% endif %}
+                  </select></label>
+                  <label><span>{{ i18n.t('reason_reject_change') }}</span><textarea name="reason" placeholder="{{ i18n.t('tell_agent_change') }}"></textarea></label>
+                  <div class="settle-row"><span class="save-state" data-afmail-settle-status aria-live="polite"></span><button type="button" class="primary-action" data-afmail-settle-button>{{ i18n.t('settle') }}</button></div>
+                </form>
+              {% else %}
+                <p class="muted">{{ i18n.t('unsupported_action') }}: <code>{{ action_kind }}</code></p>
+              {% endif %}
+            {% else %}
+              <p class="muted">{{ i18n.t('no_current_suggestion') }}</p>
+            {% endif %}
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted">{{ i18n.t('no_current_suggestion') }}</p>
+      {% endif %}
+    {% elif surface_kind == 'case_review' %}
+      {% set case = contents.collection.collection %}
+      {% if contents.stale %}<p class="authentication-warning" role="note">{{ i18n.t('suggestion_stale_notice') }}</p>{% endif %}
+      {% if case.human_suggestion %}<p class="settled-summary" data-afmail-settled-summary>{{ i18n.t('settled_label') }}: {% if case.human_suggestion.outcome == 'accepted' %}{{ i18n.t('outcome_accepted') }}{% elif case.human_suggestion.outcome == 'changed' %}{{ i18n.t('outcome_changed') }}{% elif case.human_suggestion.outcome == 'rejected' %}{{ i18n.t('outcome_rejected') }}{% else %}{{ i18n.t('outcome_decided') }}{% endif %}</p>{% endif %}
+      {% if case.agent_suggestion %}
+        {% set suggestion = case.agent_suggestion %}{% set action_kind = suggestion.suggested_action.kind %}
+        {% set known_action = action_kind == 'case_archive' or action_kind == 'case_unarchive' or action_kind == 'case_move' or action_kind == 'case_rename' or action_kind == 'case_tag' or action_kind == 'case_untag' or action_kind == 'case_trash' or action_kind == 'case_delete' %}
+        {% if known_action %}
+          <p><strong>{% if action_kind == 'case_archive' %}{{ i18n.t('archive_case') }}{% elif action_kind == 'case_unarchive' %}{{ i18n.t('restore_to') }} {{ suggestion.suggested_action.group }}{% elif action_kind == 'case_move' %}{{ i18n.t('move_to') }} {{ suggestion.suggested_action.group }}{% elif action_kind == 'case_rename' %}{{ i18n.t('rename_to') }} “{{ suggestion.suggested_action.case_name }}”{% elif action_kind == 'case_tag' %}{{ i18n.t('add_tag') }} {{ suggestion.suggested_action.tag }}{% elif action_kind == 'case_untag' %}{{ i18n.t('remove_tag') }} {{ suggestion.suggested_action.tag }}{% elif action_kind == 'case_trash' %}{{ i18n.t('trash_case_messages') }}{% elif action_kind == 'case_delete' %}{{ i18n.t('delete_case_permanently') }}{% endif %}</strong></p>
+          <blockquote>{{ suggestion.reason }}</blockquote>
+          <form data-afmail-settle="case">
+            <label><span>{{ i18n.t('decision') }}</span><select name="decision" data-afmail-decision><option value="accept">{{ i18n.t('accept_suggestion') }}</option><option value="reject">{{ i18n.t('reject') }}</option></select></label>
+            <label><span>{{ i18n.t('reason_reject') }}</span><textarea name="reason"></textarea></label>
+            {% if action_kind == 'case_delete' and suggestion.suggested_action.allow_notes %}<label class="destructive-confirmation"><span><input type="checkbox" name="allow_notes_confirmed" value="true" data-afmail-required-confirmation data-afmail-required-when="decision:accept"> {{ i18n.t('confirm_delete_case_notes') }}</span></label>{% endif %}
+            <div class="settle-row"><span class="save-state" data-afmail-settle-status aria-live="polite"></span><button type="button" class="primary-action" data-afmail-settle-button>{{ i18n.t('settle') }}</button></div>
+          </form>
+        {% else %}
+          <p class="muted">{{ i18n.t('unsupported_action') }}: <code>{{ action_kind }}</code></p>
+        {% endif %}
+      {% else %}
+        <p class="muted">{{ i18n.t('no_current_suggestion') }}</p>
+      {% endif %}
+    {% elif surface_kind == 'notification_review' %}
+      {% set notification = contents.collection.collection %}
+      {% if contents.stale %}<p class="authentication-warning" role="note">{{ i18n.t('suggestion_stale_notice') }}</p>{% endif %}
+      {% if notification.human_suggestion %}<p class="settled-summary" data-afmail-settled-summary>{{ i18n.t('settled_label') }}: {% if notification.human_suggestion.outcome == 'accepted' %}{{ i18n.t('outcome_accepted') }}{% elif notification.human_suggestion.outcome == 'changed' %}{{ i18n.t('outcome_changed') }}{% elif notification.human_suggestion.outcome == 'rejected' %}{{ i18n.t('outcome_rejected') }}{% else %}{{ i18n.t('outcome_decided') }}{% endif %}</p>{% endif %}
+      {% if notification.agent_suggestion %}
+        {% set suggestion = notification.agent_suggestion %}{% set action_kind = suggestion.suggested_action.kind %}
+        {% set known_action = action_kind == 'notification_rename' or action_kind == 'notification_delete' %}
+        {% if known_action %}
+          <p><strong>{% if action_kind == 'notification_rename' %}{{ i18n.t('rename_to') }} “{{ suggestion.suggested_action.notification_name }}”{% elif action_kind == 'notification_delete' %}{{ i18n.t('delete_notification_permanently') }}{% endif %}</strong></p>
+          <blockquote>{{ suggestion.reason }}</blockquote>
+          <form data-afmail-settle="notification">
+            <label><span>{{ i18n.t('decision') }}</span><select name="decision" data-afmail-decision><option value="accept">{{ i18n.t('accept_suggestion') }}</option><option value="reject">{{ i18n.t('reject') }}</option></select></label>
+            <label><span>{{ i18n.t('reason_reject') }}</span><textarea name="reason"></textarea></label>
+            {% if action_kind == 'notification_delete' and suggestion.suggested_action.allow_notes %}<label class="destructive-confirmation"><span><input type="checkbox" name="allow_notes_confirmed" value="true" data-afmail-required-confirmation data-afmail-required-when="decision:accept"> {{ i18n.t('confirm_delete_notification_notes') }}</span></label>{% endif %}
+            <div class="settle-row"><span class="save-state" data-afmail-settle-status aria-live="polite"></span><button type="button" class="primary-action" data-afmail-settle-button>{{ i18n.t('settle') }}</button></div>
+          </form>
+        {% else %}
+          <p class="muted">{{ i18n.t('unsupported_action') }}: <code>{{ action_kind }}</code></p>
+        {% endif %}
+      {% else %}
+        <p class="muted">{{ i18n.t('no_current_suggestion') }}</p>
+      {% endif %}
+    {% else %}
+      <p class="muted">{{ i18n.t('no_current_suggestion') }}</p>
+    {% endif %}
+  </div>
+  <div class="agent-collaboration">
+    <ol class="agent-history" data-afmail-agent-history aria-live="polite"></ol>
+    <div class="agent-channel-turn" data-afmail-channel-turn data-state="connecting" role="status" aria-live="polite">
+      <span class="avatar agent-avatar" aria-hidden="true">af</span>
+      <span class="agent-channel-status" data-afmail-channel-status>{{ i18n.t('agent_connecting') }}</span>
+      <span class="agent-typing-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+    </div>
+    <template data-afmail-agent-turn-template="person"><li class="agent-turn" data-role="person"><strong>{{ i18n.t('you') }}</strong><p data-afmail-agent-turn-message></p></li></template>
+    <template data-afmail-agent-turn-template="agent"><li class="agent-turn" data-role="agent"><strong>{{ i18n.t('agent') }}</strong><p data-afmail-agent-turn-message></p></li></template>
+    <form class="agent-composer" data-afmail-agent-form>
+      <label><span class="visually-hidden">{{ i18n.t('tell_agent') }}</span><textarea data-afmail-agent-input required rows="2" placeholder="{{ i18n.t('tell_agent_placeholder') }}"></textarea></label>
+      <button type="submit" class="primary-action" aria-keyshortcuts="Meta+Enter Control+Enter" disabled><span>{{ i18n.t('send_to_agent') }}</span><kbd data-afmail-agent-shortcut data-apple-label="⌘↵" data-control-label="Ctrl↵" aria-hidden="true">⌘↵</kbd></button>
+    </form>
+  </div>
+</section>

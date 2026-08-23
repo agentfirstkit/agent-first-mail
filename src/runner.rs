@@ -8,6 +8,11 @@ mod review;
 #[path = "runner/review_disabled.rs"]
 mod review;
 
+/// Rendering one review page, for `doctor` to validate a Review UI through the
+/// same engine that serves it.
+#[cfg(feature = "review")]
+pub(crate) use review::render_page_from as render_review_page_from;
+
 pub use dispatch::execute_command;
 pub use output::{emit_result, output_write_failed_exit_code};
 

@@ -442,11 +442,26 @@ pub(crate) fn uid_mark_and_move_session<T: std::io::Read + std::io::Write>(
         }
     }
     let target_location = match rfc822_message_id {
-        Some(message_id) => Some(find_uid_by_message_id_session(
-            session,
-            target_folder,
-            message_id,
-        )?),
+        Some(message_id) => {
+            match find_uid_by_message_id_session(session, target_folder, message_id) {
+                Ok(location) => Some(location),
+                Err(err) if moved && err.error_code == "imap_uid_missing" => {
+                    return Err(AppError::new(
+                    "imap_move_target_uid_missing",
+                    "remote move succeeded but the target message UID was not found",
+                )
+                .with_hint(
+                    "Run `afmail pull`, then preview and confirm the push again. Recovery verifies the target message without replaying the move.",
+                )
+                .with_details(json!({
+                    "target_mailbox_name": target_folder,
+                    "rfc822_message_id": message_id,
+                    "remote_effect_completed": true,
+                })));
+                }
+                Err(err) => return Err(err),
+            }
+        }
         None => None,
     };
     Ok(MoveOutcome {
@@ -594,7 +609,7 @@ pub(crate) fn find_uid_by_message_id_session<T: std::io::Read + std::io::Write>(
         .into_iter()
         .max()
         .map(|uid| uid as u64)
-        .ok_or_else(|| AppError::new("imap_uid_missing", "moved message uid was not found"))?;
+        .ok_or_else(|| AppError::new("imap_uid_missing", "message uid was not found"))?;
     Ok(RemoteLocation {
         mailbox_id: None,
         mailbox_name: folder.to_string(),

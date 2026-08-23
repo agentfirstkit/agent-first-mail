@@ -1,4 +1,4 @@
-use super::common::ReviewMode;
+use agent_first_ui::UiDeliveryMode;
 
 #[derive(Debug)]
 pub enum NotificationCommand {
@@ -18,7 +18,7 @@ pub enum NotificationCommand {
     /// Open a review session for this notification and its persisted suggestion.
     Review {
         notification_ref: String,
-        mode: ReviewMode,
+        mode: Option<UiDeliveryMode>,
     },
     /// Set or clear the current typed Agent suggestion for this collection.
     Suggestion {

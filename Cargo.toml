@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-mail"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 description = "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm."
 license = "MIT"
@@ -40,6 +40,7 @@ demo = [
     "tokio/sync",
 ]
 review = [
+    "agent-first-ui/page",
     "agent-first-ui/session",
     "dep:axum",
     "dep:tokio",
@@ -55,17 +56,20 @@ path = "src/main.rs"
 [dependencies]
 # Local monorepo development uses sibling crates where needed; version keys keep
 # packaging tied to the matching published crates.
-agent-first-data = { version = "0.32.1", default-features = false, features = ["cli", "skill-admin", "stream-redirect", "yaml", "toml", "dotenv", "ini"] }
-agent-first-slug = { version = "0.6.2", default-features = false }
+agent-first-data = { version = "0.34.0", default-features = false, features = ["cli", "skill-admin", "stream-redirect", "yaml", "toml", "dotenv", "ini"] }
+agent-first-slug = { version = "0.7.1", default-features = false }
 # Not optional, and not behind `review`. The template loader has to refuse a
 # smuggled `<script>` in every build, including the one with the Review UI
 # compiled out, and that guard is AFUI's — one copy, so it cannot drift. The
 # guard tier is file reading and hashing; the `review` feature is what adds
 # `agent-first-ui/session` and with it the server that hosts a window.
-agent-first-ui = { version = "0.3.1", default-features = false }
+# `cli` in every build, not just the ones with a UI: afmail declares the same
+# CLI surface whether or not the Review UI is compiled in, so the delivery flag
+# has to be declarable without a server behind it.
+agent-first-ui = { version = "0.5.0", default-features = false, features = ["cli"] }
 axum = { version = "0.8", optional = true }
 base64 = { version = "0.23", optional = true }
-blake3 = "1.8.6"
+blake3 = "1.8.7"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -75,7 +79,7 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 mail-parser = { version = "0.11", features = ["full_encoding"] }
 rustls-pemfile = "2.2.0"
 rustls-connector = { version = "0.23", default-features = false, features = ["webpki-root-certs", "rustls--ring"] }
-noyalib = "0.0.18"
+noyalib = "0.0.27"
 minijinja = "2"
 include_dir = "0.7"
 mime_guess = { version = "2", default-features = false }
@@ -93,6 +97,9 @@ xattr = "1.6.1"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
 
 [dev-dependencies]
+# `test-support` rather than a second copy of AFUI's fingerprint, trust store,
+# stub browser, WebSocket framing, or runtime envelope in this spore's tests.
+agent-first-ui = { version = "0.5.0", default-features = false, features = ["test-support"] }
 imap-codec = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

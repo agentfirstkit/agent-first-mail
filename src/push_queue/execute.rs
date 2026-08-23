@@ -1,5 +1,6 @@
 use super::*;
 use crate::remote::MailRemote;
+use crate::types::{MessageFile, RemoteLocation};
 
 #[derive(Clone, Copy)]
 pub(super) struct PushProgressContext {
@@ -446,6 +447,7 @@ fn step_state_mut(item: &mut PushItem, index: usize) -> Option<&mut PushStepStat
 }
 
 fn mark_step_pending(item: &mut PushItem, index: usize, step: &ActionStep) {
+    freeze_message_action_snapshot(item);
     let now = crate::store::now_rfc3339();
     if let Some(state) = step_state_mut(item, index) {
         state.label = step_label(step);
@@ -458,6 +460,16 @@ fn mark_step_pending(item: &mut PushItem, index: usize, step: &ActionStep) {
         state.retryable = None;
     }
     item.updated_rfc3339 = crate::store::now_rfc3339();
+}
+
+fn freeze_message_action_snapshot(item: &mut PushItem) {
+    let snapshot = item.planned_message_action.clone();
+    let PushPayload::Message(message) = &mut item.payload else {
+        return;
+    };
+    if message.message_action_snapshot.is_none() {
+        message.message_action_snapshot = snapshot;
+    }
 }
 
 fn mark_step_succeeded(item: &mut PushItem, index: usize, step: &ActionStep) {
@@ -531,12 +543,24 @@ fn recover_remote_outcome_unknown_step(
     index: usize,
     step: &ActionStep,
 ) -> Result<bool> {
-    if step.append_to_mailbox_id.is_none() {
-        return Ok(false);
+    if let Some(mailbox_id) = &step.append_to_mailbox_id {
+        return recover_remote_outcome_unknown_append(context, item, index, step, mailbox_id);
     }
-    let Some(mailbox_id) = &step.append_to_mailbox_id else {
-        return Ok(false);
-    };
+    if let Some(mailbox_id) = &step.move_to_mailbox_id
+        && move_completed_before_target_uid_lookup_failed(item, index)
+    {
+        return recover_remote_outcome_unknown_move(context, item, index, step, mailbox_id);
+    }
+    Ok(false)
+}
+
+fn recover_remote_outcome_unknown_append(
+    context: PushExecutionContext<'_>,
+    item: &mut PushItem,
+    index: usize,
+    step: &ActionStep,
+    mailbox_id: &str,
+) -> Result<bool> {
     let folder = context.remote.action_mailbox_folder(mailbox_id)?;
     let message_ids = append_rfc822_message_ids(context.root, item)?;
     if message_ids.is_empty() {
@@ -546,7 +570,7 @@ fn recover_remote_outcome_unknown_step(
         match context.remote.find_by_message_id(&folder, message_id) {
             Ok(Some(_)) => {}
             Ok(None) => return Ok(false),
-            Err(err) if append_find_absence_is_nonfatal(&err) => return Ok(false),
+            Err(err) if find_absence_is_nonfatal(&err) => return Ok(false),
             Err(err) => return Err(err),
         }
     }
@@ -557,7 +581,151 @@ fn recover_remote_outcome_unknown_step(
     Ok(true)
 }
 
-fn append_find_absence_is_nonfatal(err: &AppError) -> bool {
+fn move_completed_before_target_uid_lookup_failed(item: &PushItem, index: usize) -> bool {
+    item.step_states
+        .iter()
+        .find(|state| state.index == index)
+        .is_some_and(|state| match state.error_code.as_deref() {
+            Some("imap_move_target_uid_missing") => true,
+            // Compatibility with 0.10.0 records. That version used the generic
+            // code and this exact message only after UID MOVE had returned OK.
+            Some("imap_uid_missing") => {
+                state.error.as_deref() == Some("moved message uid was not found")
+            }
+            // A provider may report a completed move without a target UID. The
+            // old execute path turned that known post-effect condition into the
+            // generic push error below.
+            Some("push_remote_outcome_unknown") => state.error.as_deref().is_some_and(|error| {
+                error.starts_with("remote move completed without a target UID for message ")
+            }),
+            _ => false,
+        })
+}
+
+fn recover_remote_outcome_unknown_move(
+    context: PushExecutionContext<'_>,
+    item: &mut PushItem,
+    index: usize,
+    step: &ActionStep,
+    mailbox_id: &str,
+) -> Result<bool> {
+    let action_locations = action_locations(context.root, item, step)?;
+    let mut message_ids = item.message_ids().iter().cloned().collect::<BTreeSet<_>>();
+    message_ids.extend(
+        action_locations
+            .iter()
+            .map(|location| location.message_id.clone()),
+    );
+    if message_ids.is_empty() {
+        return Ok(false);
+    }
+
+    let workspace = crate::store::Workspace::at(context.root);
+    let mut reconciled_sources = Vec::new();
+    for message_id in message_ids {
+        let message = workspace.read_message_by_id(&message_id)?;
+        let source_locations = action_locations
+            .iter()
+            .filter(|location| location.message_id == message_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        // Finding the message in the target mailbox proves only that a target
+        // copy exists. Recovery is safe after pull has also reconciled every
+        // planned source location as missing; otherwise an earlier source may
+        // have moved while a later one is still active.
+        if has_active_planned_source(&message, &source_locations) {
+            return Ok(false);
+        }
+        reconciled_sources.push((message_id, message, source_locations));
+    }
+
+    // Resolving a configured target may require an IMAP mailbox listing. Do it
+    // only after local pull evidence proves that every original source is gone.
+    let target_folder = context.remote.action_mailbox_folder(mailbox_id)?;
+    let mut recovered = Vec::new();
+    for (message_id, message, source_locations) in reconciled_sources {
+        let rfc822_message_id = message.rfc822_message_id.clone().ok_or_else(|| {
+            AppError::new(
+                "rfc822_message_id_missing",
+                format!("message cannot be verified after remote move: {message_id}"),
+            )
+        })?;
+        let local_target = message.remote.as_ref().and_then(|remote| {
+            remote
+                .locations
+                .iter()
+                .find(|location| {
+                    location.mailbox_name == target_folder && location.missing_rfc3339.is_none()
+                })
+                .cloned()
+        });
+        let target_location = match local_target {
+            Some(location) => location,
+            None => match context
+                .remote
+                .find_by_message_id(&target_folder, &rfc822_message_id)
+            {
+                Ok(Some(location)) => location,
+                Ok(None) => return Ok(false),
+                Err(err) if find_absence_is_nonfatal(&err) => return Ok(false),
+                Err(err) => return Err(err),
+            },
+        };
+        recovered.push((message_id, source_locations, target_location));
+    }
+
+    for (message_id, source_locations, target_location) in recovered {
+        let message = workspace.read_message_by_id(&message_id)?;
+        let mut locations = message
+            .remote
+            .map(|remote| {
+                remote
+                    .locations
+                    .into_iter()
+                    .filter(|location| location.missing_rfc3339.is_none())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        locations.retain(|existing| {
+            !source_locations
+                .iter()
+                .any(|source| remote_location_matches_push(existing, source))
+        });
+        if !locations.iter().any(|existing| {
+            existing.mailbox_name == target_location.mailbox_name
+                && existing.uid_validity == target_location.uid_validity
+                && existing.uid == target_location.uid
+        }) {
+            locations.push(target_location);
+        }
+        workspace.relocate_message(&message_id, &locations)?;
+    }
+
+    mark_step_succeeded(item, index, step);
+    item.updated_rfc3339 = crate::store::now_rfc3339();
+    item.last_error = None;
+    write_item(context.root, item)?;
+    Ok(true)
+}
+
+fn has_active_planned_source(message: &MessageFile, source_locations: &[PushLocation]) -> bool {
+    message.remote.as_ref().is_some_and(|remote| {
+        remote.locations.iter().any(|existing| {
+            existing.missing_rfc3339.is_none()
+                && source_locations
+                    .iter()
+                    .any(|source| remote_location_matches_push(existing, source))
+        })
+    })
+}
+
+fn remote_location_matches_push(existing: &RemoteLocation, planned: &PushLocation) -> bool {
+    existing.mailbox_name == planned.mailbox_name
+        && existing.uid_validity == Some(planned.uid_validity)
+        && existing.uid == Some(planned.uid)
+}
+
+fn find_absence_is_nonfatal(err: &AppError) -> bool {
     matches!(
         err.error_code,
         "imap_uid_missing" | "remote_operation_unsupported"
@@ -631,7 +799,7 @@ fn remote_outcome_unknown_error(
         ),
     )
     .with_hint(
-        "Inspect the remote mailbox or SMTP outcome before retrying. Append steps can resume automatically only when the appended Message-ID is found remotely.",
+        "Inspect the remote mailbox or SMTP outcome before retrying. Append steps and moves whose target-UID lookup failed after a completed move can resume only after the target Message-ID is found.",
     )
     .with_details(details)
 }
@@ -661,6 +829,12 @@ pub(super) fn execute_outbound_step(
     let prepared = prepare_current_outbound(context.root, context.config, item)?;
     if step.smtp_send.is_some() {
         validate_smtp_send_attempt(context.config, &prepared)?;
+        // Local construction first, and it fails the step outright. Only what
+        // happens after this line could have delivered mail, so only what
+        // happens after it deserves an unknown outcome.
+        context
+            .remote
+            .prepare_send(&prepared.envelope_from, &prepared.envelope_to)?;
         persist_remote_outcome_unknown(context.root, item, index, step)?;
         context.remote.send_raw_message(
             &prepared.envelope_from,
@@ -874,15 +1048,20 @@ pub(super) fn execute_move(
         )?;
         let target_location = outcome.target_location.ok_or_else(|| {
             AppError::new(
-                "push_remote_outcome_unknown",
+                "imap_move_target_uid_missing",
                 format!(
-                    "remote move completed without a target UID for message {}",
+                    "remote move succeeded but the target UID was not returned for message {}",
                     location.message_id
                 ),
             )
             .with_hint(
-                "Inspect the source and target mailboxes, then run `afmail pull` before retrying.",
+                "Run `afmail pull`, then preview and confirm the push again. Recovery verifies the target message without replaying the move.",
             )
+            .with_details(json!({
+                "message_id": location.message_id.as_str(),
+                "target_mailbox_name": target.as_str(),
+                "remote_effect_completed": true,
+            }))
         })?;
         let message_locations =
             active_locations
@@ -988,6 +1167,7 @@ mod tests {
             payload: PushPayload::Message(MessagePush {
                 message_id: message_ids.first().cloned().unwrap_or_default(),
                 action,
+                message_action_snapshot: None,
             }),
             planned_outbound: None,
             planned_outbound_message: None,
@@ -1077,6 +1257,43 @@ mod tests {
     }
 
     #[test]
+    fn pending_message_step_persists_the_exact_action_snapshot() {
+        let step = ActionStep::move_to_mailbox_id("archive");
+        let mut item = message_action_item(
+            "push_snapshot",
+            MessagePushAction::Notification,
+            vec!["message_snapshot".to_string()],
+            vec![PushLocation {
+                message_id: "message_snapshot".to_string(),
+                mailbox_name: "INBOX".to_string(),
+                uid_validity: 44,
+                uid: 42,
+            }],
+        );
+        if let Some(action) = item.planned_message_action.as_mut() {
+            action.steps = vec![step.clone()];
+        }
+        ensure_step_states(&mut item, std::slice::from_ref(&step));
+
+        mark_step_pending(&mut item, 0, &step);
+
+        let encoded = serde_json::to_string(&item);
+        assert!(encoded.is_ok());
+        let encoded = encoded.unwrap_or_default();
+        let persisted = PushItem::parse_json(&encoded);
+        assert!(persisted.is_ok());
+        let Some(persisted) = persisted.ok() else {
+            return;
+        };
+        assert_eq!(
+            persisted
+                .message()
+                .and_then(|message| message.message_action_snapshot.as_ref()),
+            item.planned_message_action.as_ref()
+        );
+    }
+
+    #[test]
     fn remote_outcome_unknown_smtp_step_refuses_retry() {
         let root = temp_root("smtp-unknown");
         let config = MailConfig::default();
@@ -1143,6 +1360,245 @@ mod tests {
             item.step_states[0].result_summary.as_deref(),
             Some("append succeeded")
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_outcome_unknown_move_recovers_target_without_replaying_move() {
+        let root = temp_root("move-target-found");
+        write_message_json(
+            &root,
+            "message_move_recovery",
+            "<move-recovery@example.com>",
+            7,
+        );
+        let message_path = root.join("messages/message_move_recovery.json");
+        let mut message = fs::read_to_string(&message_path)
+            .ok()
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .unwrap_or(Value::Null);
+        if let Some(locations) = message["remote"]["locations"].as_array_mut() {
+            locations[0]["missing_rfc3339"] = json!("2026-06-09T00:00:01Z");
+            locations.push(json!({
+                "mailbox_name": "archive",
+                "mailbox_id": "archive",
+                "uid_validity": 55,
+                "uid": 91,
+                "flags": [],
+                "observed_rfc3339": "2026-06-09T00:00:01Z"
+            }));
+        }
+        assert!(crate::util::write_json_pretty(&message_path, &message).is_ok());
+        let config = MailConfig::default();
+        let remote = crate::remote::FakeMailRemote::default();
+        let step = ActionStep::move_to_mailbox_id("archive");
+        let locations = vec![PushLocation {
+            message_id: "message_move_recovery".to_string(),
+            mailbox_name: "INBOX".to_string(),
+            uid_validity: 44,
+            uid: 7,
+        }];
+        let mut item = message_action_item(
+            "push_move_recovery",
+            MessagePushAction::Notification,
+            vec!["message_move_recovery".to_string()],
+            locations,
+        );
+        if let Some(action) = item.planned_message_action.as_mut() {
+            action.steps = vec![step.clone()];
+        }
+        let mut state = step_state(0, &step, PushStepStatus::RemoteOutcomeUnknown);
+        state.error_code = Some("imap_move_target_uid_missing".to_string());
+        state.error =
+            Some("remote move succeeded but the target message UID was not found".to_string());
+        state.retryable = Some(false);
+        item.step_states = vec![state];
+
+        let recovered = recover_remote_outcome_unknown_step(
+            context(&root, &config, &remote),
+            &mut item,
+            0,
+            &step,
+        );
+
+        assert_eq!(recovered, Ok(true));
+        assert_eq!(item.step_states[0].status, PushStepStatus::Succeeded);
+        assert!(remote.move_requests.borrow().is_empty());
+        let message = fs::read_to_string(root.join("messages/message_move_recovery.json"))
+            .ok()
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .unwrap_or(Value::Null);
+        assert_eq!(
+            message["remote"]["locations"].as_array().map(Vec::len),
+            Some(1),
+            "{message}"
+        );
+        assert_eq!(message["remote"]["locations"][0]["mailbox_name"], "archive");
+        assert_eq!(message["remote"]["locations"][0]["uid"], 91);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_outcome_unknown_move_waits_while_a_planned_source_is_still_active() {
+        let root = temp_root("move-source-still-active");
+        write_message_json(
+            &root,
+            "message_move_partial",
+            "<move-partial@example.com>",
+            7,
+        );
+        let message_path = root.join("messages/message_move_partial.json");
+        let mut message = fs::read_to_string(&message_path)
+            .ok()
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .unwrap_or(Value::Null);
+        if let Some(locations) = message["remote"]["locations"].as_array_mut() {
+            locations[0]["missing_rfc3339"] = json!("2026-06-09T00:00:01Z");
+            locations.push(json!({
+                "mailbox_name": "Secondary",
+                "mailbox_id": "secondary",
+                "uid_validity": 45,
+                "uid": 8,
+                "flags": [],
+                "observed_rfc3339": "2026-06-09T00:00:00Z"
+            }));
+            locations.push(json!({
+                "mailbox_name": "archive",
+                "mailbox_id": "archive",
+                "uid_validity": 55,
+                "uid": 92,
+                "flags": [],
+                "observed_rfc3339": "2026-06-09T00:00:01Z"
+            }));
+        }
+        assert!(crate::util::write_json_pretty(&message_path, &message).is_ok());
+
+        let config = MailConfig::default();
+        let remote = crate::remote::FakeMailRemote::default();
+        let step = ActionStep::move_to_mailbox_id("archive");
+        let mut item = message_action_item(
+            "push_move_partial",
+            MessagePushAction::Notification,
+            vec!["message_move_partial".to_string()],
+            vec![
+                PushLocation {
+                    message_id: "message_move_partial".to_string(),
+                    mailbox_name: "INBOX".to_string(),
+                    uid_validity: 44,
+                    uid: 7,
+                },
+                PushLocation {
+                    message_id: "message_move_partial".to_string(),
+                    mailbox_name: "Secondary".to_string(),
+                    uid_validity: 45,
+                    uid: 8,
+                },
+            ],
+        );
+        if let Some(action) = item.planned_message_action.as_mut() {
+            action.steps = vec![step.clone()];
+        }
+        let mut state = step_state(0, &step, PushStepStatus::RemoteOutcomeUnknown);
+        state.error_code = Some("imap_move_target_uid_missing".to_string());
+        state.error =
+            Some("remote move succeeded but the target message UID was not found".to_string());
+        state.retryable = Some(false);
+        item.step_states = vec![state];
+
+        let recovered = recover_remote_outcome_unknown_step(
+            context(&root, &config, &remote),
+            &mut item,
+            0,
+            &step,
+        );
+
+        assert_eq!(recovered, Ok(false));
+        assert_eq!(
+            item.step_states[0].status,
+            PushStepStatus::RemoteOutcomeUnknown
+        );
+        assert!(remote.move_requests.borrow().is_empty());
+        let unchanged = fs::read_to_string(&message_path)
+            .ok()
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .unwrap_or(Value::Null);
+        assert_eq!(
+            unchanged["remote"]["locations"].as_array().map(Vec::len),
+            Some(3),
+            "{unchanged}"
+        );
+        assert!(
+            unchanged["remote"]["locations"]
+                .as_array()
+                .is_some_and(|locations| locations.iter().any(|location| {
+                    location["mailbox_name"] == "Secondary"
+                        && location.get("missing_rfc3339").is_none()
+                }))
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_outcome_unknown_move_does_not_recover_an_ambiguous_failure() {
+        let root = temp_root("move-still-ambiguous");
+        write_message_json(
+            &root,
+            "message_move_ambiguous",
+            "<move-ambiguous@example.com>",
+            8,
+        );
+        let path = root.join("messages/message_move_ambiguous.json");
+        let mut message = fs::read_to_string(&path)
+            .ok()
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .unwrap_or(Value::Null);
+        if let Some(locations) = message["remote"]["locations"].as_array_mut() {
+            locations.push(json!({
+                "mailbox_name": "archive",
+                "mailbox_id": "archive",
+                "uid_validity": 55,
+                "uid": 92,
+                "flags": [],
+                "observed_rfc3339": "2026-06-09T00:00:01Z"
+            }));
+        }
+        assert!(crate::util::write_json_pretty(&path, &message).is_ok());
+        let config = MailConfig::default();
+        let remote = crate::remote::FakeMailRemote::default();
+        let step = ActionStep::move_to_mailbox_id("archive");
+        let mut item = message_action_item(
+            "push_move_ambiguous",
+            MessagePushAction::Notification,
+            vec!["message_move_ambiguous".to_string()],
+            vec![PushLocation {
+                message_id: "message_move_ambiguous".to_string(),
+                mailbox_name: "INBOX".to_string(),
+                uid_validity: 44,
+                uid: 8,
+            }],
+        );
+        if let Some(action) = item.planned_message_action.as_mut() {
+            action.steps = vec![step.clone()];
+        }
+        let mut state = step_state(0, &step, PushStepStatus::RemoteOutcomeUnknown);
+        state.error_code = Some("imap_move_failed".to_string());
+        state.error = Some("connection closed before MOVE completed".to_string());
+        state.retryable = Some(false);
+        item.step_states = vec![state];
+
+        let recovered = recover_remote_outcome_unknown_step(
+            context(&root, &config, &remote),
+            &mut item,
+            0,
+            &step,
+        );
+
+        assert_eq!(recovered, Ok(false));
+        assert_eq!(
+            item.step_states[0].status,
+            PushStepStatus::RemoteOutcomeUnknown
+        );
+        assert!(remote.move_requests.borrow().is_empty());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1229,6 +1685,7 @@ mod tests {
             payload: PushPayload::Message(MessagePush {
                 message_id: "message_one".to_string(),
                 action: MessagePushAction::Spam,
+                message_action_snapshot: None,
             }),
             planned_outbound: None,
             planned_outbound_message: None,

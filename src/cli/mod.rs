@@ -18,8 +18,7 @@ pub use cases::{
 };
 pub use common::{
     ConfigAction, DoctorAction, LogAction, MessageSuggestionAction, PurgeAction, PushAction,
-    RemoteAction, RenderAction, ReviewMode, TriageAction, TriageSuggestionAction,
-    TriageSuggestionSetArgs,
+    RemoteAction, RenderAction, TriageAction, TriageSuggestionAction, TriageSuggestionSetArgs,
 };
 pub use contacts::{
     ContactCommand, ContactCreateArgs, ContactEmailAction, ContactNotesAction, ContactPhoneAction,
@@ -32,4 +31,9 @@ pub use notification::{
 };
 pub use root::Command;
 pub use skill::{SkillAction, SkillAgentSelection, SkillScope, SkillTargetArgs, SkillWriteArgs};
+/// Used by the runner when it builds the plan, which only exists in a build
+/// with the Review UI compiled in — the flag it also builds is declared in
+/// every build.
+#[cfg(feature = "review")]
+pub(crate) use spec::REVIEW_DELIVERY;
 pub use spec::cli_spec;

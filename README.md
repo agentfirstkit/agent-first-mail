@@ -39,7 +39,8 @@ Default builds include all three optional product surfaces:
 
 - `demo`: the loopback mock IMAP/SMTP server and embedded demo mailbox.
 - `api`: the Axum HTTP API server and OpenAPI export commands.
-- `review`: interactive local and LAN Review sessions.
+- `review`: interactive Review sessions delivered as a local window, a
+  short-lived trusted-LAN link, or a registered AFUI session.
 
 Build a core mail-workspace binary without them using
 `cargo build --no-default-features`. Enable only selected surfaces with, for
@@ -199,6 +200,10 @@ effect succeeded but its audit append did not complete, the queue retains an
 after review, confirming that new plan only completes the idempotent audit append
 and queue cleanup, and never repeats SMTP or IMAP effects.
 
+If MOVE completed but the server did not return a target UID, run `afmail pull`
+before previewing again. Recovery never replays MOVE: it completes only when the
+target message is present and every planned source location is no longer active.
+
 Then it reports back:
 
 > **Agent:** Sent and archived. That was the only message that needed a reply.
@@ -279,40 +284,57 @@ That is the shape. The [docs](#docs) cover the exact files, fields, and commands
 ## Review with your agent
 
 Review commands are blocking, local human-in-the-loop sessions for work that
-benefits from dense reading or an explicit decision. An agent starts one in the
-background. Before triage review, it saves one complete typed proposal with
-`afmail triage suggestion set`; the proposal lives in the message's canonical
-JSON metadata, never in Markdown or a separate review file. Review reads those
-persisted proposals and, on submit, writes a hash-bound `human_suggestion`
-before returning its finite result. It never files a message, changes a case,
-queues a push, or touches the remote mailbox.
+benefits from dense reading or an explicit decision. There is no batch: each
+item a review shows — a triage message, or the one case/notification a
+case/notification review is about — settles the moment the person decides it,
+written straight to the workspace. A proposal from the agent is optional, not
+a precondition; `afmail triage suggestion set` (and its case/notification
+equivalents) still let an agent make one first, living in canonical JSON
+metadata, never in Markdown or a separate review file, but a review opens and
+shows the item even when nothing has proposed anything. With no current
+suggestion it shows no speculative action menu: the person can inspect the item
+or ask the agent through the open Review. Review itself never files a message,
+changes a case, queues a push, or touches the remote mailbox — settling records
+a decision, not a mailbox change.
 
 Case and notification suggestions use the same lifecycle in their canonical
 JSON through `afmail case suggestion set|clear` and
 `afmail notification suggestion set|clear`. Notes and draft fields remain
 canonical user content and autosave through the Workspace API under an
 exclusive lock and base-hash check; each result records those writes in
-`saved_files`. Review never pushes or sends mail. A new Agent suggestion
-replaces the previous round and clears its human response. Cancel or window
-dismissal leaves suggestion state unchanged. Deletion proposals that set
-`allow_notes: true` require a separate destructive confirmation in Review.
+`saved_files`. A new Agent suggestion replaces the previous round and clears
+its human response. Deletion proposals that set `allow_notes: true` require a
+separate destructive confirmation before that item can be settled.
 
-All review surfaces expose one top-right Done button. Case, notification, and
-draft Done is enabled only after every edit is saved; dismissing the window
-never rolls back an autosave. Triage uses every persisted Agent suggestion by default and only
-shows a “Message to agent” text box when the user opens “Disagree or write to
-the agent”. Notes and drafts show no save badge on open; save progress begins
-only after an edit, and `Saved locally` appears only after the canonical file
-write succeeds. A save error keeps Done disabled.
+The open Review is bidirectional. A message typed in the page reaches the agent
+on the command's ordered AFDATA stream, correlated by a request id. The agent
+can answer directly, or first use ordinary afmail commands to update a
+canonical draft, note, or suggestion and then ask the page to reread the
+workspace. Text on the channel cannot inject those artifacts into the page.
+The built-in frontend displays every turn during that page load; AFUI only
+transports typed values and owns no conversation history or replay.
+
+There is no page-wide Done. Closing the window is the ordinary, unremarkable
+end of every review, not a decision — whatever was settled by then stays
+settled, and whatever was not stays unsettled, available for another review
+later. A settled item can be resettled: the record is replaced, not appended.
+Notes and drafts show no save badge on open; save progress begins only after
+an edit, and `Saved locally` appears only after the canonical file write
+succeeds.
 
 `afmail case review CASE_REF` opens the case and its notes;
-`afmail notification review NOTIFICATION_REF` opens a notification and its notes;
-`afmail case draft review CASE_REF DRAFT_NAME` opens one draft. Submit, cancel,
-or dismiss each session returns one structured result with its outcome, base
-hashes, and any `saved_files`. The agent must re-check triage hashes before
-applying a decision. The persisted human suggestion is feedback, not proof that
-the formal action ran and not authorization for push or send; those still use
-the normal commands and preview/confirm flow.
+`afmail notification review NOTIFICATION_REF` opens a notification and its
+notes; `afmail case draft review CASE_REF DRAFT_NAME` opens one draft. The
+terminal result is read back from the workspace after the session ends, not
+carried out of it: `settled` lists every item a person decided (`ref`,
+`outcome`, and — when there is one — `suggested_action`/`reason`), `unsettled`
+lists every item nobody decided, and `ended` says whether the window closed or
+an unattended `--mode link` page reached the end of AFUI's warning grace.
+Silence is not a decision — an unsettled
+item can be proposed or reviewed again — and the agent must re-check hashes
+before applying anything. A settled `human_suggestion` is feedback, not proof
+that the formal action ran and not authorization for push or send; those still
+use the normal commands and preview/confirm flow.
 
 If a suggestion `set` or `clear` may be retried after interrupted output, use a
 stable `--request-id` for that exact command and inputs. Case and
@@ -323,12 +345,37 @@ active drafts; notification hashes include the exact collection, contained
 messages, and current notes. Changing any of them makes an older proposal stale
 and requires a fresh suggestion.
 
-Use `--mode lan` with any review command to use a phone or another browser on
-the same trusted IPv4 local network. afmail prints a clickable, one-time
-`review_url`, waits for that review to finish, and expires the URL after 15
-minutes. Review mode defaults to `local`; both modes emit `review_ready` when
-the review surface is ready. LAN mode uses local HTTP and must not be used on
-public or untrusted networks.
+Use `--mode link` with any review command to use a phone or another browser on
+the same trusted IPv4 local network. afmail prints a clickable `review_url` and
+waits for that review to finish. The URL is an AFUI-owned page: by default it
+warns after 15 unattended minutes and lapses after a further 5-minute grace,
+while visible attention or Review traffic renews it. `--mode session`
+registers the Review without opening or
+advertising it itself; reach it later through `afui session open` or
+`afui session serve`. Review mode defaults to `window`; every mode emits
+`review_ready` when the surface is ready. Link mode uses local HTTP and must not
+be used on public or untrusted networks.
+
+The workspace's `.afmail/config.json` owns the limits that belong to afmail's
+Review provider. They can be changed with `afmail config set`:
+
+| Key | Default | Scope |
+|---|---:|---|
+| `review.max_channel_text_bytes` | `65536` | Maximum UTF-8 bytes in one Review user message or controller response |
+| `review.max_inline_image_bytes` | `16777216` | Maximum declared, read, and decoded bytes for one raster attachment preview |
+
+Remote lifetime is not an afmail Review limit. Direct links and pages created
+by `afui session serve` both read `attention.idle_timeout_s` and
+`attention.grace_period_s` from AFUI's global `config.json`
+(`~/Library/Application Support/afui/config.json` on macOS,
+`$XDG_CONFIG_HOME/afui/config.json` on Linux (or
+`~/.config/afui/config.json` when `XDG_CONFIG_HOME` is unset), or
+`%APPDATA%\afui\config.json` on Windows). `AFUI_CONFIG_DIR` replaces that
+file's parent directory. The `session serve` CLI may override them for that
+process with `--idle-minutes` and `--grace-minutes`. A local `window` is
+bounded by closing the window; a registered `session` itself does not expire.
+In a Link `review_ready` event, disabled attention expiry is reported as
+`idle_timeout_s: null`.
 
 Review HTML uses the same MiniJinja system and the same typed render documents
 as generated Markdown. Export editable multilingual templates with

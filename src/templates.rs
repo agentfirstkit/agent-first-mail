@@ -37,6 +37,7 @@ pub enum TemplateKey {
     ReviewDraftEditor,
     ReviewNotesEditor,
     ReviewStyle,
+    ReviewAgentWorkbenchLayout,
     MarkdownMessageSectionLayout,
     MarkdownTriageViewLayout,
     MarkdownCaseDocumentLayout,
@@ -52,7 +53,7 @@ pub enum TemplateKey {
 }
 
 impl TemplateKey {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::LocaleCatalog,
         Self::WorkspaceDoNotEdit,
         Self::DemoHandoff,
@@ -74,6 +75,7 @@ impl TemplateKey {
         Self::ReviewDraftEditor,
         Self::ReviewNotesEditor,
         Self::ReviewStyle,
+        Self::ReviewAgentWorkbenchLayout,
         Self::MarkdownMessageSectionLayout,
         Self::MarkdownTriageViewLayout,
         Self::MarkdownCaseDocumentLayout,
@@ -111,6 +113,7 @@ impl TemplateKey {
             Self::ReviewDraftEditor => "review/draft-editor.html.j2",
             Self::ReviewNotesEditor => "review/notes-editor.html.j2",
             Self::ReviewStyle => "review/style.css.j2",
+            Self::ReviewAgentWorkbenchLayout => "review/agent-workbench-layout.html.j2",
             Self::MarkdownMessageSectionLayout => "markdown/message-section.md.j2",
             Self::MarkdownTriageViewLayout => "markdown/triage-view.md.j2",
             Self::MarkdownCaseDocumentLayout => "markdown/case-document.md.j2",
@@ -138,6 +141,7 @@ impl TemplateKey {
         !matches!(
             self,
             Self::ReviewStyle
+                | Self::ReviewAgentWorkbenchLayout
                 | Self::MarkdownMessageSectionLayout
                 | Self::MarkdownTriageViewLayout
                 | Self::MarkdownCaseDocumentLayout
@@ -173,6 +177,7 @@ impl TemplateKey {
                 | Self::ReviewDraftEditor
                 | Self::ReviewNotesEditor
                 | Self::ReviewStyle
+                | Self::ReviewAgentWorkbenchLayout
                 | Self::ReviewPageLayout
                 | Self::ReviewMessageLayout
                 | Self::ReviewDraftEditorLayout
@@ -221,6 +226,7 @@ impl TemplateKey {
                 Self::ReviewNotesEditor,
                 Self::ReviewNotesEditorLayout,
                 Self::ReviewStyle,
+                Self::ReviewAgentWorkbenchLayout,
             ],
             Self::ReviewMessage => vec![
                 Self::ReviewMessage,
@@ -307,13 +313,15 @@ impl TemplateKey {
                 Self::ReviewNotesEditor,
                 Self::ReviewNotesEditorLayout,
                 Self::ReviewStyle,
+                Self::ReviewAgentWorkbenchLayout,
             ],
             Self::MarkdownMessageSectionLayout
             | Self::MarkdownNotificationIndexLayout
             | Self::MarkdownStatusIndexLayout
             | Self::ReviewMessageLayout
             | Self::ReviewDraftEditorLayout
-            | Self::ReviewNotesEditorLayout => vec![self, Self::LocaleCatalog],
+            | Self::ReviewNotesEditorLayout
+            | Self::ReviewAgentWorkbenchLayout => vec![self, Self::LocaleCatalog],
             _ => vec![self],
         }
     }
@@ -582,6 +590,7 @@ fn add_template_filters(
     env.add_filter("markdown_quote", template_markdown_quote_filter);
     env.add_filter("yaml", template_yaml_filter);
     env.add_filter("is_image", template_is_image_filter);
+    env.add_filter("is_safe_review_image", template_is_safe_review_image_filter);
     env.add_filter("bytes", template_bytes_filter);
     env.add_filter("display_name", template_display_name_filter);
     env.add_filter("initials", template_initials_filter);
@@ -604,6 +613,81 @@ fn add_template_filters(
     env.add_filter("asset_path", move |value: String| {
         template_asset_path_filter(root.as_deref(), output_dir.as_deref(), &value)
     });
+}
+
+/// Register the same value-only filters on AFUI's restricted page
+/// environment.  The registrar deliberately exposes no loader or escaping
+/// controls; Review template sources and policy stay owned by `UiPage`.
+#[cfg(feature = "review")]
+pub(crate) fn add_review_page_filters(
+    env: &mut agent_first_ui::UiPageEnvironment<'_>,
+    root: Option<&Path>,
+    options: TemplateRenderOptions<'_>,
+) -> agent_first_ui::Result<()> {
+    env.add_filter("inline", template_inline_filter)?;
+    env.add_filter("plain", template_inline_filter)?;
+    env.add_filter("markdown_code", template_markdown_code_filter)?;
+    env.add_filter("markdown_alt", template_markdown_alt_filter)?;
+    env.add_filter("markdown_fence", template_markdown_fence_filter)?;
+    env.add_filter("markdown_table", template_markdown_table_filter)?;
+    env.add_filter("markdown_quote", template_markdown_quote_filter)?;
+    env.add_filter("yaml", template_yaml_filter)?;
+    env.add_filter("is_image", template_is_image_filter)?;
+    env.add_filter("is_safe_review_image", template_is_safe_review_image_filter)?;
+    env.add_filter("bytes", template_bytes_filter)?;
+    env.add_filter("display_name", template_display_name_filter)?;
+    env.add_filter("initials", template_initials_filter)?;
+    env.add_filter("message_item", review_message_item_filter)?;
+    env.add_filter("message_status_key", template_message_status_key_filter)?;
+    env.add_filter("text_range", template_text_range_filter)?;
+    env.add_filter("chronological", review_chronological_filter)?;
+    env.add_filter(
+        "notification_date_desc",
+        review_notification_date_desc_filter,
+    )?;
+
+    let timezone_offset = options.timezone_offset;
+    env.add_filter("datetime", move |value: String| {
+        template_datetime_filter(&value, timezone_offset)
+    })?;
+
+    let root = root.map(Path::to_path_buf);
+    let output_dir = options.output_dir.map(Path::to_path_buf);
+    env.add_filter("asset_path", move |value: String| {
+        template_asset_path_filter(root.as_deref(), output_dir.as_deref(), &value)
+    })?;
+    Ok(())
+}
+
+#[cfg(feature = "review")]
+fn review_message_item_filter(
+    items: MiniValue,
+    message_id: String,
+) -> std::result::Result<agent_first_ui::UiPageSerializedValue, MiniError> {
+    let value = template_message_item_filter(items, message_id);
+    if value.is_undefined() {
+        Ok(agent_first_ui::UiPageSerializedValue::undefined())
+    } else {
+        agent_first_ui::UiPageSerializedValue::from_serialize(value)
+    }
+}
+
+#[cfg(feature = "review")]
+fn review_chronological_filter(
+    items: MiniValue,
+) -> std::result::Result<agent_first_ui::UiPageSerializedValue, MiniError> {
+    agent_first_ui::UiPageSerializedValue::from_serialize(template_chronological_filter(items))
+}
+
+#[cfg(feature = "review")]
+fn review_notification_date_desc_filter(
+    documents: MiniValue,
+    memberships: MiniValue,
+) -> std::result::Result<agent_first_ui::UiPageSerializedValue, MiniError> {
+    agent_first_ui::UiPageSerializedValue::from_serialize(template_notification_date_desc_filter(
+        documents,
+        memberships,
+    ))
 }
 
 fn add_template_loader(
@@ -762,7 +846,7 @@ fn validate_rendered_review_html(label: &str, text: &str) -> Result<()> {
     reject_rendered_script(label, text).map_err(unsafe_review_template_error)
 }
 
-fn unsafe_review_template_error(error: agent_first_ui::Error) -> AppError {
+pub(crate) fn unsafe_review_template_error(error: agent_first_ui::Error) -> AppError {
     AppError::new("review_template_unsafe", error.to_string()).with_hint(
         "Keep Review templates to MiniJinja, HTML, and CSS. afmail supplies the behavior-only JavaScript runtime.",
     )
@@ -789,7 +873,15 @@ fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn json_value_to_minijinja(value: &Value) -> MiniValue {
+/// A JSON document as MiniJinja values.
+///
+/// Numbers are the reason this exists: afdata turns on serde_json's
+/// `arbitrary_precision` for the whole build, so a `serde_json::Number` handed
+/// straight to a template arrives as a map with an internal key inside it, and
+/// anything that indexes or formats it fails. A document that was typed all
+/// the way down never meets this; one that passed through `serde_json::Value`
+/// on the way — a smoke fixture, an already-serialized envelope — always does.
+pub(crate) fn json_value_to_minijinja(value: &Value) -> MiniValue {
     match value {
         Value::Null => MiniValue::from(()),
         Value::Bool(value) => MiniValue::from(*value),
@@ -938,6 +1030,29 @@ fn template_is_image_filter(content_type: String) -> bool {
         .trim()
         .to_ascii_lowercase()
         .starts_with("image/")
+}
+
+fn template_is_safe_review_image_filter(content_type: String) -> bool {
+    safe_review_image_content_type(&content_type).is_some()
+}
+
+pub(crate) fn safe_review_image_content_type(content_type: &str) -> Option<&'static str> {
+    let content_type = content_type
+        .split_once(';')
+        .map(|(mime, _)| mime)
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    match content_type.as_str() {
+        "image/avif" => Some("image/avif"),
+        "image/bmp" => Some("image/bmp"),
+        "image/gif" => Some("image/gif"),
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/webp" => Some("image/webp"),
+        "image/vnd.microsoft.icon" | "image/x-icon" => Some("image/x-icon"),
+        _ => None,
+    }
 }
 
 fn template_bytes_filter(value: u64) -> String {
@@ -1221,6 +1336,20 @@ mod tests {
         assert_eq!(template_bytes_filter(1024), "1 KiB");
         assert_eq!(template_bytes_filter(1025), "2 KiB");
         assert_eq!(template_bytes_filter(1024 * 1024), "1.0 MiB");
+    }
+
+    #[test]
+    fn review_image_filter_allows_raster_formats_but_not_active_content() {
+        assert_eq!(
+            safe_review_image_content_type("IMAGE/JPEG; name=photo.jpg"),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            safe_review_image_content_type("image/png"),
+            Some("image/png")
+        );
+        assert_eq!(safe_review_image_content_type("image/svg+xml"), None);
+        assert_eq!(safe_review_image_content_type("text/html"), None);
     }
 
     #[cfg(unix)]

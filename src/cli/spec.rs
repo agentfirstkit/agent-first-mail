@@ -208,11 +208,14 @@ fn draft_name_arg() -> ArgSpec {
         .about("Draft markdown file under the case drafts directory")
 }
 
+/// Which deliveries a review offers, declared once: this flag and the plan the
+/// runner builds come from the same value, and the rule about never giving it
+/// a default is AFUI's to enforce now rather than each Provider's to remember.
+pub(crate) const REVIEW_DELIVERY: agent_first_ui::cli::UiDeliveryOffer =
+    agent_first_ui::cli::UiDeliveryOffer::WithLink;
+
 fn mode_arg() -> ArgSpec {
-    ArgSpec::option_enum("--mode", ["local", "lan"])
-        .value_name("MODE")
-        .default("local")
-        .about("Review presentation mode")
+    REVIEW_DELIVERY.arg("--mode")
 }
 
 fn confidence_arg() -> ArgSpec {
@@ -600,7 +603,10 @@ fn triage_commands() -> Vec<CommandSpec> {
         .opt(
             ArgSpec::positional("message_id", 0, "MESSAGE_ID")
                 .repeatable()
-                .about("Message ids to review. With none, reviews every current suggestion."),
+                .about(
+                    "Message ids to review. With none, reviews the current triage queue, newest \
+                     first, up to a bound; the result says if any were left out.",
+                ),
         )
         .opt(mode_arg())
         .one("triage_review"),

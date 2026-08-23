@@ -122,9 +122,6 @@ fn common_item_error(value: &Value) -> Option<CommonItemError> {
 
 fn normalize_command_payload(mut value: Value, success: bool) -> Value {
     if let Value::Object(map) = &mut value {
-        let is_typed_review_result = map.contains_key("surface_kind")
-            && map.contains_key("result_kind")
-            && map.contains_key("interaction_id");
         let is_confirmed_push_result = map.contains_key("confirmed")
             && map.contains_key("plan_id")
             && map.contains_key("workspace_uid")
@@ -132,9 +129,6 @@ fn normalize_command_payload(mut value: Value, success: bool) -> Value {
             && map.contains_key("failures");
         map.remove("code");
         map.remove("ok");
-        if !is_typed_review_result {
-            map.remove("outcome");
-        }
         if is_confirmed_push_result {
             for key in ["succeeded_items", "failures"] {
                 if let Some(Value::Array(items)) = map.get_mut(key) {
@@ -750,25 +744,29 @@ mod tests {
     }
 
     #[test]
-    fn normalization_preserves_only_typed_review_outcome() {
+    fn normalization_preserves_the_review_ended_reason_and_strips_success_markers() {
+        // The review envelope names how a session ended as `ended`, not
+        // `outcome` — there is no single "outcome" for a session where every
+        // item settles on its own — so normalization needs no review-shaped
+        // special case: `code`/`ok` are stripped like any other result, and
+        // everything else (including `ended`, `settled`, `unsettled`) passes
+        // through untouched.
         let review = normalize_command_payload(
             json!({
-                "interaction_id":"i1",
-                "surface_kind":"case_review",
-                "result_kind":"case",
-                "outcome":"dismissed",
-                "ok":true
+                "interaction_id": "i1",
+                "surface_kind": "case_review",
+                "ended": "closed",
+                "settled_count": 0,
+                "settled": [],
+                "unsettled_count": 1,
+                "unsettled": [{"ref": "case_1"}],
+                "ok": true
             }),
             true,
         );
-        assert_eq!(review["outcome"], "dismissed");
+        assert_eq!(review["ended"], "closed");
+        assert_eq!(review["unsettled"][0]["ref"], "case_1");
         assert!(review.get("ok").is_none());
-
-        let ordinary = normalize_command_payload(
-            json!({"surface_kind":"not_enough","outcome":"generic","ok":true}),
-            true,
-        );
-        assert!(ordinary.get("outcome").is_none());
     }
 
     #[test]

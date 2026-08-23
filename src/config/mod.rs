@@ -18,7 +18,7 @@ pub use mailbox::{
     SpecialUseSource, SpecialUseTarget, special_use_kinds,
 };
 pub use workspace::{
-    AuditSection, CaseSection, ContactSection, ReasonMode, SmtpConfig, SmtpSection,
+    AuditSection, CaseSection, ContactSection, ReasonMode, ReviewSection, SmtpConfig, SmtpSection,
     TemplateLanguage, WorkspaceSection,
 };
 
@@ -40,6 +40,8 @@ pub struct MailConfig {
     pub schema_name: String,
     pub schema_version: u64,
     pub workspace: WorkspaceSection,
+    #[serde(default)]
+    pub review: ReviewSection,
     pub imap: ImapSection,
     pub mailboxes: BTreeMap<String, ImapMailboxConfig>,
     pub actions: ActionsSection,
@@ -58,6 +60,7 @@ impl Default for MailConfig {
             schema_name: default_schema_name(),
             schema_version: 1,
             workspace: WorkspaceSection::default(),
+            review: ReviewSection::default(),
             imap: ImapSection::default(),
             mailboxes: default_mailbox_configs(),
             actions: ActionsSection::default(),
@@ -176,6 +179,7 @@ impl MailConfig {
             mailbox.validate(id)?;
         }
         self.workspace.validate()?;
+        self.review.validate()?;
         self.actions.validate(self)?;
         self.validate_identities()?;
         validate_password_secret_source(

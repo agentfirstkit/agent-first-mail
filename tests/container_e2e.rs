@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "support/container_runtime.rs"]
+mod test_container_runtime;
 #[path = "support/fixtures.rs"]
 mod test_fixtures;
 
-const GREENMAIL_SMTP_PORT: &str = "3025/tcp";
-const GREENMAIL_IMAP_PORT: &str = "3143/tcp";
+use test_container_runtime::TestContainerRuntime;
+
 const GREENMAIL_IMAGE: &str = "greenmail/standalone:2.1.8";
-const DOVECOT_IMAP_PORT: &str = "31993/tcp";
 const DOVECOT_IMAGE: &str = "dovecot/dovecot:2.4.4";
 const DOVECOT_VMAIL_TMPFS: &str = "/srv/vmail:uid=1000,gid=1000,mode=0755";
 const MAIL_DOMAIN: &str = "localhost";
@@ -51,7 +52,7 @@ fn mail_batch_fixture_manifest_is_valid() -> Result<(), Box<dyn std::error::Erro
 
 #[test]
 #[ignore]
-fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>> {
+fn container_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>> {
     let batch = test_fixtures::load_mail_batch().map_err(fixture_error)?;
     let problems = batch.validate();
     assert!(
@@ -61,14 +62,17 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
 
     let suffix = unique_suffix();
     let container_name = format!("afmail-fixture-e2e-greenmail-{suffix}");
-    let _docker_guard = DockerE2eGuard {
+    let runtime = TestContainerRuntime::selected();
+    let _container_guard = ContainerE2eGuard {
+        runtime,
         containers: vec![container_name.clone()],
     };
     let greenmail_opts = format!(
         "GREENMAIL_OPTS=-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled -Dgreenmail.users={ME_LOGIN}:{PASSWORD}@{MAIL_DOMAIN},{ALICE_LOGIN}:{PASSWORD}@{MAIL_DOMAIN}"
     );
 
-    docker_success(
+    let ports = runtime.published_ports(&[3025, 3143]);
+    runtime.success(
         &[
             "run",
             "-d",
@@ -78,15 +82,15 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
             "-e",
             &greenmail_opts,
             "-p",
-            "127.0.0.1::3025",
+            &ports[0].spec,
             "-p",
-            "127.0.0.1::3143",
+            &ports[1].spec,
             GREENMAIL_IMAGE,
         ],
         "start GreenMail container",
     );
-    let smtp_port = docker_mapped_port(&container_name, GREENMAIL_SMTP_PORT);
-    let imap_port = docker_mapped_port(&container_name, GREENMAIL_IMAP_PORT);
+    let smtp_port = runtime.mapped_port(&container_name, &ports[0]);
+    let imap_port = runtime.mapped_port(&container_name, &ports[1]);
     assert!(
         wait_until(Duration::from_secs(45), || imap_login_works(
             imap_port, ME_LOGIN, PASSWORD
@@ -315,7 +319,7 @@ fn docker_greenmail_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>
 
 #[test]
 #[ignore]
-fn docker_dovecot_special_use_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>> {
+fn container_dovecot_special_use_fixture_batch_e2e() -> Result<(), Box<dyn std::error::Error>> {
     let batch = test_fixtures::load_mail_batch().map_err(fixture_error)?;
     let problems = batch.validate();
     assert!(
@@ -325,7 +329,9 @@ fn docker_dovecot_special_use_fixture_batch_e2e() -> Result<(), Box<dyn std::err
 
     let suffix = unique_suffix();
     let container_name = format!("afmail-fixture-e2e-dovecot-{suffix}");
-    let _docker_guard = DockerE2eGuard {
+    let runtime = TestContainerRuntime::selected();
+    let _container_guard = ContainerE2eGuard {
+        runtime,
         containers: vec![container_name.clone()],
     };
     let root = TempRoot::new("dovecot-fixture-e2e");
@@ -340,28 +346,32 @@ fn docker_dovecot_special_use_fixture_batch_e2e() -> Result<(), Box<dyn std::err
         dovecot_special_use_conf.display()
     );
 
-    docker_success(
-        &[
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            &container_name,
-            "-e",
-            &password_env,
-            "-v",
-            &dovecot_special_use_mount,
-            "--tmpfs",
-            DOVECOT_VMAIL_TMPFS,
-            "-p",
-            "127.0.0.1::31993",
-            DOVECOT_IMAGE,
-            "/dovecot/sbin/dovecot",
-            "-F",
-        ],
-        "start Dovecot container",
-    );
-    let imap_port = docker_mapped_port(&container_name, DOVECOT_IMAP_PORT);
+    let ports = runtime.published_ports(&[31993]);
+    let mut run_args = vec![
+        "run",
+        "-d",
+        "--rm",
+        "--name",
+        &container_name,
+        "-e",
+        &password_env,
+        "-v",
+        &dovecot_special_use_mount,
+    ];
+    // Apple gives every test a disposable root filesystem. Docker keeps the
+    // explicit tmpfs plus the uid/gid mount options its image expects.
+    if !runtime.is_apple() {
+        run_args.extend(["--tmpfs", DOVECOT_VMAIL_TMPFS]);
+    }
+    run_args.extend([
+        "-p",
+        &ports[0].spec,
+        DOVECOT_IMAGE,
+        "/dovecot/sbin/dovecot",
+        "-F",
+    ]);
+    runtime.success(&run_args, "start Dovecot container");
+    let imap_port = runtime.mapped_port(&container_name, &ports[0]);
     let tls_root_cert_path = root.path().join("dovecot-ca.pem");
     assert!(
         wait_until(Duration::from_secs(30), || {
@@ -449,17 +459,20 @@ fn docker_dovecot_special_use_fixture_batch_e2e() -> Result<(), Box<dyn std::err
 
 #[test]
 #[ignore]
-fn docker_greenmail_pull_reply_send_e2e() {
+fn container_greenmail_pull_reply_send_e2e() {
     let suffix = unique_suffix();
     let container_name = format!("afmail-e2e-greenmail-{suffix}");
-    let _docker_guard = DockerE2eGuard {
+    let runtime = TestContainerRuntime::selected();
+    let _container_guard = ContainerE2eGuard {
+        runtime,
         containers: vec![container_name.clone()],
     };
     let greenmail_opts = format!(
         "GREENMAIL_OPTS=-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled -Dgreenmail.users={ME_LOGIN}:{PASSWORD}@{MAIL_DOMAIN},{ALICE_LOGIN}:{PASSWORD}@{MAIL_DOMAIN}"
     );
 
-    docker_success(
+    let ports = runtime.published_ports(&[3025, 3143]);
+    runtime.success(
         &[
             "run",
             "-d",
@@ -469,15 +482,15 @@ fn docker_greenmail_pull_reply_send_e2e() {
             "-e",
             &greenmail_opts,
             "-p",
-            "127.0.0.1::3025",
+            &ports[0].spec,
             "-p",
-            "127.0.0.1::3143",
+            &ports[1].spec,
             GREENMAIL_IMAGE,
         ],
         "start GreenMail container",
     );
-    let smtp_port = docker_mapped_port(&container_name, GREENMAIL_SMTP_PORT);
-    let imap_port = docker_mapped_port(&container_name, GREENMAIL_IMAP_PORT);
+    let smtp_port = runtime.mapped_port(&container_name, &ports[0]);
+    let imap_port = runtime.mapped_port(&container_name, &ports[1]);
     assert!(
         wait_until(Duration::from_secs(45), || imap_login_works(
             imap_port, ME_LOGIN, PASSWORD
@@ -558,7 +571,7 @@ fn docker_greenmail_pull_reply_send_e2e() {
 
     let draft_path = root.path().join(case_path).join("drafts/reply.md");
     let draft = format!(
-        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: reply\nreply_to_message_id: {inbound_message_id}\nto:\n  - alice@localhost\ncc: []\nsubject: \"Re: Docker GreenMail inbound\"\nattachments:\n---\n# Reply\n\n<!-- afmail:compose:start -->\nHi Alice, this reply went through the real SMTP server.\n<!-- afmail:compose:end -->\n"
+        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: reply\nreply_to_message_id: {inbound_message_id}\nto:\n  - alice@localhost\ncc: []\nsubject: \"Re: Container GreenMail inbound\"\nattachments:\n---\n# Reply\n\n<!-- afmail:compose:start -->\nHi Alice, this reply went through the real SMTP server.\n<!-- afmail:compose:end -->\n"
     );
     assert!(fs::write(&draft_path, draft).is_ok());
     let (status, stdout) = run(
@@ -662,7 +675,7 @@ fn docker_greenmail_pull_reply_send_e2e() {
     assert_eq!(spam_pull["new_message_count"], 1);
     assert_eq!(spam_pull["triage_created_count"], 1);
 
-    let old_spam_message_id = message_id_by_subject(root.path(), "Docker GreenMail spam");
+    let old_spam_message_id = message_id_by_subject(root.path(), "Container GreenMail spam");
     let (status, stdout) = run(
         root.path(),
         &[
@@ -729,7 +742,7 @@ fn docker_greenmail_pull_reply_send_e2e() {
         "spam message should not remain in INBOX"
     );
 
-    let new_spam_message_id = message_id_by_subject(root.path(), "Docker GreenMail spam");
+    let new_spam_message_id = message_id_by_subject(root.path(), "Container GreenMail spam");
     assert_eq!(new_spam_message_id, old_spam_message_id);
     assert!(
         root.path()
@@ -1047,7 +1060,7 @@ fn write_demo_reply_draft(path: &Path, case_uid: &str, reply_to_message_id: &str
 fn seed_inbound_message(smtp_port: u16, suffix: &str) {
     let raw = e2e_message(
         &format!("seed-{suffix}@localhost"),
-        "Docker GreenMail inbound",
+        "Container GreenMail inbound",
         "Hello from real GreenMail.",
     );
     smtp_send(smtp_port, "alice@localhost", "me@localhost", raw.as_bytes());
@@ -1056,7 +1069,7 @@ fn seed_inbound_message(smtp_port: u16, suffix: &str) {
 fn seed_spam_message(smtp_port: u16, suffix: &str) {
     let raw = e2e_message(
         &format!("spam-{suffix}@localhost"),
-        "Docker GreenMail spam",
+        "Container GreenMail spam",
         "Spam from real GreenMail.",
     );
     smtp_send(smtp_port, "alice@localhost", "me@localhost", raw.as_bytes());
@@ -1321,67 +1334,15 @@ where
     false
 }
 
-fn docker_success(args: &[&str], context: &str) {
-    let output_result = Command::new("docker").args(args).output();
-    assert!(
-        output_result.is_ok(),
-        "{context} failed: {:?}",
-        output_result.as_ref().err()
-    );
-    let output = match output_result {
-        Ok(output) => output,
-        Err(_) => return,
-    };
-    assert!(
-        output.status.success(),
-        "{context} failed: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn docker_output(args: &[&str], context: &str) -> String {
-    let output_result = Command::new("docker").args(args).output();
-    assert!(
-        output_result.is_ok(),
-        "{context} failed: {:?}",
-        output_result.as_ref().err()
-    );
-    let output = match output_result {
-        Ok(output) => output,
-        Err(_) => return String::new(),
-    };
-    assert!(
-        output.status.success(),
-        "{context} failed: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap_or_default()
-}
-
-fn docker_mapped_port(container: &str, private_port: &str) -> u16 {
-    let output = docker_output(&["port", container, private_port], "inspect mapped port");
-    let port_text = output.trim();
-    let port = port_text
-        .rsplit(':')
-        .next()
-        .and_then(|value| value.parse().ok());
-    assert!(
-        port.is_some(),
-        "could not parse docker port output: {port_text}"
-    );
-    port.unwrap_or(0)
-}
-
-struct DockerE2eGuard {
+struct ContainerE2eGuard {
+    runtime: TestContainerRuntime,
     containers: Vec<String>,
 }
 
-impl Drop for DockerE2eGuard {
+impl Drop for ContainerE2eGuard {
     fn drop(&mut self) {
         for name in &self.containers {
-            let _ = Command::new("docker").args(["rm", "-f", name]).status();
+            self.runtime.delete(name);
         }
     }
 }
@@ -1857,17 +1818,20 @@ fn contact_crud_local_e2e() {
 
 #[test]
 #[ignore]
-fn docker_greenmail_contact_cards_e2e() {
+fn container_greenmail_contact_cards_e2e() {
     let suffix = unique_suffix();
     let container_name = format!("afmail-e2e-contact-{suffix}");
-    let _docker_guard = DockerE2eGuard {
+    let runtime = TestContainerRuntime::selected();
+    let _container_guard = ContainerE2eGuard {
+        runtime,
         containers: vec![container_name.clone()],
     };
     let greenmail_opts = format!(
         "GREENMAIL_OPTS=-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled -Dgreenmail.users={ME_LOGIN}:{PASSWORD}@{MAIL_DOMAIN},{ALICE_LOGIN}:{PASSWORD}@{MAIL_DOMAIN}"
     );
 
-    docker_success(
+    let ports = runtime.published_ports(&[3025, 3143]);
+    runtime.success(
         &[
             "run",
             "-d",
@@ -1877,15 +1841,15 @@ fn docker_greenmail_contact_cards_e2e() {
             "-e",
             &greenmail_opts,
             "-p",
-            "127.0.0.1::3025",
+            &ports[0].spec,
             "-p",
-            "127.0.0.1::3143",
+            &ports[1].spec,
             GREENMAIL_IMAGE,
         ],
         "start GreenMail container for contact e2e",
     );
-    let smtp_port = docker_mapped_port(&container_name, GREENMAIL_SMTP_PORT);
-    let imap_port = docker_mapped_port(&container_name, GREENMAIL_IMAP_PORT);
+    let smtp_port = runtime.mapped_port(&container_name, &ports[0]);
+    let imap_port = runtime.mapped_port(&container_name, &ports[1]);
     assert!(
         wait_until(Duration::from_secs(45), || imap_login_works(
             imap_port, ME_LOGIN, PASSWORD

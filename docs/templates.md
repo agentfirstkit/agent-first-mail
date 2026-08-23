@@ -89,14 +89,32 @@ written against:
 ```json
 {
   "frontend_id": "my_mail_review",
-  "ui_api_version": "1"
+  "ui_api_version": "2"
 }
 ```
 
-afmail implements Review UI API version `1`. That number covers the typed
+afmail implements Review UI API version `2`. That number covers the typed
 Review render document, the template keys below, the trusted-runtime marker,
 and the `data-afmail-*` and `data-copy-*` attributes the runtime reads. A
 frontend declaring any other version is rejected.
+
+Version 2 adds the open Review's bidirectional interaction declarations. The
+built-in layout places the canonical Agent suggestion and the conversation in
+one Agent card inside `data-afmail-review-content`. During a canonical
+workspace refresh, the trusted runtime refreshes only that card's suggestion
+subtree and moves the existing card into the new content, so UI-owned
+user/Agent turns remain visible. The card declares the composer, input, channel
+status, history, and inert turn templates with `data-afmail-agent-*` hooks. The
+runtime clones only those template-declared turn structures and inserts message
+text with `textContent`; it contains no user-facing copy or page structure of
+its own. A replacement UI may arrange or omit visible history, but AFUI does
+not persist or replay it.
+
+When no canonical `agent_suggestion` exists, the built-in templates render only
+the no-suggestion state, not a fallback menu of every possible disposition.
+After an agent writes a suggestion or draft through an ordinary afmail command,
+a controller response may request a reread; the page then rebuilds the review
+content from canonical typed documents while preserving any UI-owned turns.
 
 `templates/` inside a frontend has the same shape as the content tree, holding
 only Review UI keys:
@@ -110,6 +128,7 @@ templates/<language>/
   review/notes-editor.html.j2
 templates/shared/
   review/page-layout.html.j2
+  review/agent-workbench-layout.html.j2
   review/message-layout.html.j2
   review/draft-editor-layout.html.j2
   review/notes-editor-layout.html.j2
@@ -150,9 +169,9 @@ actually serve each surface.
 
 A frontend supplies presentation and nothing else. It cannot bypass typed
 validation, the base-hash concurrency check, the workspace lock, or the
-save/submit contract: those answers come from afmail's own routes for a custom
-UI exactly as they do for the built-in one, so a Review page that claims a save
-succeeded has not made it so.
+save/settle contract: those answers come from afmail's typed AFUI runtime calls
+for a custom UI exactly as they do for the built-in one, so a Review page that
+claims a save or a settlement succeeded has not made it so.
 
 ## Render Document Contract
 
@@ -274,11 +293,21 @@ belongs, normally immediately before `</body>`:
 <!-- afmail:trusted-runtime -->
 ```
 
-The runtime handles autosave, submit/cancel, stale-base conflicts, destructive
-confirmations, and draft tabs. It does not create visible markup or carry
-user-facing copy. Templates supply localized runtime messages through the
-`data-copy-*` attributes and opt controls into behavior with the documented
-`data-afmail-*` hooks.
+The runtime handles autosave, per-item settlement, stale-base conflicts,
+destructive confirmations, and draft tabs. There is no page-wide submit or
+cancel — each item (a triage message, or the one case/notification a
+case/notification review is about) settles on its own, and closing the window
+is the ordinary end of every review. The runtime does not create visible
+markup or carry user-facing copy. Templates supply localized runtime messages
+through the `data-copy-*` attributes and opt controls into behavior with the
+documented `data-afmail-*` hooks.
+
+Raster attachment previews are read-only and limited to 16 MiB by default.
+`review.max_inline_image_bytes` in `.afmail/config.json` controls the declared,
+bounded-read, and decoded byte limit. An oversized attachment remains listed
+with its canonical filename, content type, and size, but the typed image action
+does not load or retain the bytes. Admitted previews use AFUI-managed blobs;
+templates never construct an attachment URL.
 
 Suggested actions are rendered fail-closed. Only the closed action enum gets
 decision controls; an unknown action displays localized unsupported-state copy

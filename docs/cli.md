@@ -434,7 +434,7 @@ Arguments across every shape above:
 Open a review session for this draft.
 
 ```
-afmail case draft review [--workspace <PATH>] [--log <startup|request|progress|retry>...] <CASE_REF> <DRAFT_NAME> [--mode <local|lan>]
+afmail case draft review [--workspace <PATH>] [--log <startup|request|progress|retry>...] <CASE_REF> <DRAFT_NAME> [--mode <window|link|session>]
 ```
 
 Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-to` stdout/stderr (default `stdout`); redirect with `--stdout-file` or `--stderr-file`.
@@ -445,7 +445,7 @@ Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-
 | `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
 | `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix |
 | `DRAFT_NAME` | Draft markdown file under the case drafts directory |
-| `--mode` | Review presentation mode |
+| `--mode` | How this reaches the person: window a browser window is open on this machine; link the page is reachable from this machine's network at the link URL; session the session is registered only; open it with `afui session open` or reach it through `afui session serve`. Falls back to AFUI_DELIVERY, then window |
 
 ### `afmail case draft send`
 
@@ -659,7 +659,7 @@ afmail case rename [--workspace <PATH>] [--log <startup|request|progress|retry>.
 Open a review session for this case, including editable notes.
 
 ```
-afmail case review [--workspace <PATH>] [--log <startup|request|progress|retry>...] <CASE_REF> [--mode <local|lan>]
+afmail case review [--workspace <PATH>] [--log <startup|request|progress|retry>...] <CASE_REF> [--mode <window|link|session>]
 ```
 
 Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-to` stdout/stderr (default `stdout`); redirect with `--stdout-file` or `--stderr-file`.
@@ -669,7 +669,7 @@ Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-
 | `--workspace` | Existing afmail workspace to operate on instead of discovering one from the current directory |
 | `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
 | `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix |
-| `--mode` | Review presentation mode |
+| `--mode` | How this reaches the person: window a browser window is open on this machine; link the page is reachable from this machine's network at the link URL; session the session is registered only; open it with `afui session open` or reach it through `afui session serve`. Falls back to AFUI_DELIVERY, then window |
 
 ### `afmail case set-summary`
 
@@ -1643,7 +1643,7 @@ afmail notification rename [--workspace <PATH>] [--log <startup|request|progress
 Open a review session for this notification and its persisted suggestion.
 
 ```
-afmail notification review [--workspace <PATH>] [--log <startup|request|progress|retry>...] <NOTIFICATION_REF> [--mode <local|lan>]
+afmail notification review [--workspace <PATH>] [--log <startup|request|progress|retry>...] <NOTIFICATION_REF> [--mode <window|link|session>]
 ```
 
 Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-to` stdout/stderr (default `stdout`); redirect with `--stdout-file` or `--stderr-file`.
@@ -1653,7 +1653,7 @@ Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-
 | `--workspace` | Existing afmail workspace to operate on instead of discovering one from the current directory |
 | `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
 | `NOTIFICATION_REF` | Notification ref: nYYYYMMDDNNN or nYYYYMMDDNNN-any-suffix |
-| `--mode` | Review presentation mode |
+| `--mode` | How this reaches the person: window a browser window is open on this machine; link the page is reachable from this machine's network at the link URL; session the session is registered only; open it with `afui session open` or reach it through `afui session serve`. Falls back to AFUI_DELIVERY, then window |
 
 ### `afmail notification set-summary`
 
@@ -2027,7 +2027,7 @@ afmail triage list [--workspace <PATH>] [--log <startup|request|progress|retry>.
 Open a review session for persisted triage suggestions.
 
 ```
-afmail triage review [--workspace <PATH>] [--log <startup|request|progress|retry>...] [<MESSAGE_ID>...] [--mode <local|lan>]
+afmail triage review [--workspace <PATH>] [--log <startup|request|progress|retry>...] [<MESSAGE_ID>...] [--mode <window|link|session>]
 ```
 
 Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-to` stdout/stderr (default `stdout`); redirect with `--stdout-file` or `--stderr-file`.
@@ -2036,8 +2036,8 @@ Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-
 |---|---|
 | `--workspace` | Existing afmail workspace to operate on instead of discovering one from the current directory |
 | `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
-| `MESSAGE_ID` | Message ids to review. With none, reviews every current suggestion. |
-| `--mode` | Review presentation mode |
+| `MESSAGE_ID` | Message ids to review. With none, reviews the current triage queue, newest first, up to a bound; the result says if any were left out. |
+| `--mode` | How this reaches the person: window a browser window is open on this machine; link the page is reachable from this machine's network at the link URL; session the session is registered only; open it with `afui session open` or reach it through `afui session serve`. Falls back to AFUI_DELIVERY, then window |
 
 ### `afmail triage suggestion clear`
 
@@ -2131,4 +2131,4 @@ Every structural failure emits one strict JSON `kind:"error"` event on stderr, l
 
 Two exit-1 codes describe the tool itself rather than the call: `cli_invocation_invalid` means the program misread its own resolved invocation — an unknown action id, or an argument id the selected combination cannot produce — and `output_setup_failed` means an output sink (`--stdout-file`, `--stderr-file`, stream redirection) could not be established. Both are defects to report, not inputs to correct; retrying the same command cannot help.
 
-Domain failures (exit 1) carry their own stable `error.code` instead, drawn from whatever this tool defines rather than from the `cli_*` set. No error message quotes a raw value it was given — an error event is routinely logged, and the input may hold secrets.
+Domain failures (exit 1) carry their own stable `error.code` instead, drawn from whatever this tool defines rather than from the `cli_*` set. Error events are routinely logged, so a message never quotes a value that came from an argument able to carry a credential — a header, a cookie, a token, a password, a proxy URL, an environment value, a form field. Such an error names the argument and the shape that was wrong, and stops there. A value that cannot be a secret — a path, a dot-path, a session name — is quoted, because an error that cannot say which one it means is not worth logging either.

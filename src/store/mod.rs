@@ -41,6 +41,10 @@ pub use render::{
 pub(crate) use suggestions::{
     CaseHumanSuggestionInput, MessageHumanSuggestionInput, NotificationHumanSuggestionInput,
 };
+#[cfg(feature = "review")]
+pub(crate) use suggestions::{
+    case_review_base_hash_from_documents, notification_review_base_hash_from_documents,
+};
 pub(crate) use triage::render_triage_view;
 
 use crate::config::{

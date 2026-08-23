@@ -7,6 +7,17 @@ use crate::error::{AppError, Result};
 use agent_first_data::normalize_utc_offset;
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_REVIEW_MAX_CHANNEL_TEXT_BYTES: u64 = 64 * 1024;
+const DEFAULT_REVIEW_MAX_INLINE_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+
+fn default_review_max_channel_text_bytes() -> u64 {
+    DEFAULT_REVIEW_MAX_CHANNEL_TEXT_BYTES
+}
+
+fn default_review_max_inline_image_bytes() -> u64 {
+    DEFAULT_REVIEW_MAX_INLINE_IMAGE_BYTES
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CaseSection {}
@@ -16,6 +27,41 @@ pub struct CaseSection {}
 pub struct ContactSection {
     #[serde(default = "default_contact_group")]
     pub default_group: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewSection {
+    #[serde(default = "default_review_max_channel_text_bytes")]
+    pub max_channel_text_bytes: u64,
+    #[serde(default = "default_review_max_inline_image_bytes")]
+    pub max_inline_image_bytes: u64,
+}
+
+impl Default for ReviewSection {
+    fn default() -> Self {
+        Self {
+            max_channel_text_bytes: default_review_max_channel_text_bytes(),
+            max_inline_image_bytes: default_review_max_inline_image_bytes(),
+        }
+    }
+}
+
+impl ReviewSection {
+    pub(super) fn validate(&self) -> Result<()> {
+        for (key, value) in [
+            ("review.max_channel_text_bytes", self.max_channel_text_bytes),
+            ("review.max_inline_image_bytes", self.max_inline_image_bytes),
+        ] {
+            if value == 0 {
+                return Err(AppError::new(
+                    "config_invalid",
+                    format!("{key} must be greater than zero"),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for ContactSection {

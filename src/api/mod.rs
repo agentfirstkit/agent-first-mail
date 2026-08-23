@@ -172,7 +172,7 @@ fn api_mode_name(mode: ApiMode) -> &'static str {
 }
 
 fn primary_lan_ipv4() -> Result<Ipv4Addr, AppError> {
-    crate::lan::primary_lan_ipv4().map_err(|error| {
+    agent_first_ui::primary_lan_ipv4().map_err(|error| {
         AppError::new(
             "api_lan_unavailable",
             format!("could not select an IPv4 address for LAN API serving: {error}"),

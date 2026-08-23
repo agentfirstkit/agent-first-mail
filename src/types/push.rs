@@ -290,7 +290,7 @@ fn push_payload_key_allowed(kind: &str, key: &str) -> bool {
             key,
             "case_uid" | "draft_name" | "draft_uid_validity" | "draft_uid"
         ),
-        "message" => matches!(key, "message_id" | "action"),
+        "message" => matches!(key, "message_id" | "action" | "message_action_snapshot"),
         _ => false,
     }
 }
@@ -334,6 +334,13 @@ pub struct DraftPush {
 pub struct MessagePush {
     pub message_id: String,
     pub action: MessagePushAction,
+    /// Exact message action resolved when the first tracked step starts.
+    ///
+    /// Current mailbox state may change after a remote effect whose outcome is
+    /// unknown. Keeping this snapshot lets recovery verify the original source
+    /// locations instead of reconstructing them from later pull state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_action_snapshot: Option<MessageActionPush>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

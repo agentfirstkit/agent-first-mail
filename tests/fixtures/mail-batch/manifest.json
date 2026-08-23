@@ -1,7 +1,7 @@
 {
   "schema_name": "afmail_fixture_mail_batch",
   "schema_version": 1,
-  "description": "Reusable 30-message mailbox fixture for afmail tests, Docker E2E, demos, and agent-operated inbox recordings.",
+  "description": "Reusable 30-message mailbox fixture for afmail tests, container E2E, demos, and agent-operated inbox recordings.",
   "accounts": {
     "primary": {
       "login": "me",

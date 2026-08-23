@@ -1,17 +1,18 @@
 {%- import "i18n/catalog.j2" as i18n -%}
 {% set mail = message_document.message %}{% set analysis = message_document.analysis %}{% if analysis.direction == 'inbound' %}{% set message_time = mail.received_rfc3339 or mail.sent_rfc3339 %}{% else %}{% set message_time = mail.sent_rfc3339 or mail.received_rfc3339 %}{% endif %}<div class="message-entry">
-  <article class="message-card {% if analysis.direction == 'outbound' %}outbound{% else %}inbound{% endif %}">
-    <header class="message-header">
+  <details class="message-card {% if analysis.direction == 'outbound' %}outbound{% else %}inbound{% endif %}"{% if message_expanded %} open{% endif %}>
+    <summary class="message-header">
       <span class="avatar" aria-hidden="true">{{ (mail.from or mail.identity_email or '') | initials }}</span>
-      <div>
-        <p class="sender">{% if analysis.direction == 'outbound' %}{{ i18n.t('you') }}{% elif mail.from %}{{ mail.from | display_name }}{% else %}{{ i18n.t('unknown_sender') }}{% endif %}</p>
+      <span class="message-summary">
+        <span class="sender">{% if analysis.direction == 'outbound' %}{{ i18n.t('you') }}{% elif mail.from %}{{ mail.from | display_name }}{% else %}{{ i18n.t('unknown_sender') }}{% endif %}</span>
         <span class="message-address">{% if analysis.direction == 'outbound' %}{{ mail.to | join(', ') }}{% elif mail.from %}{{ mail.from }}{% endif %}</span>
-      </div>
+        {% if mail.subject %}<span class="message-subject">{{ mail.subject }}</span>{% endif %}
+      </span>
       <time class="message-time" datetime="{{ message_time or '' }}">{% if message_time %}{{ message_time | datetime }}{% else %}{{ i18n.t('unknown_time') }}{% endif %}</time>
-    </header>
-    {% if mail.subject %}<h3 class="message-subject">{{ mail.subject }}</h3>{% endif %}
+    </summary>
     {% if analysis.security.authentication_warning %}<p class="authentication-warning" role="note">{{ i18n.t('auth_attention') }}: SPF {{ mail.authentication.spf }}, DKIM {{ mail.authentication.dkim }}, DMARC {{ mail.authentication.dmarc }}{% if mail.authentication.alignment == 'mismatch' %}; {{ i18n.t('sender_domains_not_align') }}{% endif %}.</p>{% endif %}
-    <div class="message-body">{% if analysis.body.segments %}{% for segment in analysis.body.segments %}<div{% if segment.kind == 'quoted' %} class="quoted-body"{% endif %}>{{ mail.body_text | text_range(segment.start_bytes, segment.end_bytes) }}</div>{% endfor %}{% else %}<div>{{ i18n.t('no_readable_body') }}</div>{% endif %}</div>
+    <div class="message-body">{% if analysis.body.segments %}{% for segment in analysis.body.segments %}{% if segment.kind == 'authored' %}<div>{{ mail.body_text | text_range(segment.start_bytes, segment.end_bytes) }}</div>{% endif %}{% endfor %}{% set quoted_segment = analysis.body.segments | selectattr('kind', 'equalto', 'quoted') | first %}{% if quoted_segment %}<details class="quoted-message"><summary>{{ i18n.t('show_quoted_text') }}</summary><div class="quoted-body">{% for segment in analysis.body.segments %}{% if segment.kind == 'quoted' %}<div>{{ mail.body_text | text_range(segment.start_bytes, segment.end_bytes) }}</div>{% endif %}{% endfor %}</div></details>{% endif %}{% else %}<div>{{ i18n.t('no_readable_body') }}</div>{% endif %}</div>
+    {% if mail.attachments %}<div class="attachment-list" aria-label="{{ i18n.t('attachments') }}">{% for attachment in mail.attachments %}<div class="attachment"><span>{{ attachment.filename }}</span><span class="message-address">{{ attachment.content_type }} · {{ attachment.size_bytes | bytes }}</span>{% if attachment.content_type | is_safe_review_image %}<img class="attachment-preview" data-afmail-attachment-preview data-afmail-message-id="{{ mail.message_id }}" data-afmail-part-id="{{ attachment.part_id }}" alt="{{ attachment.filename }}" loading="lazy" decoding="async">{% endif %}</div>{% endfor %}</div>{% endif %}
     <details class="message-details">
       <summary>{{ i18n.t('message_details') }}</summary>
       <div class="detail-grid">
@@ -23,6 +24,5 @@
         {% if mail.list_id %}<span class="detail-label">{{ i18n.t('mailing_list') }}</span><span>{{ mail.list_id }}</span>{% endif %}
       </div>
     </details>
-    {% if mail.attachments %}<div class="attachment-list" aria-label="{{ i18n.t('attachments') }}">{% for attachment in mail.attachments %}<div class="attachment"><span>{{ attachment.filename }}</span><span class="message-address">{{ attachment.content_type }} · {{ attachment.size_bytes | bytes }}</span></div>{% endfor %}</div>{% endif %}
-  </article>
+  </details>
 </div>

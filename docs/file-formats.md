@@ -30,6 +30,24 @@ A v1 identity or other legacy layout returns `workspace_upgrade_required` from
 ordinary commands. Run `afmail init` once to migrate; runtime readers do not
 support both layouts.
 
+## Workspace Configuration
+
+`.afmail/config.json` is a sparse override document. `afmail config show`
+returns the effective typed config after defaults are applied. The
+`afmail config set` command validates a candidate before saving it. Review
+provider limits live under `review`:
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `max_channel_text_bytes` | `65536` | Maximum UTF-8 bytes in one Review user message or controller response |
+| `max_inline_image_bytes` | `16777216` | Maximum declared, bounded-read, and decoded bytes for one raster preview |
+
+Both values must be greater than zero. Remote page lifetime is owned by AFUI,
+not this workspace. Direct Review links and pages created by `afui session
+serve` use the same global AFUI `attention.idle_timeout_s` and
+`attention.grace_period_s`; `link_expires_in_s` is therefore not an afmail
+configuration key.
+
 ## Private Git Restore Checks
 
 afmail does not have a separate backup or restore format. A private Git clone,
@@ -174,11 +192,14 @@ Canonical message metadata:
 }
 ```
 
-`human_suggestion`, when present, must bind the current
-`agent_suggestion_uid` and the same review hash. `accepted` copies the complete
-Agent action, `changed` stores a complete replacement action, `rejected` stores
-no action and requires a reason, and `deferred` stores no action. A new Agent
-suggestion or explicit clear removes the prior human response.
+`human_suggestion`, when present, holds one of four outcomes. `accepted` and
+`changed` bind the current `agent_suggestion_uid` and the same review hash —
+`accepted` copies the complete Agent action, `changed` stores a complete
+replacement action. `rejected` stores no action and requires a reason, whether
+or not it answers a current `agent_suggestion`. `decided` has no
+`agent_suggestion_uid` at all — the person originated the disposition
+themselves — and stores a complete action. A new Agent suggestion or explicit
+clear removes the prior human response.
 
 Triage message:
 
@@ -317,13 +338,18 @@ parallel IDs, nor derived counts are copied into the built-in frontmatter.
 afmail never reads generated Markdown back as state, so workspace templates are
 free to replace or omit that frontmatter.
 
-The Agent reads `review_base_hash` from `afmail message show` and calls
-`afmail triage suggestion set`; afmail writes the typed proposal to canonical
-message metadata and records `agent_suggestion_set`. `suggestion clear` requires
-the current `agent_suggestion_uid` and records `suggestion_cleared`, preventing
-an old review from clearing a newer round. `afmail triage review` accepts no
-caller-owned context file. A submitted review persists `human_suggestion` and
-records `human_suggestion_set` before returning its finite result.
+An Agent that has a recommendation reads `review_base_hash` from
+`afmail message show` and calls `afmail triage suggestion set`; afmail writes
+the typed proposal to canonical message metadata and records
+`agent_suggestion_set`. `suggestion clear` requires the current
+`agent_suggestion_uid` and records `suggestion_cleared`, preventing an old
+review from clearing a newer round. A proposal is optional, not a
+precondition: `afmail triage review` opens on a message with no
+`agent_suggestion` just as it does on one with one, and accepts no
+caller-owned context file either way. Settling one message in the review
+window persists its `human_suggestion` and records `human_suggestion_set`
+immediately — there is no page-wide submit, and the terminal result is read
+back from the workspace when the session ends rather than carried out of it.
 
 Message actions are a closed enum: `case_create`, `case_add`,
 `notification_create`, `notification_add`, `spam`, and `trash`. These are
@@ -625,11 +651,20 @@ Push items live in `.afmail/push/<push_id>.json`. Each item uses
 `draft` (case/draft locator plus optional remote draft UID) or `message` (one
 stable message id plus its canonical `action`). The action is queue intent and
 is never reconstructed from the message's later workspace status. Resolved
-action steps, remote locations, outbound MIME, message bytes, and hashes are
-plan-time projections, not editable queue fields. Common durable fields include
-timestamps, `attempt_count`, `step_states`, optional `local_stage`, optional
-`audit_pending`, and `last_error`. All version-1 push items are rejected; afmail
-does not guess a message action that was never persisted.
+action steps and remote locations are plan-time projections until execution
+starts. At the first tracked message step, afmail freezes them in the optional
+`message_action_snapshot` field so recovery can use the exact reviewed effect
+after later pulls change canonical mailbox state. Outbound MIME, message bytes,
+and hashes remain plan-time projections rather than editable queue fields.
+Common durable fields include timestamps, `attempt_count`, `step_states`,
+optional `local_stage`, optional `audit_pending`, and `last_error`. All version-1
+push items are rejected; afmail does not guess a message action that was never
+persisted.
+
+A move step whose remote effect completed without a target UID remains
+`remote_outcome_unknown`. After `pull`, recovery may finish that step without
+replaying MOVE only when the target message is present and every planned source
+location is no longer active. A target copy by itself is not completion evidence.
 
 After all remote steps and local finalize stages succeed, the item first enters
 `local_stage: "audit_pending"` and persists:

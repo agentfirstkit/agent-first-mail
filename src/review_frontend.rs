@@ -18,9 +18,9 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_first_ui::{
-    FrontendLocation, FrontendScope, SAFE_MODE_HINT, UiFrontend, safe_mode_from_env,
-};
+#[cfg(test)]
+use agent_first_ui::FrontendLocation;
+use agent_first_ui::{FrontendScope, UiAppIcon, UiErrorKind, UiFrontend};
 
 use crate::error::{AppError, Result};
 
@@ -36,7 +36,9 @@ pub(crate) const PROVIDER_ID: &str = "afmail";
 /// replaces, and the `data-afmail-*` hooks and `data-copy-*` attributes that
 /// runtime reads. A change to any of those is a change to all of them from a
 /// frontend author's point of view, so they share one number.
-pub(crate) const UI_API_VERSION: &str = "1";
+pub(crate) const UI_API_VERSION: &str = "2";
+
+const BUILTIN_APP_ICON: &str = include_str!("review_app_icon.svg");
 
 /// Every Review surface a person can replace, in `ui_kind` form.
 ///
@@ -51,15 +53,23 @@ pub(crate) const UI_KINDS: [&str; 4] = [
     "draft_review",
 ];
 
-/// The frontend serving this surface, or `None` for afmail's built-in UI.
-pub(crate) fn review_frontend(
-    workspace_root: &Path,
-    ui_kind: &str,
-) -> Result<Option<FrontendLocation>> {
-    discover(workspace_root, ui_kind, safe_mode_from_env())
+/// The resolved overlay object used by AFUI's page assembler.
+#[cfg(feature = "review")]
+pub(crate) fn review_ui_frontend(workspace_root: &Path, ui_kind: &str) -> Result<UiFrontend> {
+    UiFrontend::resolve(workspace_root, PROVIDER_ID, ui_kind, UI_API_VERSION)
+        .map_err(|error| frontend_error(ui_kind, &error))
 }
 
-/// The same lookup with safe mode named rather than read from the environment.
+/// The icon resolved from the same frontend overlay as the Review page.
+#[cfg(feature = "review")]
+pub(crate) fn review_app_icon(frontend: &UiFrontend, ui_kind: &str) -> Result<UiAppIcon> {
+    frontend
+        .app_icon(BUILTIN_APP_ICON)
+        .map_err(|error| frontend_error(ui_kind, &error))
+}
+
+/// The same lookup with safe mode named rather than read from the environment,
+/// for the tests that need to drive both.
 ///
 /// Safe mode is checked before any frontend file is opened, so a frontend that
 /// breaks afmail cannot also be what afmail needs in order to recover. AFUI
@@ -67,6 +77,7 @@ pub(crate) fn review_frontend(
 /// comparison and the "unloadable is an error, never a quiet built-in page"
 /// rule are one implementation shared with every other Provider, and afmail's
 /// only remaining job is to say those failures in its own error vocabulary.
+#[cfg(test)]
 pub(crate) fn discover(
     workspace_root: &Path,
     ui_kind: &str,
@@ -98,21 +109,59 @@ pub(crate) fn workspace_frontend_root(workspace_root: &Path, ui_kind: &str) -> R
 /// A frontend that will not load is an error, never a quiet built-in page.
 ///
 /// Falling back would be the worst of both: the person's own UI is not what
-/// they are looking at, and nothing said so. The escape is safe mode, which is
-/// why every one of these errors names it — in AFUI's words, so that the way
-/// out reads the same whichever Provider printed it.
+/// they are looking at, and nothing said so. The way out comes from AFUI — in
+/// AFUI's words, so it reads the same whichever Provider printed it, and only
+/// when AFUI says there is one, since safe mode is no answer to a page afmail
+/// itself could not render.
 fn frontend_error(ui_kind: &str, error: &agent_first_ui::Error) -> AppError {
-    let code = match error {
-        agent_first_ui::Error::FrontendIncompatible { .. } => "review_frontend_incompatible",
-        _ => "review_frontend_unreadable",
-    };
-    AppError::new(code, format!("{error}"))
-        .with_hint(SAFE_MODE_HINT)
-        .with_details(serde_json::json!({
+    let mut failure = AppError::new(review_error_code(error), error.to_string()).with_details(
+        serde_json::json!({
             "provider_id": PROVIDER_ID,
             "ui_kind": ui_kind,
             "ui_api_version": UI_API_VERSION,
-        }))
+        }),
+    );
+    if let Some(hint) = error.hint() {
+        failure = failure.with_hint(hint);
+    }
+    failure
+}
+
+/// `review_<afmail's word for what AFUI classified>`, interned so the code
+/// stays `&'static str`.
+///
+/// One place, rather than the four matches over AFUI's variants this file and
+/// `runner/review.rs` used to carry between them.
+///
+/// Exhaustive over AFUI's closed classification, with **no wildcard arm**. It
+/// used to default to `review_frontend_unreadable`, so a closed session
+/// runtime, a machine with no browser and an unreadable AFUI config all
+/// reported as "the review frontend could not be read" — a sentence that sends
+/// a person to a file with nothing wrong with it.
+pub(crate) fn review_error_code(error: &agent_first_ui::Error) -> &'static str {
+    match error.kind() {
+        UiErrorKind::FrontendIncompatible => "review_frontend_incompatible",
+        UiErrorKind::FrontendUnreadable => "review_frontend_unreadable",
+        UiErrorKind::FrontendUnsafe => "review_template_unsafe",
+        UiErrorKind::PageRender => "review_template_render_failed",
+        UiErrorKind::PageIncomplete => "review_template_invalid",
+        UiErrorKind::WindowUnavailable => "review_window_unavailable",
+        UiErrorKind::WindowWaitFailed => "review_window_wait_failed",
+        UiErrorKind::DeliveryModeInvalid | UiErrorKind::DeliveryModeNotOffered => {
+            "review_delivery_mode_invalid"
+        }
+        UiErrorKind::LinkAddressUnavailable | UiErrorKind::UpstreamNotProxyable => {
+            "review_delivery_unreachable"
+        }
+        UiErrorKind::RuntimeClosed => "review_runtime_closed",
+        UiErrorKind::RuntimeBusy => "review_runtime_busy",
+        UiErrorKind::RuntimeMisconfigured
+        | UiErrorKind::RuntimeMessageTooLarge
+        | UiErrorKind::RuntimeBlob
+        | UiErrorKind::RuntimePayload => "review_runtime_failed",
+        UiErrorKind::ConfigUnreadable => "review_config_unreadable",
+        UiErrorKind::InvalidArgument | UiErrorKind::Io => "review_failed",
+    }
 }
 
 #[cfg(test)]

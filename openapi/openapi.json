@@ -765,9 +765,13 @@
                         "anyOf": [
                           {
                             "additionalProperties": false,
+                            "description": "A person's settled disposition of one case. Same invariants as\n[`MessageHumanSuggestion`].",
                             "properties": {
                               "based_on_agent_suggestion_uid": {
-                                "type": "string"
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
                               },
                               "case_review_base_hash": {
                                 "type": "string"
@@ -779,11 +783,12 @@
                                 "type": "string"
                               },
                               "outcome": {
+                                "description": "A person's disposition of one Agent-suggestible item.\n\n`Accepted` and `Changed` answer a proposal the Agent made; `Rejected` says\nno (with a reason, whether or not there was a proposal to say no to);\n`Decided` is the person originating a disposition the Agent never\nsuggested. There is no \"deferred\" or \"submitted\" value: silence about an\nitem just means it has not been settled yet, and a person can settle it,\nand resettle it, at any time. See [`MessageHumanSuggestion`] for the\ninvariants each value carries.",
                                 "enum": [
                                   "accepted",
                                   "changed",
                                   "rejected",
-                                  "deferred"
+                                  "decided"
                                 ],
                                 "type": "string"
                               },
@@ -935,7 +940,6 @@
                             },
                             "required": [
                               "human_suggestion_uid",
-                              "based_on_agent_suggestion_uid",
                               "case_review_base_hash",
                               "outcome",
                               "created_rfc3339"
@@ -944,9 +948,13 @@
                           },
                           {
                             "additionalProperties": false,
+                            "description": "A person's settled disposition of one notification collection. Same\ninvariants as [`MessageHumanSuggestion`].",
                             "properties": {
                               "based_on_agent_suggestion_uid": {
-                                "type": "string"
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
                               },
                               "created_rfc3339": {
                                 "type": "string"
@@ -958,11 +966,12 @@
                                 "type": "string"
                               },
                               "outcome": {
+                                "description": "A person's disposition of one Agent-suggestible item.\n\n`Accepted` and `Changed` answer a proposal the Agent made; `Rejected` says\nno (with a reason, whether or not there was a proposal to say no to);\n`Decided` is the person originating a disposition the Agent never\nsuggested. There is no \"deferred\" or \"submitted\" value: silence about an\nitem just means it has not been settled yet, and a person can settle it,\nand resettle it, at any time. See [`MessageHumanSuggestion`] for the\ninvariants each value carries.",
                                 "enum": [
                                   "accepted",
                                   "changed",
                                   "rejected",
-                                  "deferred"
+                                  "decided"
                                 ],
                                 "type": "string"
                               },
@@ -1020,7 +1029,6 @@
                             },
                             "required": [
                               "human_suggestion_uid",
-                              "based_on_agent_suggestion_uid",
                               "notification_review_base_hash",
                               "outcome",
                               "created_rfc3339"
@@ -1640,9 +1648,13 @@
                         },
                         "human_suggestion": {
                           "additionalProperties": false,
+                          "description": "A person's settled disposition of one message.\n\n`based_on_agent_suggestion_uid` is `None` when the person originated this\ndisposition themselves rather than answering a proposal — the only case\nwhere that is legal is `outcome: Decided`. Three invariants hold for every\nvalue that reaches disk, checked right after deserialization rather than\nleft to each writer to remember:\n\n1. `Decided` ⇒ `based_on_agent_suggestion_uid` is `None` and\n   `suggested_action` is `Some`;\n2. `Accepted` / `Changed` ⇒ `based_on_agent_suggestion_uid` is `Some`;\n3. `Rejected` ⇒ `reason` is `Some`.",
                           "properties": {
                             "based_on_agent_suggestion_uid": {
-                              "type": "string"
+                              "type": [
+                                "string",
+                                "null"
+                              ]
                             },
                             "created_rfc3339": {
                               "type": "string"
@@ -1654,11 +1666,12 @@
                               "type": "string"
                             },
                             "outcome": {
+                              "description": "A person's disposition of one Agent-suggestible item.\n\n`Accepted` and `Changed` answer a proposal the Agent made; `Rejected` says\nno (with a reason, whether or not there was a proposal to say no to);\n`Decided` is the person originating a disposition the Agent never\nsuggested. There is no \"deferred\" or \"submitted\" value: silence about an\nitem just means it has not been settled yet, and a person can settle it,\nand resettle it, at any time. See [`MessageHumanSuggestion`] for the\ninvariants each value carries.",
                               "enum": [
                                 "accepted",
                                 "changed",
                                 "rejected",
-                                "deferred"
+                                "decided"
                               ],
                               "type": "string"
                             },
@@ -1788,7 +1801,6 @@
                           },
                           "required": [
                             "human_suggestion_uid",
-                            "based_on_agent_suggestion_uid",
                             "message_review_base_hash",
                             "outcome",
                             "created_rfc3339"
@@ -4026,9 +4038,13 @@
                       },
                       "human_suggestion": {
                         "additionalProperties": false,
+                        "description": "A person's settled disposition of one message.\n\n`based_on_agent_suggestion_uid` is `None` when the person originated this\ndisposition themselves rather than answering a proposal — the only case\nwhere that is legal is `outcome: Decided`. Three invariants hold for every\nvalue that reaches disk, checked right after deserialization rather than\nleft to each writer to remember:\n\n1. `Decided` ⇒ `based_on_agent_suggestion_uid` is `None` and\n   `suggested_action` is `Some`;\n2. `Accepted` / `Changed` ⇒ `based_on_agent_suggestion_uid` is `Some`;\n3. `Rejected` ⇒ `reason` is `Some`.",
                         "properties": {
                           "based_on_agent_suggestion_uid": {
-                            "type": "string"
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "created_rfc3339": {
                             "type": "string"
@@ -4040,11 +4056,12 @@
                             "type": "string"
                           },
                           "outcome": {
+                            "description": "A person's disposition of one Agent-suggestible item.\n\n`Accepted` and `Changed` answer a proposal the Agent made; `Rejected` says\nno (with a reason, whether or not there was a proposal to say no to);\n`Decided` is the person originating a disposition the Agent never\nsuggested. There is no \"deferred\" or \"submitted\" value: silence about an\nitem just means it has not been settled yet, and a person can settle it,\nand resettle it, at any time. See [`MessageHumanSuggestion`] for the\ninvariants each value carries.",
                             "enum": [
                               "accepted",
                               "changed",
                               "rejected",
-                              "deferred"
+                              "decided"
                             ],
                             "type": "string"
                           },
@@ -4174,7 +4191,6 @@
                         },
                         "required": [
                           "human_suggestion_uid",
-                          "based_on_agent_suggestion_uid",
                           "message_review_base_hash",
                           "outcome",
                           "created_rfc3339"
@@ -5014,9 +5030,13 @@
                         },
                         "human_suggestion": {
                           "additionalProperties": false,
+                          "description": "A person's settled disposition of one message.\n\n`based_on_agent_suggestion_uid` is `None` when the person originated this\ndisposition themselves rather than answering a proposal — the only case\nwhere that is legal is `outcome: Decided`. Three invariants hold for every\nvalue that reaches disk, checked right after deserialization rather than\nleft to each writer to remember:\n\n1. `Decided` ⇒ `based_on_agent_suggestion_uid` is `None` and\n   `suggested_action` is `Some`;\n2. `Accepted` / `Changed` ⇒ `based_on_agent_suggestion_uid` is `Some`;\n3. `Rejected` ⇒ `reason` is `Some`.",
                           "properties": {
                             "based_on_agent_suggestion_uid": {
-                              "type": "string"
+                              "type": [
+                                "string",
+                                "null"
+                              ]
                             },
                             "created_rfc3339": {
                               "type": "string"
@@ -5028,11 +5048,12 @@
                               "type": "string"
                             },
                             "outcome": {
+                              "description": "A person's disposition of one Agent-suggestible item.\n\n`Accepted` and `Changed` answer a proposal the Agent made; `Rejected` says\nno (with a reason, whether or not there was a proposal to say no to);\n`Decided` is the person originating a disposition the Agent never\nsuggested. There is no \"deferred\" or \"submitted\" value: silence about an\nitem just means it has not been settled yet, and a person can settle it,\nand resettle it, at any time. See [`MessageHumanSuggestion`] for the\ninvariants each value carries.",
                               "enum": [
                                 "accepted",
                                 "changed",
                                 "rejected",
-                                "deferred"
+                                "decided"
                               ],
                               "type": "string"
                             },
@@ -5162,7 +5183,6 @@
                           },
                           "required": [
                             "human_suggestion_uid",
-                            "based_on_agent_suggestion_uid",
                             "message_review_base_hash",
                             "outcome",
                             "created_rfc3339"
@@ -6344,9 +6364,13 @@
                         "anyOf": [
                           {
                             "additionalProperties": false,
+                            "description": "A person's settled disposition of one case. Same invariants as\n[`MessageHumanSuggestion`].",
                             "properties": {
                               "based_on_agent_suggestion_uid": {
-                                "type": "string"
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
                               },
                               "case_review_base_hash": {
                                 "type": "string"
@@ -6358,11 +6382,12 @@
                                 "type": "string"
                               },
                               "outcome": {
+                                "description": "A person's disposition of one Agent-suggestible item.\n\n`Accepted` and `Changed` answer a proposal the Agent made; `Rejected` says\nno (with a reason, whether or not there was a proposal to say no to);\n`Decided` is the person originating a disposition the Agent never\nsuggested. There is no \"deferred\" or \"submitted\" value: silence about an\nitem just means it has not been settled yet, and a person can settle it,\nand resettle it, at any time. See [`MessageHumanSuggestion`] for the\ninvariants each value carries.",
                                 "enum": [
                                   "accepted",
                                   "changed",
                                   "rejected",
-                                  "deferred"
+                                  "decided"
                                 ],
                                 "type": "string"
                               },
@@ -6514,7 +6539,6 @@
                             },
                             "required": [
                               "human_suggestion_uid",
-                              "based_on_agent_suggestion_uid",
                               "case_review_base_hash",
                               "outcome",
                               "created_rfc3339"
@@ -6523,9 +6547,13 @@
                           },
                           {
                             "additionalProperties": false,
+                            "description": "A person's settled disposition of one notification collection. Same\ninvariants as [`MessageHumanSuggestion`].",
                             "properties": {
                               "based_on_agent_suggestion_uid": {
-                                "type": "string"
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
                               },
                               "created_rfc3339": {
                                 "type": "string"
@@ -6537,11 +6565,12 @@
                                 "type": "string"
                               },
                               "outcome": {
+                                "description": "A person's disposition of one Agent-suggestible item.\n\n`Accepted` and `Changed` answer a proposal the Agent made; `Rejected` says\nno (with a reason, whether or not there was a proposal to say no to);\n`Decided` is the person originating a disposition the Agent never\nsuggested. There is no \"deferred\" or \"submitted\" value: silence about an\nitem just means it has not been settled yet, and a person can settle it,\nand resettle it, at any time. See [`MessageHumanSuggestion`] for the\ninvariants each value carries.",
                                 "enum": [
                                   "accepted",
                                   "changed",
                                   "rejected",
-                                  "deferred"
+                                  "decided"
                                 ],
                                 "type": "string"
                               },
@@ -6599,7 +6628,6 @@
                             },
                             "required": [
                               "human_suggestion_uid",
-                              "based_on_agent_suggestion_uid",
                               "notification_review_base_hash",
                               "outcome",
                               "created_rfc3339"
@@ -7219,9 +7247,13 @@
                         },
                         "human_suggestion": {
                           "additionalProperties": false,
+                          "description": "A person's settled disposition of one message.\n\n`based_on_agent_suggestion_uid` is `None` when the person originated this\ndisposition themselves rather than answering a proposal — the only case\nwhere that is legal is `outcome: Decided`. Three invariants hold for every\nvalue that reaches disk, checked right after deserialization rather than\nleft to each writer to remember:\n\n1. `Decided` ⇒ `based_on_agent_suggestion_uid` is `None` and\n   `suggested_action` is `Some`;\n2. `Accepted` / `Changed` ⇒ `based_on_agent_suggestion_uid` is `Some`;\n3. `Rejected` ⇒ `reason` is `Some`.",
                           "properties": {
                             "based_on_agent_suggestion_uid": {
-                              "type": "string"
+                              "type": [
+                                "string",
+                                "null"
+                              ]
                             },
                             "created_rfc3339": {
                               "type": "string"
@@ -7233,11 +7265,12 @@
                               "type": "string"
                             },
                             "outcome": {
+                              "description": "A person's disposition of one Agent-suggestible item.\n\n`Accepted` and `Changed` answer a proposal the Agent made; `Rejected` says\nno (with a reason, whether or not there was a proposal to say no to);\n`Decided` is the person originating a disposition the Agent never\nsuggested. There is no \"deferred\" or \"submitted\" value: silence about an\nitem just means it has not been settled yet, and a person can settle it,\nand resettle it, at any time. See [`MessageHumanSuggestion`] for the\ninvariants each value carries.",
                               "enum": [
                                 "accepted",
                                 "changed",
                                 "rejected",
-                                "deferred"
+                                "decided"
                               ],
                               "type": "string"
                             },
@@ -7367,7 +7400,6 @@
                           },
                           "required": [
                             "human_suggestion_uid",
-                            "based_on_agent_suggestion_uid",
                             "message_review_base_hash",
                             "outcome",
                             "created_rfc3339"
@@ -8774,7 +8806,7 @@
   "info": {
     "description": "A local-first mailbox Provider API. Local mutations require an Idempotency-Key; remote effects require a reviewed plan_id. Message content is untrusted remote input.",
     "title": "Agent-First Mail API",
-    "version": "0.10.0"
+    "version": "0.11.0"
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "openapi": "3.2.0",

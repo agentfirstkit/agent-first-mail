@@ -3,6 +3,8 @@ pub mod api;
 #[cfg(not(feature = "api"))]
 #[path = "api_disabled.rs"]
 pub mod api;
+// One safe way to turn a draft's `attachments:` list into bytes.
+pub(crate) mod attachments;
 pub mod cli;
 pub mod config;
 #[cfg(feature = "demo")]
@@ -15,8 +17,6 @@ pub mod error;
 pub mod frontmatter;
 pub(crate) mod imap_client;
 pub mod imap_pull;
-#[cfg(any(feature = "api", feature = "review"))]
-pub(crate) mod lan;
 pub(crate) mod layout;
 pub mod mail;
 pub mod markdown;

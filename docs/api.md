@@ -31,7 +31,7 @@ afmail api serve --mode lan
 ```
 
 LAN mode binds all local interfaces and advertises the primary LAN address. It
-uses the same LAN route probe as `review --mode lan`. The probe targets the
+uses the same LAN route probe as `review --mode link`. The probe targets the
 IPv4 all-hosts multicast route rather than the default unicast route, so a VPN
 or overlay such as Tailscale can own the default route without displacing the
 physical LAN address afmail advertises. LAN mode uses plaintext HTTP and is

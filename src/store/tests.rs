@@ -210,14 +210,14 @@ fn message_suggestion_lifecycle_uses_canonical_metadata() {
     let agent = ws.message_agent_suggestion(message_id).ok();
     assert!(agent.is_some());
     let agent = agent.unwrap_or_else(|| unreachable!());
-    let human = ws.set_message_human_suggestions(&[MessageHumanSuggestionInput {
+    let human = ws.set_message_human_suggestion(&MessageHumanSuggestionInput {
         message_id: message_id.to_string(),
-        agent_suggestion_uid: agent.agent_suggestion_uid.clone(),
+        based_on_agent_suggestion_uid: Some(agent.agent_suggestion_uid.clone()),
         message_review_base_hash: hash.clone(),
         outcome: HumanSuggestionOutcome::Accepted,
         suggested_action: Some(MessageSuggestedAction::Spam),
         reason: None,
-    }]);
+    });
     assert!(human.is_ok(), "{human:?}");
 
     let metadata_path = root.join(format!(".afmail/messages/{message_id}.json"));
@@ -297,7 +297,7 @@ fn case_and_notification_suggestions_stay_in_existing_canonical_json() {
     let case_agent_uid = case_agent.agent_suggestion_uid.clone();
     let case_human = ws.set_case_human_suggestion(&CaseHumanSuggestionInput {
         case_ref: case_uid.to_string(),
-        agent_suggestion_uid: case_agent_uid,
+        based_on_agent_suggestion_uid: Some(case_agent_uid),
         case_review_base_hash: case_hash,
         outcome: HumanSuggestionOutcome::Accepted,
         suggested_action: Some(CaseSuggestedAction::CaseArchive),
@@ -350,7 +350,7 @@ fn case_and_notification_suggestions_stay_in_existing_canonical_json() {
     let notification_human =
         ws.set_notification_human_suggestion(&NotificationHumanSuggestionInput {
             notification_ref: notification_uid.to_string(),
-            agent_suggestion_uid: notification_agent_uid,
+            based_on_agent_suggestion_uid: Some(notification_agent_uid),
             notification_review_base_hash: notification_hash.clone(),
             outcome: HumanSuggestionOutcome::Accepted,
             suggested_action: Some(NotificationSuggestedAction::NotificationRename {
@@ -2191,6 +2191,37 @@ fn triage_list_and_view_show_related_messages() {
     assert!(view.contains("`message_reply`"));
     assert!(view.contains("Sent"));
     assert!(view.contains("Re: Subject"));
+    let _ = fs::remove_dir_all(root);
+}
+
+/// `afmail triage review` with no message ids opens up to a bound, newest
+/// first, and says how many were left out — the same shape `triage_list`
+/// already uses (`triage_list_and_view_show_related_messages` above).
+#[test]
+fn triage_review_message_ids_caps_and_reports_the_full_count() {
+    let root = temp_root("triage-review-message-ids");
+    let ws = Workspace::at(&root);
+    assert!(ws.init().is_ok());
+    for id in ["message_a", "message_b", "message_c"] {
+        write_sample_message(&root, id);
+    }
+    assert!(ws.refresh_triage_views().is_ok());
+
+    let (ids, total_count) = ws
+        .triage_review_message_ids(2)
+        .expect("triage review message ids");
+    assert_eq!(total_count, 3);
+    assert_eq!(
+        ids,
+        vec!["message_b".to_string(), "message_c".to_string()],
+        "the cap keeps the newest ids, not the first ones"
+    );
+
+    let (all_ids, all_count) = ws
+        .triage_review_message_ids(10)
+        .expect("triage review message ids without truncation");
+    assert_eq!(all_count, 3);
+    assert_eq!(all_ids.len(), 3);
     let _ = fs::remove_dir_all(root);
 }
 

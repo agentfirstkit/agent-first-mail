@@ -160,6 +160,32 @@ mod tests {
     }
 
     #[test]
+    fn embedded_skill_routes_literal_review_to_afui_before_inspection_rules() {
+        let vocabulary_index = SPEC.source.find("## Request Vocabulary");
+        let core_rules_index = SPEC.source.find("## Core Rules");
+        assert!(vocabulary_index.is_some());
+        assert!(core_rules_index.is_some());
+        assert!(
+            vocabulary_index.unwrap_or(usize::MAX) < core_rules_index.unwrap_or(0),
+            "request vocabulary must precede the general local-read rules"
+        );
+        for expected in [
+            "literal standalone English word `review`",
+            "`给我 review 这个 case` means run `afmail case review",
+            "Do not reinterpret either request as content assessment, URL",
+            "do not require, probe, or substitute a",
+            "standalone `afui` executable",
+            "emits `review_ready`",
+            "Running `--help`, locating another binary, or reading",
+            "returns `feature_disabled`",
+            "`给我看看`",
+            "as a non-interactive inspection",
+        ] {
+            assert!(SPEC.source.contains(expected), "missing {expected}");
+        }
+    }
+
+    #[test]
     fn install_status_uninstall_opencode_skill() {
         let dir = temp_skills_dir("opencode");
         let install = handle_action(SkillAction::Install(write_args(

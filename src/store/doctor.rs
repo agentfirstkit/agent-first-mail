@@ -470,54 +470,84 @@ impl Workspace {
         Ok(())
     }
 
-    /// Smoke-render the Review UI that would actually serve each surface.
+    /// Render each Review UI surface the way `review` would serve it.
     ///
-    /// A person who installed a frontend wants to hear about a broken one here,
-    /// before a review command opens a window on it. Discovery failures are
-    /// reported rather than propagated so that one unloadable frontend does not
-    /// hide every other thing doctor has to say.
+    /// Through `UiPage`, not a second renderer: the serving path assembles the
+    /// page with AFUI's escaping policy, afmail's own filters, the rendered
+    /// markup guard and the element/runtime-marker contract, and a template
+    /// that satisfies a bare MiniJinja render can still fail every one of
+    /// those. Validating through the same engine is the only way this promise
+    /// means anything.
+    ///
+    /// One render per surface covers that surface's whole tree: the page
+    /// includes the message, the editors, the workbench and the stylesheet,
+    /// which is inlined rather than linked.
+    ///
+    /// A person who installed a frontend wants to hear about a broken one
+    /// here, before a review command opens a window on it. Discovery failures
+    /// are reported rather than propagated so that one unloadable frontend
+    /// does not hide every other thing doctor has to say.
     #[cfg(feature = "review")]
-    fn check_review_ui_templates(&self, language: TemplateLanguage, issues: &mut Vec<DoctorIssue>) {
-        let mut builtin = TemplateRenderer::builtin(language);
-        let mut checked_builtin = false;
+    fn check_review_ui_templates(
+        &self,
+        _language: TemplateLanguage,
+        issues: &mut Vec<DoctorIssue>,
+    ) {
         for ui_kind in crate::review_frontend::UI_KINDS {
-            match crate::review_frontend::review_frontend(&self.root, ui_kind) {
-                Ok(Some(location)) => {
-                    let mut renderer = TemplateRenderer::frontend(&location.root, language);
-                    for key in review_ui_keys() {
-                        smoke_render(&mut renderer, key, Some(ui_kind), issues);
-                    }
+            let frontend = match crate::review_frontend::review_ui_frontend(&self.root, ui_kind) {
+                Ok(frontend) => frontend,
+                Err(error) => {
+                    issues.push(DoctorIssue::error(
+                        error.error_code,
+                        error.message,
+                        Some(ui_kind.to_string()),
+                    ));
+                    continue;
                 }
-                Ok(None) if !checked_builtin => {
-                    checked_builtin = true;
-                    for key in review_ui_keys() {
-                        smoke_render(&mut builtin, key, None, issues);
-                    }
+            };
+            let model = match doctor_review_context(ui_kind) {
+                Ok(model) => model,
+                Err(err) => {
+                    issues.push(DoctorIssue::error(
+                        "template_context_failed",
+                        err.message,
+                        Some(ui_kind.to_string()),
+                    ));
+                    continue;
                 }
-                Ok(None) => {}
-                Err(error) => issues.push(DoctorIssue::error(
-                    error.error_code,
-                    error.message,
+            };
+            if let Err(err) = crate::runner::render_review_page_from(
+                self,
+                &crate::templates::json_value_to_minijinja(&model),
+                DOCTOR_SMOKE_NONCE,
+                &frontend,
+            ) {
+                issues.push(DoctorIssue::error(
+                    err.error_code,
+                    err.message,
                     Some(ui_kind.to_string()),
-                )),
+                ));
             }
         }
     }
 
+    /// A build with the Review UI compiled out has no page to render and no
+    /// frontend to resolve, so there is nothing here to check.
     #[cfg(not(feature = "review"))]
-    fn check_review_ui_templates(&self, language: TemplateLanguage, issues: &mut Vec<DoctorIssue>) {
-        let mut builtin = TemplateRenderer::builtin(language);
-        for key in review_ui_keys() {
-            smoke_render(&mut builtin, key, None, issues);
-        }
+    fn check_review_ui_templates(
+        &self,
+        _language: TemplateLanguage,
+        _issues: &mut Vec<DoctorIssue>,
+    ) {
     }
 }
 
-fn review_ui_keys() -> impl Iterator<Item = TemplateKey> {
-    TemplateKey::ALL
-        .into_iter()
-        .filter(|key| key.is_review_ui())
-}
+/// The nonce a doctor render binds its trusted runtime to.
+///
+/// Fixed rather than generated: nothing serves this page, and a smoke render
+/// that differed run to run would be harder to compare than to trust.
+#[cfg(feature = "review")]
+const DOCTOR_SMOKE_NONCE: &str = "doctor-smoke-nonce";
 
 fn smoke_render(
     renderer: &mut TemplateRenderer<'_>,
@@ -743,6 +773,9 @@ fn doctor_collection_message_document(
     )
 }
 
+/// Only a review page shows a draft as an editable document; the Markdown
+/// draft templates render from their own source document.
+#[cfg(feature = "review")]
 fn doctor_draft_document() -> DraftRenderDocument {
     let authored = "Doctor smoke authored reply.";
     let body_markdown = format!("{authored}\n{DOCTOR_SMOKE_QUOTED}");
@@ -802,22 +835,67 @@ fn doctor_value<T: Serialize>(value: &T) -> Result<Value> {
     serde_json::to_value(value).map_err(|error| AppError::json("serialize doctor context", &error))
 }
 
-fn doctor_review_context() -> Result<Value> {
+/// One review surface's smoke document, in the shape the page renders from.
+///
+/// Every surface gets its own: the page branches on `surface_kind`, so a case
+/// document would leave the triage, notification and draft branches — and the
+/// includes only they reach — unrendered and unchecked.
+#[cfg(feature = "review")]
+fn doctor_review_context(ui_kind: &str) -> Result<Value> {
+    let notes_state = json!({
+        "document": doctor_value(&doctor_notes_document())?,
+        "base_hash": "doctor-smoke-notes-hash",
+    });
+    let draft_state = json!({
+        "document": doctor_value(&doctor_draft_document())?,
+        "base_hash": "doctor-smoke-draft-hash",
+    });
+    let contents = match ui_kind {
+        "triage_review" => json!({
+            "items": [{
+                "document": doctor_value(&triage_render_document(
+                    doctor_message_document("triage"),
+                    vec![build_message_render_document(
+                        &doctor_message(
+                            "triage",
+                            "message_doctor_related",
+                            "Doctor smoke related conversation.",
+                        ),
+                        Some("me@example.com"),
+                    )],
+                ))?,
+                "message_review_base_hash": "doctor-smoke-message-hash",
+                "stale": false,
+            }],
+        }),
+        "notification_review" => json!({
+            "collection": doctor_value(&doctor_collection_document(
+                NOTIFICATION_SCHEMA_NAME,
+                DOCTOR_SMOKE_NOTIFICATION_UID,
+                "active",
+            ))?,
+            "notification_review_base_hash": "doctor-smoke-notification-hash",
+            "stale": false,
+            "notes": notes_state,
+        }),
+        "draft_review" => json!({ "draft": draft_state }),
+        _ => json!({
+            "collection": doctor_value(&doctor_collection_document(
+                CASE_SCHEMA_NAME,
+                DOCTOR_SMOKE_CASE_UID,
+                "active",
+            ))?,
+            "case_review_base_hash": "doctor-smoke-case-hash",
+            "stale": false,
+            "notes": notes_state,
+            "drafts": [draft_state],
+        }),
+    };
     Ok(json!({
         "schema_name": "afmail_review_render_document",
         "schema_version": RENDER_DOCUMENT_SCHEMA_VERSION,
-        "surface_kind": "case_review",
-        "contents": {
-            "collection": doctor_value(&doctor_collection_document(CASE_SCHEMA_NAME, DOCTOR_SMOKE_CASE_UID, "active"))?,
-            "notes": {
-                "document": doctor_value(&doctor_notes_document())?,
-                "base_hash": "doctor-smoke-notes-hash",
-            },
-            "drafts": [{
-                "document": doctor_value(&doctor_draft_document())?,
-                "base_hash": "doctor-smoke-draft-hash",
-            }],
-        },
+        "surface_kind": ui_kind,
+        "contents": contents,
     }))
 }
 
@@ -882,22 +960,6 @@ fn minimal_template_context(key: TemplateKey) -> Result<Value> {
         TemplateKey::StatusMessage | TemplateKey::MarkdownStatusMessageLayout => {
             doctor_value(&doctor_message_document("spam"))
         }
-        TemplateKey::ReviewPage | TemplateKey::ReviewPageLayout => doctor_review_context(),
-        TemplateKey::ReviewMessage | TemplateKey::ReviewMessageLayout => Ok(json!({
-            "message_document": doctor_value(&doctor_message_document("triage"))?,
-        })),
-        TemplateKey::ReviewDraftEditor | TemplateKey::ReviewDraftEditorLayout => Ok(json!({
-            "draft_state": {
-                "document": doctor_value(&doctor_draft_document())?,
-                "base_hash": "doctor-smoke-draft-hash",
-            }
-        })),
-        TemplateKey::ReviewNotesEditor | TemplateKey::ReviewNotesEditorLayout => Ok(json!({
-            "notes_state": {
-                "document": doctor_value(&doctor_notes_document())?,
-                "base_hash": "doctor-smoke-notes-hash",
-            }
-        })),
         TemplateKey::ContactDefault => doctor_value(&ContactRenderDocument {
             schema_name: "afmail_contact_render_document".to_string(),
             schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
@@ -919,7 +981,21 @@ fn minimal_template_context(key: TemplateKey) -> Result<Value> {
             "workspace_ref": "afmail-demo/",
             "agent_prompt": "doctor-smoke-agent-prompt",
         })),
-        TemplateKey::LocaleCatalog | TemplateKey::ReviewStyle => Ok(json!({})),
+        TemplateKey::LocaleCatalog => Ok(json!({})),
+        // Rendered as part of a page rather than on their own — see
+        // `check_review_ui_templates`. Reaching one here would mean a review
+        // key had escaped that route.
+        key if key.is_review_ui() => Err(AppError::new(
+            "template_context_failed",
+            format!(
+                "{} is rendered through the review page, not on its own",
+                key.as_str()
+            ),
+        )),
+        _ => Err(AppError::new(
+            "template_context_failed",
+            "template has no doctor smoke context",
+        )),
     }
 }
 
@@ -976,7 +1052,21 @@ fn doctor_smoke_expectations(key: TemplateKey) -> &'static [&'static str] {
         | TemplateKey::ReviewPageLayout
         | TemplateKey::ReviewMessageLayout
         | TemplateKey::ReviewDraftEditorLayout
-        | TemplateKey::ReviewNotesEditorLayout => &[],
+        | TemplateKey::ReviewNotesEditorLayout
+        | TemplateKey::ReviewAgentWorkbenchLayout => &[],
+    }
+}
+
+/// What a correctly-wired render of one review surface must surface, the same
+/// way [`doctor_smoke_expectations`] does for a single template: a page that
+/// renders but reads the wrong field would otherwise pass on `is_ok()` alone.
+#[cfg(all(test, feature = "review"))]
+fn doctor_review_expectations(ui_kind: &str) -> &'static [&'static str] {
+    match ui_kind {
+        "triage_review" => &[DOCTOR_SMOKE_MESSAGE_ID],
+        "notification_review" => &[DOCTOR_SMOKE_NOTIFICATION_UID, DOCTOR_SMOKE_MESSAGE_ID],
+        "draft_review" => &["doctor-smoke.md"],
+        _ => &[DOCTOR_SMOKE_CASE_UID, DOCTOR_SMOKE_MESSAGE_ID],
     }
 }
 
@@ -994,7 +1084,10 @@ mod tests {
         // to surface actually made it into the rendered text.
         for language in TemplateLanguage::ALL {
             let mut renderer = TemplateRenderer::builtin(language);
-            for key in TemplateKey::ALL {
+            for key in TemplateKey::ALL
+                .into_iter()
+                .filter(|key| !key.is_review_ui())
+            {
                 let context = minimal_template_context(key).unwrap_or_else(|error| {
                     panic!(
                         "builtin template {}/{} context failed: {}",
@@ -1024,6 +1117,57 @@ mod tests {
                         key.as_str(),
                         sentinel,
                         rendered
+                    );
+                }
+            }
+        }
+    }
+
+    /// The Review UI's half of the same promise, through the engine that
+    /// serves it.
+    ///
+    /// The review templates left the loop above when doctor stopped rendering
+    /// them one at a time — but the reason that loop exists is that a language
+    /// pack nobody runs locally can carry a Jinja error to a release, and that
+    /// reason did not change. So every language builds a real workspace and
+    /// renders every surface the way `review` would: the page, its includes,
+    /// the inlined stylesheet, the markup guard and the element contract.
+    #[cfg(feature = "review")]
+    #[test]
+    fn every_builtin_review_surface_renders_in_every_language() {
+        for language in TemplateLanguage::ALL {
+            let temp = tempfile::tempdir().expect("a temp workspace");
+            let workspace = crate::store::Workspace::at(temp.path().to_path_buf());
+            workspace.init().expect("the workspace initializes");
+            workspace
+                .config_set("workspace.language_bcp47", &[language.as_str().to_string()])
+                .expect("the workspace language is set");
+
+            for ui_kind in crate::review_frontend::UI_KINDS {
+                let frontend = crate::review_frontend::review_ui_frontend(temp.path(), ui_kind)
+                    .expect("afmail's own Review UI resolves");
+                let model = doctor_review_context(ui_kind).expect("a smoke document");
+                let rendered = crate::runner::render_review_page_from(
+                    &workspace,
+                    &crate::templates::json_value_to_minijinja(&model),
+                    DOCTOR_SMOKE_NONCE,
+                    &frontend,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "builtin {} review page in {} failed to render: {}",
+                        ui_kind,
+                        language.as_str(),
+                        error.message
+                    )
+                });
+                for sentinel in doctor_review_expectations(ui_kind) {
+                    assert!(
+                        rendered.contains(sentinel),
+                        "builtin {} review page in {} rendered but is missing {:?}",
+                        ui_kind,
+                        language.as_str(),
+                        sentinel
                     );
                 }
             }

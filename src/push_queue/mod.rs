@@ -240,6 +240,10 @@ pub fn queue_action_steps(
             payload: PushPayload::Message(MessagePush {
                 message_id: message_id.clone(),
                 action,
+                message_action_snapshot: preserved.and_then(|item| {
+                    item.message()
+                        .and_then(|message| message.message_action_snapshot.clone())
+                }),
             }),
             planned_outbound: None,
             planned_outbound_message: None,
@@ -961,14 +965,30 @@ fn plan_item(root: &Path, config: &MailConfig, item: &mut PushItem) -> Result<bo
     }
     match &item.payload {
         PushPayload::Message(message) => {
+            let message = message.clone();
             let workspace = crate::store::Workspace::at(root);
             let current_push_path = push_path(root, &item.push_id);
-            item.planned_message_action = workspace.plan_message_push(
-                &message.message_id,
-                message.action,
-                Some(&current_push_path),
-                config,
-            )?;
+            item.planned_message_action = if item.has_started_effects() {
+                match message.message_action_snapshot.clone() {
+                    Some(snapshot) => {
+                        validate_message_action_snapshot(item, &message, &snapshot)?;
+                        Some(snapshot)
+                    }
+                    None => workspace.plan_message_push(
+                        &message.message_id,
+                        message.action,
+                        Some(&current_push_path),
+                        config,
+                    )?,
+                }
+            } else {
+                workspace.plan_message_push(
+                    &message.message_id,
+                    message.action,
+                    Some(&current_push_path),
+                    config,
+                )?
+            };
             if item.planned_message_action.is_some() {
                 reset_progress_if_plan_changed(root, config, item)?;
                 if item.message_action().is_some_and(|action| {
@@ -987,6 +1007,23 @@ fn plan_item(root: &Path, config: &MailConfig, item: &mut PushItem) -> Result<bo
                     }
                 }
                 Ok(true)
+            } else if item.has_started_effects() {
+                Err(AppError::new(
+                    "push_remote_outcome_unknown",
+                    format!(
+                        "message push {} has started but its original action plan is unavailable",
+                        item.push_id
+                    ),
+                )
+                .with_hint(
+                    "Inspect the push item and remote mailbox; this item cannot be reconciled from current mailbox state alone.",
+                )
+                .with_details(json!({
+                    "push_id": item.push_id.as_str(),
+                    "message_id": message.message_id.as_str(),
+                    "action": message.action.kind(),
+                    "remote_calls_started": true,
+                })))
             } else {
                 Ok(false)
             }
@@ -1051,6 +1088,43 @@ fn plan_item(root: &Path, config: &MailConfig, item: &mut PushItem) -> Result<bo
             Ok(true)
         }
     }
+}
+
+fn validate_message_action_snapshot(
+    item: &PushItem,
+    message: &MessagePush,
+    snapshot: &crate::types::MessageActionPush,
+) -> Result<()> {
+    let message_ids_match = snapshot.message_ids.as_slice() == [message.message_id.as_str()];
+    let locations_match = snapshot
+        .locations
+        .iter()
+        .all(|location| location.message_id == message.message_id);
+    if snapshot.action == message.action
+        && message_ids_match
+        && locations_match
+        && !snapshot.locations.is_empty()
+        && !snapshot.steps.is_empty()
+    {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "push_item_invalid",
+        format!(
+            "message action snapshot does not match queued intent for {}",
+            item.push_id
+        ),
+    )
+    .with_details(json!({
+        "push_id": item.push_id.as_str(),
+        "message_id": message.message_id.as_str(),
+        "action": message.action.kind(),
+        "snapshot_action": snapshot.action.kind(),
+        "snapshot_message_ids": snapshot.message_ids,
+        "snapshot_location_count": snapshot.locations.len(),
+        "snapshot_step_count": snapshot.steps.len(),
+        "remote_calls_started": item.has_started_effects(),
+    })))
 }
 
 fn hydrate_audit_pending_plan(item: &mut PushItem) -> Result<()> {

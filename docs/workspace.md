@@ -357,7 +357,7 @@ escaping, ordering, visibility, and markup.
 
 Workspace Review templates can use MiniJinja, HTML, and CSS but cannot provide
 JavaScript. afmail rejects JavaScript-capable Review overrides and supplies its
-own behavior-only autosave/submit runtime. See [Markdown and Review
+own behavior-only autosave/settle runtime. See [Markdown and Review
 Templates](templates.md) for all paths, data fields, filters, language packs,
 and Review behavior hooks.
 

@@ -19,7 +19,7 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{SmtpTransport, Transport};
 use sanitize_filename::{Options as SanitizeFilenameOptions, sanitize_with_options};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn prepare_outbound(
     root: &Path,
@@ -143,12 +143,19 @@ fn sent_message_id_conflict(message_id: &str) -> AppError {
     }))
 }
 
-pub fn send_raw_message(
+/// Everything a send needs before anything can leave the machine.
+///
+/// The relay configuration, the transport and the envelope are all built from
+/// local state, and every way they can fail is a mistake that delivered
+/// nothing. Doing it here lets the caller find those out while the step is
+/// still plainly retryable, instead of after it has written down that this
+/// step's outcome is unknown — which is a state a queue cannot recover from on
+/// its own.
+pub fn prepare_send(
     config: &MailConfig,
     envelope_from: &str,
     envelope_to: &[String],
-    raw: &[u8],
-) -> Result<()> {
+) -> Result<(lettre::SmtpTransport, Envelope)> {
     let smtp = config.require_smtp()?;
     let sender = build_transport(&smtp)?;
     let from = envelope_from
@@ -165,6 +172,18 @@ pub fn send_raw_message(
     }
     let envelope = Envelope::new(Some(from), to)
         .map_err(|e| AppError::new("smtp_send_failed", e.to_string()))?;
+    Ok((sender, envelope))
+}
+
+pub fn send_raw_message(
+    config: &MailConfig,
+    envelope_from: &str,
+    envelope_to: &[String],
+    raw: &[u8],
+) -> Result<()> {
+    let (sender, envelope) = prepare_send(config, envelope_from, envelope_to)?;
+    // From here on the outcome genuinely can be unknown: the connection, the
+    // handshake, the envelope exchange and DATA all happen inside this call.
     sender
         .send_raw(&envelope, raw)
         .map_err(|e| AppError::new("smtp_send_failed", e.to_string()))?;
@@ -273,14 +292,9 @@ fn build_message(
         .boundary(format!("afmail-{}-mixed", stable_headers.message_id))
         .singlepart(SinglePart::plain(body.to_string()));
     for attachment in attachments {
-        let path = draft_attachment_path(case_path, attachment)?;
-        let data = fs::read(&path).map_err(|e| AppError::io("read draft attachment", &e))?;
-        let raw_filename = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(ToString::to_string)
-            .ok_or_else(|| AppError::new("draft_invalid", "invalid attachment file name"))?;
-        let filename = safe_outbound_attachment_filename(&raw_filename);
+        let open = crate::attachments::open_draft_attachment(case_path, attachment)?;
+        let data = crate::attachments::read_attachment(&open)?;
+        let filename = safe_outbound_attachment_filename(&open.filename);
         let content_type_str = mime_guess::from_path(&filename)
             .first_raw()
             .unwrap_or("application/octet-stream");
@@ -306,35 +320,6 @@ fn identity_draft_error(err: AppError) -> AppError {
         "unknown_identity" | "config_invalid" => AppError::new("draft_invalid", err.message),
         _ => err,
     }
-}
-
-fn draft_attachment_path(case_path: &Path, attachment: &str) -> Result<PathBuf> {
-    let path = Path::new(attachment);
-    if attachment.trim().is_empty() || path.is_absolute() {
-        return Err(AppError::new(
-            "draft_invalid",
-            format!("invalid draft attachment path: {attachment}"),
-        ));
-    }
-    let mut safe = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => safe.push(part),
-            _ => {
-                return Err(AppError::new(
-                    "draft_invalid",
-                    format!("invalid draft attachment path: {attachment}"),
-                ));
-            }
-        }
-    }
-    if safe.as_os_str().is_empty() {
-        return Err(AppError::new(
-            "draft_invalid",
-            format!("invalid draft attachment path: {attachment}"),
-        ));
-    }
-    Ok(case_path.join(safe))
 }
 
 fn safe_outbound_attachment_filename(filename: &str) -> String {
@@ -545,6 +530,43 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         std::env::temp_dir().join(format!("afmail-smtp-{name}-{}-{stamp}", std::process::id()))
+    }
+
+    #[test]
+    fn everything_that_cannot_have_sent_mail_fails_before_the_send() {
+        // The queue writes "outcome unknown" immediately before the send and
+        // cannot recover from it on its own, so a failure that plainly
+        // delivered nothing has to surface earlier than that. These are all
+        // local construction, and `prepare_send` is where they now happen.
+        let mut config = MailConfig::default();
+        config.smtp.host = Some("smtp.example.com".to_string());
+        config.smtp.port = 587;
+        config.smtp.starttls = true;
+
+        // A recipient the envelope will not accept.
+        assert!(
+            prepare_send(&config, "me@example.com", &["not an address".to_string()]).is_err(),
+            "an unusable recipient must fail before anything is sent"
+        );
+        // A sender the envelope will not accept.
+        assert!(prepare_send(&config, "@", &["you@example.com".to_string()]).is_err());
+        // No relay host at all.
+        let unconfigured = MailConfig::default();
+        assert!(
+            prepare_send(
+                &unconfigured,
+                "me@example.com",
+                &["you@example.com".to_string()]
+            )
+            .is_err()
+        );
+
+        // A usable configuration builds a transport and an envelope without
+        // opening a connection — this must not touch the network.
+        assert!(
+            prepare_send(&config, "me@example.com", &["you@example.com".to_string()]).is_ok(),
+            "preparation must not require the server to be reachable"
+        );
     }
 
     #[test]

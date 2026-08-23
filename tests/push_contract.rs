@@ -126,6 +126,41 @@ fn run_confirmed_push(cwd: &std::path::Path) -> (i32, String) {
     run(cwd, &["push", "--confirm", plan_id.as_str()])
 }
 
+fn force_first_move_step_remote_outcome_unknown(root: &std::path::Path) {
+    let (plan_status, plan_stdout) = run(root, &["push"]);
+    assert_eq!(plan_status, 0, "{plan_stdout}");
+    let plan = parse_one(&plan_stdout);
+    assert_eq!(plan["count"], 1, "{plan}");
+    let planned_item = &plan["items"][0];
+
+    let queued = parse_one(&run(root, &["push", "list"]).1);
+    assert_eq!(queued["count"], 1, "{queued}");
+    let push_id = queued["items"][0]["push_id"].as_str().unwrap_or_default();
+    let push_path = root.join(".afmail/push").join(format!("{push_id}.json"));
+    let mut push_item = read_json(&push_path);
+    push_item["message_action_snapshot"] = json!({
+        "action": planned_item["action"].clone(),
+        "message_ids": planned_item["message_ids"].clone(),
+        "locations": planned_item["locations"].clone(),
+        "steps": planned_item["steps"].clone()
+    });
+    push_item["attempt_count"] = json!(2);
+    push_item["step_states"] = json!([{
+        "index": 0,
+        "label": "move_to_mailbox_id_archive",
+        "status": "remote_outcome_unknown",
+        "started_rfc3339": "2026-07-11T00:00:00Z",
+        "result_summary": "remote outcome unknown",
+        "error_code": "imap_uid_missing",
+        "error": "moved message uid was not found",
+        "retryable": false
+    }]);
+    push_item["last_error"] = json!(
+        "push_remote_outcome_unknown: remote outcome is unknown for push step move_to_mailbox_id_archive; refusing to retry automatically"
+    );
+    write_json(&push_path, &push_item);
+}
+
 fn confirmed_push_items(value: &Value) -> &[Value] {
     assert_eq!(value["confirmed"], true, "{value}");
     value["succeeded_items"]
@@ -1028,6 +1063,167 @@ fn push_remote_outcome_unknown_without_succeeded_steps_is_partial() {
         queued["items"][0]["step_states"][0]["status"],
         "remote_outcome_unknown"
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn push_move_target_uid_unknown_recovers_pulled_target_without_replaying_move() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("push-move-target-uid-recovery");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_message(&root, "message_move_recovery", 42, None);
+    write_triage(&root, "message_move_recovery", "archive after reply");
+    create_notification(
+        &root,
+        "completed",
+        "message_move_recovery",
+        "completed request",
+        "request completed",
+    );
+    force_first_move_step_remote_outcome_unknown(&root);
+    update_message_json(&root, "message_move_recovery", |message| {
+        if let Some(locations) = message["remote"]["locations"].as_array_mut() {
+            locations[0]["missing_rfc3339"] = json!("2026-07-11T00:01:00Z");
+            locations.push(json!({
+                "mailbox_name": "Archive",
+                "mailbox_id": "archive",
+                "uid_validity": 55,
+                "uid": 193,
+                "flags": ["\\Seen"],
+                "observed_rfc3339": "2026-07-11T00:01:00Z"
+            }));
+        }
+    });
+
+    let server = start_imap_server(3);
+    assert!(server.is_some());
+    let server = match server {
+        Some(server) => server,
+        None => return,
+    };
+    configure_imap_without_smtp(&root, server.addr.port());
+
+    let (status, stdout) = run_confirmed_push(&root);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(confirmed_push_items(&value).len(), 1, "{value}");
+    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
+
+    let message = read_json(&root.join("messages/message_move_recovery.json"));
+    let locations = message["remote"]["locations"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    assert_eq!(locations.len(), 1, "{message}");
+    assert_eq!(locations[0]["mailbox_name"], "Archive");
+    assert_eq!(locations[0]["uid_validity"], 55);
+    assert_eq!(locations[0]["uid"], 193);
+
+    assert!(server.handle.join().is_ok());
+    let moved = server
+        .moved
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    assert!(moved.is_empty(), "recovery replayed UID MOVE: {moved:?}");
+    let commands = server
+        .commands
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    assert!(
+        !commands.iter().any(|command| command == "MOVE"),
+        "recovery replayed UID MOVE: {commands:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn push_move_target_uid_unknown_waits_until_every_planned_source_is_reconciled() {
+    let root = temp_root("push-move-source-still-active");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let mut config = read_json(&root.join(".afmail/config.json"));
+    let archive_rule = json!({
+        "steps": [{"move_to_mailbox_id": "archive"}]
+    });
+    config["mailboxes"]["inbox"] = json!({
+        "resolve": [{"mailbox_name": "INBOX"}]
+    });
+    config["mailboxes"]["archive"] = json!({
+        "resolve": [{"mailbox_name": "Archive"}]
+    });
+    config["mailboxes"]["secondary"] = json!({
+        "resolve": [{"mailbox_name": "Secondary"}]
+    });
+    config["actions"]["message"]["notification"]["by_source_mailbox_id"]["inbox"] =
+        archive_rule.clone();
+    config["actions"]["message"]["notification"]["by_source_mailbox_id"]["secondary"] =
+        archive_rule;
+    write_json(&root.join(".afmail/config.json"), &config);
+    write_message(&root, "message_move_partial", 42, None);
+    update_message_json(&root, "message_move_partial", |message| {
+        if let Some(locations) = message["remote"]["locations"].as_array_mut() {
+            locations.push(json!({
+                "mailbox_name": "Secondary",
+                "mailbox_id": "secondary",
+                "uid_validity": 45,
+                "uid": 88,
+                "flags": ["\\Seen"],
+                "observed_rfc3339": "2026-07-11T00:00:00Z"
+            }));
+        }
+    });
+    write_triage(&root, "message_move_partial", "archive after reply");
+    create_notification(
+        &root,
+        "completed-partial",
+        "message_move_partial",
+        "completed request",
+        "request completed",
+    );
+    force_first_move_step_remote_outcome_unknown(&root);
+    update_message_json(&root, "message_move_partial", |message| {
+        if let Some(locations) = message["remote"]["locations"].as_array_mut() {
+            locations[0]["missing_rfc3339"] = json!("2026-07-11T00:01:00Z");
+            locations.push(json!({
+                "mailbox_name": "Archive",
+                "mailbox_id": "archive",
+                "uid_validity": 55,
+                "uid": 194,
+                "flags": ["\\Seen"],
+                "observed_rfc3339": "2026-07-11T00:01:00Z"
+            }));
+        }
+    });
+
+    let (status, stdout) = run_confirmed_push(&root);
+    assert_eq!(status, 3, "{stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["code"], "partial", "{result}");
+    assert_eq!(result["partially_applied_count"], 1, "{result}");
+    assert_eq!(
+        result["failures"][0]["error"]["code"], "push_remote_outcome_unknown",
+        "{result}"
+    );
+    let queued = parse_one(&run(&root, &["push", "list"]).1);
+    assert_eq!(queued["count"], 1, "{queued}");
+    assert_eq!(
+        queued["items"][0]["step_states"][0]["status"], "remote_outcome_unknown",
+        "{queued}"
+    );
+    let message = read_json(&root.join("messages/message_move_partial.json"));
+    let locations = message["remote"]["locations"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    assert_eq!(locations.len(), 3, "{message}");
+    assert!(locations.iter().any(|location| {
+        location["mailbox_name"] == "Secondary" && location.get("missing_rfc3339").is_none()
+    }));
     let _ = fs::remove_dir_all(root);
 }
 

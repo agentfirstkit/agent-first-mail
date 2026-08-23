@@ -1,3 +1,5 @@
+#[cfg(feature = "review")]
+use agent_first_ui::test_support::BlockingRuntimeClient;
 use fs4::FileExt;
 use serde_json::{Value, json};
 use std::fs;
@@ -25,9 +27,13 @@ enum TestImapMessages {
     Shared(Vec<(u64, Vec<u8>)>),
 }
 
+/// A stale `agent_suggestion` used to refuse to open the whole review. The
+/// new per-item model marks it stale in place instead — the case still
+/// opens, the page says so, and closing without settling it is a normal,
+/// successful end (the case simply stays unsettled for a later review).
 #[test]
 #[cfg(feature = "review")]
-fn case_review_rejects_a_stale_persisted_suggestion_before_opening_a_session() {
+fn case_review_marks_a_stale_persisted_suggestion_in_place_rather_than_refusing_to_open() {
     let root = temp_root("case-review-stale");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
@@ -78,14 +84,338 @@ fn case_review_rejects_a_stale_persisted_suggestion_before_opening_a_session() {
         ],
     );
     assert_eq!(status, 0, "{stdout}");
-    let (status, stdout) = run(&root, &["case", "review", case_uid, "--mode", "lan"]);
-    assert_eq!(status, 1, "{stdout}");
-    assert_eq!(parse_one(&stdout)["code"], "review_stale");
+    let afui_config_dir = afui_attention_config(&root, 900, 300);
+    let _command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut child = Command::new(bin())
+        .current_dir(&root)
+        .env("AFUI_CONFIG_DIR", &afui_config_dir)
+        .args(["case", "review", case_uid, "--mode", "link"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn case review");
+    let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
+    let mut progress_line = String::new();
+    assert!(child_stdout.read_line(&mut progress_line).is_ok());
+    let progress: Value = serde_json::from_str(progress_line.trim()).unwrap_or(Value::Null);
+    assert_eq!(progress["progress"]["phase"], "review_ready");
+    let review_url = progress["progress"]["review_url"]
+        .as_str()
+        .unwrap_or_default();
+    let (authority, _shell_root, session_root) = review_link_target(review_url).unwrap_or_default();
+
+    let get_response = review_http_request(
+        &authority,
+        &format!("GET {session_root} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"),
+    );
+    assert!(get_response.contains("200 OK"), "{get_response}");
+    // The stale case still opens and still shows the standing suggestion —
+    // it is marked, not hidden or blocked.
+    assert!(
+        get_response.contains("This case is complete"),
+        "{get_response}"
+    );
+    assert!(
+        get_response.to_lowercase().contains("out of date")
+            || get_response.contains("suggestion_stale_notice"),
+        "the page must mark the stale suggestion in place: {get_response}"
+    );
+
+    let end_response = review_http_request(
+        &authority,
+        &format!(
+            "POST {session_root}__afui/end HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(end_response.contains("204 No Content"), "{end_response}");
+
+    let mut terminal_line = String::new();
+    assert!(child_stdout.read_to_string(&mut terminal_line).is_ok());
+    let status = child.wait();
+    assert!(
+        status.is_ok_and(|status| status.success()),
+        "closing without settling a stale item is not a failure"
+    );
+    let terminal: Value = serde_json::from_str(terminal_line.trim()).unwrap_or(Value::Null);
+    assert_eq!(terminal["kind"], "result");
+    assert_eq!(terminal["result"]["ended"], "closed");
+    // Nobody settled the stale item: it is unsettled, not an error.
+    assert_eq!(terminal["result"]["settled_count"], 0);
+    assert_eq!(terminal["result"]["unsettled_count"], 1);
+    assert_eq!(terminal["result"]["unsettled"][0]["ref"], case_uid);
 }
 
 #[test]
 #[cfg(feature = "review")]
-fn triage_review_rejects_request_ids_and_stale_suggestions_before_opening_a_session() {
+fn case_review_follows_dark_mode_and_serves_only_its_raster_images() {
+    let root = temp_root("case-review-image");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let message_id = "message_review_image";
+    write_image_message(&root, message_id, 73);
+    write_triage(&root, message_id, "image review fixture");
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "create",
+            "--name",
+            "Image review",
+            "--group",
+            "support",
+            "--message",
+            message_id,
+            "--reason",
+            "test Review image rendering",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let case_uid = parse_one(&stdout)["case_uid"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "draft",
+            "reply",
+            &case_uid,
+            message_id,
+            "--body",
+            "Thanks for the screenshot. Here is the next step.",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let draft_name = parse_one(&stdout)["draft_name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!draft_name.is_empty(), "{stdout}");
+
+    let afui_config_dir = afui_attention_config(&root, 900, 300);
+    let _command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut child = Command::new(bin())
+        .current_dir(&root)
+        .env("AFUI_CONFIG_DIR", &afui_config_dir)
+        .args(["case", "review", &case_uid, "--mode", "link"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn image review");
+    let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
+    let mut progress_line = String::new();
+    assert!(child_stdout.read_line(&mut progress_line).is_ok());
+    let progress: Value = serde_json::from_str(progress_line.trim()).unwrap_or(Value::Null);
+    assert_eq!(progress["progress"]["phase"], "review_ready");
+    let review_url = progress["progress"]["review_url"]
+        .as_str()
+        .unwrap_or_default();
+    let (authority, _shell_root, session_root) = review_link_target(review_url).unwrap_or_default();
+
+    let page = review_http_request(
+        &authority,
+        &format!("GET {session_root} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"),
+    );
+    assert!(page.contains("200 OK"), "{page}");
+    // Both themes come from the stylesheet AFUI serves every session, so what
+    // the review page carries is the link — and the route behind it answers
+    // under this session's own credential like every other reserved path.
+    assert!(
+        page.contains("<link rel=\"stylesheet\" href=\"__afui/base.css\">"),
+        "{page}"
+    );
+    let baseline = review_http_request(
+        &authority,
+        &format!(
+            "GET {session_root}__afui/base.css HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(baseline.contains("200 OK"), "{baseline}");
+    assert!(
+        baseline.contains("@media (prefers-color-scheme: dark)"),
+        "{baseline}"
+    );
+    assert!(
+        page.contains("<details class=\"message-card inbound\" open>"),
+        "{page}"
+    );
+    assert!(page.contains("class=\"attachment-preview\""), "{page}");
+    assert!(
+        page.contains(&format!("data-afmail-message-id=\"{message_id}\"")),
+        "{page}"
+    );
+    assert!(page.contains("data-afmail-part-id=\"2\""), "{page}");
+    assert!(
+        !page.contains(&format!("attachment/{message_id}/2")),
+        "Review must not invent a private attachment URL: {page}"
+    );
+    let conversation = page
+        .find("id=\"case-conversation-heading\"")
+        .unwrap_or(usize::MAX);
+    let drafts = page
+        .find("id=\"case-drafts-heading\"")
+        .unwrap_or(usize::MAX);
+    let suggestion = page
+        .find("<section class=\"panel suggestion agent-workbench\"")
+        .unwrap_or(usize::MAX);
+    assert!(conversation < drafts && drafts < suggestion, "{page}");
+    assert_eq!(
+        page.matches("<section class=\"panel suggestion agent-workbench\"")
+            .count(),
+        1,
+        "the suggestion and conversation must share one Agent card: {page}"
+    );
+    let agent_history = page.find("data-afmail-agent-history").unwrap_or(usize::MAX);
+    let agent_waiting = page.find("data-afmail-channel-turn").unwrap_or(usize::MAX);
+    let agent_composer = page.find("data-afmail-agent-form").unwrap_or(usize::MAX);
+    assert!(
+        agent_history < agent_waiting && agent_waiting < agent_composer,
+        "the typing state must follow the conversation and precede its composer: {page}"
+    );
+    assert!(page.contains("@keyframes agent-typing-dot"), "{page}");
+    assert!(
+        page.contains("channelTurn.hidden = state === 'live'"),
+        "an idle live channel should not occupy chat space: {page}"
+    );
+    assert!(
+        !page.contains("Settle items as you go."),
+        "the page should not explain the absence of a page-wide settlement: {page}"
+    );
+    assert!(
+        page.contains("<details class=\"draft-card\" open>"),
+        "{page}"
+    );
+    assert!(page.contains("<summary class=\"draft-header\">"), "{page}");
+    assert!(page.contains("class=\"draft-state\">Local draft"), "{page}");
+    assert!(
+        page.contains("<details class=\"draft-recipient-details\">"),
+        "empty Cc and Bcc fields should be collapsed: {page}"
+    );
+    assert_eq!(
+        page.matches("<details class=\"draft-recipient-details\">")
+            .count(),
+        2,
+        "Cc and Bcc should each have their own disclosure: {page}"
+    );
+    assert!(page.contains("<summary>Cc</summary>"), "{page}");
+    assert!(page.contains("<summary>Bcc</summary>"), "{page}");
+    assert!(!page.contains("<summary>Cc · Bcc</summary>"), "{page}");
+    assert!(
+        page.contains(".draft-recipient-details > input { margin-top: .8rem; }"),
+        "{page}"
+    );
+    assert!(
+        !page.contains("<div class=\"save-row\"><span class=\"muted\">Local draft"),
+        "the card footer must not repeat the draft state: {page}"
+    );
+    assert!(
+        page.contains("class=\"save-state draft-save-state\""),
+        "autosave feedback must remain available after the redundant label is removed: {page}"
+    );
+    assert!(
+        page.contains("Thanks for the screenshot. Here is the next step."),
+        "{page}"
+    );
+    assert!(!page.contains("data-afmail-draft-choice"), "{page}");
+    assert!(!page.contains("role=\"tablist\""), "{page}");
+    let draft_summary_start = page
+        .find("<summary class=\"draft-header\">")
+        .unwrap_or(usize::MAX);
+    let draft_summary_tail = page.get(draft_summary_start..).unwrap_or_default();
+    let draft_summary_end = draft_summary_tail.find("</summary>").unwrap_or_default();
+    let draft_summary = draft_summary_tail
+        .get(..draft_summary_end)
+        .unwrap_or_default();
+    assert!(
+        !draft_summary.contains(&draft_name),
+        "an internal draft filename must not be the human-facing card label: {draft_summary}"
+    );
+    assert!(
+        page.contains("<details class=\"draft-card notes-card\""),
+        "notes must use the same content-card grammar as the draft: {page}"
+    );
+    assert!(page.contains("form.reportValidity()"), "{page}");
+
+    let runtime = review_runtime_client(&authority, &session_root);
+    assert!(runtime.is_some(), "could not open Review runtime");
+    let mut runtime = runtime.expect("checked Review runtime client");
+    let image_result = review_runtime_call(
+        &mut runtime,
+        json!({
+            "type": "load_image",
+            "message_id": message_id,
+            "part_id": "2",
+        }),
+    )
+    .unwrap_or(Value::Null);
+    assert_eq!(image_result["type"], "image", "{image_result}");
+    assert_eq!(image_result["blob"]["media_type"], "image/jpeg");
+    let blob_url = image_result["blob"]["blob_url"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(blob_url.starts_with("__afui/blobs/"), "{image_result}");
+    let image = review_http_request(
+        &authority,
+        &format!(
+            "GET {session_root}{blob_url} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(image.contains("200 OK"), "{image}");
+    assert!(image.contains("content-type: image/jpeg"), "{image}");
+    assert!(image.contains("cache-control: no-store"), "{image}");
+    assert!(image.contains("x-content-type-options: nosniff"), "{image}");
+    assert!(image.ends_with("image-bytes"), "{image:?}");
+    assert!(
+        !root
+            .join(format!(".afmail/messages/{message_id}.files"))
+            .exists(),
+        "Review image rendering must remain read-only"
+    );
+
+    let outside = review_runtime_call(
+        &mut runtime,
+        json!({
+            "type": "load_image",
+            "message_id": "message_not_in_review",
+            "part_id": "2",
+        }),
+    )
+    .expect_err("an image outside this Review must be refused");
+    assert_eq!(outside["code"], "review_image_not_found", "{outside}");
+
+    let obsolete_attachment_route = review_http_request(
+        &authority,
+        &format!(
+            "GET {session_root}attachment/{message_id}/2 HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(
+        obsolete_attachment_route.contains("404 Not Found"),
+        "afmail must not retain a private attachment protocol: {obsolete_attachment_route}"
+    );
+
+    let end_response = review_http_request(
+        &authority,
+        &format!(
+            "POST {session_root}__afui/end HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(end_response.contains("204 No Content"), "{end_response}");
+    let mut terminal_line = String::new();
+    assert!(child_stdout.read_to_string(&mut terminal_line).is_ok());
+    assert!(child.wait().is_ok_and(|status| status.success()));
+    let terminal: Value = serde_json::from_str(terminal_line.trim()).unwrap_or(Value::Null);
+    assert_eq!(terminal["result"]["ended"], "closed");
+}
+
+#[test]
+#[cfg(feature = "review")]
+fn triage_review_rejects_request_ids_but_no_longer_refuses_a_stale_suggestion() {
     let root = temp_root("triage-review-stale");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
@@ -135,7 +465,7 @@ fn triage_review_rejects_request_ids_and_stale_suggestions_before_opening_a_sess
             "review",
             message_id,
             "--mode",
-            "lan",
+            "link",
             "--request-id",
             "review-request-id-is-not-supported",
         ],
@@ -148,23 +478,64 @@ fn triage_review_rejects_request_ids_and_stale_suggestions_before_opening_a_sess
     });
     let message_path = root.join(format!("messages/{message_id}.json"));
     let before = fs::read(&message_path).unwrap_or_default();
-    let (status, stdout, stderr) =
-        run_allow_stderr(&root, &["triage", "review", message_id, "--mode", "lan"]);
-    assert_eq!(status, 1, "stdout={stdout} stderr={stderr}");
-    assert!(stdout.is_empty() || stderr.is_empty());
-    let terminal = if stdout.is_empty() { &stderr } else { &stdout };
-    assert_eq!(terminal.lines().count(), 1, "{terminal}");
-    let error: Value = serde_json::from_str(terminal.trim()).expect("stale review must emit JSON");
-    assert!(agent_first_data::validate_protocol_event(&error, false).is_ok());
-    assert_eq!(error["kind"], "error");
-    assert_eq!(error["error"]["code"], "review_stale");
+
+    // A stale `agent_suggestion` used to refuse to open the review at all.
+    // Now it opens — the item is marked stale in place — and closing
+    // without settling it leaves the message file exactly as it was.
+    let afui_config_dir = afui_attention_config(&root, 900, 300);
+    let _command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut child = Command::new(bin())
+        .current_dir(&root)
+        .env("AFUI_CONFIG_DIR", &afui_config_dir)
+        .args(["triage", "review", message_id, "--mode", "link"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn triage review");
+    let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
+    let mut progress_line = String::new();
+    assert!(child_stdout.read_line(&mut progress_line).is_ok());
+    let progress: Value = serde_json::from_str(progress_line.trim()).unwrap_or(Value::Null);
+    assert_eq!(progress["progress"]["phase"], "review_ready");
+    let review_url = progress["progress"]["review_url"]
+        .as_str()
+        .unwrap_or_default();
+    let (authority, _shell_root, session_root) = review_link_target(review_url).unwrap_or_default();
+
+    let get_response = review_http_request(
+        &authority,
+        &format!("GET {session_root} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"),
+    );
+    assert!(get_response.contains("200 OK"), "{get_response}");
+    assert!(
+        get_response.to_lowercase().contains("out of date"),
+        "the drifted agent_suggestion must be marked stale in place: {get_response}"
+    );
+
+    let end_response = review_http_request(
+        &authority,
+        &format!(
+            "POST {session_root}__afui/end HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(end_response.contains("204 No Content"), "{end_response}");
+
+    let mut terminal_line = String::new();
+    assert!(child_stdout.read_to_string(&mut terminal_line).is_ok());
+    let status = child.wait();
+    assert!(status.is_ok_and(|status| status.success()));
+    let terminal: Value = serde_json::from_str(terminal_line.trim()).unwrap_or(Value::Null);
+    assert_eq!(terminal["result"]["ended"], "closed");
+    assert_eq!(terminal["result"]["unsettled_count"], 1);
     assert_eq!(fs::read(&message_path).unwrap_or_default(), before);
 }
 
 #[test]
 #[cfg(feature = "review")]
-fn triage_review_lan_outputs_a_reachable_url_and_self_describing_submit_result() {
-    let root = temp_root("triage-review-lan");
+fn triage_review_link_outputs_a_reachable_url_and_settles_one_item_without_ending_the_session() {
+    let root = temp_root("triage-review-link");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
     let message_id = "message_review_lan";
@@ -192,18 +563,20 @@ fn triage_review_lan_outputs_a_reachable_url_and_self_describing_submit_result()
         ],
     );
     assert_eq!(status, 0, "{stdout}");
+    let afui_config_dir = afui_attention_config(&root, 37, 5);
 
     let _command_guard = COMMAND_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let child = Command::new(bin())
         .current_dir(&root)
+        .env("AFUI_CONFIG_DIR", &afui_config_dir)
         .args([
             "triage",
             "review",
             message_id,
             "--mode",
-            "lan",
+            "link",
             "--output-to",
             "stdout",
         ])
@@ -227,19 +600,18 @@ fn triage_review_lan_outputs_a_reachable_url_and_self_describing_submit_result()
     assert!(agent_first_data::validate_protocol_event(&progress, false).is_ok());
     assert_eq!(progress["kind"], "progress");
     assert_eq!(progress["progress"]["phase"], "review_ready");
-    assert_eq!(progress["progress"]["expires_in_s"], 900);
+    assert_eq!(progress["progress"]["idle_timeout_s"], 37);
+    assert_eq!(progress["progress"]["grace_period_s"], 5);
     let review_url = progress["progress"]["review_url"]
         .as_str()
         .unwrap_or_default();
-    let address_and_path = review_url.strip_prefix("http://").unwrap_or_default();
-    let (authority, session_tail) = address_and_path.split_once('/').unwrap_or_default();
+    let (authority, shell_root, session_root) = review_link_target(review_url).unwrap_or_default();
     // The credential lives in the URL path and the trailing slash is load
     // bearing: every route the page posts to is resolved relative to it.
-    let session_root = format!("/{session_tail}");
     assert!(!authority.is_empty(), "{progress}");
     assert!(review_url.ends_with('/'), "{progress}");
     assert!(
-        session_root
+        shell_root
             .trim_matches('/')
             .chars()
             .all(|c| c.is_ascii_hexdigit()),
@@ -247,47 +619,79 @@ fn triage_review_lan_outputs_a_reachable_url_and_self_describing_submit_result()
     );
 
     let get_response = review_http_request(
-        authority,
+        &authority,
         &format!("GET {session_root} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"),
     );
     assert!(get_response.contains("200 OK"), "{get_response}");
     assert!(get_response.contains("Review this message from another LAN device"));
-    // The page's own script is the only one the session authorizes.
+    // The page's own script is the only one the session authorizes, and it
+    // starts from a policy that permits nothing. Two separate facts rather
+    // than one substring: which order AFUI writes the directives in is not
+    // something this test has an opinion about.
     assert!(
-        get_response.contains("content-security-policy: default-src 'none'; script-src 'nonce-"),
+        get_response.contains("content-security-policy: default-src 'none';"),
         "{get_response}"
     );
-
-    // A name that resolves to this socket still arrives with its own Host, and
-    // the session refuses it rather than rendering private mail for it.
-    let rebound = review_http_request(
-        authority,
-        &format!(
-            "GET {session_root} HTTP/1.1\r\nHost: rebound.example\r\nConnection: close\r\n\r\n"
-        ),
+    assert!(
+        get_response.contains("script-src 'nonce-"),
+        "{get_response}"
     );
-    assert!(!rebound.contains("200 OK"), "{rebound}");
 
     // An unknown credential is not a session, and saying so would confirm one
     // is hosted here.
     let unknown = review_http_request(
-        authority,
+        &authority,
         &format!(
             "GET /0123456789abcdef/ HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
         ),
     );
     assert!(unknown.contains("404 Not Found"), "{unknown}");
 
-    let body = format!("decision%3A{message_id}=accept&reason%3A{message_id}=");
-    let post_response = review_http_request(
-        authority,
+    let runtime = review_runtime_client(&authority, &session_root);
+    assert!(runtime.is_some(), "could not open Review runtime");
+    let mut runtime = runtime.expect("checked Review runtime client");
+    let settlement = review_runtime_call(
+        &mut runtime,
+        json!({
+            "type": "settle",
+            "fields": {
+                "message_id": message_id,
+                "decision": "accept",
+                "reason": "",
+            },
+        }),
+    );
+    assert!(settlement.is_ok(), "{settlement:?}");
+    let settlement = settlement.unwrap_or(Value::Null);
+    assert_eq!(settlement["type"], "settlement", "{settlement}");
+    assert_eq!(settlement["result"]["settled"], true, "{settlement}");
+    assert_eq!(
+        settlement["result"]["message_id"], message_id,
+        "{settlement}"
+    );
+    assert_eq!(settlement["result"]["outcome"], "accepted", "{settlement}");
+
+    let obsolete_settle_route = review_http_request(
+        &authority,
         &format!(
-            "POST {session_root}submit HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
+            "POST {session_root}settle HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         ),
     );
-    assert!(post_response.contains("200 OK"), "{post_response}");
-    assert!(post_response.contains(r#"{"submitted":true}"#));
+    assert!(
+        obsolete_settle_route.contains("404 Not Found"),
+        "afmail must not retain a private settle protocol: {obsolete_settle_route}"
+    );
+
+    // Settling one item does not end the session — that is the whole point
+    // of the per-item model. The AFUI runtime is still open, and the terminal
+    // result only comes after the session ends.
+    let end_response = review_http_request(
+        &authority,
+        &format!(
+            "POST {session_root}__afui/end HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(end_response.contains("204 No Content"), "{end_response}");
 
     let mut terminal_line = String::new();
     assert!(child_stdout.read_to_string(&mut terminal_line).is_ok());
@@ -297,16 +701,336 @@ fn triage_review_lan_outputs_a_reachable_url_and_self_describing_submit_result()
     let terminal: Value = serde_json::from_str(terminal_line.trim()).unwrap_or(Value::Null);
     assert!(agent_first_data::validate_protocol_event(&terminal, false).is_ok());
     assert_eq!(terminal["kind"], "result");
-    assert_eq!(terminal["result"]["outcome"], "submitted");
+    assert_eq!(terminal["result"]["ended"], "closed");
     assert_eq!(terminal["result"]["surface_kind"], "triage_review");
-    assert_eq!(terminal["result"]["result_kind"], "triage");
-    assert_eq!(
-        terminal["result"]["human_suggestions"][0]["message_id"],
-        message_id
+    assert_eq!(terminal["result"]["settled_count"], 1);
+    assert_eq!(terminal["result"]["unsettled_count"], 0);
+    assert_eq!(terminal["result"]["settled"][0]["ref"], message_id);
+    assert_eq!(terminal["result"]["settled"][0]["outcome"], "accepted");
+
+    let child_stderr = child.stderr.take();
+    assert!(child_stderr.is_some());
+    let mut stderr = String::new();
+    if let Some(mut child_stderr) = child_stderr {
+        assert!(child_stderr.read_to_string(&mut stderr).is_ok());
+    }
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+/// A Review message crosses AFUI's typed runtime into the ordered AFDATA
+/// stream, and one JSON line on the still-running process's stdin completes
+/// that same runtime call. Neither direction is a hidden HTTP form or a
+/// test-only hook.
+#[test]
+#[cfg(feature = "review")]
+fn triage_review_exchanges_a_user_instruction_and_controller_response() {
+    let root = temp_root("triage-review-channel");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let message_id = "message_review_channel";
+    write_message(&root, message_id, 74, None);
+    write_triage(&root, message_id, "Review channel fixture");
+    let afui_config_dir = afui_attention_config(&root, 900, 300);
+
+    let _command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let child = Command::new(bin())
+        .current_dir(&root)
+        .env("AFUI_CONFIG_DIR", &afui_config_dir)
+        .args([
+            "triage",
+            "review",
+            message_id,
+            "--mode",
+            "link",
+            "--output-to",
+            "stdout",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    assert!(child.is_ok());
+    let mut child = match child {
+        Ok(child) => child,
+        Err(_) => return,
+    };
+    let mut child_stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => return,
+    };
+    let mut child_stdout = match child.stdout.take() {
+        Some(stdout) => BufReader::new(stdout),
+        None => return,
+    };
+
+    let mut ready_line = String::new();
+    assert!(child_stdout.read_line(&mut ready_line).is_ok());
+    let ready: Value = serde_json::from_str(ready_line.trim()).unwrap_or(Value::Null);
+    assert_eq!(ready["progress"]["phase"], "review_ready");
+    let review_url = ready["progress"]["review_url"].as_str().unwrap_or_default();
+    let (authority, _shell_root, session_root) = review_link_target(review_url).unwrap_or_default();
+
+    let runtime = review_runtime_client(&authority, &session_root);
+    assert!(
+        runtime.is_some(),
+        "could not open Review runtime at {review_url}"
     );
-    assert_eq!(
-        terminal["result"]["human_suggestions"][0]["human_suggestion"]["outcome"],
-        "accepted"
+    let mut runtime = runtime.expect("checked Review runtime client");
+    let response = json!({
+        "type": "review_response",
+        "message": "I recommend marking it as spam.",
+        "refresh": false,
+    });
+    let action = json!({
+        "type": "agent_message",
+        "message": "This looks fraudulent.",
+    });
+    let mut progress_seen = false;
+    let received: Value = runtime
+        .call_with_progress::<_, Value, Value, _>(&action, |accepted| {
+            assert!(!progress_seen, "agent call emitted duplicate progress");
+            progress_seen = true;
+            assert_eq!(accepted["type"], "agent_accepted");
+            assert!(accepted.get("request_id").is_none());
+
+            let mut input_line = String::new();
+            assert!(child_stdout.read_line(&mut input_line).is_ok());
+            let input: Value = serde_json::from_str(input_line.trim()).unwrap_or(Value::Null);
+            assert!(agent_first_data::validate_protocol_event(&input, false).is_ok());
+            assert_eq!(input["kind"], "progress");
+            assert_eq!(input["progress"]["phase"], "review_input");
+            assert_eq!(input["progress"]["instruction"], "This looks fraudulent.");
+            assert!(
+                input["progress"].get("request_id").is_none(),
+                "AFUI transport identity must not leak into the controller protocol: {input}"
+            );
+            assert!(writeln!(child_stdin, "{response}").is_ok());
+            assert!(child_stdin.flush().is_ok());
+        })
+        .unwrap_or(Value::Null);
+    assert!(progress_seen, "agent call emitted no progress");
+    assert_eq!(received["type"], "agent_response");
+    assert_eq!(received["message"], "I recommend marking it as spam.");
+    // Whether the review changed is what the retained state says, and it says
+    // it once. A reply repeating it would be racing that state — AFUI orders
+    // neither against the other — for a fact the page would then have two
+    // sources for.
+    assert!(
+        received.get("refresh").is_none(),
+        "the agent reply must carry only what the agent said: {received}"
+    );
+    assert!(received.get("request_id").is_none());
+    drop(child_stdin);
+
+    let end_response = review_http_request(
+        &authority,
+        &format!(
+            "POST {session_root}__afui/end HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(end_response.contains("204 No Content"), "{end_response}");
+
+    let mut terminal_line = String::new();
+    assert!(child_stdout.read_to_string(&mut terminal_line).is_ok());
+    let status = child.wait();
+    assert!(status.is_ok_and(|status| status.success()));
+    let terminal: Value = serde_json::from_str(terminal_line.trim()).unwrap_or(Value::Null);
+    assert_eq!(terminal["kind"], "result");
+    assert_eq!(terminal["result"]["ended"], "closed");
+}
+
+/// `--mode session` opens no window and advertises no address of its own —
+/// it only registers, the same way `afui session serve` discovers any other
+/// session: a JSON entry under `AFUI_CONFIG_DIR/sessions/`, keyed by session
+/// id, holding the credentialed URL. This drives that URL directly rather
+/// than shelling out to a separate `afui` binary — this crate has no
+/// dependency on that binary. The test drives the same AFUI runtime as the
+/// page; what is new here is discoverability and the absence of a window.
+#[test]
+#[cfg(feature = "review")]
+fn triage_review_session_registers_in_the_afui_registry_and_settles_one_item() {
+    let root = temp_root("triage-review-session");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let message_id = "message_review_session";
+    write_message(&root, message_id, 72, None);
+    write_triage(&root, message_id, "Session review fixture");
+    let (status, stdout) = run(&root, &["message", "show", message_id]);
+    assert_eq!(status, 0, "{stdout}");
+    let base_hash = parse_one(&stdout)["review_base_hash"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let (status, stdout) = run(
+        &root,
+        &[
+            "triage",
+            "suggestion",
+            "set",
+            message_id,
+            "--message-review-base-hash",
+            &base_hash,
+            "--reason",
+            "Review this message through afui session serve",
+            "--action",
+            "trash",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+
+    // A registry of its own so this test neither reads a developer's real
+    // `~/.config/afui/sessions` nor races another test or another concurrent
+    // agent's `afui` traffic on this machine.
+    let afui_config_dir = root.join("afui-config");
+
+    let _command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let child = Command::new(bin())
+        .current_dir(&root)
+        .env("AFUI_CONFIG_DIR", &afui_config_dir)
+        .args([
+            "triage",
+            "review",
+            message_id,
+            "--mode",
+            "session",
+            "--output-to",
+            "stdout",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    assert!(child.is_ok());
+    let mut child = match child {
+        Ok(child) => child,
+        Err(_) => return,
+    };
+    let child_stdout = child.stdout.take();
+    assert!(child_stdout.is_some());
+    let mut child_stdout = BufReader::new(match child_stdout {
+        Some(stdout) => stdout,
+        None => return,
+    });
+    let mut progress_line = String::new();
+    assert!(child_stdout.read_line(&mut progress_line).is_ok());
+    let progress: Value = serde_json::from_str(progress_line.trim()).unwrap_or(Value::Null);
+    assert!(agent_first_data::validate_protocol_event(&progress, false).is_ok());
+    assert_eq!(progress["kind"], "progress");
+    assert_eq!(progress["progress"]["phase"], "review_ready");
+    assert_eq!(progress["progress"]["review_mode"], "session");
+    // Nothing to advertise and nothing that expires unopened: a `session`
+    // delivery is reached only through the registry, never printed here.
+    assert!(
+        progress["progress"].get("review_url").is_none(),
+        "{progress}"
+    );
+    assert!(
+        progress["progress"].get("idle_timeout_s").is_none(),
+        "{progress}"
+    );
+    assert!(
+        progress["progress"].get("grace_period_s").is_none(),
+        "{progress}"
+    );
+
+    // Discover the session the way `afui session serve` would: poll the
+    // registry directory for the one entry this run announced. The
+    // announcement happens before the progress event above, so this is
+    // already there by the time the read loop starts; the retries are for a
+    // filesystem that has not caught up, not a wait on the review itself.
+    let sessions_dir = afui_config_dir.join("sessions");
+    let mut entry = Value::Null;
+    for _ in 0..50 {
+        if let Some(path) = first_json_file_in(&sessions_dir) {
+            entry = read_json(&path);
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_ne!(
+        entry,
+        Value::Null,
+        "no session registered under {sessions_dir:?}"
+    );
+    assert_eq!(entry["provider_id"], "afmail");
+    assert_eq!(entry["ui_kind"], "triage_review");
+    assert_eq!(entry["subject"], message_id);
+    // The whole reason afmail declares `awaiting_person()` on a `T = ()`
+    // session (task 1's dependency in AFUI): every item on this page is
+    // unresolved until a person settles it, so a `session` listing has to
+    // say so even though nothing is ever handed back through completion.
+    assert_eq!(entry["waits_for_decision"], true, "{entry}");
+    let access_url = entry["access_url_secret"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let address_and_path = access_url.strip_prefix("http://").unwrap_or_default();
+    let (authority, session_tail) = address_and_path.split_once('/').unwrap_or_default();
+    let session_root = format!("/{session_tail}");
+    assert!(authority.starts_with("127.0.0.1:"), "{access_url}");
+    assert!(access_url.ends_with('/'), "{access_url}");
+
+    let get_response = review_http_request(
+        authority,
+        &format!("GET {session_root} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"),
+    );
+    assert!(get_response.contains("200 OK"), "{get_response}");
+    assert!(get_response.contains("Review this message through afui session serve"));
+
+    let runtime = review_runtime_client(authority, &session_root);
+    assert!(
+        runtime.is_some(),
+        "could not open registered Review runtime"
+    );
+    let mut runtime = runtime.expect("checked registered Review runtime client");
+    let settlement = review_runtime_call(
+        &mut runtime,
+        json!({
+            "type": "settle",
+            "fields": {
+                "message_id": message_id,
+                "decision": "accept",
+                "reason": "",
+            },
+        }),
+    );
+    assert!(settlement.is_ok(), "{settlement:?}");
+    let settlement = settlement.unwrap_or(Value::Null);
+    assert_eq!(settlement["type"], "settlement", "{settlement}");
+    assert_eq!(settlement["result"]["settled"], true, "{settlement}");
+
+    // `session` delivery opens no window, so nothing closes it on its own;
+    // the reserved end route is the only way this review ever finishes.
+    let end_response = review_http_request(
+        authority,
+        &format!(
+            "POST {session_root}__afui/end HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(end_response.contains("204 No Content"), "{end_response}");
+
+    let mut terminal_line = String::new();
+    assert!(child_stdout.read_to_string(&mut terminal_line).is_ok());
+    let status = child.wait();
+    assert!(status.is_ok());
+    assert!(status.is_ok_and(|status| status.success()));
+    let terminal: Value = serde_json::from_str(terminal_line.trim()).unwrap_or(Value::Null);
+    assert!(agent_first_data::validate_protocol_event(&terminal, false).is_ok());
+    assert_eq!(terminal["kind"], "result");
+    assert_eq!(terminal["result"]["ended"], "closed");
+    assert_eq!(terminal["result"]["settled_count"], 1);
+    assert_eq!(terminal["result"]["unsettled_count"], 0);
+    assert_eq!(terminal["result"]["settled"][0]["ref"], message_id);
+    assert_eq!(terminal["result"]["settled"][0]["outcome"], "accepted");
+
+    // The registry entry is this run's own announcement, revoked with the
+    // session: a live-only registry does not still list a review that ended.
+    assert!(
+        first_json_file_in(&sessions_dir).is_none(),
+        "session entry outlived the review it announced"
     );
 
     let child_stderr = child.stderr.take();
@@ -316,6 +1040,100 @@ fn triage_review_lan_outputs_a_reachable_url_and_self_describing_submit_result()
         assert!(child_stderr.read_to_string(&mut stderr).is_ok());
     }
     assert!(stderr.is_empty(), "{stderr}");
+}
+
+/// The event that makes "crash-safe" true rather than aspirational: settling
+/// writes to the workspace the moment it happens, not at the end of the
+/// session, so a process killed mid-review — no graceful shutdown, no
+/// `__afui/end`, no terminal result — still leaves what it already settled
+/// on disk.
+#[test]
+#[cfg(feature = "review")]
+fn a_settled_item_survives_the_review_process_being_kill_9d() {
+    let root = temp_root("review-kill9-survives");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let message_id = "message_kill9_survives";
+    write_message(&root, message_id, 91, None);
+    write_triage(&root, message_id, "kill -9 fixture");
+    let (status, stdout) = run(&root, &["message", "show", message_id]);
+    assert_eq!(status, 0, "{stdout}");
+    let base_hash = parse_one(&stdout)["review_base_hash"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let (status, stdout) = run(
+        &root,
+        &[
+            "triage",
+            "suggestion",
+            "set",
+            message_id,
+            "--message-review-base-hash",
+            &base_hash,
+            "--reason",
+            "Looks safe to trash",
+            "--action",
+            "trash",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+
+    let afui_config_dir = afui_attention_config(&root, 900, 300);
+    let _command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut child = Command::new(bin())
+        .current_dir(&root)
+        .env("AFUI_CONFIG_DIR", &afui_config_dir)
+        .args(["triage", "review", message_id, "--mode", "link"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn triage review");
+    let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
+    let mut progress_line = String::new();
+    assert!(child_stdout.read_line(&mut progress_line).is_ok());
+    let progress: Value = serde_json::from_str(progress_line.trim()).unwrap_or(Value::Null);
+    assert_eq!(progress["progress"]["phase"], "review_ready");
+    let review_url = progress["progress"]["review_url"]
+        .as_str()
+        .unwrap_or_default();
+    let (authority, _shell_root, session_root) = review_link_target(review_url).unwrap_or_default();
+
+    let runtime = review_runtime_client(&authority, &session_root);
+    assert!(runtime.is_some(), "could not open Review runtime");
+    let mut runtime = runtime.expect("checked Review runtime client");
+    let settlement = review_runtime_call(
+        &mut runtime,
+        json!({
+            "type": "settle",
+            "fields": {
+                "message_id": message_id,
+                "decision": "accept",
+                "reason": "",
+            },
+        }),
+    );
+    assert!(settlement.is_ok(), "{settlement:?}");
+    assert_eq!(settlement.unwrap_or(Value::Null)["result"]["settled"], true);
+
+    // `Child::kill` sends SIGKILL on Unix — the same signal `kill -9` sends —
+    // with no chance for the process to run any shutdown code.
+    child.kill().expect("kill -9 the review process");
+    let _ = child.wait();
+    drop(_command_guard);
+
+    let (status, stdout) = run(&root, &["message", "show", message_id]);
+    assert_eq!(status, 0, "{stdout}");
+    let human_suggestion =
+        parse_one(&stdout)["context"]["message"]["message"]["human_suggestion"].clone();
+    assert_eq!(human_suggestion["outcome"], "accepted");
+    assert!(human_suggestion["based_on_agent_suggestion_uid"].is_string());
+    assert_eq!(
+        human_suggestion["suggested_action"]["kind"], "trash",
+        "the settled decision, not just some decision, must be on disk: {human_suggestion}"
+    );
 }
 
 #[test]
@@ -404,9 +1222,13 @@ fn ordinary_commands_report_old_and_future_workspace_versions_with_recovery_hint
     }
 }
 
+/// A message that was never `suggestion set` opens directly — no more
+/// "set a suggestion before review" wall — and a person can decide its
+/// disposition themselves. That decision has no `agent_suggestion` to
+/// answer, so it settles as `decided`, not `accepted`/`changed`/`rejected`.
 #[test]
 #[cfg(feature = "review")]
-fn triage_review_missing_suggestion_returns_exact_recovery_commands() {
+fn triage_review_opens_a_message_with_no_suggestion_and_a_person_can_decide_it() {
     let root = temp_root("review-missing-suggestion");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
@@ -414,19 +1236,91 @@ fn triage_review_missing_suggestion_returns_exact_recovery_commands() {
     write_message(&root, message_id, 74, None);
     write_triage(&root, message_id, "missing suggestion fixture");
 
-    let (status, stdout) = run(&root, &["triage", "review", message_id, "--mode", "lan"]);
-    assert_eq!(status, 1, "{stdout}");
-    let error = parse_one(&stdout);
-    assert_eq!(error["code"], "suggestion_not_found");
-    assert_eq!(
-        error["suggested_commands"][0],
-        format!("afmail message show {message_id}")
+    let afui_config_dir = afui_attention_config(&root, 900, 300);
+    let _command_guard = COMMAND_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut child = Command::new(bin())
+        .current_dir(&root)
+        .env("AFUI_CONFIG_DIR", &afui_config_dir)
+        .args(["triage", "review", message_id, "--mode", "link"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn triage review");
+    let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
+    let mut progress_line = String::new();
+    assert!(child_stdout.read_line(&mut progress_line).is_ok());
+    let progress: Value = serde_json::from_str(progress_line.trim()).unwrap_or(Value::Null);
+    assert_eq!(progress["progress"]["phase"], "review_ready");
+    let review_url = progress["progress"]["review_url"]
+        .as_str()
+        .unwrap_or_default();
+    let (authority, _shell_root, session_root) = review_link_target(review_url).unwrap_or_default();
+
+    let get_response = review_http_request(
+        &authority,
+        &format!("GET {session_root} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"),
     );
+    assert!(get_response.contains("200 OK"), "{get_response}");
     assert!(
-        error["suggested_commands"][1]
-            .as_str()
-            .is_some_and(|command| command.contains("--message-review-base-hash HASH"))
+        get_response.contains("No current agent suggestion"),
+        "{get_response}"
     );
+
+    let runtime = review_runtime_client(&authority, &session_root);
+    assert!(runtime.is_some(), "could not open Review runtime");
+    let mut runtime = runtime.expect("checked Review runtime client");
+    let settlement = review_runtime_call(
+        &mut runtime,
+        json!({
+            "type": "settle",
+            "fields": {
+                "message_id": message_id,
+                "decision": "decide_trash",
+                "reason": "",
+            },
+        }),
+    );
+    assert!(settlement.is_ok(), "{settlement:?}");
+    let settlement = settlement.unwrap_or(Value::Null);
+    assert_eq!(settlement["result"]["settled"], true, "{settlement}");
+    assert_eq!(settlement["result"]["outcome"], "decided", "{settlement}");
+
+    let end_response = review_http_request(
+        &authority,
+        &format!(
+            "POST {session_root}__afui/end HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(end_response.contains("204 No Content"), "{end_response}");
+
+    let mut terminal_line = String::new();
+    assert!(child_stdout.read_to_string(&mut terminal_line).is_ok());
+    let status = child.wait();
+    assert!(status.is_ok_and(|status| status.success()));
+    let terminal: Value = serde_json::from_str(terminal_line.trim()).unwrap_or(Value::Null);
+    assert_eq!(terminal["result"]["settled_count"], 1);
+    assert_eq!(terminal["result"]["settled"][0]["outcome"], "decided");
+    assert_eq!(
+        terminal["result"]["settled"][0]["suggested_action"]["kind"],
+        "trash"
+    );
+    // `run` below acquires `COMMAND_TEST_LOCK` itself; holding `_command_guard`
+    // across it would self-deadlock a non-reentrant mutex.
+    drop(_command_guard);
+
+    let (status, stdout) = run(&root, &["message", "show", message_id]);
+    assert_eq!(status, 0, "{stdout}");
+    let human_suggestion =
+        parse_one(&stdout)["context"]["message"]["message"]["human_suggestion"].clone();
+    assert_eq!(human_suggestion["outcome"], "decided");
+    assert!(
+        human_suggestion
+            .get("based_on_agent_suggestion_uid")
+            .is_none()
+    );
+    assert_eq!(human_suggestion["suggested_action"]["kind"], "trash");
 }
 
 #[test]
@@ -469,6 +1363,66 @@ fn review_http_request(authority: &str, request: &str) -> String {
     let mut response = String::new();
     assert!(stream.read_to_string(&mut response).is_ok());
     response
+}
+
+/// Resolve a direct Review link through the AFUI-owned shell to the one
+/// Provider session that shell is allowed to frame.
+#[cfg(feature = "review")]
+fn review_link_target(review_url: &str) -> Option<(String, String, String)> {
+    let address_and_path = review_url.strip_prefix("http://")?;
+    let (authority, shell_tail) = address_and_path.split_once('/')?;
+    let shell_root = format!("/{shell_tail}");
+    let response = review_http_request(
+        authority,
+        &format!(
+            "GET {shell_root}sessions HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    let (_, body) = response.split_once("\r\n\r\n")?;
+    let document: Value = serde_json::from_str(body).ok()?;
+    let provider_root = document["sessions"].as_array()?.first()?["proxy_url_secret"]
+        .as_str()?
+        .to_owned();
+    Some((authority.to_owned(), shell_root, provider_root))
+}
+
+#[cfg(feature = "review")]
+fn afui_attention_config(root: &Path, idle_timeout_s: u64, grace_period_s: u64) -> PathBuf {
+    let config_root = root.join("afui-config");
+    write_json(
+        &config_root.join("config.json"),
+        &json!({
+            "attention": {
+                "idle_timeout_s": idle_timeout_s,
+                "grace_period_s": grace_period_s,
+            }
+        }),
+    );
+    config_root
+}
+
+#[cfg(feature = "review")]
+fn review_runtime_client(authority: &str, session_root: &str) -> Option<BlockingRuntimeClient> {
+    BlockingRuntimeClient::connect(
+        &format!("http://{authority}{session_root}"),
+        "review-cli-integration",
+    )
+    .ok()
+}
+
+#[cfg(feature = "review")]
+fn review_runtime_call(
+    runtime: &mut BlockingRuntimeClient,
+    payload: Value,
+) -> std::result::Result<Value, Value> {
+    runtime.call(&payload).map_err(|error| {
+        error.call_failure().cloned().unwrap_or_else(|| {
+            json!({
+                "code": "test_runtime_failed",
+                "message": error.to_string(),
+            })
+        })
+    })
 }
 
 fn bin() -> PathBuf {
@@ -683,6 +1637,17 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap_or_default()).unwrap_or(Value::Null)
 }
 
+/// The one `*.json` file directly under `directory`, if any — used to find an
+/// AFUI registry entry without depending on its session-id-derived name.
+#[cfg(feature = "review")]
+fn first_json_file_in(directory: &Path) -> Option<PathBuf> {
+    let files = fs::read_dir(directory).ok()?;
+    files.filter_map(|entry| entry.ok()).find_map(|entry| {
+        let path = entry.path();
+        (path.extension().and_then(|ext| ext.to_str()) == Some("json")).then_some(path)
+    })
+}
+
 fn draft_with_compose(raw: String) -> String {
     let Some((frontmatter, body)) = raw.split_once("\n---\n") else {
         return raw;
@@ -837,6 +1802,28 @@ fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Option<&s
         )
     )
     .is_ok());
+}
+
+#[cfg(feature = "review")]
+fn write_image_message(root: &Path, message_id: &str, uid: u64) {
+    write_message(root, message_id, uid, None);
+    update_message_json(root, message_id, |message| {
+        message["attachments"] = json!([{
+            "part_id": "2",
+            "filename": "screenshot.jpg",
+            "content_type": "image/jpeg",
+            "size_bytes": 11
+        }]);
+    });
+    assert!(
+        fs::write(
+            root.join(format!(".afmail/messages/{message_id}.eml")),
+            format!(
+                "Message-ID: <{message_id}@example.com>\r\nFrom: alice@example.com\r\nTo: me@example.com\r\nDate: Thu, 21 May 2026 10:00:00 +0000\r\nSubject: Screenshot\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"afmail-test\"\r\n\r\n--afmail-test\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSee screenshot.\r\n--afmail-test\r\nContent-Type: image/jpeg; name=\"screenshot.jpg\"\r\nContent-Disposition: inline; filename=\"screenshot.jpg\"\r\nContent-Transfer-Encoding: base64\r\n\r\naW1hZ2UtYnl0ZXM=\r\n--afmail-test--\r\n"
+            )
+        )
+        .is_ok()
+    );
 }
 
 fn update_message_json(root: &Path, message_id: &str, update: impl FnOnce(&mut Value)) {

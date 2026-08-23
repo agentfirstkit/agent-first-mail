@@ -28,6 +28,17 @@ pub trait MailRemote {
         uid: u64,
         flags: &[String],
     ) -> Result<()>;
+    /// Everything a send needs that cannot possibly have sent anything.
+    ///
+    /// Split out so the caller can do it *before* recording that the outcome
+    /// of this step is unknown. A relay URL that will not parse, a transport
+    /// that will not build, an address the envelope refuses — none of those can
+    /// have delivered mail, and marking them unknown turns a plainly retryable
+    /// mistake into a queue entry nobody can resolve.
+    fn prepare_send(&self, envelope_from: &str, envelope_to: &[String]) -> Result<()> {
+        let _ = (envelope_from, envelope_to);
+        Ok(())
+    }
     fn send_raw_message(
         &self,
         envelope_from: &str,
@@ -146,6 +157,10 @@ impl MailRemote for ImapSmtpRemote<'_> {
         })
     }
 
+    fn prepare_send(&self, envelope_from: &str, envelope_to: &[String]) -> Result<()> {
+        crate::smtp_send::prepare_send(self.config, envelope_from, envelope_to).map(|_| ())
+    }
+
     fn send_raw_message(
         &self,
         envelope_from: &str,
@@ -175,6 +190,9 @@ pub struct FakeMailRemote {
     pub move_results: std::cell::RefCell<std::collections::VecDeque<Result<MoveOutcome>>>,
     pub add_flags_results: std::cell::RefCell<std::collections::VecDeque<Result<()>>>,
     pub send_results: std::cell::RefCell<std::collections::VecDeque<Result<()>>>,
+    /// Failures the real adapter would raise before anything is sent, so a test
+    /// can tell "this never left the machine" from "this may have".
+    pub prepare_send_results: std::cell::RefCell<std::collections::VecDeque<Result<()>>>,
     pub find_results:
         std::cell::RefCell<std::collections::VecDeque<Result<Option<RemoteLocation>>>>,
     pub move_requests: std::cell::RefCell<Vec<(String, u64, u64, String)>>,
@@ -247,6 +265,13 @@ impl MailRemote for FakeMailRemote {
             flags.to_vec(),
         ));
         self.add_flags_results
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(Ok(()))
+    }
+
+    fn prepare_send(&self, _envelope_from: &str, _envelope_to: &[String]) -> Result<()> {
+        self.prepare_send_results
             .borrow_mut()
             .pop_front()
             .unwrap_or(Ok(()))

@@ -40,6 +40,10 @@ check_minimal_dependency_tree() {
 }
 
 run_static() {
+  # Parsing is not linting, and this ran neither until now. The pinned version
+  # lives in the script itself, mirrored from the monorepo and compared byte for
+  # byte there, so this spore and its siblings cannot drift onto different rules.
+  "$ROOTPATH/scripts/install-shellcheck.sh" --check "$ROOTPATH"
   cargo fmt --all --check
   run_clippy
   run_clippy --no-default-features
@@ -75,8 +79,43 @@ run_render_perf() {
   cargo test --lib render_performance_synthetic -- --ignored --nocapture --test-threads=1
 }
 
+select_test_container_runtime() {
+  local runtime="${AFMAIL_TEST_CONTAINER_RUNTIME:-}"
+  if [[ -z "$runtime" ]]; then
+    if [[ "${CI:-}" == "true" ]]; then
+      runtime="docker"
+    elif [[ "$(uname -s)" == "Darwin" ]]; then
+      runtime="apple"
+    else
+      runtime="docker"
+    fi
+  fi
+
+  case "$runtime" in
+    apple)
+      command -v container >/dev/null 2>&1 || {
+        echo "Apple container is required for local macOS e2e" >&2
+        return 2
+      }
+      container system start >/dev/null
+      ;;
+    docker)
+      command -v docker >/dev/null 2>&1 || {
+        echo "Docker is required for the selected e2e runtime" >&2
+        return 2
+      }
+      docker info >/dev/null
+      ;;
+    *)
+      echo "AFMAIL_TEST_CONTAINER_RUNTIME must be apple or docker" >&2
+      return 2
+      ;;
+  esac
+  export AFMAIL_TEST_CONTAINER_RUNTIME="$runtime"
+}
+
 run_e2e() {
-  docker info >/dev/null
+  select_test_container_runtime
   if [[ -n "$FILTER" ]]; then
     cargo test --test container_e2e "$FILTER" -- --ignored --nocapture --test-threads=1
   else
@@ -109,7 +148,7 @@ case "$MODE" in
   greenmail-review)   "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" review ;;
   all)           run_static; run_unit; run_minimal ;;
   # What CI runs, and therefore what a release must survive: `all` plus the
-  # container e2e that `all` omits because it needs Docker. A check that can
+  # container e2e that `all` omits because it needs a container runtime. A check that can
   # fail the release has to be able to fail this gate first.
   release)       run_static; run_unit; run_minimal; run_e2e ;;
   full)          run_static; run_unit; run_minimal; run_e2e; "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" run ;;

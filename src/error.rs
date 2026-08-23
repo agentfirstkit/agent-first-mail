@@ -176,6 +176,7 @@ fn default_hint(error_code: &str) -> Option<&'static str> {
         | "imap_copy_failed"
         | "imap_expunge_failed"
         | "imap_move_failed"
+        | "imap_move_target_uid_missing"
         | "imap_store_failed"
         | "imap_uid_missing"
         | "imap_uidvalidity_changed" => Some(

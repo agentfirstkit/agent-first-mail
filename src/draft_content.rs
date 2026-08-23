@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn quote_footer_and_template_heading_outside_compose_do_not_count() {
         let body = format!(
-            "# Reply\n{COMPOSE_START}\n<!-- todo\nstill a comment -->\n{COMPOSE_END}\n\
+            "# Reply\n{COMPOSE_START}\n<!-- note\nstill a comment -->\n{COMPOSE_END}\n\
              Original message\n{QUOTE_START}\nPlain original text\n{QUOTE_END}\n\
              -- \nSupport Agent\n"
         );

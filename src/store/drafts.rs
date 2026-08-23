@@ -962,13 +962,11 @@ impl Workspace {
             }
         }
         for attachment in &fm.attachments {
-            let attachment_path = draft_attachment_path(case_path, attachment)?;
-            if !attachment_path.is_file() {
-                return Err(AppError::new(
-                    "draft_invalid",
-                    format!("draft attachment does not exist: {attachment}"),
-                ));
-            }
+            // Through the same primitive the planner and the MIME builder use,
+            // so a draft that validates is a draft that can be sent — and one
+            // naming a link out of the case is refused here, where a person is
+            // still looking at it.
+            crate::attachments::open_draft_attachment(case_path, attachment)?;
         }
         Ok(DraftValidation {
             draft_hash,
@@ -1156,17 +1154,13 @@ fn draft_attachment_analysis(
     case_path: &Path,
     attachment: &str,
 ) -> Result<DraftAttachmentAnalysis> {
-    let path = draft_attachment_path(case_path, attachment)?;
-    let metadata = match fs::metadata(&path) {
-        Ok(metadata) => Some(metadata),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(AppError::io("read draft attachment metadata", &error)),
-    };
+    // "Missing" and "there but not something this will send" are the same
+    // answer to a caller reading a draft's status: neither can be attached.
+    // The difference is reported when the draft is validated, with a reason.
+    let open = crate::attachments::open_draft_attachment(case_path, attachment).ok();
     Ok(DraftAttachmentAnalysis {
-        exists: metadata.as_ref().is_some_and(|metadata| metadata.is_file()),
-        size_bytes: metadata
-            .filter(|metadata| metadata.is_file())
-            .map(|metadata| metadata.len()),
+        exists: open.is_some(),
+        size_bytes: open.map(|open| open.metadata.len()),
     })
 }
 
@@ -1358,33 +1352,4 @@ pub(super) fn resolve_cli_path(path: &str) -> Result<PathBuf> {
     Ok(std::env::current_dir()
         .map_err(|e| AppError::io("current dir", &e))?
         .join(path))
-}
-
-pub(super) fn draft_attachment_path(case_path: &Path, attachment: &str) -> Result<PathBuf> {
-    let path = Path::new(attachment);
-    if attachment.trim().is_empty() || path.is_absolute() {
-        return Err(AppError::new(
-            "draft_invalid",
-            format!("invalid draft attachment path: {attachment}"),
-        ));
-    }
-    let mut safe = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => safe.push(part),
-            _ => {
-                return Err(AppError::new(
-                    "draft_invalid",
-                    format!("invalid draft attachment path: {attachment}"),
-                ));
-            }
-        }
-    }
-    if safe.as_os_str().is_empty() {
-        return Err(AppError::new(
-            "draft_invalid",
-            format!("invalid draft attachment path: {attachment}"),
-        ));
-    }
-    Ok(case_path.join(safe))
 }

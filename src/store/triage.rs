@@ -18,6 +18,39 @@ impl Workspace {
         ))
     }
 
+    /// Message ids currently in triage, newest first, capped at `limit`.
+    ///
+    /// Every current triage message is a review candidate now — a message
+    /// with no `agent_suggestion` shows up as unrecommended, not filtered
+    /// out — so an unbounded caller (`afmail triage review` with no message
+    /// ids) needs its own cap the way `triage_list` needs `--limit`. Returns
+    /// `(ids, total_count)` so the caller can say how many were left out
+    /// rather than silently dropping them.
+    #[cfg(any(feature = "review", test))]
+    pub(crate) fn triage_review_message_ids(&self, limit: usize) -> Result<(Vec<String>, usize)> {
+        self.require_workspace()?;
+        let triage_dir = self.root.join(layout::TRIAGE);
+        if !triage_dir.exists() {
+            return Ok((Vec::new(), 0));
+        }
+        let mut paths: Vec<PathBuf> = read_dir(&triage_dir, "read triage directory")?
+            .into_iter()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("md"))
+            .collect();
+        paths.sort();
+        let total_count = paths.len();
+        let ids = take_last(paths, limit)
+            .into_iter()
+            .map(|path| {
+                path.file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        Ok((ids, total_count))
+    }
+
     /// List untriaged messages by stable locator. Resolve details with
     /// path_templates or `afmail message show`.
     pub fn triage_list(&self, limit: Option<usize>, details: bool) -> Result<Value> {

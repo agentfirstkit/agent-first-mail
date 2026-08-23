@@ -20,6 +20,8 @@ fn config_defaults_pull_and_tls() {
     assert_eq!(cfg.workspace.language_bcp47, None);
     assert_eq!(cfg.template_language(), TemplateLanguage::EnUs);
     assert!(cfg.workspace.timezone_utc_offset.is_some());
+    assert_eq!(cfg.review.max_channel_text_bytes, 65_536);
+    assert_eq!(cfg.review.max_inline_image_bytes, 16_777_216);
     assert_eq!(
         cfg.actions
             .message
@@ -119,6 +121,13 @@ fn default_config_serializes_explicit_mailboxes_and_actions() {
     assert!(value.get("pull").is_none());
     assert!(value.get("push").is_none());
     assert!(value.get("ui").is_none());
+    assert_eq!(
+        value["review"],
+        json!({
+            "max_channel_text_bytes": 65_536,
+            "max_inline_image_bytes": 16_777_216
+        })
+    );
     assert!(value.get("timezone").is_none());
     assert_eq!(
         value["identities"],
@@ -298,6 +307,22 @@ fn config_set_and_get_key() {
     );
     assert_eq!(cfg.get_key("audit.reason_mode"), Ok(json!("optional")));
     assert!(
+        cfg.set_key("review.max_channel_text_bytes", &["131072".to_string()])
+            .is_ok()
+    );
+    assert_eq!(
+        cfg.get_key("review.max_channel_text_bytes"),
+        Ok(json!(131_072))
+    );
+    assert!(
+        cfg.set_key("review.max_inline_image_bytes", &["33554432".to_string()])
+            .is_ok()
+    );
+    assert_eq!(
+        cfg.get_key("review.max_inline_image_bytes"),
+        Ok(json!(33_554_432))
+    );
+    assert!(
         cfg.set_key("workspace.language_bcp47", &["zh-CN".to_string()])
             .is_ok()
     );
@@ -347,6 +372,31 @@ fn config_set_and_get_key() {
             json!([{"identity": "support", "name": "Support", "email": "support@example.com", "default": true}])
         )
     );
+}
+
+#[test]
+fn review_limits_must_be_positive() {
+    let mut cfg = MailConfig::default();
+    for key in [
+        "review.max_channel_text_bytes",
+        "review.max_inline_image_bytes",
+    ] {
+        let error = cfg
+            .set_key(key, &["0".to_string()])
+            .expect_err("a zero Review limit must be rejected");
+        assert_eq!(error.error_code, "config_invalid");
+        assert!(error.message.contains(key), "{}", error.message);
+    }
+}
+
+#[test]
+fn review_link_lifetime_is_not_an_afmail_configuration_key() {
+    let mut value = serde_json::to_value(MailConfig::default()).expect("default config");
+    value["review"]["link_expires_in_s"] = json!(900);
+    let error = serde_json::from_value::<MailConfig>(value)
+        .expect_err("AFUI-owned lifetime must be rejected from afmail config")
+        .to_string();
+    assert!(error.contains("link_expires_in_s"), "{error}");
 }
 
 #[test]

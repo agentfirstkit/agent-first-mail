@@ -92,32 +92,61 @@ module only when a concern has its own file format, lifecycle, or command group.
 
 `runner/review.rs` owns the review domain for triage, cases, notifications, and
 drafts. It contains the same typed render documents used by Markdown, renders
-the page through `TemplateRenderer` while holding only a shared lock, then
-returns one AFDATA result naming how the review ended. Triage, case, and
-notification review persist typed, hash-bound human suggestion state before
-returning a submitted result, but never apply the suggested domain action.
-Case-note, notification-note, and draft edits debounce into automatic saves that
-acquire an exclusive lock, verify the base hash, and call the canonical
-Workspace API; the result lists each completed write in `saved_files`. Review
-never queues, pushes, or sends remote effects, and ending a session without a
-decision does not roll back saved local changes.
+the page through AFUI's `UiPage` — one engine for both the doctor's check and
+the live session, so a template cannot pass one and fail the other — while
+holding only a shared lock, then returns one AFDATA result read back from the
+workspace once the session ends.
+There is no batch and no page-wide submit: each item — a triage message, or
+the one case/notification a case/notification review is about — settles the
+moment a person decides it, writing typed, hash-bound human suggestion state
+immediately, but never applying the suggested domain action itself. A stale
+`agent_suggestion` is marked in place rather than refusing to open the whole
+review; only accepting or changing it is refused, at settle time. Case-note,
+notification-note, and draft edits debounce into automatic saves that acquire
+an exclusive lock, verify the base hash, and call the canonical Workspace API;
+the result lists each completed write in `saved_files`. Review never queues,
+pushes, or sends remote effects, and ending a session leaves every settlement
+and saved local change exactly as it was written.
 
 `runner/review/host.rs` is the only place that domain meets `agent-first-ui`.
-AFUI owns delivery — the listener, the credential in the URL path, the LAN
-expiry, the security headers and CSP nonce, the exact-`Host` and `Origin`
-checks, the isolated browser window on a disposable profile, and shutdown — so
-afmail hosts nothing itself. The host module contributes an Axum router with one
-route per thing the page can say (`GET /`, `POST /notes`, `POST /draft`,
-`POST /submit`, `POST /cancel`) and maps AFUI's outcome onto the result:
-`submitted` and `cancelled` are decisions the page reached, `dismissed` means
-the person closed the window, and `expired` means a LAN URL lapsed unopened.
-Saved files are reported for all four, because the session's saved-file list
-outlives the session.
+AFUI owns delivery — the listener, the credential in the URL path, attention
+and warning-grace enforcement, the security headers and CSP nonce, the exact-`Host` and
+`Origin` checks, the isolated browser window on a disposable profile, and
+shutdown — so afmail hosts nothing itself. `--mode link` and `afui session
+serve` use the same AFUI attention policy (15 unattended minutes plus 5
+minutes of warning grace by default), renewed by visible-page attention or
+framed UI traffic. afmail neither receives a lifetime setting nor constructs
+an AFUI expiry type. The host module contributes only the server-rendered
+`GET /` page and attaches AFUI's typed runtime with managed blobs. Notes,
+draft saves, settlement, refresh, image loading, and the Agent turn are typed
+Review actions; afmail defines their domain payloads while AFUI owns the
+envelope, correlation, reconnect, progress/result/error completion, retained
+state, and temporary byte URLs. A user message becomes a `review_input` AFDATA
+progress event; one strict `review_response` JSON line on the still-running
+command's stdin completes the one waiting AFUI call. With `refresh:true`, AFUI
+publishes retained changed state; the page requests a freshly rendered HTML
+blob, whose render first rereads the exact surface from canonical workspace
+documents, so controller text cannot inject a draft or suggestion. The host
+then builds the terminal result by rereading the workspace
+regardless of how the session ended: `closed` means the window closed (or,
+under `--mode link`/`--mode session`, the session's own end route was hit) —
+the ordinary, unremarkable end of every review, not a decision — and
+`expired` means the AFUI-owned Link page reached the end of its unattended
+warning grace. The session's type parameter to
+AFUI is `()`: nothing is ever handed back through completion, so
+`Outcome::Completed` is unreachable here. Saved files and the
+settled/unsettled summary are reported the same way for both outcomes,
+because the session's state outlives the session.
 
 The old Review-specific HTML/CSS/DOM-rendering bundle does not exist. Review
 templates own server-rendered structure, style, and localized copy;
-`runner/review_runtime.js` is an afmail-owned behavior-only runtime. Review
-templates cannot supply JavaScript.
+`runner/review_runtime.js` is an afmail-owned behavior-only runtime. It binds
+autosave/settlement controls to `afui.connect`, keeps the built-in UI's visible
+turn history, loads attachment/page bytes through AFUI-managed blobs, and
+replaces only the declared Review content subtree after a canonical refresh.
+Review templates cannot supply JavaScript; the runtime clones
+template-declared turn markup rather than constructing page structure or
+carrying user-facing copy.
 
 `review_frontend.rs` is where a person's own Review UI comes from.
 `agent-first-ui` owns the location, the lookup order, safe mode, and the trust
@@ -224,7 +253,7 @@ split-out config and dependency contract target (`tests/config_contract.rs`).
 target (`tests/draft_contract.rs`). `push` runs the split-out push contract
 target (`tests/push_contract.rs`).
 
-## Fixture Batch, Docker E2E, and GreenMail Workflow
+## Fixture Batch, Container E2E, and GreenMail Workflow
 
 The reusable mailbox story lives under `tests/fixtures/mail-batch/`: a
 `manifest.json` plus 30 realistic `.eml` files. Tests should load that manifest
@@ -235,7 +264,7 @@ pass one Rust test-name filter as the second argument:
 
 ```bash
 ./scripts/test.sh e2e
-./scripts/test.sh e2e docker_greenmail_pull_reply_send_e2e
+./scripts/test.sh e2e container_greenmail_pull_reply_send_e2e
 ```
 
 The same fixture batch powers a real agent-operation workspace. This prepares a

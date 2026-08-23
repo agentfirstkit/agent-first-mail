@@ -11,6 +11,41 @@ IMAGE=greenmail/standalone:2.1.8
 CONTAINER=${AFMAIL_DEMO_CONTAINER:-afmail-demo-greenmail-$(date +%s)-$$}
 STEP_DELAY_S=${AFMAIL_DEMO_STEP_DELAY_S:-0}
 
+CONTAINER_RUNTIME=${AFMAIL_TEST_CONTAINER_RUNTIME:-}
+if [[ -z "$CONTAINER_RUNTIME" ]]; then
+  if [[ "${CI:-}" == "true" ]]; then
+    CONTAINER_RUNTIME=docker
+  elif [[ "$(uname -s)" == "Darwin" ]]; then
+    CONTAINER_RUNTIME=apple
+  else
+    CONTAINER_RUNTIME=docker
+  fi
+fi
+case "$CONTAINER_RUNTIME" in
+  apple)
+    CONTAINER_BIN=container
+    CONTAINER_STOP_COMMAND="container delete --force $CONTAINER"
+    command -v container >/dev/null 2>&1 || {
+      echo "Apple container is required for this local demo" >&2
+      exit 2
+    }
+    container system start >/dev/null
+    ;;
+  docker)
+    CONTAINER_BIN=docker
+    CONTAINER_STOP_COMMAND="docker rm -f $CONTAINER"
+    command -v docker >/dev/null 2>&1 || {
+      echo "Docker is required for this CI demo runtime" >&2
+      exit 2
+    }
+    docker info >/dev/null
+    ;;
+  *)
+    echo "AFMAIL_TEST_CONTAINER_RUNTIME must be apple or docker" >&2
+    exit 2
+    ;;
+esac
+
 case "$MODE" in
   prepare | review | run) ;;
   *)
@@ -27,7 +62,11 @@ fi
 
 cleanup() {
   if [[ "$KEEP_CONTAINER" != "1" ]]; then
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    if [[ "$CONTAINER_RUNTIME" == "apple" ]]; then
+      container delete --force "$CONTAINER" >/dev/null 2>&1 || true
+    else
+      docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    fi
   fi
 }
 trap cleanup EXIT
@@ -110,6 +149,9 @@ PY
 write_config() {
   local imap_port=$1
   local smtp_port=$2
+  # `$Junk` is the IMAP system flag spelled literally; not expanding is the
+  # point of the quotes.
+  # shellcheck disable=SC2016
   local junk_flag='$Junk'
   local default_mailbox_ids
   if [[ "$MODE" == "prepare" ]]; then
@@ -463,7 +505,7 @@ case. Nothing will be sent unless you explicitly confirm a push/send action.
 
 Stop the mailbox when done:
 
-docker rm -f $CONTAINER
+$CONTAINER_STOP_COMMAND
 EOF
 }
 
@@ -488,17 +530,26 @@ local files through afmail, with base-hash checks; their result lists the
 saved_files field. Review never queues, pushes, or sends mail, and closing a
 session does not undo a completed autosave. Stop the mailbox when done:
 
-docker rm -f $CONTAINER
+$CONTAINER_STOP_COMMAND
 EOF
 }
 
 say "Starting GreenMail container $CONTAINER"
-docker run -d --rm --name "$CONTAINER" \
-  -e "GREENMAIL_OPTS=-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled -Dgreenmail.users=me:secret@localhost,alice:secret@localhost" \
-  -p 127.0.0.1::3025 -p 127.0.0.1::3143 "$IMAGE" >/dev/null
+read -r SMTP_PORT IMAP_PORT < <(python3 - <<'PY'
+import socket
 
-SMTP_PORT=$(docker port "$CONTAINER" 3025/tcp | awk -F: '{print $NF}')
-IMAP_PORT=$(docker port "$CONTAINER" 3143/tcp | awk -F: '{print $NF}')
+listeners = []
+for _ in range(2):
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listeners.append(listener)
+print(*(listener.getsockname()[1] for listener in listeners))
+PY
+)
+"$CONTAINER_BIN" run -d --rm --name "$CONTAINER" \
+  -e "GREENMAIL_OPTS=-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled -Dgreenmail.users=me:secret@localhost,alice:secret@localhost" \
+  -p "127.0.0.1:${SMTP_PORT}:3025" -p "127.0.0.1:${IMAP_PORT}:3143" "$IMAGE" >/dev/null
+
 say "Seeding 30-message fixture batch into GreenMail IMAP on port $IMAP_PORT"
 wait_and_seed_greenmail "$IMAP_PORT"
 

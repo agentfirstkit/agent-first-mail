@@ -1,11 +1,4 @@
-/// Review presentation mode.
-#[derive(Clone, Copy, Debug)]
-pub enum ReviewMode {
-    /// Open a local review window.
-    Local,
-    /// Print a one-time review URL for the trusted local network.
-    Lan,
-}
+use agent_first_ui::UiDeliveryMode;
 
 #[derive(Debug)]
 pub enum ConfigAction {
@@ -42,7 +35,9 @@ pub enum TriageAction {
     /// Open a review session for persisted triage suggestions.
     Review {
         message_id: Vec<String>,
-        mode: ReviewMode,
+        /// `None` when `--mode` was not given: resolved against
+        /// `AFUI_DELIVERY`, then `window`, inside the runner.
+        mode: Option<UiDeliveryMode>,
     },
 }
 

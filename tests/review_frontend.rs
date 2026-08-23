@@ -20,12 +20,12 @@
     clippy::print_stdout
 )]
 
-use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agent_first_ui::test_support::FrontendOnDisk;
 use serde_json::{Value, json};
 
 const STUB_BROWSER: &str = r#"#!/bin/sh
@@ -41,8 +41,25 @@ curl -sS -o "$AFMAIL_STUB_DIR/body" -w '%{http_code}' "$url" > "$AFMAIL_STUB_DIR
 "#;
 
 /// A Review page nobody could mistake for afmail's own.
+/// A person's own review page, as small as one is allowed to be.
+///
+/// The four `data-afmail-*` hooks are the contract afmail declares: the
+/// runtime that ships with the page binds to them, and a page without them
+/// opens and does nothing. Everything else here is this frontend's own.
 const CUSTOM_PAGE: &str = "<!doctype html><html><body>\
-<main data-my-review-ui>MY OWN REVIEW UI</main>\
+<main data-my-review-ui data-afmail-review>MY OWN REVIEW UI\
+<div data-afmail-review-content>\
+<section data-afmail-agent-workbench><div data-afmail-agent-suggestion-content></div></section>\
+</div></main>\
+<!-- afmail:trusted-runtime --></body></html>";
+
+/// The same page with one hook renamed — a frontend that looks finished and
+/// cannot work.
+const CUSTOM_PAGE_MISSING_HOOK: &str = "<!doctype html><html><body>\
+<main data-my-review-ui data-afmail-review>MY OWN REVIEW UI\
+<div data-my-own-content>\
+<section data-afmail-agent-workbench><div data-afmail-agent-suggestion-content></div></section>\
+</div></main>\
 <!-- afmail:trusted-runtime --></body></html>";
 
 struct Workspace {
@@ -152,55 +169,28 @@ impl Workspace {
         root
     }
 
-    /// What `afui frontend enable` records: the exact contents, trusted.
-    ///
-    /// The fingerprint is recomputed here rather than shelled out to `afui`,
-    /// so a change to AFUI's algorithm shows up as this suite failing to serve
-    /// a trusted frontend — loudly, not as a quiet pass.
-    fn trust(&self, ui_kind: &str) {
-        let trust = json!({
-            "frontends": {
-                format!("workspace:afmail:{ui_kind}"): {
-                    "fingerprint": fingerprint(&self.frontend_root(ui_kind)),
-                },
-            },
-        });
+    /// Replace an installed frontend's page and re-trust it, so the change is
+    /// what the test is about rather than the trust gate.
+    fn replace_page(&self, ui_kind: &str, page: &str) {
         fs::write(
-            self.config_dir.join("trust.json"),
-            serde_json::to_string_pretty(&trust).expect("trust store"),
+            self.frontend_root(ui_kind)
+                .join("templates/en-US/review/page.html.j2"),
+            page,
         )
-        .expect("write trust store");
+        .expect("write frontend page");
+        self.trust(ui_kind);
     }
-}
-
-/// AFUI's content fingerprint: blake3 per file, keyed by relative path.
-fn fingerprint(root: &Path) -> String {
-    fn walk(root: &Path, directory: &Path, files: &mut BTreeMap<String, String>) {
-        for entry in fs::read_dir(directory).expect("read frontend directory") {
-            let path = entry.expect("frontend entry").path();
-            if path.is_dir() {
-                walk(root, &path, files);
-                continue;
-            }
-            let relative = path
-                .strip_prefix(root)
-                .expect("frontend file is inside the frontend")
-                .to_string_lossy()
-                .replace('\\', "/");
-            let bytes = fs::read(&path).expect("read frontend file");
-            files.insert(relative, blake3::hash(&bytes).to_hex().to_string());
-        }
+    /// What `afui frontend enable` records, through AFUI's own code.
+    ///
+    /// The fingerprint used to be recomputed here so that a change to AFUI's
+    /// algorithm showed up as this suite failing to serve a trusted frontend.
+    /// Calling AFUI's own helper is the stronger version of that: there is no
+    /// second implementation left to drift.
+    fn trust(&self, ui_kind: &str) {
+        FrontendOnDisk::at(self.frontend_root(ui_kind), "afmail", ui_kind)
+            .trust_in(&self.config_dir)
+            .expect("trust the frontend");
     }
-    let mut files = BTreeMap::new();
-    walk(root, root, &mut files);
-    let mut hasher = blake3::Hasher::new();
-    for (path, hash) in files {
-        hasher.update(path.as_bytes());
-        hasher.update(&[0]);
-        hasher.update(hash.as_bytes());
-        hasher.update(&[0]);
-    }
-    hasher.finalize().to_hex().to_string()
 }
 
 fn event(events: &[Value], kind: &str) -> Value {
@@ -242,12 +232,12 @@ fn a_user_frontend_serves_the_review_only_once_it_is_installed_compatible_and_tr
     assert_eq!(status, 0, "{events:?}");
     assert!(is_builtin_page(&body), "{body}");
     assert!(ready(&events).get("review_frontend_id").is_none());
-    assert_eq!(result(&events)["outcome"], "dismissed");
+    assert_eq!(result(&events)["ended"], "closed");
 
     // 2. Installed but not trusted: still afmail's own UI. A workspace
     //    frontend is inert until someone says otherwise, and the ready event
     //    is where an Agent can see that it is not serving.
-    workspace.install_frontend("case_review", "1");
+    workspace.install_frontend("case_review", "2");
     let (status, events, untrusted) = workspace.review(&[]);
     assert_eq!(status, 0, "{events:?}");
     assert!(is_builtin_page(&untrusted), "{untrusted}");
@@ -341,7 +331,7 @@ fn an_incompatible_frontend_is_an_error_naming_safe_mode_and_never_a_quiet_built
 #[test]
 fn an_unreadable_frontend_manifest_is_an_error_rather_than_a_fallback() {
     let workspace = Workspace::new("unreadable");
-    let root = workspace.install_frontend("case_review", "1");
+    let root = workspace.install_frontend("case_review", "2");
     fs::write(root.join("frontend.json"), "{ not json").expect("break the manifest");
     workspace.trust("case_review");
 
@@ -359,12 +349,46 @@ fn an_unreadable_frontend_manifest_is_an_error_rather_than_a_fallback() {
     );
 }
 
+/// A frontend that dropped one of afmail's hooks is refused before a window
+/// opens, rather than serving a page whose runtime finds nothing.
+///
+/// This is the failure the contract exists for: the page parses, renders,
+/// passes the markup guard, and carries the trusted runtime — everything
+/// except the one hook the runtime binds every form through. Nobody looking
+/// at it would see the problem; a person clicking Settle on it would.
+#[test]
+fn a_frontend_missing_one_of_afmails_hooks_is_refused_rather_than_served() {
+    let workspace = Workspace::new("missing-hook");
+    workspace.install_frontend("case_review", "2");
+    workspace.replace_page("case_review", CUSTOM_PAGE_MISSING_HOOK);
+
+    let (status, events, body) = workspace.review(&[]);
+    assert_eq!(status, 1, "{events:?}");
+    assert!(body.is_empty(), "{body}");
+    let error = event(&events, "error")["error"].clone();
+    assert_eq!(error["code"], "review_template_invalid");
+    // The name of the hook, so the fix is the next thing the author reads.
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("data-afmail-review-content"),
+        "{error}"
+    );
+
+    // And the same frontend with the hook restored serves.
+    workspace.replace_page("case_review", CUSTOM_PAGE);
+    let (status, events, served) = workspace.review(&[]);
+    assert_eq!(status, 0, "{events:?}");
+    assert!(served.contains("MY OWN REVIEW UI"), "{served}");
+}
+
 /// `ui_kind` is the override key, so replacing one surface replaces one
 /// surface. A case-review frontend must not turn up in a draft review.
 #[test]
 fn a_frontend_replaces_exactly_the_surface_it_was_installed_for() {
     let workspace = Workspace::new("per-surface");
-    workspace.install_frontend("draft_review", "1");
+    workspace.install_frontend("draft_review", "2");
     workspace.trust("draft_review");
 
     let (status, events, body) = workspace.review(&[]);
@@ -391,7 +415,7 @@ fn exporting_built_in_templates_seeds_an_installed_frontend_and_not_the_content_
     assert!(!workspace.root.join("templates/shared/review").exists());
     assert_eq!(result(&events)["frontend_count"], 0);
 
-    workspace.install_frontend("case_review", "1");
+    workspace.install_frontend("case_review", "2");
     let (status, events) = workspace.afmail(&["render", "templates"], &[]);
     assert_eq!(status, 0, "{events:?}");
     let frontend = workspace.frontend_root("case_review");

@@ -437,16 +437,11 @@ fn push_plan_outbound(
         || (identity.identity == "me" && identity.name == "Me");
     let mut attachments = Vec::new();
     for attachment in &frontmatter.attachments {
-        let attachment_path = planned_attachment_path(&case_path, attachment)?;
-        let bytes = fs::read(&attachment_path)
-            .map_err(|err| AppError::io("read planned draft attachment", &err))?;
-        let filename = attachment_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| AppError::new("draft_invalid", "invalid attachment file name"))?;
+        let open = crate::attachments::open_draft_attachment(&case_path, attachment)?;
+        let bytes = crate::attachments::read_attachment(&open)?;
         attachments.push(PushPlanAttachment {
-            path: relative_path(root, &attachment_path),
-            filename: filename.to_string(),
+            path: relative_path(root, &open.path),
+            filename: open.filename.clone(),
             size_bytes: bytes.len() as u64,
             content_hash: crate::util::blake3_fingerprint(&bytes),
         });
@@ -477,35 +472,6 @@ fn push_plan_outbound(
         subject: frontmatter.subject.unwrap_or_default(),
         attachments,
     })
-}
-
-fn planned_attachment_path(case_path: &Path, attachment: &str) -> Result<PathBuf> {
-    let path = Path::new(attachment);
-    if attachment.trim().is_empty() || path.is_absolute() {
-        return Err(AppError::new(
-            "draft_invalid",
-            format!("invalid draft attachment path: {attachment}"),
-        ));
-    }
-    let mut safe = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => safe.push(part),
-            _ => {
-                return Err(AppError::new(
-                    "draft_invalid",
-                    format!("invalid draft attachment path: {attachment}"),
-                ));
-            }
-        }
-    }
-    if safe.as_os_str().is_empty() {
-        return Err(AppError::new(
-            "draft_invalid",
-            format!("invalid draft attachment path: {attachment}"),
-        ));
-    }
-    Ok(case_path.join(safe))
 }
 
 fn canonical_workspace_path(root: &Path) -> Result<String> {
@@ -576,6 +542,7 @@ mod tests {
             PushPayload::Message(MessagePush {
                 message_id: message_id.to_string(),
                 action: MessagePushAction::Notification,
+                message_action_snapshot: None,
             }),
         );
         item.planned_message_action = Some(crate::types::MessageActionPush {

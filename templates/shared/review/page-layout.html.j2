@@ -3,8 +3,10 @@
 <html lang="{{ i18n.t('language_bcp47') }}">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{{ page_title }} · afmail</title>
+  <link rel="icon" href="{{ afui.app_icon_path }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ afui.base_style_path }}">
   <style>{% include "review/style.css.j2" %}</style>
 </head>
 <body data-afmail-review
@@ -14,60 +16,57 @@
   data-copy-save-error="{{ i18n.t('save_error') }}"
   data-copy-conflict="{{ i18n.t('save_conflict') }}"
   data-copy-confirmation="{{ i18n.t('confirm_destructive') }}"
-  data-copy-finishing="{{ i18n.t('finishing') }}"
-  data-copy-submit-error="{{ i18n.t('submit_error') }}">
+  data-copy-settling="{{ i18n.t('settling') }}"
+  data-copy-settled="{{ i18n.t('item_settled') }}"
+  data-copy-settled-repair-required="{{ i18n.t('settled_repair_required') }}"
+  data-copy-settle-error="{{ i18n.t('settle_error') }}"
+  data-copy-channel-connecting="{{ i18n.t('agent_connecting') }}"
+  data-copy-channel-live="{{ i18n.t('agent_live') }}"
+  data-copy-channel-waiting="{{ i18n.t('agent_waiting') }}"
+  data-copy-channel-disconnected="{{ i18n.t('agent_disconnected') }}"
+  data-copy-channel-error="{{ i18n.t('agent_channel_error') }}">
   <header class="app-bar">
     <div class="brand" aria-label="afmail {{ i18n.t('review') }}"><span class="brand-mark" aria-hidden="true">af</span><span><strong>afmail</strong><br><small>{{ page_title }}</small></span></div>
     <div class="app-actions">
       <span class="local-pill">{{ i18n.t('local_workspace_only') }}</span>
-      <span class="app-action-status" data-afmail-submit-status aria-live="polite"></span>
-      <button class="secondary-action" type="button" data-afmail-cancel>{{ i18n.t('cancel') }}</button>
-      <button class="primary-action" type="button" data-afmail-done>{{ i18n.t('done') }}</button>
+      <span class="app-action-status" data-afmail-status aria-live="polite"></span>
     </div>
   </header>
-  <main>
-    <div data-afmail-active>
-      {% if surface_kind == 'triage_review' %}
-      <section class="review-heading"><h1>{{ i18n.t('triage') }}</h1><p class="muted">{{ i18n.t('triage_description') }}</p></section>
-      {% for document in contents.items %}
-        {% with message_document = document.context.message %}{% include "review/message.html.j2" %}{% endwith %}
-        {% set suggestion = document.context.message.message.agent_suggestion %}
-        <section class="panel suggestion">
-          <h2>{{ i18n.t('agent_suggestion') }}</h2>
-          {% if suggestion %}
-          {% set action_kind = suggestion.suggested_action.kind %}
-          {% set known_action = action_kind == 'case_create' or action_kind == 'case_add' or action_kind == 'notification_create' or action_kind == 'notification_add' or action_kind == 'spam' or action_kind == 'trash' %}
-          {% if known_action %}
-          <p><strong>{% if action_kind == 'case_create' %}{{ i18n.t('create_case') }} “{{ suggestion.suggested_action.case_name }}” · {{ suggestion.suggested_action.group }}{% elif action_kind == 'case_add' %}{{ i18n.t('add_to_case') }} {{ suggestion.suggested_action.case_ref }}{% elif action_kind == 'notification_create' %}{{ i18n.t('create_notification') }} “{{ suggestion.suggested_action.notification_name }}”{% elif action_kind == 'notification_add' %}{{ i18n.t('add_to_notification') }} {{ suggestion.suggested_action.notification_ref }}{% elif action_kind == 'spam' %}{{ i18n.t('mark_spam') }}{% elif action_kind == 'trash' %}{{ i18n.t('move_trash') }}{% endif %}</strong></p>
-          <blockquote>{{ suggestion.reason }}</blockquote>
-          {% if suggestion.confidence_percent is defined and suggestion.confidence_percent is not none %}<p class="muted">{{ i18n.t('confidence') }}: {{ suggestion.confidence_percent }}%</p>{% endif %}
-          <label><span>{{ i18n.t('decision') }}</span><select name="decision:{{ document.context.message.message.message_id }}" data-afmail-submit-field><option value="accept">{{ i18n.t('accept_suggestion') }}</option><option value="defer">{{ i18n.t('decide_later') }}</option><option value="reject">{{ i18n.t('reject') }}</option><option value="override_spam">{{ i18n.t('mark_spam_instead') }}</option><option value="override_trash">{{ i18n.t('move_trash_instead') }}</option></select></label>
-          <label><span>{{ i18n.t('reason_reject_change') }}</span><textarea name="reason:{{ document.context.message.message.message_id }}" data-afmail-submit-field placeholder="{{ i18n.t('tell_agent_change') }}"></textarea></label>
-          {% else %}
-          <p class="muted">{{ i18n.t('unsupported_action') }}: <code>{{ action_kind }}</code></p>
-          {% endif %}
-          {% else %}<p class="muted">{{ i18n.t('no_current_suggestion') }}</p>{% endif %}
-        </section>
-      {% endfor %}
-      {% elif surface_kind == 'case_review' %}
-      {% set case_document = contents.collection %}{% set case = case_document.collection %}
-      <section class="review-heading"><h1>{{ case.collection_name }}</h1><p class="muted">{{ i18n.t('case') }} {{ case.collection_uid }} · {{ i18n.message_count(case_document.messages | length) }}{% if case_document.location %} · {{ case_document.location.group }}{% endif %}</p></section>
-      {% for document in case_document.messages %}{% with message_document = document %}{% include "review/message.html.j2" %}{% endwith %}{% endfor %}
-      {% if case.agent_suggestion %}{% set suggestion = case.agent_suggestion %}{% set action_kind = suggestion.suggested_action.kind %}{% set known_action = action_kind == 'case_archive' or action_kind == 'case_unarchive' or action_kind == 'case_move' or action_kind == 'case_rename' or action_kind == 'case_tag' or action_kind == 'case_untag' or action_kind == 'case_trash' or action_kind == 'case_delete' %}<section class="panel suggestion"><h2>{{ i18n.t('agent_suggestion') }}</h2>{% if known_action %}<p><strong>{% if action_kind == 'case_archive' %}{{ i18n.t('archive_case') }}{% elif action_kind == 'case_unarchive' %}{{ i18n.t('restore_to') }} {{ suggestion.suggested_action.group }}{% elif action_kind == 'case_move' %}{{ i18n.t('move_to') }} {{ suggestion.suggested_action.group }}{% elif action_kind == 'case_rename' %}{{ i18n.t('rename_to') }} “{{ suggestion.suggested_action.case_name }}”{% elif action_kind == 'case_tag' %}{{ i18n.t('add_tag') }} {{ suggestion.suggested_action.tag }}{% elif action_kind == 'case_untag' %}{{ i18n.t('remove_tag') }} {{ suggestion.suggested_action.tag }}{% elif action_kind == 'case_trash' %}{{ i18n.t('trash_case_messages') }}{% elif action_kind == 'case_delete' %}{{ i18n.t('delete_case_permanently') }}{% endif %}</strong></p><blockquote>{{ suggestion.reason }}</blockquote><label><span>{{ i18n.t('decision') }}</span><select name="case_decision" data-afmail-submit-field><option value="accept">{{ i18n.t('accept_suggestion') }}</option><option value="defer">{{ i18n.t('decide_later') }}</option><option value="reject">{{ i18n.t('reject') }}</option></select></label><label><span>{{ i18n.t('reason_reject') }}</span><textarea name="case_reason" data-afmail-submit-field></textarea></label>{% if action_kind == 'case_delete' and suggestion.suggested_action.allow_notes %}<label class="destructive-confirmation"><span><input type="checkbox" name="case_delete_allow_notes_confirmed" value="true" data-afmail-submit-field data-afmail-required-confirmation data-afmail-required-when="case_decision:accept"> {{ i18n.t('confirm_delete_case_notes') }}</span></label>{% endif %}{% else %}<p class="muted">{{ i18n.t('unsupported_action') }}: <code>{{ action_kind }}</code></p>{% endif %}</section>{% endif %}
-      {% with notes_state = contents.notes %}{% include "review/notes-editor.html.j2" %}{% endwith %}
-      {% if contents.drafts %}<section class="review-heading"><h2>{{ i18n.t('drafts') }}</h2><div class="draft-picker" role="tablist" aria-label="{{ i18n.t('drafts') }}">{% for draft_state in contents.drafts %}<button type="button" role="tab" data-afmail-draft-choice="{{ loop.index0 }}">{{ draft_state.document.locator.draft_name }}</button>{% endfor %}</div></section>{% for draft_state in contents.drafts %}<div data-afmail-draft-panel="{{ loop.index0 }}">{% include "review/draft-editor.html.j2" %}</div>{% endfor %}{% elif case.status %}<section class="panel"><p>{{ i18n.t('archived_no_drafts') }}</p></section>{% else %}<section class="panel"><p>{{ i18n.t('no_drafts') }}</p></section>{% endif %}
-      {% elif surface_kind == 'notification_review' %}
-      {% set notification_document = contents.collection %}{% set notification = notification_document.collection %}
-      <section class="review-heading"><h1>{{ notification.collection_name }}</h1><p class="muted">{{ i18n.t('notification') }} {{ notification.collection_uid }} · {{ i18n.message_count(notification_document.messages | length) }}</p></section>
-      {% for document in notification_document.messages %}{% with message_document = document %}{% include "review/message.html.j2" %}{% endwith %}{% endfor %}
-      {% if notification.agent_suggestion %}{% set suggestion = notification.agent_suggestion %}{% set action_kind = suggestion.suggested_action.kind %}{% set known_action = action_kind == 'notification_rename' or action_kind == 'notification_delete' %}<section class="panel suggestion"><h2>{{ i18n.t('agent_suggestion') }}</h2>{% if known_action %}<p><strong>{% if action_kind == 'notification_rename' %}{{ i18n.t('rename_to') }} “{{ suggestion.suggested_action.notification_name }}”{% elif action_kind == 'notification_delete' %}{{ i18n.t('delete_notification_permanently') }}{% endif %}</strong></p><blockquote>{{ suggestion.reason }}</blockquote><label><span>{{ i18n.t('decision') }}</span><select name="notification_decision" data-afmail-submit-field><option value="accept">{{ i18n.t('accept_suggestion') }}</option><option value="defer">{{ i18n.t('decide_later') }}</option><option value="reject">{{ i18n.t('reject') }}</option></select></label><label><span>{{ i18n.t('reason_reject') }}</span><textarea name="notification_reason" data-afmail-submit-field></textarea></label>{% if action_kind == 'notification_delete' and suggestion.suggested_action.allow_notes %}<label class="destructive-confirmation"><span><input type="checkbox" name="notification_delete_allow_notes_confirmed" value="true" data-afmail-submit-field data-afmail-required-confirmation data-afmail-required-when="notification_decision:accept"> {{ i18n.t('confirm_delete_notification_notes') }}</span></label>{% endif %}{% else %}<p class="muted">{{ i18n.t('unsupported_action') }}: <code>{{ action_kind }}</code></p>{% endif %}</section>{% endif %}
-      {% with notes_state = contents.notes %}{% include "review/notes-editor.html.j2" %}{% endwith %}
-      {% else %}
-      <section class="review-heading"><h1>{{ i18n.t('draft_review') }}</h1><p class="muted">{{ i18n.t('draft_review_description') }}</p></section>
-      {% with draft_state = contents.draft %}{% include "review/draft-editor.html.j2" %}{% endwith %}
-      {% endif %}
-    </div>
-    <section class="complete" data-afmail-complete hidden><h1>{{ i18n.t('review_complete') }}</h1><p class="muted">{{ i18n.t('close_window') }}</p></section>
+  <main data-afmail-review-content>
+    {% if surface_kind == 'triage_review' %}
+    <section class="review-heading"><h1>{{ i18n.t('triage') }}</h1><p class="muted">{{ i18n.t('triage_description') }}</p>{% if contents.truncated %}<p class="muted">{{ i18n.triage_truncated(contents.truncated.returned_count, contents.truncated.count) }}</p>{% endif %}</section>
+    {% for item in contents.items %}
+      {% set document = item.document %}
+      {% with message_document = document.context.message, message_expanded = true %}{% include "review/message.html.j2" %}{% endwith %}
+    {% endfor %}
+    {% include "review/agent-workbench-layout.html.j2" %}
+    {% elif surface_kind == 'case_review' %}
+    {% set case_document = contents.collection %}{% set case = case_document.collection %}
+    <section class="review-heading"><h1>{{ case.collection_name }}</h1><p class="muted">{{ i18n.t('case') }} {{ case.collection_uid }} · {{ i18n.message_count(case_document.messages | length) }}{% if case_document.location %} · {{ case_document.location.group }}{% endif %}</p></section>
+    <section class="review-section" aria-labelledby="case-conversation-heading">
+      <header class="section-heading"><h2 id="case-conversation-heading">{{ i18n.t('conversation') }}</h2></header>
+      {% for document in case_document.messages %}{% with message_document = document, message_expanded = loop.last %}{% include "review/message.html.j2" %}{% endwith %}{% endfor %}
+    </section>
+    <section class="review-section" aria-labelledby="case-drafts-heading">
+      <header class="section-heading"><h2 id="case-drafts-heading">{{ i18n.t('drafts') }}</h2></header>
+      {% if contents.drafts %}{% for draft_state in contents.drafts %}{% with draft_expanded = loop.first %}{% include "review/draft-editor.html.j2" %}{% endwith %}{% endfor %}{% elif case.status %}<section class="panel"><p>{{ i18n.t('archived_no_drafts') }}</p></section>{% else %}<section class="panel"><p>{{ i18n.t('no_drafts') }}</p></section>{% endif %}
+    </section>
+    {% with notes_state = contents.notes %}{% include "review/notes-editor.html.j2" %}{% endwith %}
+    {% include "review/agent-workbench-layout.html.j2" %}
+    {% elif surface_kind == 'notification_review' %}
+    {% set notification_document = contents.collection %}{% set notification = notification_document.collection %}
+    <section class="review-heading"><h1>{{ notification.collection_name }}</h1><p class="muted">{{ i18n.t('notification') }} {{ notification.collection_uid }} · {{ i18n.message_count(notification_document.messages | length) }}</p></section>
+    <section class="review-section" aria-labelledby="notification-conversation-heading">
+      <header class="section-heading"><h2 id="notification-conversation-heading">{{ i18n.t('conversation') }}</h2></header>
+      {% for document in notification_document.messages %}{% with message_document = document, message_expanded = loop.last %}{% include "review/message.html.j2" %}{% endwith %}{% endfor %}
+    </section>
+    {% with notes_state = contents.notes %}{% include "review/notes-editor.html.j2" %}{% endwith %}
+    {% include "review/agent-workbench-layout.html.j2" %}
+    {% else %}
+    <section class="review-heading"><h1>{{ i18n.t('draft_review') }}</h1><p class="muted">{{ i18n.t('draft_review_description') }}</p></section>
+    {% with draft_state = contents.draft, draft_expanded = true %}{% include "review/draft-editor.html.j2" %}{% endwith %}
+    {% include "review/agent-workbench-layout.html.j2" %}
+    {% endif %}
   </main>
   <!-- afmail:trusted-runtime -->
 </body>

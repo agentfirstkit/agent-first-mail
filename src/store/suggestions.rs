@@ -21,11 +21,54 @@ enum CollectionReviewBaseDocument<'a> {
     },
 }
 
+pub(crate) fn case_review_base_hash_from_documents(
+    collection: &CollectionRenderDocument,
+    notes: &NotesRenderDocument,
+    drafts: &[DraftRenderDocument],
+) -> Result<String> {
+    let mut collection = collection.clone();
+    collection.collection.agent_suggestion = None;
+    collection.collection.human_suggestion = None;
+    review_document_hash(
+        "case",
+        &CollectionReviewBaseDocument::Case {
+            collection: &collection,
+            notes,
+            drafts,
+        },
+    )
+}
+
+pub(crate) fn notification_review_base_hash_from_documents(
+    collection: &CollectionRenderDocument,
+    notes: &NotesRenderDocument,
+) -> Result<String> {
+    let mut collection = collection.clone();
+    collection.collection.agent_suggestion = None;
+    collection.collection.human_suggestion = None;
+    review_document_hash(
+        "notification",
+        &CollectionReviewBaseDocument::Notification {
+            collection: &collection,
+            notes,
+        },
+    )
+}
+
+/// One item's settled disposition, as a review page's settle route receives it.
+///
+/// `based_on_agent_suggestion_uid` is `None` for `outcome: Decided` — the
+/// person originated this disposition rather than answering a proposal — and
+/// `Some` for `Accepted` / `Changed` / an agent-answering `Rejected`.
+/// `message_review_base_hash` is always the message's own current hash at
+/// settle time, whether or not an Agent suggestion is involved: it is what
+/// catches a message that changed under the person between page-open and
+/// settle.
 #[derive(Clone, Debug)]
 #[cfg(any(feature = "review", test))]
 pub(crate) struct MessageHumanSuggestionInput {
     pub(crate) message_id: String,
-    pub(crate) agent_suggestion_uid: String,
+    pub(crate) based_on_agent_suggestion_uid: Option<String>,
     pub(crate) message_review_base_hash: String,
     pub(crate) outcome: HumanSuggestionOutcome,
     pub(crate) suggested_action: Option<MessageSuggestedAction>,
@@ -36,7 +79,7 @@ pub(crate) struct MessageHumanSuggestionInput {
 #[cfg(any(feature = "review", test))]
 pub(crate) struct CaseHumanSuggestionInput {
     pub(crate) case_ref: String,
-    pub(crate) agent_suggestion_uid: String,
+    pub(crate) based_on_agent_suggestion_uid: Option<String>,
     pub(crate) case_review_base_hash: String,
     pub(crate) outcome: HumanSuggestionOutcome,
     pub(crate) suggested_action: Option<CaseSuggestedAction>,
@@ -47,7 +90,7 @@ pub(crate) struct CaseHumanSuggestionInput {
 #[cfg(any(feature = "review", test))]
 pub(crate) struct NotificationHumanSuggestionInput {
     pub(crate) notification_ref: String,
-    pub(crate) agent_suggestion_uid: String,
+    pub(crate) based_on_agent_suggestion_uid: Option<String>,
     pub(crate) notification_review_base_hash: String,
     pub(crate) outcome: HumanSuggestionOutcome,
     pub(crate) suggested_action: Option<NotificationSuggestedAction>,
@@ -158,14 +201,22 @@ fn validate_agent_fields(
     Ok(())
 }
 
+/// Shape-only checks on a [`crate::types::MessageHumanSuggestion`] (and its
+/// case/notification equivalents): no field is blank, and — when present —
+/// `based_on_agent_suggestion_uid` is not blank either. Whether it is allowed
+/// to be present at all is an outcome invariant, checked separately by
+/// `validate_human_*_fields`, because that check needs to know which agent
+/// suggestion (if any) is current.
 fn validate_human_fields(
     uid: &str,
-    based_on_uid: &str,
+    based_on_agent_suggestion_uid: Option<&str>,
     review_base_hash: &str,
     created_rfc3339: &str,
 ) -> Result<()> {
     checked_suggestion_text("human_suggestion_uid", uid)?;
-    checked_suggestion_text("based_on_agent_suggestion_uid", based_on_uid)?;
+    if let Some(based_on_uid) = based_on_agent_suggestion_uid {
+        checked_suggestion_text("based_on_agent_suggestion_uid", based_on_uid)?;
+    }
     checked_suggestion_text("review_base_hash", review_base_hash)?;
     checked_suggestion_text("created_rfc3339", created_rfc3339)?;
     Ok(())
@@ -175,47 +226,43 @@ pub(super) fn validate_message_suggestion_pair(
     agent: Option<&MessageAgentSuggestion>,
     human: Option<&MessageHumanSuggestion>,
 ) -> Result<()> {
-    let Some(agent) = agent else {
-        return if human.is_none() {
-            Ok(())
-        } else {
-            Err(AppError::new(
-                "invalid_suggestion_state",
-                "human_suggestion requires a current agent_suggestion",
-            ))
-        };
-    };
-    validate_agent_fields(
-        &agent.agent_suggestion_uid,
-        &agent.message_review_base_hash,
-        &agent.reason,
-        agent.confidence_percent,
-        &agent.created_rfc3339,
-    )?;
-    validate_message_action(&agent.suggested_action)?;
-    if let Some(human) = human {
-        validate_human_fields(
-            &human.human_suggestion_uid,
-            &human.based_on_agent_suggestion_uid,
-            &human.message_review_base_hash,
-            &human.created_rfc3339,
+    if let Some(agent) = agent {
+        validate_agent_fields(
+            &agent.agent_suggestion_uid,
+            &agent.message_review_base_hash,
+            &agent.reason,
+            agent.confidence_percent,
+            &agent.created_rfc3339,
         )?;
-        if human.based_on_agent_suggestion_uid != agent.agent_suggestion_uid
-            || human.message_review_base_hash != agent.message_review_base_hash
-        {
-            return Err(AppError::new(
-                "invalid_suggestion_state",
-                "human_suggestion is not bound to the current agent_suggestion",
-            ));
-        }
-        validate_human_message_fields(
-            human.outcome,
-            human.suggested_action.as_ref(),
-            human.reason.as_deref(),
-            &agent.suggested_action,
-        )?;
+        validate_message_action(&agent.suggested_action)?;
     }
-    Ok(())
+    let Some(human) = human else {
+        return Ok(());
+    };
+    validate_human_fields(
+        &human.human_suggestion_uid,
+        human.based_on_agent_suggestion_uid.as_deref(),
+        &human.message_review_base_hash,
+        &human.created_rfc3339,
+    )?;
+    let agent_action = bind_human_to_agent(
+        human.based_on_agent_suggestion_uid.as_deref(),
+        &human.message_review_base_hash,
+        agent.map(|agent| {
+            (
+                agent.agent_suggestion_uid.as_str(),
+                agent.message_review_base_hash.as_str(),
+                &agent.suggested_action,
+            )
+        }),
+    )?;
+    validate_human_message_fields(
+        human.outcome,
+        human.based_on_agent_suggestion_uid.as_deref(),
+        human.suggested_action.as_ref(),
+        human.reason.as_deref(),
+        agent_action,
+    )
 }
 
 pub(super) fn validate_case_suggestion_pair(
@@ -242,47 +289,43 @@ pub(super) fn validate_case_suggestion_pair(
         }
         None => None,
     };
-    let Some(agent) = agent else {
-        return if human.is_none() {
-            Ok(())
-        } else {
-            Err(AppError::new(
-                "invalid_suggestion_state",
-                "human_suggestion requires a current agent_suggestion",
-            ))
-        };
-    };
-    validate_agent_fields(
-        &agent.agent_suggestion_uid,
-        &agent.case_review_base_hash,
-        &agent.reason,
-        agent.confidence_percent,
-        &agent.created_rfc3339,
-    )?;
-    validate_case_action(&agent.suggested_action)?;
-    if let Some(human) = human {
-        validate_human_fields(
-            &human.human_suggestion_uid,
-            &human.based_on_agent_suggestion_uid,
-            &human.case_review_base_hash,
-            &human.created_rfc3339,
+    if let Some(agent) = agent {
+        validate_agent_fields(
+            &agent.agent_suggestion_uid,
+            &agent.case_review_base_hash,
+            &agent.reason,
+            agent.confidence_percent,
+            &agent.created_rfc3339,
         )?;
-        if human.based_on_agent_suggestion_uid != agent.agent_suggestion_uid
-            || human.case_review_base_hash != agent.case_review_base_hash
-        {
-            return Err(AppError::new(
-                "invalid_suggestion_state",
-                "human_suggestion is not bound to the current agent_suggestion",
-            ));
-        }
-        validate_human_case_fields(
-            human.outcome,
-            human.suggested_action.as_ref(),
-            human.reason.as_deref(),
-            &agent.suggested_action,
-        )?;
+        validate_case_action(&agent.suggested_action)?;
     }
-    Ok(())
+    let Some(human) = human else {
+        return Ok(());
+    };
+    validate_human_fields(
+        &human.human_suggestion_uid,
+        human.based_on_agent_suggestion_uid.as_deref(),
+        &human.case_review_base_hash,
+        &human.created_rfc3339,
+    )?;
+    let agent_action = bind_human_to_agent(
+        human.based_on_agent_suggestion_uid.as_deref(),
+        &human.case_review_base_hash,
+        agent.map(|agent| {
+            (
+                agent.agent_suggestion_uid.as_str(),
+                agent.case_review_base_hash.as_str(),
+                &agent.suggested_action,
+            )
+        }),
+    )?;
+    validate_human_case_fields(
+        human.outcome,
+        human.based_on_agent_suggestion_uid.as_deref(),
+        human.suggested_action.as_ref(),
+        human.reason.as_deref(),
+        agent_action,
+    )
 }
 
 pub(super) fn validate_notification_suggestion_pair(
@@ -309,47 +352,76 @@ pub(super) fn validate_notification_suggestion_pair(
         }
         None => None,
     };
-    let Some(agent) = agent else {
-        return if human.is_none() {
-            Ok(())
-        } else {
-            Err(AppError::new(
-                "invalid_suggestion_state",
-                "human_suggestion requires a current agent_suggestion",
-            ))
-        };
-    };
-    validate_agent_fields(
-        &agent.agent_suggestion_uid,
-        &agent.notification_review_base_hash,
-        &agent.reason,
-        agent.confidence_percent,
-        &agent.created_rfc3339,
-    )?;
-    validate_notification_action(&agent.suggested_action)?;
-    if let Some(human) = human {
-        validate_human_fields(
-            &human.human_suggestion_uid,
-            &human.based_on_agent_suggestion_uid,
-            &human.notification_review_base_hash,
-            &human.created_rfc3339,
+    if let Some(agent) = agent {
+        validate_agent_fields(
+            &agent.agent_suggestion_uid,
+            &agent.notification_review_base_hash,
+            &agent.reason,
+            agent.confidence_percent,
+            &agent.created_rfc3339,
         )?;
-        if human.based_on_agent_suggestion_uid != agent.agent_suggestion_uid
-            || human.notification_review_base_hash != agent.notification_review_base_hash
-        {
-            return Err(AppError::new(
-                "invalid_suggestion_state",
-                "human_suggestion is not bound to the current agent_suggestion",
-            ));
-        }
-        validate_human_notification_fields(
-            human.outcome,
-            human.suggested_action.as_ref(),
-            human.reason.as_deref(),
-            &agent.suggested_action,
-        )?;
+        validate_notification_action(&agent.suggested_action)?;
     }
-    Ok(())
+    let Some(human) = human else {
+        return Ok(());
+    };
+    validate_human_fields(
+        &human.human_suggestion_uid,
+        human.based_on_agent_suggestion_uid.as_deref(),
+        &human.notification_review_base_hash,
+        &human.created_rfc3339,
+    )?;
+    let agent_action = bind_human_to_agent(
+        human.based_on_agent_suggestion_uid.as_deref(),
+        &human.notification_review_base_hash,
+        agent.map(|agent| {
+            (
+                agent.agent_suggestion_uid.as_str(),
+                agent.notification_review_base_hash.as_str(),
+                &agent.suggested_action,
+            )
+        }),
+    )?;
+    validate_human_notification_fields(
+        human.outcome,
+        human.based_on_agent_suggestion_uid.as_deref(),
+        human.suggested_action.as_ref(),
+        human.reason.as_deref(),
+        agent_action,
+    )
+}
+
+/// Resolve which agent action (if any) a human_suggestion is answering.
+///
+/// `None` (no `based_on_agent_suggestion_uid`) always resolves to `None` —
+/// that is `Decided`, or a `Rejected` that answers nothing in particular.
+/// `Some` must resolve to the exact current agent suggestion; a `based_on`
+/// that names an agent suggestion which is missing, replaced, or was computed
+/// against a different review hash is a dangling reference, not a stale one —
+/// afmail always clears `human_suggestion` when it replaces or clears
+/// `agent_suggestion`, so this can only happen to a hand-edited or corrupted
+/// file.
+fn bind_human_to_agent<'a, T>(
+    based_on_agent_suggestion_uid: Option<&str>,
+    human_review_base_hash: &str,
+    agent: Option<(&str, &str, &'a T)>,
+) -> Result<Option<&'a T>> {
+    match (based_on_agent_suggestion_uid, agent) {
+        (None, _) => Ok(None),
+        (Some(based_on_uid), Some((agent_uid, agent_review_base_hash, agent_action))) => {
+            if based_on_uid != agent_uid || human_review_base_hash != agent_review_base_hash {
+                return Err(AppError::new(
+                    "invalid_suggestion_state",
+                    "human_suggestion is not bound to the current agent_suggestion",
+                ));
+            }
+            Ok(Some(agent_action))
+        }
+        (Some(_), None) => Err(AppError::new(
+            "invalid_suggestion_state",
+            "human_suggestion references an agent_suggestion that is no longer current",
+        )),
+    }
 }
 
 impl Workspace {
@@ -483,111 +555,103 @@ impl Workspace {
             })
     }
 
-    pub fn triage_suggested_message_ids(&self) -> Result<Vec<String>> {
-        self.require_workspace()?;
-        let mut message_ids = Vec::new();
-        for path in message_json_paths(&self.root)? {
-            let message = read_message(&path)?;
-            if message.workspace.status == MessageStatus::Triage.as_str()
-                && message.agent_suggestion.is_some()
-            {
-                message_ids.push(message.message_id);
-            }
-        }
-        message_ids.sort();
-        Ok(message_ids)
-    }
-
+    /// One item's settled disposition, written the moment a person settles it.
+    ///
+    /// This writes exactly the one message named by `input`; it never touches
+    /// any other message, and a caller settling several messages in one
+    /// review session calls this once per message. A stale
+    /// `message_review_base_hash` — the message changed since the page was
+    /// rendered, or since the referenced `agent_suggestion` was proposed —
+    /// fails this one call without touching the file at all.
     #[cfg(any(feature = "review", test))]
-    pub(crate) fn set_message_human_suggestions(
+    pub(crate) fn set_message_human_suggestion(
         &self,
-        inputs: &[MessageHumanSuggestionInput],
-    ) -> Result<Vec<(String, MessageHumanSuggestion)>> {
+        input: &MessageHumanSuggestionInput,
+    ) -> Result<MessageHumanSuggestion> {
         self.require_workspace()?;
-        if inputs.is_empty() {
-            return Err(AppError::new(
-                "invalid_human_suggestion",
-                "triage review must contain at least one message",
-            ));
-        }
-        let mut prepared = Vec::with_capacity(inputs.len());
-        let mut seen = BTreeSet::new();
-        for input in inputs {
-            validate_id("message_id", &input.message_id)?;
-            if !seen.insert(input.message_id.as_str()) {
-                return Err(AppError::new(
-                    "invalid_human_suggestion",
-                    "triage review contains the same message more than once",
-                ));
-            }
-            let mut metadata = read_message_metadata_file(&self.root, &input.message_id)?
-                .ok_or_else(|| {
-                    AppError::new(
-                        "message_metadata_missing",
-                        format!(
-                            "canonical metadata is missing for message {}",
-                            input.message_id
-                        ),
-                    )
-                })?;
-            let agent = metadata.agent_suggestion.as_ref().ok_or_else(|| {
+        validate_id("message_id", &input.message_id)?;
+        let mut metadata =
+            read_message_metadata_file(&self.root, &input.message_id)?.ok_or_else(|| {
                 AppError::new(
-                    "suggestion_not_found",
-                    format!("message {} has no agent_suggestion", input.message_id),
+                    "message_metadata_missing",
+                    format!(
+                        "canonical metadata is missing for message {}",
+                        input.message_id
+                    ),
                 )
             })?;
-            let current_hash = self.message_review_base_hash(&input.message_id)?;
-            if agent.agent_suggestion_uid != input.agent_suggestion_uid
-                || agent.message_review_base_hash != input.message_review_base_hash
-                || current_hash != input.message_review_base_hash
-            {
-                return Err(stale_suggestion_error(
-                    "message",
-                    &input.message_id,
-                    &input.message_review_base_hash,
-                    &current_hash,
-                ));
+        let current_hash = self.message_review_base_hash(&input.message_id)?;
+        if current_hash != input.message_review_base_hash {
+            return Err(stale_suggestion_error(
+                "message",
+                &input.message_id,
+                &input.message_review_base_hash,
+                &current_hash,
+            ));
+        }
+        let agent_action = match input.based_on_agent_suggestion_uid.as_deref() {
+            Some(based_on_uid) => {
+                let agent = metadata.agent_suggestion.as_ref().ok_or_else(|| {
+                    AppError::new(
+                        "suggestion_not_found",
+                        format!("message {} has no agent_suggestion", input.message_id),
+                    )
+                })?;
+                if agent.agent_suggestion_uid != based_on_uid
+                    || agent.message_review_base_hash != input.message_review_base_hash
+                {
+                    return Err(stale_suggestion_error(
+                        "message",
+                        &input.message_id,
+                        &input.message_review_base_hash,
+                        &current_hash,
+                    ));
+                }
+                Some(&agent.suggested_action)
             }
-            validate_human_message_choice(input, &agent.suggested_action)?;
-            let human = MessageHumanSuggestion {
-                human_suggestion_uid: suggestion_uid("human_suggestion"),
-                based_on_agent_suggestion_uid: input.agent_suggestion_uid.clone(),
-                message_review_base_hash: input.message_review_base_hash.clone(),
-                outcome: input.outcome,
-                suggested_action: input.suggested_action.clone(),
-                reason: clean_optional_reason(input.reason.as_deref()),
-                created_rfc3339: now_rfc3339(),
-            };
-            metadata.human_suggestion = Some(human.clone());
-            prepared.push((input.message_id.clone(), metadata, human));
-        }
-        for (message_id, metadata, human) in &prepared {
-            write_message_metadata_file(&self.root, metadata)?;
-            self.refresh_message_projection(message_id)?;
-            self.append_audit_event(
-                "human_suggestion_set",
-                vec![audit_target("message", message_id)],
-                human.reason.as_deref(),
-                json!({
-                    "human_suggestion_uid": human.human_suggestion_uid,
-                    "based_on_agent_suggestion_uid": human.based_on_agent_suggestion_uid,
-                    "message_review_base_hash": human.message_review_base_hash,
-                    "outcome": human.outcome,
-                    "suggested_action": human.suggested_action,
-                }),
-            )?;
-        }
-        Ok(prepared
-            .into_iter()
-            .map(|(message_id, _, human)| (message_id, human))
-            .collect())
+            None => None,
+        };
+        validate_human_message_fields(
+            input.outcome,
+            input.based_on_agent_suggestion_uid.as_deref(),
+            input.suggested_action.as_ref(),
+            input.reason.as_deref(),
+            agent_action,
+        )?;
+        let human = MessageHumanSuggestion {
+            human_suggestion_uid: suggestion_uid("human_suggestion"),
+            based_on_agent_suggestion_uid: input.based_on_agent_suggestion_uid.clone(),
+            message_review_base_hash: input.message_review_base_hash.clone(),
+            outcome: input.outcome,
+            suggested_action: input.suggested_action.clone(),
+            reason: clean_optional_reason(input.reason.as_deref()),
+            created_rfc3339: now_rfc3339(),
+        };
+        metadata.human_suggestion = Some(human.clone());
+        write_message_metadata_file(&self.root, &metadata)?;
+        let projection = self.refresh_message_projection(&input.message_id);
+        let audit = self.append_audit_event(
+            "human_suggestion_set",
+            vec![audit_target("message", &input.message_id)],
+            human.reason.as_deref(),
+            json!({
+                "human_suggestion_uid": human.human_suggestion_uid,
+                "based_on_agent_suggestion_uid": human.based_on_agent_suggestion_uid,
+                "message_review_base_hash": human.message_review_base_hash,
+                "outcome": human.outcome,
+                "suggested_action": human.suggested_action,
+            }),
+        );
+        report_persisted_settlement_followup_errors(
+            &human.human_suggestion_uid,
+            [projection, audit],
+        )?;
+        Ok(human)
     }
 
     pub fn case_review_base_hash(&self, case_ref: &str) -> Result<String> {
         self.require_workspace()?;
-        let mut collection = self.case_render_document(case_ref)?;
-        collection.collection.agent_suggestion = None;
-        collection.collection.human_suggestion = None;
+        let collection = self.case_render_document(case_ref)?;
         let case_uid = collection.collection.collection_uid.clone();
         let notes = self.case_notes_render_document(&case_uid)?;
         let drafts = if collection.collection.status.is_empty() {
@@ -595,14 +659,7 @@ impl Workspace {
         } else {
             Vec::new()
         };
-        review_document_hash(
-            "case",
-            &CollectionReviewBaseDocument::Case {
-                collection: &collection,
-                notes: &notes,
-                drafts: &drafts,
-            },
-        )
+        case_review_base_hash_from_documents(&collection, &notes, &drafts)
     }
 
     pub fn set_case_agent_suggestion(
@@ -692,6 +749,12 @@ impl Workspace {
         )
     }
 
+    /// A case's settled disposition, written the moment a person settles it.
+    ///
+    /// A case review has exactly one settleable item (the case itself, apart
+    /// from its notes and drafts, which autosave independently), so unlike
+    /// [`Workspace::set_message_human_suggestion`] there is no batch to speak
+    /// of — this is that one write.
     #[cfg(any(feature = "review", test))]
     pub(crate) fn set_case_human_suggestion(
         &self,
@@ -700,20 +763,8 @@ impl Workspace {
         self.require_workspace()?;
         let case = self.resolve_case_any(&input.case_ref)?;
         let mut data = read_case_file(&case.path)?;
-        let agent = match data.agent_suggestion.as_ref() {
-            Some(CollectionAgentSuggestion::Case(value)) => value,
-            _ => {
-                return Err(AppError::new(
-                    "suggestion_not_found",
-                    "case has no agent_suggestion",
-                ));
-            }
-        };
         let current_hash = self.case_review_base_hash(&input.case_ref)?;
-        if agent.agent_suggestion_uid != input.agent_suggestion_uid
-            || agent.case_review_base_hash != input.case_review_base_hash
-            || current_hash != input.case_review_base_hash
-        {
+        if current_hash != input.case_review_base_hash {
             return Err(stale_suggestion_error(
                 "case",
                 &case.case_uid,
@@ -721,10 +772,41 @@ impl Workspace {
                 &current_hash,
             ));
         }
-        validate_human_case_choice(input, &agent.suggested_action)?;
+        let agent_action = match input.based_on_agent_suggestion_uid.as_deref() {
+            Some(based_on_uid) => {
+                let agent = match data.agent_suggestion.as_ref() {
+                    Some(CollectionAgentSuggestion::Case(value)) => value,
+                    _ => {
+                        return Err(AppError::new(
+                            "suggestion_not_found",
+                            "case has no agent_suggestion",
+                        ));
+                    }
+                };
+                if agent.agent_suggestion_uid != based_on_uid
+                    || agent.case_review_base_hash != input.case_review_base_hash
+                {
+                    return Err(stale_suggestion_error(
+                        "case",
+                        &case.case_uid,
+                        &input.case_review_base_hash,
+                        &current_hash,
+                    ));
+                }
+                Some(&agent.suggested_action)
+            }
+            None => None,
+        };
+        validate_human_case_fields(
+            input.outcome,
+            input.based_on_agent_suggestion_uid.as_deref(),
+            input.suggested_action.as_ref(),
+            input.reason.as_deref(),
+            agent_action,
+        )?;
         let human = CaseHumanSuggestion {
             human_suggestion_uid: suggestion_uid("human_suggestion"),
-            based_on_agent_suggestion_uid: input.agent_suggestion_uid.clone(),
+            based_on_agent_suggestion_uid: input.based_on_agent_suggestion_uid.clone(),
             case_review_base_hash: input.case_review_base_hash.clone(),
             outcome: input.outcome,
             suggested_action: input.suggested_action.clone(),
@@ -733,7 +815,7 @@ impl Workspace {
         };
         data.human_suggestion = Some(CollectionHumanSuggestion::Case(human.clone()));
         write_case_file(&case.path, &data)?;
-        self.append_audit_event(
+        let audit = self.append_audit_event(
             "human_suggestion_set",
             vec![audit_target("case", &case.case_uid)],
             human.reason.as_deref(),
@@ -744,24 +826,20 @@ impl Workspace {
                 "outcome": human.outcome,
                 "suggested_action": human.suggested_action,
             }),
+        );
+        report_persisted_settlement_followup_errors(
+            &human.human_suggestion_uid,
+            std::iter::once(audit),
         )?;
         Ok(human)
     }
 
     pub fn notification_review_base_hash(&self, notification_ref: &str) -> Result<String> {
         self.require_workspace()?;
-        let mut collection = self.notification_render_document(notification_ref)?;
-        collection.collection.agent_suggestion = None;
-        collection.collection.human_suggestion = None;
+        let collection = self.notification_render_document(notification_ref)?;
         let notification_uid = collection.collection.collection_uid.clone();
         let notes = self.notification_notes_render_document(&notification_uid)?;
-        review_document_hash(
-            "notification",
-            &CollectionReviewBaseDocument::Notification {
-                collection: &collection,
-                notes: &notes,
-            },
-        )
+        notification_review_base_hash_from_documents(&collection, &notes)
     }
 
     pub fn set_notification_agent_suggestion(
@@ -853,6 +931,9 @@ impl Workspace {
         )
     }
 
+    /// A notification collection's settled disposition, written the moment a
+    /// person settles it. See [`Workspace::set_case_human_suggestion`]: same
+    /// shape, one item.
     #[cfg(any(feature = "review", test))]
     pub(crate) fn set_notification_human_suggestion(
         &self,
@@ -861,20 +942,8 @@ impl Workspace {
         self.require_workspace()?;
         let (notification_uid, _) = self.resolve_notification(&input.notification_ref)?;
         let mut data = self.read_notifications(&notification_uid)?;
-        let agent = match data.agent_suggestion.as_ref() {
-            Some(CollectionAgentSuggestion::Notification(value)) => value,
-            _ => {
-                return Err(AppError::new(
-                    "suggestion_not_found",
-                    "notification has no agent_suggestion",
-                ));
-            }
-        };
         let current_hash = self.notification_review_base_hash(&notification_uid)?;
-        if agent.agent_suggestion_uid != input.agent_suggestion_uid
-            || agent.notification_review_base_hash != input.notification_review_base_hash
-            || current_hash != input.notification_review_base_hash
-        {
+        if current_hash != input.notification_review_base_hash {
             return Err(stale_suggestion_error(
                 "notification",
                 &notification_uid,
@@ -882,15 +951,41 @@ impl Workspace {
                 &current_hash,
             ));
         }
+        let agent_action = match input.based_on_agent_suggestion_uid.as_deref() {
+            Some(based_on_uid) => {
+                let agent = match data.agent_suggestion.as_ref() {
+                    Some(CollectionAgentSuggestion::Notification(value)) => value,
+                    _ => {
+                        return Err(AppError::new(
+                            "suggestion_not_found",
+                            "notification has no agent_suggestion",
+                        ));
+                    }
+                };
+                if agent.agent_suggestion_uid != based_on_uid
+                    || agent.notification_review_base_hash != input.notification_review_base_hash
+                {
+                    return Err(stale_suggestion_error(
+                        "notification",
+                        &notification_uid,
+                        &input.notification_review_base_hash,
+                        &current_hash,
+                    ));
+                }
+                Some(&agent.suggested_action)
+            }
+            None => None,
+        };
         validate_human_notification_fields(
             input.outcome,
+            input.based_on_agent_suggestion_uid.as_deref(),
             input.suggested_action.as_ref(),
             input.reason.as_deref(),
-            &agent.suggested_action,
+            agent_action,
         )?;
         let human = NotificationHumanSuggestion {
             human_suggestion_uid: suggestion_uid("human_suggestion"),
-            based_on_agent_suggestion_uid: input.agent_suggestion_uid.clone(),
+            based_on_agent_suggestion_uid: input.based_on_agent_suggestion_uid.clone(),
             notification_review_base_hash: input.notification_review_base_hash.clone(),
             outcome: input.outcome,
             suggested_action: input.suggested_action.clone(),
@@ -899,7 +994,7 @@ impl Workspace {
         };
         data.human_suggestion = Some(CollectionHumanSuggestion::Notification(human.clone()));
         self.write_notifications(&notification_uid, &data)?;
-        self.append_audit_event(
+        let audit = self.append_audit_event(
             "human_suggestion_set",
             vec![audit_target("notification", &notification_uid)],
             human.reason.as_deref(),
@@ -910,6 +1005,10 @@ impl Workspace {
                 "outcome": human.outcome,
                 "suggested_action": human.suggested_action,
             }),
+        );
+        report_persisted_settlement_followup_errors(
+            &human.human_suggestion_uid,
+            std::iter::once(audit),
         )?;
         Ok(human)
     }
@@ -920,28 +1019,73 @@ impl Workspace {
     }
 }
 
+/// Canonical suggestion files are the authority.  Once one has been replaced,
+/// a projection or audit failure must never come back shaped like "nothing was
+/// settled" — retrying that lie would mint a second human suggestion.  Keep
+/// the underlying failures and mark the committed boundary explicitly so HTTP
+/// callers can report an accurate, repair-required result.
 #[cfg(any(feature = "review", test))]
-fn validate_human_message_choice(
-    input: &MessageHumanSuggestionInput,
-    agent_action: &MessageSuggestedAction,
+fn report_persisted_settlement_followup_errors(
+    human_suggestion_uid: &str,
+    followups: impl IntoIterator<Item = Result<()>>,
 ) -> Result<()> {
-    validate_human_message_fields(
-        input.outcome,
-        input.suggested_action.as_ref(),
-        input.reason.as_deref(),
-        agent_action,
+    let failures = followups
+        .into_iter()
+        .filter_map(std::result::Result::err)
+        .map(|error| {
+            json!({
+                "code": error.error_code,
+                "message": error.message,
+            })
+        })
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "settlement_followup_failed",
+        "the human suggestion was persisted, but a derived projection or audit write failed",
     )
+    .with_hint(
+        "Do not repeat the decision. Run `afmail doctor`, repair the reported local follow-up, and reread the item.",
+    )
+    .with_details(json!({
+        "settlement_persisted": true,
+        "human_suggestion_uid": human_suggestion_uid,
+        "followup_failures": failures,
+    })))
 }
 
+/// The three invariants every [`crate::types::MessageHumanSuggestion`] (and
+/// its case/notification equivalents) must satisfy, checked identically
+/// whether the value was just built from a settle request or read back off
+/// disk:
+///
+/// 1. `Decided` requires no `based_on_agent_suggestion_uid` and a complete
+///    `suggested_action` — the person originated this, nothing was proposed;
+/// 2. `Accepted` / `Changed` require `based_on_agent_suggestion_uid` — they
+///    answer a proposal, so one must exist; `Accepted` must copy the current
+///    Agent action exactly, `Changed` must carry a different complete one;
+/// 3. `Rejected` requires a `reason` and carries no action — an Agent
+///    suggestion is not required (a person may reject the idea that
+///    anything is needed here even when nothing was proposed), but if one is
+///    referenced, `agent_action` confirms it is still current.
 fn validate_human_message_fields(
     outcome: HumanSuggestionOutcome,
+    based_on_agent_suggestion_uid: Option<&str>,
     suggested_action: Option<&MessageSuggestedAction>,
     reason: Option<&str>,
-    agent_action: &MessageSuggestedAction,
+    agent_action: Option<&MessageSuggestedAction>,
 ) -> Result<()> {
     match outcome {
         HumanSuggestionOutcome::Accepted => {
-            if suggested_action != Some(agent_action) {
+            if based_on_agent_suggestion_uid.is_none() {
+                return Err(AppError::new(
+                    "invalid_human_suggestion",
+                    "accepted human_suggestion requires based_on_agent_suggestion_uid",
+                ));
+            }
+            if suggested_action.is_none() || suggested_action != agent_action {
                 return Err(AppError::new(
                     "invalid_human_suggestion",
                     "accepted human_suggestion must copy the current Agent action",
@@ -949,6 +1093,12 @@ fn validate_human_message_fields(
             }
         }
         HumanSuggestionOutcome::Changed => {
+            if based_on_agent_suggestion_uid.is_none() {
+                return Err(AppError::new(
+                    "invalid_human_suggestion",
+                    "changed human_suggestion requires based_on_agent_suggestion_uid",
+                ));
+            }
             let action = suggested_action.ok_or_else(|| {
                 AppError::new(
                     "invalid_human_suggestion",
@@ -956,6 +1106,12 @@ fn validate_human_message_fields(
                 )
             })?;
             validate_message_action(action)?;
+            if agent_action.is_none() || Some(action) == agent_action {
+                return Err(AppError::new(
+                    "invalid_human_suggestion",
+                    "changed human_suggestion must differ from the current Agent action",
+                ));
+            }
         }
         HumanSuggestionOutcome::Rejected => {
             if suggested_action.is_some() || clean_optional_reason(reason).is_none() {
@@ -965,40 +1121,42 @@ fn validate_human_message_fields(
                 ));
             }
         }
-        HumanSuggestionOutcome::Deferred => {
-            if suggested_action.is_some() {
+        HumanSuggestionOutcome::Decided => {
+            if based_on_agent_suggestion_uid.is_some() {
                 return Err(AppError::new(
                     "invalid_human_suggestion",
-                    "deferred human_suggestion must not contain an action",
+                    "decided human_suggestion must not reference an agent_suggestion",
                 ));
             }
+            let action = suggested_action.ok_or_else(|| {
+                AppError::new(
+                    "invalid_human_suggestion",
+                    "decided human_suggestion requires a complete suggested_action",
+                )
+            })?;
+            validate_message_action(action)?;
         }
     }
     Ok(())
 }
 
-#[cfg(any(feature = "review", test))]
-fn validate_human_case_choice(
-    input: &CaseHumanSuggestionInput,
-    agent_action: &CaseSuggestedAction,
-) -> Result<()> {
-    validate_human_case_fields(
-        input.outcome,
-        input.suggested_action.as_ref(),
-        input.reason.as_deref(),
-        agent_action,
-    )
-}
-
+/// See [`validate_human_message_fields`]: same three invariants, case shape.
 fn validate_human_case_fields(
     outcome: HumanSuggestionOutcome,
+    based_on_agent_suggestion_uid: Option<&str>,
     suggested_action: Option<&CaseSuggestedAction>,
     reason: Option<&str>,
-    agent_action: &CaseSuggestedAction,
+    agent_action: Option<&CaseSuggestedAction>,
 ) -> Result<()> {
     match outcome {
         HumanSuggestionOutcome::Accepted => {
-            if suggested_action != Some(agent_action) {
+            if based_on_agent_suggestion_uid.is_none() {
+                return Err(AppError::new(
+                    "invalid_human_suggestion",
+                    "accepted human_suggestion requires based_on_agent_suggestion_uid",
+                ));
+            }
+            if suggested_action.is_none() || suggested_action != agent_action {
                 return Err(AppError::new(
                     "invalid_human_suggestion",
                     "accepted human_suggestion must copy the current Agent action",
@@ -1006,6 +1164,12 @@ fn validate_human_case_fields(
             }
         }
         HumanSuggestionOutcome::Changed => {
+            if based_on_agent_suggestion_uid.is_none() {
+                return Err(AppError::new(
+                    "invalid_human_suggestion",
+                    "changed human_suggestion requires based_on_agent_suggestion_uid",
+                ));
+            }
             let action = suggested_action.ok_or_else(|| {
                 AppError::new(
                     "invalid_human_suggestion",
@@ -1013,6 +1177,12 @@ fn validate_human_case_fields(
                 )
             })?;
             validate_case_action(action)?;
+            if agent_action.is_none() || Some(action) == agent_action {
+                return Err(AppError::new(
+                    "invalid_human_suggestion",
+                    "changed human_suggestion must differ from the current Agent action",
+                ));
+            }
         }
         HumanSuggestionOutcome::Rejected => {
             if suggested_action.is_some() || clean_optional_reason(reason).is_none() {
@@ -1022,27 +1192,43 @@ fn validate_human_case_fields(
                 ));
             }
         }
-        HumanSuggestionOutcome::Deferred => {
-            if suggested_action.is_some() {
+        HumanSuggestionOutcome::Decided => {
+            if based_on_agent_suggestion_uid.is_some() {
                 return Err(AppError::new(
                     "invalid_human_suggestion",
-                    "deferred human_suggestion must not contain an action",
+                    "decided human_suggestion must not reference an agent_suggestion",
                 ));
             }
+            let action = suggested_action.ok_or_else(|| {
+                AppError::new(
+                    "invalid_human_suggestion",
+                    "decided human_suggestion requires a complete suggested_action",
+                )
+            })?;
+            validate_case_action(action)?;
         }
     }
     Ok(())
 }
 
+/// See [`validate_human_message_fields`]: same three invariants, notification
+/// shape.
 fn validate_human_notification_fields(
     outcome: HumanSuggestionOutcome,
+    based_on_agent_suggestion_uid: Option<&str>,
     suggested_action: Option<&NotificationSuggestedAction>,
     reason: Option<&str>,
-    agent_action: &NotificationSuggestedAction,
+    agent_action: Option<&NotificationSuggestedAction>,
 ) -> Result<()> {
     match outcome {
         HumanSuggestionOutcome::Accepted => {
-            if suggested_action != Some(agent_action) {
+            if based_on_agent_suggestion_uid.is_none() {
+                return Err(AppError::new(
+                    "invalid_human_suggestion",
+                    "accepted human_suggestion requires based_on_agent_suggestion_uid",
+                ));
+            }
+            if suggested_action.is_none() || suggested_action != agent_action {
                 return Err(AppError::new(
                     "invalid_human_suggestion",
                     "accepted human_suggestion must copy the current Agent action",
@@ -1050,6 +1236,12 @@ fn validate_human_notification_fields(
             }
         }
         HumanSuggestionOutcome::Changed => {
+            if based_on_agent_suggestion_uid.is_none() {
+                return Err(AppError::new(
+                    "invalid_human_suggestion",
+                    "changed human_suggestion requires based_on_agent_suggestion_uid",
+                ));
+            }
             let action = suggested_action.ok_or_else(|| {
                 AppError::new(
                     "invalid_human_suggestion",
@@ -1057,6 +1249,12 @@ fn validate_human_notification_fields(
                 )
             })?;
             validate_notification_action(action)?;
+            if agent_action.is_none() || Some(action) == agent_action {
+                return Err(AppError::new(
+                    "invalid_human_suggestion",
+                    "changed human_suggestion must differ from the current Agent action",
+                ));
+            }
         }
         HumanSuggestionOutcome::Rejected => {
             if suggested_action.is_some() || clean_optional_reason(reason).is_none() {
@@ -1066,13 +1264,20 @@ fn validate_human_notification_fields(
                 ));
             }
         }
-        HumanSuggestionOutcome::Deferred => {
-            if suggested_action.is_some() {
+        HumanSuggestionOutcome::Decided => {
+            if based_on_agent_suggestion_uid.is_some() {
                 return Err(AppError::new(
                     "invalid_human_suggestion",
-                    "deferred human_suggestion must not contain an action",
+                    "decided human_suggestion must not reference an agent_suggestion",
                 ));
             }
+            let action = suggested_action.ok_or_else(|| {
+                AppError::new(
+                    "invalid_human_suggestion",
+                    "decided human_suggestion requires a complete suggested_action",
+                )
+            })?;
+            validate_notification_action(action)?;
         }
     }
     Ok(())
@@ -1113,4 +1318,151 @@ fn stale_suggestion_uid_error(current_uid: &str, supplied_uid: &str) -> AppError
         "agent_suggestion_uid": supplied_uid,
         "current_agent_suggestion_uid": current_uid,
     }))
+}
+
+/// The three invariants documented on [`validate_human_message_fields`], each
+/// pinned by a test that a violation is refused. These are pure checks on
+/// the free functions — no workspace, no disk — so they exercise the same
+/// rule whether it fires while writing a fresh settlement or while
+/// re-validating one just read back off disk.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decided_with_a_based_on_agent_suggestion_uid_is_refused() {
+        let error = validate_human_message_fields(
+            HumanSuggestionOutcome::Decided,
+            Some("agent_suggestion_1"),
+            Some(&MessageSuggestedAction::Spam),
+            None,
+            None,
+        )
+        .expect_err("Decided must not reference an agent_suggestion");
+        assert_eq!(error.error_code, "invalid_human_suggestion");
+    }
+
+    #[test]
+    fn accepted_without_a_based_on_agent_suggestion_uid_is_refused() {
+        let error = validate_human_message_fields(
+            HumanSuggestionOutcome::Accepted,
+            None,
+            Some(&MessageSuggestedAction::Spam),
+            None,
+            Some(&MessageSuggestedAction::Spam),
+        )
+        .expect_err("Accepted must reference an agent_suggestion");
+        assert_eq!(error.error_code, "invalid_human_suggestion");
+    }
+
+    #[test]
+    fn rejected_without_a_reason_is_refused() {
+        let error =
+            validate_human_message_fields(HumanSuggestionOutcome::Rejected, None, None, None, None)
+                .expect_err("Rejected must carry a reason");
+        assert_eq!(error.error_code, "invalid_human_suggestion");
+    }
+
+    #[test]
+    fn changed_without_a_based_on_agent_suggestion_uid_is_refused() {
+        let error = validate_human_message_fields(
+            HumanSuggestionOutcome::Changed,
+            None,
+            Some(&MessageSuggestedAction::Trash),
+            None,
+            None,
+        )
+        .expect_err("Changed must reference an agent_suggestion");
+        assert_eq!(error.error_code, "invalid_human_suggestion");
+    }
+
+    #[test]
+    fn changed_must_actually_differ_for_every_suggestion_shape() {
+        let message = MessageSuggestedAction::Spam;
+        let error = validate_human_message_fields(
+            HumanSuggestionOutcome::Changed,
+            Some("agent_suggestion_1"),
+            Some(&message),
+            Some("different reasoning"),
+            Some(&message),
+        )
+        .expect_err("an unchanged message action is not Changed");
+        assert_eq!(error.error_code, "invalid_human_suggestion");
+
+        let case = CaseSuggestedAction::CaseArchive;
+        let error = validate_human_case_fields(
+            HumanSuggestionOutcome::Changed,
+            Some("agent_suggestion_1"),
+            Some(&case),
+            Some("different reasoning"),
+            Some(&case),
+        )
+        .expect_err("an unchanged case action is not Changed");
+        assert_eq!(error.error_code, "invalid_human_suggestion");
+
+        let notification = NotificationSuggestedAction::NotificationRename {
+            notification_name: "Release".to_string(),
+        };
+        let error = validate_human_notification_fields(
+            HumanSuggestionOutcome::Changed,
+            Some("agent_suggestion_1"),
+            Some(&notification),
+            Some("different reasoning"),
+            Some(&notification),
+        )
+        .expect_err("an unchanged notification action is not Changed");
+        assert_eq!(error.error_code, "invalid_human_suggestion");
+    }
+
+    #[test]
+    fn decided_without_a_suggested_action_is_refused() {
+        let error =
+            validate_human_message_fields(HumanSuggestionOutcome::Decided, None, None, None, None)
+                .expect_err("Decided must carry a complete suggested_action");
+        assert_eq!(error.error_code, "invalid_human_suggestion");
+    }
+
+    #[test]
+    fn a_well_formed_value_of_each_outcome_is_accepted() {
+        validate_human_message_fields(
+            HumanSuggestionOutcome::Accepted,
+            Some("agent_suggestion_1"),
+            Some(&MessageSuggestedAction::Spam),
+            None,
+            Some(&MessageSuggestedAction::Spam),
+        )
+        .expect("accepted, bound, matching action");
+        validate_human_message_fields(
+            HumanSuggestionOutcome::Changed,
+            Some("agent_suggestion_1"),
+            Some(&MessageSuggestedAction::Trash),
+            None,
+            Some(&MessageSuggestedAction::Spam),
+        )
+        .expect("changed, bound, different complete action");
+        validate_human_message_fields(
+            HumanSuggestionOutcome::Rejected,
+            Some("agent_suggestion_1"),
+            None,
+            Some("not needed"),
+            Some(&MessageSuggestedAction::Spam),
+        )
+        .expect("rejected, bound, with a reason");
+        validate_human_message_fields(
+            HumanSuggestionOutcome::Rejected,
+            None,
+            None,
+            Some("nothing to do here"),
+            None,
+        )
+        .expect("rejected with no agent_suggestion at all, still with a reason");
+        validate_human_message_fields(
+            HumanSuggestionOutcome::Decided,
+            None,
+            Some(&MessageSuggestedAction::Trash),
+            None,
+            None,
+        )
+        .expect("decided, unbound, with a complete action");
+    }
 }

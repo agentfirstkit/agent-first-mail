@@ -1,4 +1,4 @@
-use super::common::ReviewMode;
+use agent_first_ui::UiDeliveryMode;
 
 #[derive(Debug)]
 pub enum CaseCommand {
@@ -9,7 +9,10 @@ pub enum CaseCommand {
     /// Show the exact typed case collection document used by Markdown and Review.
     Show { case_ref: String },
     /// Open a review session for this case, including editable notes.
-    Review { case_ref: String, mode: ReviewMode },
+    Review {
+        case_ref: String,
+        mode: Option<UiDeliveryMode>,
+    },
     /// Set or clear the current typed Agent suggestion for this case.
     Suggestion { action: CaseSuggestionAction },
     /// Add a message to this existing case.
@@ -192,7 +195,7 @@ pub enum CaseDraftAction {
     Review {
         case_ref: String,
         draft_name: String,
-        mode: ReviewMode,
+        mode: Option<UiDeliveryMode>,
     },
     /// Validate a draft under the case drafts directory.
     Validate {
