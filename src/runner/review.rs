@@ -2394,6 +2394,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// An HTML mail is read through `body_markdown`: the page writes real
+    /// anchors whose text is the sender's link text, the tracking URL lives
+    /// only in `href`, and markup inside the mail never becomes markup on the
+    /// page — the block tree carries text, the template writes the tags.
+    #[test]
+    fn triage_review_renders_an_html_body_as_links_and_paragraphs() {
+        let (root, workspace, _, _) = temp_workspace("html-body-links");
+        let html = concat!(
+            "<html><head><style>p{color:red}</style></head><body>",
+            "<div>\u{034F}\u{2800}\u{2800}</div>",
+            "<p>前往<a href=\"https://c.apple.com/r?v=2&amp;a=abc\">教育商店选购</a>。</p>",
+            "<p><img src=\"https://x/pixel.gif\" width=\"1\"><b>Bold</b> &lt;script&gt;alert(1)&lt;/script&gt;</p>",
+            "<p><a href=\"javascript:alert(2)\">unsafe</a></p>",
+            "</body></html>"
+        );
+        let raw = format!(
+            "From: Apple <news@example.com>\r\nTo: me@example.com\r\nSubject: Offer\r\nDate: Mon, 20 Jul 2026 08:00:00 +0000\r\nMessage-ID: <html-body@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n教育商店选购\r\nhttps://c.apple.com/r?v=2&a=abc\r\n--b\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{html}\r\n--b--\r\n"
+        );
+        let parsed = crate::mail::parse_inbound_message(
+            "message_html_body".to_string(),
+            raw.as_bytes(),
+            crate::types::ImapRef {
+                mailbox_name: "INBOX".to_string(),
+                uid_validity: 1,
+                uid: 7,
+            },
+        )
+        .expect("html message parses");
+        assert!(
+            parsed.message.body_markdown.as_deref().is_some_and(
+                |markdown| markdown.contains("[教育商店选购](https://c.apple.com/r?v=2&a=abc)")
+            ),
+            "{:?}",
+            parsed.message.body_markdown
+        );
+        workspace
+            .write_message_artifacts(&parsed.message)
+            .expect("html message artifacts write");
+        let message_review_base_hash = workspace
+            .message_review_base_hash("message_html_body")
+            .expect("message review hash");
+        let document = workspace
+            .triage_template_document("message_html_body")
+            .expect("triage document");
+        let item = TriageReviewItem {
+            document,
+            message_review_base_hash,
+            expected_agent_suggestion_uid: None,
+            stale: false,
+        };
+        let model = review_render_document(
+            &workspace,
+            ReviewSurfaceKind::Triage,
+            ReviewContents::Triage(TriageReviewContents {
+                items: vec![item],
+                truncated: None,
+            }),
+        )
+        .expect("triage Review document");
+        let page = render_builtin_page(&workspace, &model).expect("triage Review page renders");
+        // A link is text that knows where it goes, never navigation: no `<a href`
+        // reaches the page, the destination is a data attribute the trusted
+        // runtime reads, and the registrable domain is shown beside the text,
+        // marked when it is not the sender's. (MiniJinja's HTML autoescape also
+        // encodes `/` in attributes.)
+        assert!(
+            page.contains(
+                r#"<span class="md-link" role="link" tabindex="0" data-afmail-href="https:&#x2f;&#x2f;c.apple.com&#x2f;r?v=2&amp;a=abc" data-afmail-host="apple.com">教育商店选购</span>"#
+            ),
+            "{page}"
+        );
+        assert!(
+            page.contains(
+                r#"<span class="link-host foreign" title="Not the sender&#x27;s domain">↗ apple.com</span>"#
+            ),
+            "{page}"
+        );
+        assert!(!page.contains("<a href="), "{page}");
+        assert!(page.contains("data-afmail-link-panel"), "{page}");
+        assert!(page.contains("<strong>Bold</strong>"), "{page}");
+        assert!(
+            page.contains("&lt;script&gt;alert(1)&lt;&#x2f;script&gt;"),
+            "{page}"
+        );
+        assert!(!page.contains("<script>alert(1)"), "{page}");
+        assert!(!page.contains("javascript:"), "{page}");
+        assert!(page.contains(">unsafe</p>"), "{page}");
+        assert!(page.contains("data-afmail-link-panel"), "{page}");
+        assert!(!page.contains("pixel.gif"), "{page}");
+        // The plain-text alternative, with its bare URL line, is not what the
+        // page shows once a Markdown body exists.
+        assert!(!page.contains(">https:&#x2f;&#x2f;c.apple.com"), "{page}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn every_surface_refuses_a_suggestion_round_that_changed_after_render() {
         let (root, workspace, case_ref, _) = temp_workspace("suggestion-round-races");

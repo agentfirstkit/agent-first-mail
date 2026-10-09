@@ -179,6 +179,7 @@ fn default_hint(error_code: &str) -> Option<&'static str> {
         | "imap_move_target_uid_missing"
         | "imap_store_failed"
         | "imap_uid_missing"
+        | "imap_uid_ambiguous"
         | "imap_uidvalidity_changed" => Some(
             "Check IMAP config with `afmail config show`; use `afmail remote test` and `afmail remote folders` to diagnose.",
         ),

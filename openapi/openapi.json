@@ -1170,6 +1170,206 @@
                           ],
                           "type": "object"
                         },
+                        "body_markdown": {
+                          "additionalProperties": false,
+                          "description": "The reading copy of an HTML body, present exactly when\n`message.body_markdown` is.",
+                          "properties": {
+                            "authored": {
+                              "items": {
+                                "additionalProperties": false,
+                                "description": "One block of a Markdown body, as data a template can lay out.\n\nThe Review page is rendered inside AFUI's restricted template environment,\nwhere no filter or value may carry pre-rendered markup. So the body is not\nturned into HTML here; it is turned into this tree, and the template writes\nthe `<p>` and `<a href>` itself with ordinary autoescaping.",
+                                "properties": {
+                                  "kind": {
+                                    "enum": [
+                                      "paragraph",
+                                      "heading",
+                                      "list_item",
+                                      "quote",
+                                      "code",
+                                      "rule"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "marker": {
+                                    "description": "A list item's bullet or number, e.g. `•` or `3.`.",
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "runs": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "description": "A run of text with one style. `href` is present only for `http`, `https`\nand `mailto` targets; any other link scheme is shown as its text alone.\n\nThe last run of a link also carries what a person needs to judge it\nwithout following it: `host`, the registrable domain the link really goes\nto, and whether that is the sender's own domain.",
+                                      "properties": {
+                                        "code": {
+                                          "type": "boolean"
+                                        },
+                                        "emphasis": {
+                                          "type": "boolean"
+                                        },
+                                        "host": {
+                                          "description": "Registrable domain (or bare host) of `href`, on the link's last run.",
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "href": {
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "sender_domain_match": {
+                                          "description": "Whether `host` is the sender's registrable domain. One rule, no\nheuristics: equal or not. Absent when the sender's domain is unknown.",
+                                          "type": [
+                                            "boolean",
+                                            "null"
+                                          ]
+                                        },
+                                        "strong": {
+                                          "type": "boolean"
+                                        },
+                                        "text": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "text"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": "array"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "runs"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "quoted": {
+                              "items": {
+                                "additionalProperties": false,
+                                "description": "One block of a Markdown body, as data a template can lay out.\n\nThe Review page is rendered inside AFUI's restricted template environment,\nwhere no filter or value may carry pre-rendered markup. So the body is not\nturned into HTML here; it is turned into this tree, and the template writes\nthe `<p>` and `<a href>` itself with ordinary autoescaping.",
+                                "properties": {
+                                  "kind": {
+                                    "enum": [
+                                      "paragraph",
+                                      "heading",
+                                      "list_item",
+                                      "quote",
+                                      "code",
+                                      "rule"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "marker": {
+                                    "description": "A list item's bullet or number, e.g. `•` or `3.`.",
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "runs": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "description": "A run of text with one style. `href` is present only for `http`, `https`\nand `mailto` targets; any other link scheme is shown as its text alone.\n\nThe last run of a link also carries what a person needs to judge it\nwithout following it: `host`, the registrable domain the link really goes\nto, and whether that is the sender's own domain.",
+                                      "properties": {
+                                        "code": {
+                                          "type": "boolean"
+                                        },
+                                        "emphasis": {
+                                          "type": "boolean"
+                                        },
+                                        "host": {
+                                          "description": "Registrable domain (or bare host) of `href`, on the link's last run.",
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "href": {
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "sender_domain_match": {
+                                          "description": "Whether `host` is the sender's registrable domain. One rule, no\nheuristics: equal or not. Absent when the sender's domain is unknown.",
+                                          "type": [
+                                            "boolean",
+                                            "null"
+                                          ]
+                                        },
+                                        "strong": {
+                                          "type": "boolean"
+                                        },
+                                        "text": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "text"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": "array"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "runs"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "segments": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "end_bytes": {
+                                    "format": "uint",
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  },
+                                  "kind": {
+                                    "enum": [
+                                      "authored",
+                                      "quoted"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "start_bytes": {
+                                    "format": "uint",
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "start_bytes",
+                                  "end_bytes"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "segments",
+                            "authored",
+                            "quoted"
+                          ],
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
                         "direction": {
                           "enum": [
                             "inbound",
@@ -1519,6 +1719,13 @@
                             "type": "string"
                           },
                           "type": "array"
+                        },
+                        "body_markdown": {
+                          "description": "Markdown made from the HTML part for reading: links keep their text and\ntarget, images become their alt text, structure becomes paragraphs,\nlists and quotes. Present only when the message has an HTML part;\n`body_text` stays the verbatim plain-text source that hashes and\nquote segmentation are computed over.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
                         },
                         "body_text": {
                           "default": "",
@@ -3560,6 +3767,206 @@
                         ],
                         "type": "object"
                       },
+                      "body_markdown": {
+                        "additionalProperties": false,
+                        "description": "The reading copy of an HTML body, present exactly when\n`message.body_markdown` is.",
+                        "properties": {
+                          "authored": {
+                            "items": {
+                              "additionalProperties": false,
+                              "description": "One block of a Markdown body, as data a template can lay out.\n\nThe Review page is rendered inside AFUI's restricted template environment,\nwhere no filter or value may carry pre-rendered markup. So the body is not\nturned into HTML here; it is turned into this tree, and the template writes\nthe `<p>` and `<a href>` itself with ordinary autoescaping.",
+                              "properties": {
+                                "kind": {
+                                  "enum": [
+                                    "paragraph",
+                                    "heading",
+                                    "list_item",
+                                    "quote",
+                                    "code",
+                                    "rule"
+                                  ],
+                                  "type": "string"
+                                },
+                                "marker": {
+                                  "description": "A list item's bullet or number, e.g. `•` or `3.`.",
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "runs": {
+                                  "items": {
+                                    "additionalProperties": false,
+                                    "description": "A run of text with one style. `href` is present only for `http`, `https`\nand `mailto` targets; any other link scheme is shown as its text alone.\n\nThe last run of a link also carries what a person needs to judge it\nwithout following it: `host`, the registrable domain the link really goes\nto, and whether that is the sender's own domain.",
+                                    "properties": {
+                                      "code": {
+                                        "type": "boolean"
+                                      },
+                                      "emphasis": {
+                                        "type": "boolean"
+                                      },
+                                      "host": {
+                                        "description": "Registrable domain (or bare host) of `href`, on the link's last run.",
+                                        "type": [
+                                          "string",
+                                          "null"
+                                        ]
+                                      },
+                                      "href": {
+                                        "type": [
+                                          "string",
+                                          "null"
+                                        ]
+                                      },
+                                      "sender_domain_match": {
+                                        "description": "Whether `host` is the sender's registrable domain. One rule, no\nheuristics: equal or not. Absent when the sender's domain is unknown.",
+                                        "type": [
+                                          "boolean",
+                                          "null"
+                                        ]
+                                      },
+                                      "strong": {
+                                        "type": "boolean"
+                                      },
+                                      "text": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "text"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "type": "array"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "runs"
+                              ],
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          "quoted": {
+                            "items": {
+                              "additionalProperties": false,
+                              "description": "One block of a Markdown body, as data a template can lay out.\n\nThe Review page is rendered inside AFUI's restricted template environment,\nwhere no filter or value may carry pre-rendered markup. So the body is not\nturned into HTML here; it is turned into this tree, and the template writes\nthe `<p>` and `<a href>` itself with ordinary autoescaping.",
+                              "properties": {
+                                "kind": {
+                                  "enum": [
+                                    "paragraph",
+                                    "heading",
+                                    "list_item",
+                                    "quote",
+                                    "code",
+                                    "rule"
+                                  ],
+                                  "type": "string"
+                                },
+                                "marker": {
+                                  "description": "A list item's bullet or number, e.g. `•` or `3.`.",
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "runs": {
+                                  "items": {
+                                    "additionalProperties": false,
+                                    "description": "A run of text with one style. `href` is present only for `http`, `https`\nand `mailto` targets; any other link scheme is shown as its text alone.\n\nThe last run of a link also carries what a person needs to judge it\nwithout following it: `host`, the registrable domain the link really goes\nto, and whether that is the sender's own domain.",
+                                    "properties": {
+                                      "code": {
+                                        "type": "boolean"
+                                      },
+                                      "emphasis": {
+                                        "type": "boolean"
+                                      },
+                                      "host": {
+                                        "description": "Registrable domain (or bare host) of `href`, on the link's last run.",
+                                        "type": [
+                                          "string",
+                                          "null"
+                                        ]
+                                      },
+                                      "href": {
+                                        "type": [
+                                          "string",
+                                          "null"
+                                        ]
+                                      },
+                                      "sender_domain_match": {
+                                        "description": "Whether `host` is the sender's registrable domain. One rule, no\nheuristics: equal or not. Absent when the sender's domain is unknown.",
+                                        "type": [
+                                          "boolean",
+                                          "null"
+                                        ]
+                                      },
+                                      "strong": {
+                                        "type": "boolean"
+                                      },
+                                      "text": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "text"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "type": "array"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "runs"
+                              ],
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          "segments": {
+                            "items": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "end_bytes": {
+                                  "format": "uint",
+                                  "minimum": 0,
+                                  "type": "integer"
+                                },
+                                "kind": {
+                                  "enum": [
+                                    "authored",
+                                    "quoted"
+                                  ],
+                                  "type": "string"
+                                },
+                                "start_bytes": {
+                                  "format": "uint",
+                                  "minimum": 0,
+                                  "type": "integer"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "start_bytes",
+                                "end_bytes"
+                              ],
+                              "type": "object"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "segments",
+                          "authored",
+                          "quoted"
+                        ],
+                        "type": [
+                          "object",
+                          "null"
+                        ]
+                      },
                       "direction": {
                         "enum": [
                           "inbound",
@@ -3909,6 +4316,13 @@
                           "type": "string"
                         },
                         "type": "array"
+                      },
+                      "body_markdown": {
+                        "description": "Markdown made from the HTML part for reading: links keep their text and\ntarget, images become their alt text, structure becomes paragraphs,\nlists and quotes. Present only when the message has an HTML part;\n`body_text` stays the verbatim plain-text source that hashes and\nquote segmentation are computed over.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       },
                       "body_text": {
                         "default": "",
@@ -4552,6 +4966,206 @@
                           ],
                           "type": "object"
                         },
+                        "body_markdown": {
+                          "additionalProperties": false,
+                          "description": "The reading copy of an HTML body, present exactly when\n`message.body_markdown` is.",
+                          "properties": {
+                            "authored": {
+                              "items": {
+                                "additionalProperties": false,
+                                "description": "One block of a Markdown body, as data a template can lay out.\n\nThe Review page is rendered inside AFUI's restricted template environment,\nwhere no filter or value may carry pre-rendered markup. So the body is not\nturned into HTML here; it is turned into this tree, and the template writes\nthe `<p>` and `<a href>` itself with ordinary autoescaping.",
+                                "properties": {
+                                  "kind": {
+                                    "enum": [
+                                      "paragraph",
+                                      "heading",
+                                      "list_item",
+                                      "quote",
+                                      "code",
+                                      "rule"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "marker": {
+                                    "description": "A list item's bullet or number, e.g. `•` or `3.`.",
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "runs": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "description": "A run of text with one style. `href` is present only for `http`, `https`\nand `mailto` targets; any other link scheme is shown as its text alone.\n\nThe last run of a link also carries what a person needs to judge it\nwithout following it: `host`, the registrable domain the link really goes\nto, and whether that is the sender's own domain.",
+                                      "properties": {
+                                        "code": {
+                                          "type": "boolean"
+                                        },
+                                        "emphasis": {
+                                          "type": "boolean"
+                                        },
+                                        "host": {
+                                          "description": "Registrable domain (or bare host) of `href`, on the link's last run.",
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "href": {
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "sender_domain_match": {
+                                          "description": "Whether `host` is the sender's registrable domain. One rule, no\nheuristics: equal or not. Absent when the sender's domain is unknown.",
+                                          "type": [
+                                            "boolean",
+                                            "null"
+                                          ]
+                                        },
+                                        "strong": {
+                                          "type": "boolean"
+                                        },
+                                        "text": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "text"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": "array"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "runs"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "quoted": {
+                              "items": {
+                                "additionalProperties": false,
+                                "description": "One block of a Markdown body, as data a template can lay out.\n\nThe Review page is rendered inside AFUI's restricted template environment,\nwhere no filter or value may carry pre-rendered markup. So the body is not\nturned into HTML here; it is turned into this tree, and the template writes\nthe `<p>` and `<a href>` itself with ordinary autoescaping.",
+                                "properties": {
+                                  "kind": {
+                                    "enum": [
+                                      "paragraph",
+                                      "heading",
+                                      "list_item",
+                                      "quote",
+                                      "code",
+                                      "rule"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "marker": {
+                                    "description": "A list item's bullet or number, e.g. `•` or `3.`.",
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "runs": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "description": "A run of text with one style. `href` is present only for `http`, `https`\nand `mailto` targets; any other link scheme is shown as its text alone.\n\nThe last run of a link also carries what a person needs to judge it\nwithout following it: `host`, the registrable domain the link really goes\nto, and whether that is the sender's own domain.",
+                                      "properties": {
+                                        "code": {
+                                          "type": "boolean"
+                                        },
+                                        "emphasis": {
+                                          "type": "boolean"
+                                        },
+                                        "host": {
+                                          "description": "Registrable domain (or bare host) of `href`, on the link's last run.",
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "href": {
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "sender_domain_match": {
+                                          "description": "Whether `host` is the sender's registrable domain. One rule, no\nheuristics: equal or not. Absent when the sender's domain is unknown.",
+                                          "type": [
+                                            "boolean",
+                                            "null"
+                                          ]
+                                        },
+                                        "strong": {
+                                          "type": "boolean"
+                                        },
+                                        "text": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "text"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": "array"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "runs"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "segments": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "end_bytes": {
+                                    "format": "uint",
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  },
+                                  "kind": {
+                                    "enum": [
+                                      "authored",
+                                      "quoted"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "start_bytes": {
+                                    "format": "uint",
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "start_bytes",
+                                  "end_bytes"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "segments",
+                            "authored",
+                            "quoted"
+                          ],
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
                         "direction": {
                           "enum": [
                             "inbound",
@@ -4901,6 +5515,13 @@
                             "type": "string"
                           },
                           "type": "array"
+                        },
+                        "body_markdown": {
+                          "description": "Markdown made from the HTML part for reading: links keep their text and\ntarget, images become their alt text, structure becomes paragraphs,\nlists and quotes. Present only when the message has an HTML part;\n`body_text` stays the verbatim plain-text source that hashes and\nquote segmentation are computed over.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
                         },
                         "body_text": {
                           "default": "",
@@ -6769,6 +7390,206 @@
                           ],
                           "type": "object"
                         },
+                        "body_markdown": {
+                          "additionalProperties": false,
+                          "description": "The reading copy of an HTML body, present exactly when\n`message.body_markdown` is.",
+                          "properties": {
+                            "authored": {
+                              "items": {
+                                "additionalProperties": false,
+                                "description": "One block of a Markdown body, as data a template can lay out.\n\nThe Review page is rendered inside AFUI's restricted template environment,\nwhere no filter or value may carry pre-rendered markup. So the body is not\nturned into HTML here; it is turned into this tree, and the template writes\nthe `<p>` and `<a href>` itself with ordinary autoescaping.",
+                                "properties": {
+                                  "kind": {
+                                    "enum": [
+                                      "paragraph",
+                                      "heading",
+                                      "list_item",
+                                      "quote",
+                                      "code",
+                                      "rule"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "marker": {
+                                    "description": "A list item's bullet or number, e.g. `•` or `3.`.",
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "runs": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "description": "A run of text with one style. `href` is present only for `http`, `https`\nand `mailto` targets; any other link scheme is shown as its text alone.\n\nThe last run of a link also carries what a person needs to judge it\nwithout following it: `host`, the registrable domain the link really goes\nto, and whether that is the sender's own domain.",
+                                      "properties": {
+                                        "code": {
+                                          "type": "boolean"
+                                        },
+                                        "emphasis": {
+                                          "type": "boolean"
+                                        },
+                                        "host": {
+                                          "description": "Registrable domain (or bare host) of `href`, on the link's last run.",
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "href": {
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "sender_domain_match": {
+                                          "description": "Whether `host` is the sender's registrable domain. One rule, no\nheuristics: equal or not. Absent when the sender's domain is unknown.",
+                                          "type": [
+                                            "boolean",
+                                            "null"
+                                          ]
+                                        },
+                                        "strong": {
+                                          "type": "boolean"
+                                        },
+                                        "text": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "text"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": "array"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "runs"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "quoted": {
+                              "items": {
+                                "additionalProperties": false,
+                                "description": "One block of a Markdown body, as data a template can lay out.\n\nThe Review page is rendered inside AFUI's restricted template environment,\nwhere no filter or value may carry pre-rendered markup. So the body is not\nturned into HTML here; it is turned into this tree, and the template writes\nthe `<p>` and `<a href>` itself with ordinary autoescaping.",
+                                "properties": {
+                                  "kind": {
+                                    "enum": [
+                                      "paragraph",
+                                      "heading",
+                                      "list_item",
+                                      "quote",
+                                      "code",
+                                      "rule"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "marker": {
+                                    "description": "A list item's bullet or number, e.g. `•` or `3.`.",
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "runs": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "description": "A run of text with one style. `href` is present only for `http`, `https`\nand `mailto` targets; any other link scheme is shown as its text alone.\n\nThe last run of a link also carries what a person needs to judge it\nwithout following it: `host`, the registrable domain the link really goes\nto, and whether that is the sender's own domain.",
+                                      "properties": {
+                                        "code": {
+                                          "type": "boolean"
+                                        },
+                                        "emphasis": {
+                                          "type": "boolean"
+                                        },
+                                        "host": {
+                                          "description": "Registrable domain (or bare host) of `href`, on the link's last run.",
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "href": {
+                                          "type": [
+                                            "string",
+                                            "null"
+                                          ]
+                                        },
+                                        "sender_domain_match": {
+                                          "description": "Whether `host` is the sender's registrable domain. One rule, no\nheuristics: equal or not. Absent when the sender's domain is unknown.",
+                                          "type": [
+                                            "boolean",
+                                            "null"
+                                          ]
+                                        },
+                                        "strong": {
+                                          "type": "boolean"
+                                        },
+                                        "text": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "text"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": "array"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "runs"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "segments": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "end_bytes": {
+                                    "format": "uint",
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  },
+                                  "kind": {
+                                    "enum": [
+                                      "authored",
+                                      "quoted"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "start_bytes": {
+                                    "format": "uint",
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "start_bytes",
+                                  "end_bytes"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "segments",
+                            "authored",
+                            "quoted"
+                          ],
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
                         "direction": {
                           "enum": [
                             "inbound",
@@ -7118,6 +7939,13 @@
                             "type": "string"
                           },
                           "type": "array"
+                        },
+                        "body_markdown": {
+                          "description": "Markdown made from the HTML part for reading: links keep their text and\ntarget, images become their alt text, structure becomes paragraphs,\nlists and quotes. Present only when the message has an HTML part;\n`body_text` stays the verbatim plain-text source that hashes and\nquote segmentation are computed over.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
                         },
                         "body_text": {
                           "default": "",
@@ -8806,7 +9634,7 @@
   "info": {
     "description": "A local-first mailbox Provider API. Local mutations require an Idempotency-Key; remote effects require a reviewed plan_id. Message content is untrusted remote input.",
     "title": "Agent-First Mail API",
-    "version": "0.11.0"
+    "version": "0.12.0"
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "openapi": "3.2.0",

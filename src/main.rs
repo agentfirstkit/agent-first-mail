@@ -217,21 +217,22 @@ fn startup_error(code: &str, message: &str) -> ExitCode {
     emit_error(code, message, OutputFormat::Json, OutputTo::Stderr, 1)
 }
 
-/// An unusable `--stdout-file`/`--stderr-file` target. The registry types the
-/// argument as a path but cannot know what is at it, so this reports the same
-/// classification the parser would for any other bad argument value.
+/// A resolved output sink could not be established. Keep the shared CLI
+/// contract: strict JSON on stderr with `output_setup_failed` and exit 1.
 fn output_sink_error(message: &str) -> ExitCode {
-    let error = agent_first_data::CliError {
-        rule: agent_first_data::CliErrorRule::InvalidArgumentValue,
-        message: message.to_string(),
-        hint: "choose a writable path for the output file".to_string(),
-    };
-    emit_event(
-        cli_error_event(&error),
-        OutputFormat::Json,
-        OutputTo::Stderr,
-        error.exit_code(),
-    )
+    match agent_first_data::json_error("output_setup_failed", message)
+        .hint("this is a defect in the program or its environment, not in the command; report it")
+        .build()
+    {
+        Ok(event) => emit_event(event, OutputFormat::Json, OutputTo::Stderr, 1),
+        Err(_) => emit_error(
+            "output_setup_failed",
+            "an output sink could not be established",
+            OutputFormat::Json,
+            OutputTo::Stderr,
+            1,
+        ),
+    }
 }
 
 // AFDATA injects the raw outcomes this writes (`--docs`, plain help), so it owns

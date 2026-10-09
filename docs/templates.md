@@ -270,6 +270,16 @@ display aliases, table rows, or pre-rendered Markdown/HTML. Templates and their
 filters own wording, localization, fallback, pluralization, formatting,
 escaping, markup, ordering, visibility, and layout.
 
+`datetime` shows an RFC 3339 instant as a readable local time in the
+workspace timezone, `YYYY-MM-DD HH:MM`; machine fields and `<time datetime=…>`
+keep the raw value. A Review filter or value can never carry pre-rendered
+markup, so an HTML body reaches the page as `analysis.body_markdown` blocks
+and the built-in `review/message-layout.html.j2` writes the paragraphs and
+links itself. A link is a `.md-link` span carrying `data-afmail-href`, never
+an `<a href>`: the window has no address bar, so the trusted runtime shows the
+destination in a panel and opens it, on request, outside the page through
+AFUI's `openExternal`.
+
 Useful filters include `datetime`, `bytes`, `text_range`, `chronological`,
 `notification_date_desc`, `message_item`, `message_status_key`, `display_name`,
 `initials`, `asset_path`, and the Markdown filters `inline`, `plain`,

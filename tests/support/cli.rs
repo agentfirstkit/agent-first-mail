@@ -101,7 +101,7 @@ pub fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Optio
     }
     let msg = json!({
         "schema_name": "message",
-        "schema_version": 2,
+        "schema_version": 3,
         "message_id": message_id,
         "rfc822_message_id": format!("<{message_id}@example.com>"),
         "remote": {"locations": [{
@@ -145,7 +145,7 @@ pub fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Optio
 #[allow(dead_code)]
 pub fn write_triage(root: &Path, message_id: &str, notes: &str) {
     let text = format!(
-        "---\nkind: triage_view\nmessage_id: {message_id}\n---\n\n# Contract renewal\n\n### {message_id} - 2026-05-21T10:00:00Z - Alice <alice@example.com>\n\n```text\nBody for {message_id}\n```\n"
+        "---\nkind: triage_view\nmessage_id: {message_id}\n---\n\n# Contract renewal\n\n### {message_id} - 2026-05-21 10:00 - Alice <alice@example.com>\n\n```text\nBody for {message_id}\n```\n"
     );
     let _ = notes;
     assert!(fs::write(root.join(format!("triage/{message_id}.md")), text).is_ok());

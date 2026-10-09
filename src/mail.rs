@@ -74,6 +74,23 @@ pub fn parse_message_with_options(
         .map(|s| s.into_owned())
         .unwrap_or_default();
     let body_text = clean_body_text(&body);
+    // Only a real HTML part is worth converting: mail-parser's `body_html`
+    // would otherwise synthesise HTML from the plain text, and converting
+    // that back would just be `body_text` with Markdown escaping in it.
+    // `html_body` lists a text part too when the mail has no HTML, so the
+    // part type is what says whether there is anything to convert.
+    let has_html_part = parsed.html_body.iter().any(|part_id| {
+        parsed
+            .part(*part_id)
+            .is_some_and(|part| matches!(part.body, mail_parser::PartType::Html(_)))
+    });
+    let body_markdown = if has_html_part {
+        parsed
+            .body_html(0)
+            .and_then(|html| crate::body_markdown::html_to_markdown(&html))
+    } else {
+        None
+    };
     let mut attachments = parsed
         .attachments
         .iter()
@@ -144,6 +161,7 @@ pub fn parse_message_with_options(
         received_rfc3339,
         sent_rfc3339,
         body_text: body_text.clone(),
+        body_markdown,
         eml_path: Some(format!(".afmail/messages/{message_id}.eml")),
         attachments,
         contact: None,
@@ -815,5 +833,58 @@ mod tests {
             body_text.contains("Hello") || body_text.contains("world"),
             "body should contain text content, got: {body_text:?}"
         );
+    }
+
+    #[test]
+    fn body_markdown_exists_only_for_a_real_html_part() {
+        let html_only = concat!(
+            "Message-ID: <html-only@example.com>\r\n",
+            "From: Sender <sender@example.com>\r\n",
+            "To: Me <me@example.com>\r\n",
+            "Date: Thu, 21 May 2026 10:00:00 +0000\r\n",
+            "Subject: HTML only\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "\r\n",
+            "<p>Hello <b>world</b> <a href=\"https://example.com/x\">here</a></p>\r\n"
+        );
+        let parsed = parse_inbound_message(
+            "message_inbox_1_4".to_string(),
+            html_only.as_bytes(),
+            ImapRef {
+                mailbox_name: "INBOX".to_string(),
+                uid_validity: 1,
+                uid: 4,
+            },
+        )
+        .expect("html-only message parses");
+        assert_eq!(
+            parsed.message.body_markdown.as_deref(),
+            Some("Hello **world** [here](https://example.com/x)")
+        );
+
+        // mail-parser lists a text part under `html_body` too when the mail
+        // has no HTML; that must not produce a Markdown copy of plain text.
+        let plain_only = concat!(
+            "Message-ID: <plain-only@example.com>\r\n",
+            "From: Sender <sender@example.com>\r\n",
+            "To: Me <me@example.com>\r\n",
+            "Date: Thu, 21 May 2026 10:00:00 +0000\r\n",
+            "Subject: Plain only\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "Hello *world*\r\n"
+        );
+        let parsed = parse_inbound_message(
+            "message_inbox_1_5".to_string(),
+            plain_only.as_bytes(),
+            ImapRef {
+                mailbox_name: "INBOX".to_string(),
+                uid_validity: 1,
+                uid: 5,
+            },
+        )
+        .expect("plain-only message parses");
+        assert_eq!(parsed.message.body_markdown, None);
+        assert_eq!(parsed.message.body_text, "Hello *world*\n");
     }
 }

@@ -5,6 +5,7 @@ pub mod api;
 pub mod api;
 // One safe way to turn a draft's `attachments:` list into bytes.
 pub(crate) mod attachments;
+pub(crate) mod body_markdown;
 pub mod cli;
 pub mod config;
 #[cfg(feature = "demo")]

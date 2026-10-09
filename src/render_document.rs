@@ -48,6 +48,10 @@ pub(crate) struct MessageRenderAnalysis {
     pub direction: RenderMessageDirection,
     pub action: RenderMessageAction,
     pub body: MessageBodyAnalysis,
+    /// The reading copy of an HTML body, present exactly when
+    /// `message.body_markdown` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_markdown: Option<MarkdownBodyAnalysis>,
     pub security: MessageSecurityAnalysis,
 }
 
@@ -70,6 +74,18 @@ pub(crate) enum RenderMessageAction {
 #[serde(deny_unknown_fields)]
 pub(crate) struct MessageBodyAnalysis {
     pub segments: Vec<MessageBodySegment>,
+}
+
+/// `message.body_markdown` split the same way as `body_text` — byte ranges
+/// for Markdown consumers — and already laid out as blocks for the Review
+/// page, which may not render markup from a value and so writes the `<p>`
+/// and `<a>` itself.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MarkdownBodyAnalysis {
+    pub segments: Vec<MessageBodySegment>,
+    pub authored: Vec<crate::body_markdown::MarkdownBlock>,
+    pub quoted: Vec<crate::body_markdown::MarkdownBlock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]

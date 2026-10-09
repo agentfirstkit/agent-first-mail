@@ -25,6 +25,7 @@ type MovedMessages = Arc<Mutex<Vec<(String, u64, String)>>>;
 
 enum TestImapMessages {
     Shared(Vec<(u64, Vec<u8>)>),
+    PerMailbox(std::collections::BTreeMap<String, Vec<(u64, Vec<u8>)>>),
 }
 
 /// A stale `agent_suggestion` used to refuse to open the whole review. The
@@ -1336,9 +1337,13 @@ fn review_headless_mode_is_not_a_public_cli_option() {
 }
 
 impl TestImapMessages {
-    fn for_mailbox(&self, _mailbox: &str) -> &[(u64, Vec<u8>)] {
+    fn for_mailbox(&self, mailbox: &str) -> &[(u64, Vec<u8>)] {
         match self {
             Self::Shared(messages) => messages.as_slice(),
+            Self::PerMailbox(by_mailbox) => by_mailbox
+                .get(mailbox)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
         }
     }
 }
@@ -1581,11 +1586,7 @@ fn workspace_tree_snapshot(root: &Path) -> Vec<(String, bool, Vec<u8>, u128)> {
 }
 
 fn workspace_runtime_lock_path(root: &Path) -> PathBuf {
-    let canonical = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let digest = blake3::hash(canonical.as_os_str().as_encoded_bytes()).to_hex();
-    std::env::temp_dir()
-        .join("afmail-workspace-locks")
-        .join(format!("{digest}.lock"))
+    root.join(".afmail/cache/workspace.lock")
 }
 
 fn workspace_snapshot_differences(
@@ -1763,7 +1764,7 @@ fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Option<&s
     }
     let msg = json!({
         "schema_name": "message",
-        "schema_version": 2,
+        "schema_version": 3,
         "message_id": message_id,
         "rfc822_message_id": format!("<{message_id}@example.com>"),
         "remote": {"locations": [{
@@ -2019,7 +2020,7 @@ fn message_id_for_rfc822(root: &Path, rfc822: &str) -> String {
 
 fn write_triage(root: &Path, message_id: &str, notes: &str) {
     let text = format!(
-        "---\nkind: triage_view\nmessage_id: {message_id}\n---\n\n# Contract renewal\n\n### {message_id} - 2026-05-21T10:00:00Z - Alice <alice@example.com>\n\n```text\nBody for {message_id}\n```\n"
+        "---\nkind: triage_view\nmessage_id: {message_id}\n---\n\n# Contract renewal\n\n### {message_id} - 2026-05-21 10:00 - Alice <alice@example.com>\n\n```text\nBody for {message_id}\n```\n"
     );
     let _ = notes;
     assert!(fs::write(root.join(format!("triage/{message_id}.md")), text).is_ok());
@@ -2153,6 +2154,7 @@ fn bind_loopback_listener() -> Option<TcpListener> {
 struct ImapTestServer {
     addr: SocketAddr,
     commands: ImapCommands,
+    header_batches: ImapCommands,
     appended: AppendedMessages,
     moved: MovedMessages,
     handle: thread::JoinHandle<()>,
@@ -2162,6 +2164,15 @@ struct ImapTestServer {
 struct ImapServerCapabilities {
     move_supported: bool,
     uidplus_supported: bool,
+    /// UIDs answered to every non-enumerating `UID SEARCH` (the
+    /// `HEADER Message-ID` lookup afmail runs after a MOVE). Empty models a
+    /// server whose search index lags behind its mailbox; two or more model
+    /// several messages sharing one Message-ID.
+    header_search_uids: &'static [u64],
+    /// Report where a MOVE/COPY put the message with a `COPYUID` code:
+    /// untagged for MOVE (RFC 6851), on the tagged OK for COPY (RFC 4315).
+    /// The target UID is always 193 under UIDVALIDITY 44.
+    copyuid: bool,
 }
 
 fn start_imap_server(messages: Vec<(u64, Vec<u8>)>, accept_count: usize) -> Option<ImapTestServer> {
@@ -2179,6 +2190,8 @@ fn start_imap_server_with_move(
         ImapServerCapabilities {
             move_supported,
             uidplus_supported: false,
+            header_search_uids: &[900],
+            copyuid: false,
         },
     )
 }
@@ -2203,10 +2216,12 @@ fn start_imap_server_with_messages(
     let listener = bind_loopback_listener()?;
     let addr = listener.local_addr().ok()?;
     let commands = Arc::new(Mutex::new(Vec::new()));
+    let header_batches = Arc::new(Mutex::new(Vec::new()));
     let appended = Arc::new(Mutex::new(Vec::new()));
     let created = Arc::new(Mutex::new(Vec::new()));
     let moved = Arc::new(Mutex::new(Vec::new()));
     let server_commands = Arc::clone(&commands);
+    let server_header_batches = Arc::clone(&header_batches);
     let server_appended = Arc::clone(&appended);
     let server_created = Arc::clone(&created);
     let server_moved = Arc::clone(&moved);
@@ -2225,6 +2240,7 @@ fn start_imap_server_with_messages(
                         stream,
                         &messages,
                         &server_commands,
+                        &server_header_batches,
                         &server_appended,
                         &server_created,
                         &server_moved,
@@ -2234,10 +2250,14 @@ fn start_imap_server_with_messages(
                     last = Instant::now();
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Between two afmail commands the client is a whole
+                    // process exiting and another starting; under a loaded
+                    // parallel test run that gap passes one second, so the
+                    // post-connection idle limit has to sit well above it.
                     let idle_limit = if served == 0 {
                         Duration::from_secs(5)
                     } else {
-                        Duration::from_millis(800)
+                        Duration::from_secs(2)
                     };
                     if last.elapsed() > idle_limit {
                         break;
@@ -2251,6 +2271,7 @@ fn start_imap_server_with_messages(
     Some(ImapTestServer {
         addr,
         commands,
+        header_batches,
         appended,
         moved,
         handle,
@@ -2262,6 +2283,7 @@ fn serve_imap_connection(
     mut writer: TcpStream,
     messages: &TestImapMessages,
     commands: &ImapCommands,
+    header_batches: &ImapCommands,
     appended: &AppendedMessages,
     created: &CreatedFolders,
     moved: &MovedMessages,
@@ -2382,6 +2404,14 @@ fn serve_imap_connection(
                 }
             }
             "FETCH" if is_uid_fetch => {
+                let query = String::from_utf8_lossy(&line).to_ascii_uppercase();
+                if query.contains("BODY.PEEK[HEADER]")
+                    && let Some((_, after_fetch)) = query.split_once(" UID FETCH ")
+                    && let Some(sequence) = after_fetch.split_whitespace().next()
+                    && let Ok(mut batches) = header_batches.lock()
+                {
+                    batches.push(sequence.to_string());
+                }
                 if write_imap_fetch(
                     &mut writer,
                     &tag,
@@ -2396,18 +2426,52 @@ fn serve_imap_connection(
             "SEARCH" => {
                 let text = String::from_utf8_lossy(&line);
                 let upper = text.to_ascii_uppercase();
-                let uids =
-                    if upper.contains(" UID SEARCH ALL") || upper.contains(" UID SEARCH SINCE ") {
-                        messages
-                            .for_mailbox(&selected_mailbox)
-                            .iter()
-                            .map(|(uid, _)| uid.to_string())
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    } else {
-                        "900".to_string()
-                    };
-                let response = format!("* SEARCH {uids}\r\n{tag} OK SEARCH completed\r\n");
+                let uids = if upper.contains(" UID SEARCH ALL")
+                    || upper.contains(" UID SEARCH SINCE ")
+                    || upper.contains(" UID SEARCH UID ")
+                {
+                    let uid_query = upper.replace(" UID SEARCH UID ", " UID FETCH ");
+                    // RFC sequence ranges are unordered: n:* past the
+                    // highest UID still names that last UID. The pull must
+                    // filter it rather than treating it as fresh work.
+                    let descending_uid = upper
+                        .split_once(" UID SEARCH UID ")
+                        .and_then(|(_, sequence)| sequence.split_whitespace().next())
+                        .and_then(|sequence| sequence.strip_suffix(":*"))
+                        .and_then(|start| start.parse::<u64>().ok())
+                        .zip(
+                            messages
+                                .for_mailbox(&selected_mailbox)
+                                .iter()
+                                .map(|(uid, _)| *uid)
+                                .max(),
+                        )
+                        .filter(|(start, highest)| start > highest)
+                        .map(|(_start, highest)| highest);
+                    messages
+                        .for_mailbox(&selected_mailbox)
+                        .iter()
+                        .filter(|(uid, _)| {
+                            descending_uid == Some(*uid)
+                                || uid_fetch_query_matches_uid(&uid_query, *uid)
+                        })
+                        .map(|(uid, _)| uid.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    capabilities
+                        .header_search_uids
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                let uids = if uids.is_empty() {
+                    uids
+                } else {
+                    format!(" {uids}")
+                };
+                let response = format!("* SEARCH{uids}\r\n{tag} OK SEARCH completed\r\n");
                 if write_imap(&mut writer, response.as_bytes()).is_err() {
                     return;
                 }
@@ -2419,9 +2483,13 @@ fn serve_imap_connection(
                 }
             }
             "COPY" => {
+                let code = match uid_command_args_from_line(&line, " UID COPY ") {
+                    Some((uid, _)) if capabilities.copyuid => format!("[COPYUID 44 {uid} 193] "),
+                    _ => String::new(),
+                };
                 if write_imap(
                     &mut writer,
-                    format!("{tag} OK COPY completed\r\n").as_bytes(),
+                    format!("{tag} OK {code}COPY completed\r\n").as_bytes(),
                 )
                 .is_err()
                 {
@@ -2453,14 +2521,18 @@ fn serve_imap_connection(
                     );
                     return;
                 }
-                if let Some((uid, target)) = uid_move_args_from_line(&line)
-                    && let Ok(mut locked) = moved.lock()
-                {
-                    locked.push((selected_mailbox.clone(), uid, target));
+                let mut untagged = String::new();
+                if let Some((uid, target)) = uid_move_args_from_line(&line) {
+                    if capabilities.copyuid {
+                        untagged = format!("* OK [COPYUID 44 {uid} 193] Moved\r\n");
+                    }
+                    if let Ok(mut locked) = moved.lock() {
+                        locked.push((selected_mailbox.clone(), uid, target));
+                    }
                 }
                 if write_imap(
                     &mut writer,
-                    format!("{tag} OK MOVE completed\r\n").as_bytes(),
+                    format!("{untagged}{tag} OK MOVE completed\r\n").as_bytes(),
                 )
                 .is_err()
                 {
@@ -2531,9 +2603,12 @@ fn folder_arg_from_line(line: &[u8], command: &str) -> Option<String> {
 }
 
 fn uid_move_args_from_line(line: &[u8]) -> Option<(u64, String)> {
+    uid_command_args_from_line(line, " UID MOVE ")
+}
+
+fn uid_command_args_from_line(line: &[u8], marker: &str) -> Option<(u64, String)> {
     let text = String::from_utf8_lossy(line);
     let upper = text.to_ascii_uppercase();
-    let marker = " UID MOVE ";
     let start = upper.find(marker)? + marker.len();
     let rest = text.get(start..)?.trim();
     let mut parts = rest.split_whitespace();
@@ -3817,6 +3892,198 @@ fn status_progress_uses_progress_percent_field() {
 }
 
 #[test]
+fn doctor_repairs_old_and_malformed_message_caches_from_canonical_evidence() {
+    let root = temp_root("doctor-message-cache-recovery");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    let case_message_id = "message_cache_case";
+    let pending_message_id = "message_cache_pending";
+    write_message(&root, case_message_id, 1, None);
+    write_message(&root, pending_message_id, 2, None);
+    let case_path = write_case_fixture(
+        &root,
+        "support",
+        "c20260521001",
+        "cache-recovery",
+        &[case_message_id],
+    );
+    let (status, stdout) = run(&root, &["message", "show", pending_message_id]);
+    assert_eq!(status, 0, "{stdout}");
+    let base_hash = parse_one(&stdout)["review_base_hash"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let (status, stdout) = run(
+        &root,
+        &[
+            "triage",
+            "suggestion",
+            "set",
+            pending_message_id,
+            "--message-review-base-hash",
+            &base_hash,
+            "--reason",
+            "Unsolicited message",
+            "--action",
+            "spam",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let (status, stdout) = run(
+        &root,
+        &[
+            "message",
+            "spam",
+            pending_message_id,
+            "--reason",
+            "Preserve the queued action during cache recovery",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let push_id = parse_one(&stdout)[0]["push_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!push_id.is_empty(), "{stdout}");
+
+    let case_cache_path = root.join(format!("messages/{case_message_id}.json"));
+    let mut old_cache = read_json(&case_cache_path);
+    old_cache["schema_version"] = json!(2);
+    write_json(&case_cache_path, &old_cache);
+    assert!(
+        fs::write(
+            root.join(format!("messages/{pending_message_id}.json")),
+            "{broken JSON"
+        )
+        .is_ok()
+    );
+    let canonical_before = [case_message_id, pending_message_id]
+        .into_iter()
+        .map(|message_id| {
+            (
+                message_id,
+                fs::read(root.join(format!(".afmail/messages/{message_id}.eml"))).unwrap(),
+                read_json(&root.join(format!(".afmail/messages/{message_id}.json"))),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(canonical_before[1].2["agent_suggestion"].is_object());
+    let case_before = fs::read(case_path.join("data/case.json")).unwrap();
+    let push_before = workspace_tree_snapshot(&root.join(".afmail/push"));
+    let workspace_before = workspace_tree_snapshot(&root);
+
+    let (status, stdout) = run(&root, &["status"]);
+    assert_eq!(status, 1, "{stdout}");
+    let error = parse_one(&stdout);
+    assert_eq!(error["code"], "message_cache_invalid");
+    assert!(
+        error["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("afmail doctor repair --confirm")),
+        "{error}"
+    );
+    let (status, stdout) = run(&root, &["doctor"]);
+    assert_eq!(status, 1, "{stdout}");
+    let doctor = parse_one(&stdout);
+    assert_eq!(doctor["repairable_count"], 2, "{doctor}");
+    assert_eq!(doctor["issue_count"], 2, "{doctor}");
+    for issue in doctor["issues"].as_array().unwrap() {
+        assert_eq!(issue["code"], "message_cache_invalid", "{issue}");
+        assert_eq!(issue["repairable"], true, "{issue}");
+    }
+    assert!(
+        workspace_snapshot_differences(&workspace_before, &workspace_tree_snapshot(&root))
+            .is_empty(),
+        "status and doctor must leave workspace contents and mtimes unchanged"
+    );
+
+    let (status, stdout) = run(&root, &["doctor", "repair", "--confirm"]);
+    assert_eq!(status, 0, "{stdout}");
+    let repaired = parse_one(&stdout);
+    assert_eq!(repaired["message_cache_rebuilt_count"], 2, "{repaired}");
+    assert_eq!(repaired["after_issue_count"], 0, "{repaired}");
+    for (message_id, eml, metadata) in canonical_before {
+        assert_eq!(
+            fs::read(root.join(format!(".afmail/messages/{message_id}.eml"))).unwrap(),
+            eml
+        );
+        let metadata_before: agent_first_mail::types::MessageMetadata =
+            serde_json::from_value(metadata).unwrap();
+        let metadata_after: agent_first_mail::types::MessageMetadata = serde_json::from_value(
+            read_json(&root.join(format!(".afmail/messages/{message_id}.json"))),
+        )
+        .unwrap();
+        assert_eq!(metadata_after, metadata_before);
+        let cache: agent_first_mail::types::MessageFile =
+            serde_json::from_value(read_json(&root.join(format!("messages/{message_id}.json"))))
+                .unwrap();
+        assert_eq!(cache.schema_version, 3, "{cache:?}");
+        assert_eq!(cache.remote, metadata_before.remote, "{cache:?}");
+        assert_eq!(cache.agent_suggestion, metadata_before.agent_suggestion);
+    }
+    assert_eq!(
+        fs::read(case_path.join("data/case.json")).unwrap(),
+        case_before
+    );
+    assert_eq!(
+        workspace_tree_snapshot(&root.join(".afmail/push")),
+        push_before
+    );
+    assert_eq!(read_json(&case_cache_path)["workspace"]["status"], "case");
+    let pending_cache = read_json(&root.join(format!("messages/{pending_message_id}.json")));
+    assert_eq!(pending_cache["workspace"]["status"], "spam");
+    assert_eq!(
+        pending_cache["workspace"]["push"]["pending"][0]["push_id"],
+        push_id
+    );
+    assert_eq!(run(&root, &["status"]).0, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn doctor_marks_message_cache_unrepairable_when_canonical_evidence_is_unusable() {
+    let root = temp_root("doctor-message-cache-unrepairable");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    for (index, message_id) in [
+        "message_missing_eml",
+        "message_invalid_eml",
+        "message_missing_metadata",
+        "message_invalid_metadata",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        write_message(&root, message_id, index as u64 + 1, None);
+        let path = root.join(format!("messages/{message_id}.json"));
+        let mut cache = read_json(&path);
+        cache["schema_version"] = json!(2);
+        write_json(&path, &cache);
+    }
+    assert!(fs::remove_file(root.join(".afmail/messages/message_missing_eml.eml")).is_ok());
+    assert!(fs::write(root.join(".afmail/messages/message_invalid_eml.eml"), "").is_ok());
+    assert!(fs::remove_file(root.join(".afmail/messages/message_missing_metadata.json")).is_ok());
+    let metadata_path = root.join(".afmail/messages/message_invalid_metadata.json");
+    let mut metadata = read_json(&metadata_path);
+    metadata["schema_version"] = json!(99);
+    write_json(&metadata_path, &metadata);
+    let before = workspace_tree_snapshot(&root);
+
+    let (status, stdout) = run(&root, &["doctor"]);
+    assert_eq!(status, 1, "{stdout}");
+    let doctor = parse_one(&stdout);
+    assert_eq!(doctor["repairable_count"], 0, "{doctor}");
+    assert_eq!(doctor["issue_count"], 4, "{doctor}");
+    for issue in doctor["issues"].as_array().unwrap() {
+        assert_eq!(issue["code"], "message_cache_invalid", "{issue}");
+        assert_eq!(issue["repairable"], false, "{issue}");
+    }
+    assert!(workspace_snapshot_differences(&before, &workspace_tree_snapshot(&root)).is_empty());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn doctor_reports_and_repairs_afmail_state_only() {
     let root = temp_root("doctor");
     assert!(fs::create_dir_all(&root).is_ok());
@@ -4273,7 +4540,10 @@ fn pull_imports_imap_mail_with_codec_backed_test_server() {
     assert_eq!(value["triage_created_count"], 0);
     assert_eq!(value["triage_written_count"], 0);
     assert_eq!(value["triage_unchanged_count"], 1);
-    assert_eq!(value["checked_location_count"], 0);
+    // An incremental pull still reconciles every active remote location: a
+    // message moved or deleted remotely must not stay active locally just
+    // because no new UIDs arrived.
+    assert_eq!(value["checked_location_count"], 1);
     assert_eq!(value["uid_validity_reset_count"], 0);
     assert_eq!(value["uid_validity_reset_mailbox_ids"], json!([]));
     let cursor = read_json(&root.join(".afmail/pull/cursors.json"));
@@ -4311,9 +4581,454 @@ fn pull_imports_imap_mail_with_codec_backed_test_server() {
             .iter()
             .filter(|cmd| cmd.as_str() == "FETCH")
             .count(),
+        // Three pulls: four FETCHes on import, one reconciliation UID snapshot
+        // on the empty incremental pull, and header + snapshot on UID reset.
+        // UID SEARCH now avoids even an empty header FETCH for the incremental.
         7
     );
+    assert_eq!(
+        *server.header_batches.lock().expect("header batches"),
+        vec!["7", "7"]
+    );
     assert!(!commands.iter().any(|cmd| cmd == "STORE"));
+    let _ = fs::remove_dir_all(root);
+}
+
+/// A MOVE whose target UID the server never surfaced — no COPYUID, and the
+/// follow-up `HEADER Message-ID` search comes back empty — leaves the push
+/// item in `remote_outcome_unknown`. Recovery depends on the next pull
+/// noticing that the source UID is gone, and that pull is incremental
+/// because nothing new arrived. It must still reconcile the old location,
+/// and the recovered push must finish without a second MOVE.
+///
+/// The mock server exits once a served connection has been idle, so each
+/// afmail command talks to its own server instance; the mailbox state each
+/// instance serves is what the test controls.
+#[test]
+fn move_target_uid_missing_recovers_after_incremental_pull_without_replaying_move() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("move-recovery-incremental-pull");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let raw = concat!(
+        "Message-ID: <moved-7@example.com>\r\n",
+        "From: Alice <alice@example.com>\r\n",
+        "To: Me <me@example.com>\r\n",
+        "Date: Thu, 21 May 2026 10:00:00 +0000\r\n",
+        "Subject: Archive me\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n",
+        "Please file this.\r\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let in_inbox = || {
+        TestImapMessages::PerMailbox(std::collections::BTreeMap::from([(
+            "INBOX".to_string(),
+            vec![(7, raw.clone())],
+        )]))
+    };
+    let in_archive = || {
+        TestImapMessages::PerMailbox(std::collections::BTreeMap::from([
+            ("INBOX".to_string(), Vec::new()),
+            ("Archive".to_string(), vec![(193, raw.clone())]),
+        ]))
+    };
+    let capabilities = ImapServerCapabilities {
+        move_supported: true,
+        uidplus_supported: false,
+        header_search_uids: &[],
+        copyuid: false,
+    };
+    let serve = |messages: TestImapMessages| -> Option<ImapTestServer> {
+        let server = start_imap_server_with_messages(messages, 8, capabilities)?;
+        write_json(
+            &root.join(".afmail/config.json"),
+            &test_config(Some(server.addr.port()), None),
+        );
+        Some(server)
+    };
+    let moved_on = |server: ImapTestServer| -> Vec<(String, u64, String)> {
+        assert!(server.handle.join().is_ok());
+        server
+            .moved
+            .lock()
+            .map(|items| items.clone())
+            .unwrap_or_default()
+    };
+
+    // Phase 1: the message is in INBOX. MOVE succeeds, but the target lookup
+    // finds nothing, so the push item stops in remote_outcome_unknown.
+    let Some(server) = serve(in_inbox()) else {
+        return;
+    };
+    let (status, stdout) = run(&root, &["pull"]);
+    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["new_message_count"], 1);
+    assert!(moved_on(server).is_empty());
+    let id = message_id_for_rfc822(&root, "moved-7@example.com");
+    let (status, stdout) = run(
+        &root,
+        &[
+            "notification",
+            "create",
+            "--name",
+            "filed",
+            "--message",
+            &id,
+            "--summary",
+            "handled",
+            "--reason",
+            "done with it",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let Some(server) = serve(in_inbox()) else {
+        return;
+    };
+    let (status, stdout) = run_confirmed_push(&root);
+    assert_eq!(status, 3, "{stdout}");
+    let queued = parse_one(&run(&root, &["push", "list"]).1);
+    assert_eq!(queued["count"], 1, "{queued}");
+    assert_eq!(
+        queued["items"][0]["step_states"][0]["error_code"], "imap_move_target_uid_missing",
+        "{queued}"
+    );
+    let moved = moved_on(server);
+    assert_eq!(moved.len(), 1, "{moved:?}");
+
+    // Phase 2: the server now shows the message only in Archive. Nothing new
+    // arrived, so this pull is incremental for every mailbox.
+    let Some(server) = serve(in_archive()) else {
+        return;
+    };
+    let (status, stdout) = run(&root, &["pull"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["new_message_count"], 0, "{value}");
+    assert_eq!(value["missing_location_count"], 1, "{value}");
+    assert!(moved_on(server).is_empty());
+    let message = read_json(&root.join(format!("messages/{id}.json")));
+    let locations = message["remote"]["locations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let inbox = locations
+        .iter()
+        .find(|location| location["mailbox_name"] == "INBOX");
+    assert!(
+        inbox.is_some_and(|location| location["missing_rfc3339"].is_string()),
+        "the incremental pull must mark the moved-away source UID missing: {message}"
+    );
+    assert!(
+        locations
+            .iter()
+            .any(|location| location["mailbox_name"] == "Archive" && location["uid"] == 193),
+        "{message}"
+    );
+
+    let Some(server) = serve(in_archive()) else {
+        return;
+    };
+    let (status, stdout) = run_confirmed_push(&root);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(confirmed_push_items(&value).len(), 1, "{value}");
+    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
+    let moved = moved_on(server);
+    assert!(moved.is_empty(), "recovery must not replay MOVE: {moved:?}");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Shared scaffolding for the move-target tests: one pulled INBOX message,
+/// filed as a notification so a push queues its Archive move. Returns the
+/// message id; the caller starts its own server for the push.
+fn pulled_inbox_message_filed_for_archive(
+    root: &Path,
+    raw: &[u8],
+    capabilities: ImapServerCapabilities,
+) -> Option<String> {
+    let server = start_imap_server_with_messages(
+        TestImapMessages::PerMailbox(std::collections::BTreeMap::from([(
+            "INBOX".to_string(),
+            vec![(7, raw.to_vec())],
+        )])),
+        8,
+        capabilities,
+    )?;
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+    let (status, stdout) = run(root, &["pull"]);
+    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["new_message_count"], 1);
+    assert!(server.handle.join().is_ok());
+    let id = parse_one(&stdout)["new_message_ids"][0]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!id.is_empty(), "{stdout}");
+    let (status, stdout) = run(
+        root,
+        &[
+            "notification",
+            "create",
+            "--name",
+            "filed",
+            "--message",
+            &id,
+            "--summary",
+            "handled",
+            "--reason",
+            "done with it",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    Some(id)
+}
+
+fn moved_message_raw() -> Vec<u8> {
+    concat!(
+        "Message-ID: <moved-7@example.com>\r\n",
+        "From: Alice <alice@example.com>\r\n",
+        "To: Me <me@example.com>\r\n",
+        "Date: Thu, 21 May 2026 10:00:00 +0000\r\n",
+        "Subject: Archive me\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n",
+        "Please file this.\r\n"
+    )
+    .as_bytes()
+    .to_vec()
+}
+
+fn archive_location(root: &Path, id: &str) -> Option<Value> {
+    let message = read_json(&root.join(format!("messages/{id}.json")));
+    message["remote"]["locations"]
+        .as_array()
+        .and_then(|locations| {
+            locations
+                .iter()
+                .find(|location| location["mailbox_name"] == "Archive")
+                .cloned()
+        })
+}
+
+/// With a COPYUID in the MOVE response the target is known immediately: no
+/// `HEADER Message-ID` search runs, so a lagging search index cannot leave
+/// the push in remote_outcome_unknown.
+#[test]
+fn push_move_takes_the_target_from_copyuid_and_never_searches() {
+    assert_push_move_copyuid("push-move-copyuid", moved_message_raw(), false);
+}
+
+#[test]
+fn push_move_without_message_id_takes_the_target_from_copyuid() {
+    assert_push_move_copyuid(
+        "push-move-copyuid-no-message-id",
+        moved_message_raw_without_id(),
+        false,
+    );
+}
+
+#[test]
+fn push_move_recovers_legacy_missing_message_id_preflight() {
+    assert_push_move_copyuid(
+        "push-move-legacy-missing-message-id",
+        moved_message_raw_without_id(),
+        true,
+    );
+}
+
+fn moved_message_raw_without_id() -> Vec<u8> {
+    String::from_utf8_lossy(&moved_message_raw())
+        .replacen("Message-ID: <moved-7@example.com>\r\n", "", 1)
+        .into_bytes()
+}
+
+fn assert_push_move_copyuid(label: &str, raw: Vec<u8>, legacy_preflight_failure: bool) {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root(label);
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let capabilities = ImapServerCapabilities {
+        move_supported: true,
+        uidplus_supported: false,
+        header_search_uids: &[],
+        copyuid: true,
+    };
+    let Some(id) = pulled_inbox_message_filed_for_archive(&root, &raw, capabilities) else {
+        return;
+    };
+    if legacy_preflight_failure {
+        let queue = parse_one(&run(&root, &["push", "list"]).1);
+        let push_id = queue["items"][0]["push_id"].as_str().unwrap_or_default();
+        assert!(!push_id.is_empty(), "{queue}");
+        let path = root.join(format!(".afmail/push/{push_id}.json"));
+        let mut item = read_json(&path);
+        item["attempt_count"] = json!(1);
+        item["step_states"] = json!([{
+            "index": 0,
+            "label": "move_to_mailbox_id_archive",
+            "status": "remote_outcome_unknown",
+            "started_rfc3339": "2026-05-21T10:00:00Z",
+            "result_summary": "remote outcome unknown",
+            "error_code": "rfc822_message_id_missing",
+            "error": format!("message cannot be relocated after remote move without Message-ID: {id}"),
+            "retryable": false,
+        }]);
+        write_json(&path, &item);
+    }
+    let Some(server) = start_imap_server_with_messages(
+        TestImapMessages::PerMailbox(std::collections::BTreeMap::from([(
+            "INBOX".to_string(),
+            vec![(7, raw)],
+        )])),
+        8,
+        capabilities,
+    ) else {
+        return;
+    };
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+    let (status, stdout) = run_confirmed_push(&root);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(confirmed_push_items(&value).len(), 1, "{value}");
+    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
+    let location = archive_location(&root, &id).unwrap_or(Value::Null);
+    assert_eq!(location["uid"], 193, "{location}");
+    assert_eq!(location["uid_validity"], 44, "{location}");
+    assert!(server.handle.join().is_ok());
+    let commands = server
+        .commands
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    assert!(commands.iter().any(|cmd| cmd == "MOVE"), "{commands:?}");
+    assert_eq!(commands.iter().filter(|cmd| *cmd == "MOVE").count(), 1);
+    assert!(
+        !commands.iter().any(|cmd| cmd == "SEARCH"),
+        "a COPYUID receipt makes the target search unnecessary: {commands:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The COPY + flag + expunge fallback for servers without MOVE reads the
+/// COPYUID from COPY's tagged completion, which the imap crate's convenience
+/// wrapper would have truncated.
+#[test]
+fn push_copy_fallback_takes_the_target_from_the_tagged_copyuid() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("push-copy-copyuid");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let capabilities = ImapServerCapabilities {
+        move_supported: false,
+        uidplus_supported: true,
+        header_search_uids: &[],
+        copyuid: true,
+    };
+    let raw = moved_message_raw();
+    let Some(id) = pulled_inbox_message_filed_for_archive(&root, &raw, capabilities) else {
+        return;
+    };
+    let Some(server) = start_imap_server_with_messages(
+        TestImapMessages::PerMailbox(std::collections::BTreeMap::from([(
+            "INBOX".to_string(),
+            vec![(7, raw)],
+        )])),
+        8,
+        capabilities,
+    ) else {
+        return;
+    };
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+    let (status, stdout) = run_confirmed_push(&root);
+    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
+    let location = archive_location(&root, &id).unwrap_or(Value::Null);
+    assert_eq!(location["uid"], 193, "{location}");
+    assert!(server.handle.join().is_ok());
+    let commands = server
+        .commands
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    assert!(commands.iter().any(|cmd| cmd == "COPY"), "{commands:?}");
+    assert!(commands.iter().any(|cmd| cmd == "EXPUNGE"), "{commands:?}");
+    assert!(!commands.iter().any(|cmd| cmd == "SEARCH"), "{commands:?}");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Without a COPYUID, a search that returns several candidates must not be
+/// resolved by picking the largest UID. The move stays completed-but-
+/// unlocated, exactly like an empty search, and is never replayed.
+#[test]
+fn push_move_with_an_ambiguous_target_search_does_not_guess() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("push-move-ambiguous");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let capabilities = ImapServerCapabilities {
+        move_supported: true,
+        uidplus_supported: false,
+        header_search_uids: &[900, 901],
+        copyuid: false,
+    };
+    let raw = moved_message_raw();
+    let Some(id) = pulled_inbox_message_filed_for_archive(&root, &raw, capabilities) else {
+        return;
+    };
+    let Some(server) = start_imap_server_with_messages(
+        TestImapMessages::PerMailbox(std::collections::BTreeMap::from([(
+            "INBOX".to_string(),
+            vec![(7, raw)],
+        )])),
+        8,
+        capabilities,
+    ) else {
+        return;
+    };
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+    let (status, stdout) = run_confirmed_push(&root);
+    assert_eq!(status, 3, "{stdout}");
+    let queued = parse_one(&run(&root, &["push", "list"]).1);
+    assert_eq!(queued["count"], 1, "{queued}");
+    let state = &queued["items"][0]["step_states"][0];
+    assert_eq!(state["status"], "remote_outcome_unknown", "{queued}");
+    assert_eq!(
+        state["error_code"], "imap_move_target_uid_missing",
+        "{queued}"
+    );
+    assert!(
+        archive_location(&root, &id).is_none(),
+        "no guessed Archive location may be recorded"
+    );
+    assert!(server.handle.join().is_ok());
+    let moved = server
+        .moved
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    assert_eq!(moved.len(), 1, "{moved:?}");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -4591,9 +5306,241 @@ fn pull_body_progress_reports_fetch_batches() {
     let fetch_count = commands
         .map(|items| items.iter().filter(|cmd| cmd.as_str() == "FETCH").count())
         .unwrap_or(0);
-    // Header fetch + two metadata batches + one bounded partial body fetch per
+    // Two header batches + two metadata batches + one body fetch per
     // message + reconciliation UID snapshot.
-    assert_eq!(fetch_count, 30);
+    assert_eq!(fetch_count, 31);
+    assert_eq!(
+        *server.header_batches.lock().expect("header batches"),
+        vec![
+            (1..=25)
+                .map(|uid| uid.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            "26".to_string(),
+        ]
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+fn header_batch_messages(count: u64) -> Vec<(u64, Vec<u8>)> {
+    (1..=count).rev().map(|uid| (uid, format!(
+        "Message-ID: <header-batch-{uid}@example.com>\r\nFrom: a@example.com\r\nTo: me@example.com\r\nDate: Thu, 21 May 2026 10:00:00 +0000\r\nSubject: Header batch {uid}\r\n\r\nBody {uid}\r\n",
+    ).into_bytes())).collect()
+}
+
+fn expected_header_batches(first: u64, last: u64) -> Vec<String> {
+    (first..=last)
+        .collect::<Vec<_>>()
+        .chunks(25)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect()
+}
+
+#[test]
+fn pull_header_batches_keep_budgeted_uids_for_the_next_pull() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = temp_root("pull-header-budget-continuation");
+    fs::create_dir_all(&root).expect("workspace");
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let messages = header_batch_messages(52);
+    for (first, count, highest) in [(1, 26, 26), (27, 26, 52)] {
+        let server = start_imap_server(messages.clone(), 3).expect("mock IMAP");
+        write_json(
+            &root.join(".afmail/config.json"),
+            &test_config(Some(server.addr.port()), None),
+        );
+        let (status, stdout) = run(
+            &root,
+            &["pull", "--all-history", "--max-new-messages", "26", "inbox"],
+        );
+        assert_eq!(status, 0, "{stdout}");
+        let result = parse_one(&stdout);
+        assert_eq!(result["new_message_count"], count);
+        let cursor = read_json(&root.join(".afmail/pull/cursors.json"));
+        assert_eq!(cursor["mailboxes"]["inbox"]["highest_uid"], highest);
+        assert!(server.handle.join().is_ok());
+        assert_eq!(
+            *server.header_batches.lock().expect("header batches"),
+            expected_header_batches(first, 52)
+        );
+    }
+    assert_eq!(
+        fs::read_dir(root.join("messages"))
+            .expect("messages")
+            .count(),
+        52
+    );
+    for uid in 1..=52 {
+        let id = message_id_for_rfc822(&root, &format!("header-batch-{uid}@example.com"));
+        assert!(
+            root.join(format!("messages/{id}.json")).is_file(),
+            "missing UID {uid}"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pull_dry_run_headers_are_batched_without_local_changes() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = temp_root("pull-dry-run-header-batches");
+    fs::create_dir_all(&root).expect("workspace");
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let server = start_imap_server(header_batch_messages(52), 3).expect("mock IMAP");
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+    let before = workspace_tree_snapshot(&root);
+    let (status, stdout) = run(
+        &root,
+        &[
+            "pull",
+            "--dry-run",
+            "--since-days",
+            "30",
+            "--max-new-messages",
+            "26",
+            "inbox",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["remote_envelope_count"], 52);
+    assert_eq!(result["candidate_count"], 26);
+    assert_eq!(result["budget_skipped_count"], 26);
+    assert_eq!(result["candidates"][0]["uid"], 1);
+    assert_eq!(result["candidates"][25]["uid"], 26);
+    assert!(workspace_snapshot_differences(&before, &workspace_tree_snapshot(&root)).is_empty());
+    assert!(server.handle.join().is_ok());
+    assert_eq!(
+        *server.header_batches.lock().expect("header batches"),
+        expected_header_batches(1, 52)
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pull_reports_and_preserves_a_corrupt_cursor_before_rebuilding_it() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = temp_root("pull-corrupt-cursor-warning");
+    fs::create_dir_all(&root).expect("workspace");
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let path = root.join(".afmail/pull/cursors.json");
+    fs::create_dir_all(path.parent().expect("cursor parent")).expect("cursor directory");
+    let source = b"{CursorValueCanary";
+    fs::write(&path, source).expect("bad cursor");
+    let server = start_imap_server(header_batch_messages(1), 3).expect("mock IMAP");
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+    let (status, stdout) = run(&root, &["pull", "--all-history", "inbox"]);
+    assert_eq!(status, 0, "{stdout}");
+    let result = parse_one(&stdout);
+    assert_eq!(result["warning_count"], 1);
+    assert_eq!(
+        result["warnings"][0]["warning_code"],
+        "pull_cursor_recovered"
+    );
+    assert_eq!(result["warnings"][0]["reason"], "invalid_json");
+    assert!(!stdout.contains("CursorValueCanary"));
+    let preserved = result["warnings"][0]["quarantine_path"]
+        .as_str()
+        .expect("preserved path");
+    assert_eq!(
+        fs::read(root.join(preserved)).expect("preserved source"),
+        source
+    );
+    assert_eq!(read_json(&path)["mailboxes"]["inbox"]["highest_uid"], 1);
+    assert!(server.handle.join().is_ok());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pull_header_batches_share_the_bytes_budget_across_mailboxes() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = temp_root("pull-header-global-bytes");
+    fs::create_dir_all(&root).expect("workspace");
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let mut messages = header_batch_messages(2);
+    let first = messages.pop().expect("first mail");
+    let second = messages.pop().expect("second mail");
+    assert_eq!(first.1.len(), second.1.len());
+    let budget_bytes = first.1.len().to_string();
+    let by_mailbox = std::collections::BTreeMap::from([
+        ("INBOX".to_string(), vec![(1, first.1)]),
+        ("Sent".to_string(), vec![(1, second.1)]),
+    ]);
+    for pull_index in 0..2 {
+        let server = start_imap_server_with_messages(
+            TestImapMessages::PerMailbox(by_mailbox.clone()),
+            3,
+            ImapServerCapabilities {
+                move_supported: true,
+                uidplus_supported: false,
+                header_search_uids: &[900],
+                copyuid: false,
+            },
+        )
+        .expect("mock IMAP");
+        let mut config = test_config(Some(server.addr.port()), None);
+        config["mailboxes"]["sent"]["resolve"] = json!([{"mailbox_name": "Sent"}]);
+        write_json(&root.join(".afmail/config.json"), &config);
+        let (status, stdout) = run(
+            &root,
+            &[
+                "pull",
+                "--all-history",
+                "--max-new-messages",
+                "10",
+                "--max-total-bytes",
+                &budget_bytes,
+                "inbox",
+                "sent",
+            ],
+        );
+        assert_eq!(status, 0, "{stdout}");
+        let result = parse_one(&stdout);
+        assert_eq!(result["new_message_count"], 1);
+        assert_eq!(result["remaining_bytes_budget"], 0);
+        assert_eq!(
+            result["budget_skipped_count"],
+            if pull_index == 0 { 1 } else { 0 }
+        );
+        let cursor = read_json(&root.join(".afmail/pull/cursors.json"));
+        assert_eq!(cursor["mailboxes"]["inbox"]["highest_uid"], 1);
+        assert_eq!(cursor["mailboxes"]["sent"]["highest_uid"], pull_index);
+        assert!(server.handle.join().is_ok());
+        assert_eq!(
+            *server.header_batches.lock().expect("header batches"),
+            if pull_index == 0 {
+                vec!["1", "1"]
+            } else {
+                vec!["1"]
+            }
+        );
+    }
+    assert_eq!(
+        fs::read_dir(root.join("messages"))
+            .expect("messages")
+            .count(),
+        2
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -5034,7 +5981,9 @@ fn pull_updates_flags_for_existing_remote_location() {
     )
     .as_bytes()
     .to_vec();
-    let server = start_imap_server(vec![(31, raw)], 3);
+    let mut messages = header_batch_messages(30);
+    messages.push((31, raw));
+    let server = start_imap_server(messages, 3);
     assert!(server.is_some());
     let server = match server {
         Some(server) => server,
@@ -5045,10 +5994,10 @@ fn pull_updates_flags_for_existing_remote_location() {
         &test_config(Some(server.addr.port()), None),
     );
 
-    let (status, stdout) = run(&root, &["pull", "inbox"]);
+    let (status, stdout) = run(&root, &["pull", "--max-new-messages", "1", "inbox"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["new_message_count"], 0);
+    assert_eq!(value["new_message_count"], 1);
     assert_eq!(value["flags_updated_count"], 1);
     let message: Value = serde_json::from_str(
         &fs::read_to_string(root.join("messages/message_existing.json")).unwrap_or_default(),
@@ -5059,7 +6008,16 @@ fn pull_updates_flags_for_existing_remote_location() {
         message["remote"]["locations"][0]["flags"],
         json!(["\\Flagged", "\\Seen"])
     );
+    assert_eq!(value["remaining_message_budget"], 0);
+    assert_eq!(
+        read_json(&root.join(".afmail/pull/cursors.json"))["mailboxes"]["inbox"]["highest_uid"],
+        1
+    );
     assert!(server.handle.join().is_ok());
+    assert_eq!(
+        *server.header_batches.lock().expect("header batches"),
+        expected_header_batches(1, 31)
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -5657,17 +6615,17 @@ fn stdout_file_rejects_non_regular_target() {
     // rejected before any command runs. A directory rather than a character
     // device keeps this case reachable on every platform the gate runs on —
     // /dev/full exists only on some, and skipping there hid this assertion
-    // from the local gate entirely. `status` is finite, so the default split
-    // routing puts the cli_error on stderr and leaves stdout empty.
+    // from the local gate entirely. Sink setup failures use strict JSON on
+    // stderr and leave stdout empty, before the domain command can run.
     let target = root.join("not-a-regular-file");
     assert!(fs::create_dir_all(&target).is_ok());
     let target_arg = target.to_string_lossy().to_string();
     let (status, stdout, stderr) =
         run_allow_stderr(&root, &["status", "--stdout-file", target_arg.as_str()]);
-    assert_eq!(status, 2, "stdout={stdout} stderr={stderr}");
+    assert_eq!(status, 1, "stdout={stdout} stderr={stderr}");
     assert!(stdout.is_empty(), "stdout={stdout}");
     let value = parse_one(&stderr);
-    assert_eq!(value["code"], "cli_invalid_argument_value", "{value}");
+    assert_eq!(value["code"], "output_setup_failed", "{value}");
     assert!(
         value["message"]
             .as_str()
@@ -5680,9 +6638,9 @@ fn stdout_file_rejects_non_regular_target() {
     if Path::new("/dev/full").exists() {
         let (status, stdout, stderr) =
             run_allow_stderr(&root, &["status", "--stdout-file", "/dev/full"]);
-        assert_eq!(status, 2, "stdout={stdout} stderr={stderr}");
+        assert_eq!(status, 1, "stdout={stdout} stderr={stderr}");
         assert!(stdout.is_empty(), "stdout={stdout}");
-        assert_eq!(parse_one(&stderr)["code"], "cli_invalid_argument_value");
+        assert_eq!(parse_one(&stderr)["code"], "output_setup_failed");
     }
     let _ = fs::remove_dir_all(root);
 }
@@ -6080,7 +7038,6 @@ fn shared_mailbox_reads_leave_workspace_bytes_and_mtimes_unchanged() {
         Some("notification read"),
     );
 
-    let _ = fs::remove_file(workspace_runtime_lock_path(&root));
     assert!(!root.join(".afmail/workspace.lock").exists());
     let before = workspace_tree_snapshot(&root);
     for args in [
@@ -6117,7 +7074,6 @@ fn concurrent_shared_readers_leave_workspace_unchanged() {
     write_json(&root.join(".afmail/config.json"), &test_config(None, None));
     write_message(&root, "message_concurrent_read", 65, None);
     write_triage(&root, "message_concurrent_read", "concurrent read");
-    let _ = fs::remove_file(workspace_runtime_lock_path(&root));
 
     let before = workspace_tree_snapshot(&root);
     let _command_guard = COMMAND_TEST_LOCK
@@ -6814,6 +7770,101 @@ fn purge_deletes_old_local_discard_records() {
 }
 
 #[test]
+fn pull_restores_remote_deleted_message_at_a_new_uid() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("pull-restore-deleted");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    write_message(&root, "message_restored", 42, None);
+    update_message_json(&root, "message_restored", |message| {
+        message["workspace"]["status"] = json!("deleted_remote");
+        message["remote"]["locations"][0]["missing_rfc3339"] = json!("2026-05-22T10:00:00Z");
+    });
+    let (status, stdout) = run(&root, &["render", "refresh"]);
+    assert_eq!(status, 0, "{stdout}");
+    assert!(root.join("deleted/message_restored.md").exists());
+    let raw = fs::read(root.join(".afmail/messages/message_restored.eml")).unwrap();
+    let server = start_imap_server(vec![(43, raw)], 2).expect("IMAP server");
+    write_json(
+        &root.join(".afmail/config.json"),
+        &test_config(Some(server.addr.port()), None),
+    );
+    let (status, stdout) = run(&root, &["pull", "inbox"]);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(value["reclassified_message_count"], 1);
+    assert_eq!(value["new_message_count"], 0);
+    assert!(server.handle.join().is_ok());
+    assert_eq!(
+        read_json(&root.join("messages/message_restored.json"))["workspace"]["status"],
+        "triage"
+    );
+    assert!(root.join("triage/message_restored.md").exists());
+    assert!(!root.join("deleted/message_restored.md").exists());
+    assert_eq!(
+        read_json(&root.join("deleted/data/deleted.json"))["items"],
+        json!([])
+    );
+    let (status, stdout) = run(&root, &["purge", "deleted", "--older-than-days", "0"]);
+    assert_eq!(status, 0, "{stdout}");
+    assert!(!stdout.contains("message_restored"), "{stdout}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pull_leaves_every_other_status_alone_when_a_message_reappears_at_a_new_uid() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Same reappearance as the restore above — identical bytes at a new UID
+    // after the old location went missing — but the message was not
+    // `deleted_remote`, so the pull has no business reclassifying it.
+    // (`archived` is derived from a case or notification reference rather than
+    // stored, so it is not a status a pull could overwrite in the first place.)
+    for kept_status in ["spam", "trashed"] {
+        let root = temp_root(&format!("pull-reappear-{kept_status}"));
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert_eq!(run(&root, &["init"]).0, 0);
+        write_message(&root, "message_kept", 42, None);
+        update_message_json(&root, "message_kept", |message| {
+            message["workspace"]["status"] = json!(kept_status);
+            message["remote"]["locations"][0]["missing_rfc3339"] = json!("2026-05-22T10:00:00Z");
+        });
+        let (status, stdout) = run(&root, &["render", "refresh"]);
+        assert_eq!(status, 0, "{stdout}");
+        assert_eq!(
+            read_json(&root.join("messages/message_kept.json"))["workspace"]["status"],
+            kept_status,
+            "the fixture status must be stable before the pull"
+        );
+        let raw = fs::read(root.join(".afmail/messages/message_kept.eml")).unwrap();
+        let server = start_imap_server(vec![(43, raw)], 2).expect("IMAP server");
+        write_json(
+            &root.join(".afmail/config.json"),
+            &test_config(Some(server.addr.port()), None),
+        );
+        let (status, stdout) = run(&root, &["pull", "inbox"]);
+        assert_eq!(status, 0, "{kept_status}: {stdout}");
+        let value = parse_one(&stdout);
+        assert_eq!(value["reclassified_message_count"], 0, "{kept_status}");
+        assert_eq!(value["new_message_count"], 0, "{kept_status}");
+        assert_eq!(value["updated_location_count"], 1, "{kept_status}");
+        assert!(server.handle.join().is_ok());
+        assert_eq!(
+            read_json(&root.join("messages/message_kept.json"))["workspace"]["status"],
+            kept_status
+        );
+        assert!(
+            !root.join("triage/message_kept.md").exists(),
+            "{kept_status}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
 fn pull_marks_unreferenced_missing_remote_message_deleted_remote() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -7092,6 +8143,59 @@ fn status_reports_progress_while_workspace_is_exclusively_locked() {
         "pull: Trash bodies 125/199, batch 5/8"
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_lock_is_independent_of_child_tmpdir_and_ignored_by_git() {
+    let root = temp_root("workspace-lock-tmpdir");
+    fs::create_dir_all(&root).unwrap();
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let git_status = || {
+        let output = Command::new("git")
+            .current_dir(&root)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        output.stdout
+    };
+    assert!(
+        Command::new("git")
+            .current_dir(&root)
+            .arg("init")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let before = git_status();
+    // Recreating the ignored lock during a shared read does not change Git status.
+    fs::remove_file(workspace_runtime_lock_path(&root)).unwrap();
+    assert_eq!(run(&root, &["message", "list"]).0, 0);
+    assert_eq!(git_status(), before);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(workspace_runtime_lock_path(&root))
+        .unwrap();
+    FileExt::try_lock(&lock).unwrap();
+    for name in ["tmp-one", "tmp-two"] {
+        let temp = root.join(name);
+        fs::create_dir_all(&temp).unwrap();
+        let output = Command::new(bin())
+            .current_dir(&root)
+            .env("TMPDIR", &temp)
+            .args(["render", "refresh", "--output-to", "stdout"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(
+            parse_one(&String::from_utf8(output.stdout).unwrap())["code"],
+            "workspace_locked"
+        );
+    }
+    FileExt::unlock(&lock).unwrap();
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

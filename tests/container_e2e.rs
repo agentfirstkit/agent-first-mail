@@ -14,8 +14,8 @@ mod test_fixtures;
 
 use test_container_runtime::TestContainerRuntime;
 
-const GREENMAIL_IMAGE: &str = "greenmail/standalone:2.1.8";
-const DOVECOT_IMAGE: &str = "dovecot/dovecot:2.4.4";
+const GREENMAIL_IMAGE: &str = "greenmail/standalone:2.1.14";
+const DOVECOT_IMAGE: &str = "dovecot/dovecot:2.4.5";
 const DOVECOT_VMAIL_TMPFS: &str = "/srv/vmail:uid=1000,gid=1000,mode=0755";
 const MAIL_DOMAIN: &str = "localhost";
 const ME_LOGIN: &str = "me";

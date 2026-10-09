@@ -7,7 +7,7 @@ CRATE_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 FIXTURE_DIR="$CRATE_DIR/tests/fixtures/mail-batch"
 MODE=${1:-prepare}
 WORKSPACE=${AFMAIL_DEMO_WORKSPACE:-$(mktemp -d "${TMPDIR:-/tmp}/afmail-demo.XXXXXX")}
-IMAGE=greenmail/standalone:2.1.8
+IMAGE=greenmail/standalone:2.1.14
 CONTAINER=${AFMAIL_DEMO_CONTAINER:-afmail-demo-greenmail-$(date +%s)-$$}
 STEP_DELAY_S=${AFMAIL_DEMO_STEP_DELAY_S:-0}
 

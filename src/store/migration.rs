@@ -566,8 +566,7 @@ fn collect_named_files(
     filename: &str,
     visit: &mut impl FnMut(&Path) -> Result<()>,
 ) -> Result<()> {
-    for entry in read_dir(dir, "walk workspace migration inputs")? {
-        let path = entry.path();
+    for path in read_dir_paths(dir, "walk workspace migration inputs")? {
         if path.is_dir() {
             collect_named_files(&path, filename, visit)?;
         } else if path.file_name().and_then(|value| value.to_str()) == Some(filename) {

@@ -193,6 +193,30 @@ fn version_uses_afdata_output_formats() {
 }
 
 #[test]
+fn output_setup_failure_keeps_the_shared_error_contract_without_running_the_command() {
+    let root = temp_root("output-setup-failed");
+    assert!(fs::create_dir_all(&root).is_ok());
+
+    for args in [
+        vec!["init", "--stdout-file", "."],
+        vec!["init", "--stderr-file", "missing-parent/events.jsonl"],
+    ] {
+        let (status, stdout, stderr) = run_allow_stderr(&root, &args);
+        assert_eq!(status, 1, "{args:?}: stdout={stdout} stderr={stderr}");
+        assert!(stdout.is_empty(), "{args:?}: {stdout}");
+        let events = protocol_events(&stderr);
+        assert_eq!(events.len(), 1, "{args:?}: {stderr}");
+        assert!(agent_first_data::validate_protocol_stream(&events, true).is_ok());
+        assert_eq!(events[0]["kind"], "error");
+        assert_eq!(events[0]["error"]["code"], "output_setup_failed");
+        assert_eq!(events[0]["error"]["retryable"], false);
+        assert!(!root.join(".afmail").exists(), "init must not have run");
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn removed_flag_and_seen_commands_are_unknown_commands() {
     let root = temp_root("message-seen");
     assert!(fs::create_dir_all(&root).is_ok());

@@ -766,7 +766,8 @@ fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, Box<Response>
             _ => ("invalid_request", StatusCode::BAD_REQUEST),
         };
         Box::new(error_response_with_status(
-            AppError::new(code, format!("invalid JSON request body: {rejection}")),
+            AppError::new(code, "invalid JSON request body")
+                .with_details(json!({"details": {"kind": "json_rejection"}})),
             status,
             0,
         ))
@@ -774,23 +775,19 @@ fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, Box<Response>
 }
 
 fn query_value<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, Box<Response>> {
-    query.map(|Query(query)| query).map_err(|rejection| {
+    query.map(|Query(query)| query).map_err(|_| {
         Box::new(error_response(
-            AppError::new(
-                "invalid_request",
-                format!("invalid query parameters: {rejection}"),
-            ),
+            AppError::new("invalid_request", "invalid query parameters")
+                .with_details(json!({"details": {"kind": "query_rejection"}})),
             0,
         ))
     })
 }
 
-fn path_rejection(rejection: PathRejection) -> Response {
+fn path_rejection(_rejection: PathRejection) -> Response {
     error_response(
-        AppError::new(
-            "invalid_request",
-            format!("invalid path parameters: {rejection}"),
-        ),
+        AppError::new("invalid_request", "invalid path parameters")
+            .with_details(json!({"details": {"kind": "path_rejection"}})),
         0,
     )
 }
@@ -1078,6 +1075,7 @@ mod tests {
                     .method("POST")
                     .uri("/v1/cases")
                     .header("authorization", format!("Bearer {TOKEN}"))
+                    .header("idempotency-key", "case-create-json-001")
                     .header("content-type", "application/json")
                     .body(Body::from("{"))
                     .expect("request"),
@@ -1090,6 +1088,8 @@ mod tests {
             .expect("body");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
         assert_eq!(value["kind"], "error");
+        assert_eq!(value["error"]["code"], "invalid_request");
+        assert_eq!(value["error"]["details"]["kind"], "json_rejection");
 
         let unsupported = app
             .clone()
@@ -1137,6 +1137,256 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let value = response_json(response).await;
+        assert_eq!(value["error"]["code"], "idempotency_key_required");
+    }
+
+    #[tokio::test]
+    async fn extractor_rejections_keep_status_and_do_not_echo_request_canaries() {
+        const CANARY: &str = "AFMAILExtractorPrivateCanary";
+        let temp = tempfile::tempdir().expect("create temp dir");
+        Workspace::at(temp.path()).init().expect("init workspace");
+        let app = router(ApiState::new(temp.path().to_path_buf(), TOKEN.to_string()));
+        let mut oversized = vec![b'a'; MAX_BODY_BYTES + 1];
+        oversized[..CANARY.len()].copy_from_slice(CANARY.as_bytes());
+        let cases = [
+            (
+                "POST",
+                "/v1/cases".to_string(),
+                Some("application/json"),
+                Body::from(format!(
+                    r#"{{"case_name":"test","group":"support","{CANARY}":"private"}}"#
+                )),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "invalid JSON request body",
+                "json_rejection",
+            ),
+            (
+                "POST",
+                "/v1/cases".to_string(),
+                Some("application/json"),
+                Body::from(oversized),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                "invalid JSON request body",
+                "json_rejection",
+            ),
+            (
+                "POST",
+                "/v1/cases".to_string(),
+                Some("text/plain"),
+                Body::from(CANARY),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+                "invalid JSON request body",
+                "json_rejection",
+            ),
+            (
+                "GET",
+                format!("/v1/cases?scope={CANARY}"),
+                None,
+                Body::empty(),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "invalid query parameters",
+                "query_rejection",
+            ),
+            (
+                "GET",
+                format!("/v1/cases/{CANARY}%FF"),
+                None,
+                Body::empty(),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "invalid path parameters",
+                "path_rejection",
+            ),
+        ];
+
+        for (method, uri, content_type, body, status, code, message, kind) in cases {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("idempotency-key", "extractor-canary-001");
+            if let Some(content_type) = content_type {
+                request = request.header("content-type", content_type);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(body).expect("request"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), status);
+            let body = to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("response body");
+            let text = std::str::from_utf8(&body).expect("UTF-8 response");
+            assert!(!text.contains(CANARY));
+            assert!(!text.contains(TOKEN));
+            let value: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+            assert_eq!(value["kind"], "error");
+            assert_eq!(value["error"]["code"], code);
+            assert_eq!(value["error"]["message"], message);
+            assert_eq!(value["error"]["retryable"], false);
+            assert_eq!(value["error"]["details"], serde_json::json!({"kind": kind}));
+            assert_eq!(value["trace"]["duration_ms"], 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_case_create_does_not_claim_key_and_corrected_request_succeeds() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let workspace = Workspace::at(temp.path());
+        workspace.init().expect("init workspace");
+        let app = router(ApiState::new(temp.path().to_path_buf(), TOKEN.to_string()));
+        let request_id = "case-create-correctable-001";
+        let record_path = temp
+            .path()
+            .join(".afmail/requests")
+            .join(format!("{request_id}.json"));
+
+        let invalid = app
+            .clone()
+            .oneshot(case_create_request(request_id, "   "))
+            .await
+            .expect("invalid response");
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(invalid).await["error"]["code"],
+            "invalid_request"
+        );
+        assert!(!record_path.exists());
+        assert_eq!(
+            workspace.case_list(false, false).expect("list cases")["count"],
+            0
+        );
+
+        let corrected = app
+            .oneshot(case_create_request(request_id, "corrected"))
+            .await
+            .expect("corrected response");
+        assert_eq!(corrected.status(), StatusCode::OK);
+        let corrected = response_json(corrected).await;
+        assert_eq!(corrected["result"]["case_name"], "corrected");
+        assert_eq!(
+            workspace.case_list(false, false).expect("list cases")["count"],
+            1
+        );
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(record_path).expect("read completed record"))
+                .expect("record JSON");
+        assert_eq!(record["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn completed_case_create_replays_before_current_config_precheck() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        Workspace::at(temp.path()).init().expect("init workspace");
+        let app = router(ApiState::new(temp.path().to_path_buf(), TOKEN.to_string()));
+        let request_id = "case-create-cached-001";
+        let record_path = temp
+            .path()
+            .join(".afmail/requests")
+            .join(format!("{request_id}.json"));
+        let first = app
+            .clone()
+            .oneshot(case_create_request(request_id, "cached"))
+            .await
+            .expect("first response");
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = response_json(first).await;
+        let record_before = std::fs::read(&record_path).expect("read completed record");
+        std::fs::write(temp.path().join(".afmail/config.json"), "{")
+            .expect("change current config");
+
+        let fresh = app
+            .clone()
+            .oneshot(case_create_request("case-create-fresh-001", "fresh"))
+            .await
+            .expect("fresh response");
+        assert_eq!(fresh.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response_json(fresh).await["error"]["code"], "store_error");
+        assert!(
+            !temp
+                .path()
+                .join(".afmail/requests/case-create-fresh-001.json")
+                .exists()
+        );
+
+        let retry = app
+            .oneshot(case_create_request(request_id, "cached"))
+            .await
+            .expect("cached retry response");
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(response_json(retry).await["result"], first["result"]);
+        assert_eq!(
+            std::fs::read(record_path).expect("read retained record"),
+            record_before
+        );
+    }
+
+    #[tokio::test]
+    async fn case_create_after_effect_failure_keeps_pending_and_api_retry_is_incomplete() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let workspace = Workspace::at(temp.path());
+        workspace.init().expect("init workspace");
+        let request_id = "case-create-pending-001";
+        let failure = workspace
+            .run_idempotent_request(
+                request_id,
+                "case_create",
+                serde_json::json!({
+                    "name": "pending",
+                    "group": "support",
+                    "message": null,
+                    "summary": null,
+                    "reason": "test",
+                }),
+                || {
+                    workspace.create_case("pending", Some("support"), None, None, Some("test"))?;
+                    Err(crate::error::AppError::new(
+                        "after_effect_test_failure",
+                        "forced failure after creating the case",
+                    ))
+                },
+            )
+            .expect_err("forced failure");
+        assert_eq!(failure.error_code, "after_effect_test_failure");
+        let record_path = temp
+            .path()
+            .join(".afmail/requests")
+            .join(format!("{request_id}.json"));
+        let record_before = std::fs::read(&record_path).expect("read pending record");
+        let record: serde_json::Value =
+            serde_json::from_slice(&record_before).expect("record JSON");
+        assert_eq!(record["status"], "pending");
+        assert_eq!(record["result"], serde_json::Value::Null);
+        let cases_before = workspace
+            .case_list(false, false)
+            .expect("list created case");
+        assert_eq!(cases_before["count"], 1);
+
+        let response = router(ApiState::new(temp.path().to_path_buf(), TOKEN.to_string()))
+            .oneshot(case_create_request(request_id, "pending"))
+            .await
+            .expect("retry response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "idempotency_incomplete"
+        );
+        assert_eq!(
+            std::fs::read(record_path).expect("read retained pending record"),
+            record_before
+        );
+        assert_eq!(
+            workspace
+                .case_list(false, false)
+                .expect("list retained case"),
+            cases_before
+        );
     }
 
     #[tokio::test]
@@ -1394,6 +1644,26 @@ mod tests {
             .expect("body");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
         assert_eq!(value["error"]["code"], "api_method_not_allowed");
+    }
+
+    fn case_create_request(request_id: &str, case_name: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/cases")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("idempotency-key", request_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "case_name": case_name,
+                    "group": "support",
+                    "message_id": null,
+                    "summary": null,
+                    "reason": "test",
+                })
+                .to_string(),
+            ))
+            .expect("case create request")
     }
 
     async fn response_json(response: axum::response::Response) -> serde_json::Value {

@@ -926,13 +926,42 @@ pub fn remove_pending_message_pushes(
     message_id: &str,
     kind: &str,
 ) -> Result<Vec<RemovedMessagePush>> {
+    let items = removable_message_pushes(root, message_id, kind)?;
+    let mut removed = Vec::new();
+    for item in items {
+        let push_id = item.push_id.clone();
+        delete_item(root, &item)?;
+        removed.push(RemovedMessagePush { push_id });
+    }
+    Ok(removed)
+}
+
+pub(crate) fn message_push_items(root: &Path, message_id: &str) -> Result<Vec<PushItem>> {
+    Ok(read_items(root)?
+        .into_iter()
+        .filter(|item| {
+            item.message()
+                .is_some_and(|payload| payload.message_id == message_id)
+        })
+        .collect())
+}
+
+pub(crate) fn ensure_pending_message_pushes_removable(
+    root: &Path,
+    message_id: &str,
+    kind: &str,
+) -> Result<()> {
+    removable_message_pushes(root, message_id, kind).map(|_| ())
+}
+
+fn removable_message_pushes(root: &Path, message_id: &str, kind: &str) -> Result<Vec<PushItem>> {
     let action = MessagePushAction::from_kind(kind).ok_or_else(|| {
         AppError::new(
             "push_item_invalid",
             format!("unsupported message push action kind: {kind}"),
         )
     })?;
-    let items = read_items(root)?
+    let items = message_push_items(root, message_id)?
         .into_iter()
         .filter(|item| {
             item.message()
@@ -949,13 +978,7 @@ pub fn remove_pending_message_pushes(
         ));
     }
 
-    let mut removed = Vec::new();
-    for item in items {
-        let push_id = item.push_id.clone();
-        delete_item(root, &item)?;
-        removed.push(RemovedMessagePush { push_id });
-    }
-    Ok(removed)
+    Ok(items)
 }
 
 fn plan_item(root: &Path, config: &MailConfig, item: &mut PushItem) -> Result<bool> {

@@ -1,20 +1,24 @@
 # Agent-First Mail
 
-Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.
+Let your AI agent work your inbox the way it works a git checkout — mail pulled into local files it reads, sorts, and drafts on your machine, and nothing reaches your real mailbox until you confirm the push.
 
 > **Ask your agent:** "Sort this week's inbox and draft replies to anything urgent."
 
-Agent-First Mail — the `afmail` command — isn't an email client, a helpdesk app,
-or an auto-replying bot. It's the **workspace your agent operates in**. It borrows
-the `git` shape — pull from a remote, work in a local worktree, push deliberately
-— so there is always a clear line between *reading your mail* and *changing it*.
+Agent-First Mail — the `afmail` command — isn't an email client, a helpdesk
+app, or an auto-replying bot. It's the **workspace your agent operates in**,
+borrowed from the `git` shape: `pull` the mailbox into a local worktree, work
+in files, and `push` deliberately. Reading your mail and changing it are two
+different commands, and only one of them can touch the server.
 
-Supported platforms: macOS, Linux, Windows.
+Supported platforms: macOS, Linux, Windows. Works with Gmail, Fastmail,
+iCloud, and any other IMAP/SMTP mailbox that accepts a password login; see
+[Connect a Mailbox](docs/setup.md).
 
-## Try the complete workflow locally
+## Try it in a minute
 
-Create an ordinary workspace connected only to afmail's loopback mock mail
-server:
+No credentials needed. `demo init` creates an ordinary workspace wired to a
+loopback mock mail server with a 12-message founder inbox: a reproducible
+product bug, receipts, an outage, a VIP request, phishing, and a fake invoice.
 
 ```bash
 afmail demo init
@@ -22,150 +26,55 @@ cd afmail-demo
 afmail demo serve
 ```
 
-Leave `demo serve` running, then ask your agent to pull and triage the inbox,
-draft replies, and show the push preview before confirmation. The focused
-`founder-inbox` scenario contains 12 messages, including a reproducible product
-bug, receipts, an outage, a VIP request, phishing, and a fake invoice.
+Leave `demo serve` running and ask your agent to pull and triage the inbox,
+draft replies, and show you the push preview. Pull and push use the real
+IMAP/SMTP paths, and a remote effect still requires the exact
+`afmail push --confirm PLAN_ID` the preview returned. Restart the server to
+reset it; delete `afmail-demo/` and run `demo init` again for a clean slate.
 
-This is the real workflow: pull and push use the normal IMAP/SMTP paths, and a
-remote effect still requires the exact `afmail push --confirm PLAN_ID` returned
-by the preview. The server listens on `127.0.0.1` only. Restarting it resets its
-in-memory mailbox; remove the generated `afmail-demo/` directory and run
-`afmail demo init` again for a completely clean workspace.
-
-## Build features
-
-Default builds include all three optional product surfaces:
-
-- `demo`: the loopback mock IMAP/SMTP server and embedded demo mailbox.
-- `api`: the Axum HTTP API server and OpenAPI export commands.
-- `review`: interactive Review sessions delivered as a local window, a
-  short-lived trusted-LAN link, or a registered AFUI session.
-
-Build a core mail-workspace binary without them using
-`cargo build --no-default-features`. Enable only selected surfaces with, for
-example, `cargo build --no-default-features --features api,review`. Commands
-whose implementation was excluded remain discoverable and return a structured
-`feature_disabled` error naming the required feature.
-
-## How it works: one email, start to finish
+## One email, start to finish
 
 <video src="https://github.com/user-attachments/assets/a7f9ee4d-3729-41e7-811c-74590d963782" controls muted playsinline></video>
 
-You don't run afmail — your agent does. You ask for what you want in plain
-language, and afmail is the tool it reaches for. The commands below are the
-agent's tool calls, not something you type.
-
-Say a mailbox is already configured (one folder per account, like a git
-worktree). You ask:
+You don't run afmail — your agent does. You ask in plain language, and afmail
+is the tool it reaches for. You say:
 
 > **You:** Check my latest email, go through it, and handle anything urgent.
 
-The agent decides how to do that on its own. It starts by investigating — all
-read-only and within the explicit request to check current remote mail: it pulls the mailbox into local files, sees
-what came down, opens a **case** for the refund request, and reads what it
-actually says:
+The agent starts read-only: it pulls the mailbox into local files, sees what
+came down, opens a **case** for a refund request, and reads what the customer
+actually wrote.
 
 ```bash
-afmail status                                            # local counts and latest pull/push progress
-afmail push list                                         # pending real-mailbox effects
 afmail pull                                              # bounded remote read → local files
 afmail triage list                                       # locators for what came down
 afmail case create --name "Refund request" --group support \
   --message message_inbox_88213_4 --summary "refund request for late order" --reason "wants a refund"
-afmail message show message_inbox_88213_4                # read the request: order #4471, arrived late
+afmail message show message_inbox_88213_4                # order #4471, arrived late
 ```
 
-Fresh pulls default to the last 90 days, at most 500 new messages and 512 MiB
-across all selected mailboxes. Use `pull --dry-run` to estimate candidates
-without downloading bodies or changing workspace bytes; use `--all-history`
-only for an explicitly reviewed full-history import. Explicit
-`--max-new-messages` and `--max-total-bytes` remain hard command-wide budgets.
+To check whether the claim holds, it steps outside afmail to **another
+skill** — your store's order system — and looks the order up. afmail neither
+knows nor cares what that skill is: it holds the mailbox while your agent
+brings the rest of the toolbox. Then it comes back with a recommendation:
 
-The mailbox workspace is designed to be kept in your own private Git repository.
-Raw `.eml` evidence, canonical metadata, generated read views, attachments, queued effects,
-and audit files are normal workspace state that private Git can version, sync,
-and back up. That is a Git trust boundary, not an encryption boundary: anyone
-with repository access, host backups, local machine access, or retained Git
-history may still be able to read the mail evidence. Deleting files from the
-worktree does not erase old commits. Service credentials are different from mail
-evidence; private Git support for mailbox state does not mean passwords or API
-secrets should be committed.
-
-To restore or move a mailbox workspace, clone or fetch the private repository,
-then run `afmail status` from the workspace to verify the `workspace_uid`, local
-counts, and `storage.*_bytes` summary. Run `afmail doctor` before making new
-changes or pushing remote effects; it checks canonical files, incomplete local
-transactions, pending idempotency records, contact index conflicts, and retained
-push/audit recovery state. This is a validation flow over the existing
-workspace, not a separate restore command.
-
-Reading the email tells it what's being claimed. To check whether the claim holds,
-it steps outside afmail to **another skill** — your store's transaction system —
-and looks the order up. That's still read-only, so it still needs no permission.
-afmail neither knows nor cares what that skill is: it holds the mailbox while your
-agent brings the rest of the toolbox.
-
-```text
-# the agent's store / transaction skill — not afmail:
-get order #4471      → 9 days late, $79.90, refund-eligible
-```
-
-Now, before changing anything, it comes back with what it found and what it
-recommends:
-
-> **Agent:** One email needs a decision. A customer wants a refund on order #4471.
-> I pulled it up: it arrived 9 days late, it's $79.90, and it's refund-eligible.
-> I'd refund the full amount, reply to confirm, then archive the thread. Go ahead?
+> **Agent:** One email needs a decision. A customer wants a refund on order
+> #4471: it arrived 9 days late, it's $79.90, and it's refund-eligible. I'd
+> refund it, reply to confirm, then archive the thread. Go ahead?
 >
 > **You:** Ok, go ahead.
 
-With that approved, the agent issues the refund — which never touches afmail, just
-the store's own API:
-
-```text
-refund order #4471   → refunded $79.90 to original card (transaction rf_8c21)
-```
-
-With the money back, the agent turns to afmail. It drafts the reply confirming
-the refund and queues it — still local, nothing sent yet:
+The refund goes through the store's own API. Then the agent drafts the reply
+under your configured send identity and queues it — still local, nothing sent:
 
 ```bash
 afmail case draft reply c20260606001 message_inbox_88213_4 --body-file refund-reply.txt
-afmail case draft send c20260606001 reply-message_inbox_88213_4.md # queue the reply
+afmail case draft send c20260606001 reply-message_inbox_88213_4.md   # queue it
+afmail case archive c20260606001 --reason "refunded order #4471, replied to customer"
 ```
 
-Replies go out under an explicit send identity you've configured, and any persona
-footer is written into the draft for review rather than appended secretly at send
-time.
-
-If the queued reply needs correction before sending, edit the draft Markdown or
-use `draft change`; the queued item still points at the latest draft content:
-
-```bash
-afmail case draft change c20260606001 reply-message_inbox_88213_4.md --body-file revised-reply.txt
-```
-
-Edits are allowed until preview. Once `afmail push` returns a `plan_id`, changing
-the draft, attachment bytes, identity, queue, or action configuration invalidates
-that reviewed plan; afmail requires a new preview instead of silently sending
-newer content under an older approval.
-
-Draft Markdown has a marked compose section so afmail can distinguish the text
-you wrote from template headings, quoted history, and the identity footer. An
-unfinished draft may be uploaded to the remote Drafts mailbox, but it cannot be
-queued for sending until that compose section contains authored text. The local
-state is then `queued_send`, not `sent`; afmail revalidates the latest file at
-push time and strips editor-only markers from the outgoing plain-text message.
-Drafts accept `To`, `Cc`, and `Bcc` recipients. Bcc addresses remain visible in
-the local draft, Review UI, push preview, and the sender's private Drafts/Sent
-evidence, but afmail removes the `Bcc` header from SMTP DATA while keeping those
-addresses in the SMTP envelope.
-
-Pushing is the moment your real mailbox changes. Bare `afmail push` is a pure
-preview containing the complete resolved queue and a workspace-bound `plan_id`;
-only `--confirm PLAN_ID` can apply that exact snapshot. So the agent stops and
-shows you the draft and all other effects before anything goes out:
+Pushing is the moment your real mailbox changes, so the agent stops and shows
+you the draft and every other pending effect first:
 
 > **Agent:** Refund's done. Here's the reply before I send it:
 >
@@ -176,243 +85,117 @@ shows you the draft and all other effects before anything goes out:
 >
 > **You:** Looks good — send it.
 
-Only now, with the draft approved, does it push:
-
 ```bash
-afmail case archive c20260606001 --reason "refunded order #4471, replied to customer"
-afmail push                                              # review the full plan and copy plan_id
-afmail push --confirm push_plan_<REVIEWED_PLAN_ID>       # apply only that exact plan
+afmail push                                              # preview: the full plan and its plan_id
+afmail push --confirm push_plan_<REVIEWED_PLAN_ID>       # apply exactly that plan
 ```
 
-If the case still contains queued send drafts or a remote archive effect,
-`case archive` returns canonical `status: archiving` and queues the remote archive as
-its own push item. Its workspace is held under `archived-cases/`, but it does
-not become `status: archived` or receive `archived_rfc3339` until the send and
-archive pushes both succeed.
+Then it reports back on everything else in the inbox — the look-alike
+PayPal domain to junk, the `.zip` "invoice" from a stranger to junk, the
+shipping notification and the Stripe payout to archive — and asks before
+filing any of it.
 
-If a confirmed push exits with code `3` and `outcome: partial`, do not blindly
-repeat the whole push. Inspect `failures`, `partially_applied_count`,
-`remaining_count`, and `audit_warnings`, then compare `afmail push list` with
-`afmail status` before deciding whether another confirmed push is safe. A
-`remote_outcome_unknown` item must never be retried automatically. If a remote
-effect succeeded but its audit append did not complete, the queue retains an
-`audit_pending` item. The next preview marks it `effect_scope: local_recovery`;
-after review, confirming that new plan only completes the idempotent audit append
-and queue cleanup, and never repeats SMTP or IMAP effects.
+That is the whole shape: **you ask, the agent works in local files, and
+nothing reaches your real mailbox until you've seen the resolved plan and it
+runs `push --confirm` with that exact ID.**
 
-If MOVE completed but the server did not return a target UID, run `afmail pull`
-before previewing again. Recovery never replays MOVE: it completes only when the
-target message is present and every planned source location is no longer active.
+## Why it is shaped this way
 
-Then it reports back:
+- **A worktree, not tool calls.** Mail becomes plain files with stable ids.
+  Your agent reads Markdown, greps it, and points at the same message across
+  runs, instead of round-tripping every look through a live provider API.
+- **One confirm boundary.** Replying writes a draft, archiving moves a local
+  folder, marking spam removes it from triage. Each of those only *queues* a
+  remote effect. Bare `afmail push` is a pure preview with a plan id bound to
+  that exact snapshot; `--confirm PLAN_ID` is the single moment anything is
+  sent, moved, or flagged, and any change in between makes the old id fail.
+  Every confirmed effect lands in an append-only audit log.
+- **Cases, not just messages.** Ongoing issues get a folder with the messages
+  involved, notes, and draft replies, so work survives the session that
+  started it.
+- **Bring your own brain.** afmail does not classify mail, decide what
+  matters, or write replies. Any skill or model does that on top of a stable,
+  file-first mailbox. Put your priorities and reply style in `AGENTS.md`; the
+  embedded [Agent Skill](skills/agent-first-mail/SKILL.md) teaches the safety
+  contract, and yours stacks on it.
 
-> **Agent:** Sent and archived. That was the only message that needed a reply.
-> Here's everything else in the inbox and what I'd do with each:
->
-> - **"Your account is suspended — verify now"** — phishing. The link points to `secure-paypa1.com` (a look-alike, "1" in place of the "l"), not the real site, and it pressures you to log in. I'd mark it junk.
-> - **"RE: unpaid invoice"** with a `.zip` attachment from a Gmail address, no prior thread — almost certainly malware. Junk.
-> - **"Order #4490 is out for delivery"** — a routine shipping notification from the store, nothing to do. Archive.
-> - **"Payout of $2,140 sent to your bank"** — your weekly Stripe payout receipt; worth keeping for records. Archive.
->
-> Want me to junk the first two and archive the rest?
-
-That is the whole shape: **you ask in plain language and the agent does the work
-in local files — investigating, proposing a plan, drafting — and nothing reaches
-your real mailbox until you've reviewed the resolved plan and it runs
-`afmail push --confirm PLAN_ID` with that exact ID.**
-
-The exact permission boundary for local reads, remote reads, local changes,
+The exact permission line between local reads, remote reads, local changes,
 remote effects, and permanent deletion is the
-[authorization contract](docs/authorization.md). Loading the afmail skill is
-automatic when an installed agent recognizes a mail task; loading it grants no
-additional permission.
+[authorization contract](docs/authorization.md).
 
-## Nothing touches your real mailbox until you confirm
+## Connect your mailbox
 
-Everything your agent does by default is local: replying writes a draft,
-archiving moves a local folder, marking spam/trash removes it from triage and
-adds it to generated `spam/` or `trash/` review views, and remotely deleted mail
-is retained under generated `deleted/` views. `afmail purge` only previews the
-old local copies it would permanently remove; deletion requires rerunning it
-with the exact returned `--confirm PLAN_ID`. Local filing only *queues* a remote effect. `afmail push` is like `git push` — it
-previews everything pending, and **`--confirm PLAN_ID` is the one explicit
-plan-bound moment** that reviewed snapshot is sent, moved, or flagged. Any
-relevant change makes the old ID fail before remote access.
-Every confirmed effect lands in an append-only audit log, so a suggestion is never
-mistaken for a change after the fact.
+One workspace directory per account. Your agent can run every step; the only
+thing it needs from you is an app password from your provider.
 
-## Bring your own skill: afmail is the workspace, your agent is the brain
+```bash
+mkdir gmail && cd gmail
+afmail init
+afmail config set imap.host imap.gmail.com
+afmail config set imap.username ada@gmail.com
+afmail config set imap.password_secret "file:$HOME/.config/afmail/secrets.json#gmail_app_password"
+afmail config set smtp.host smtp.gmail.com
+afmail config set smtp.username ada@gmail.com
+afmail config set smtp.password_secret "file:$HOME/.config/afmail/secrets.json#gmail_app_password"
+afmail config add identities ada name="Ada Lovelace" email=ada@gmail.com default=true
+afmail config remove identities me
+afmail status          # what is still missing
+afmail remote test     # logs in to IMAP and SMTP; sends nothing
+```
 
-afmail deliberately does not classify your mail, decide what matters, or write
-your replies. It gives **any agent skill a stable, file-first mailbox to operate
-on**, safely behind the push boundary — so you compose the behavior you want on
-top of it:
-
-- Drop in a custom **skill** that reads the workspace, triages by your rules,
-  summarizes threads, suggests cases, and drafts replies in your voice. Its
-  output stays local until you push.
-- Put your mailbox **policy in `AGENTS.md`**: priorities, reply style, escalation
-  rules, labels, who gets a fast response.
-- afmail ships an embedded [Agent Skill](skills/agent-first-mail/SKILL.md) that teaches
-  an agent its safe behavior contract. Your own skill stacks on top of it, not
-  against it.
-
-afmail stays deliberately small — it's the mailbox substrate, and the
-intelligence is whatever skill you point at it.
+For Gmail that app password comes from
+<https://myaccount.google.com/apppasswords> once 2-Step Verification is on,
+and Gmail needs a label named `Archive` because it has no archive folder of
+its own. [Connect a Mailbox](docs/setup.md) walks through Gmail, Fastmail,
+iCloud, and generic servers, where to keep the password so it stays out of
+your private Git history, and how mailbox folders map. Outlook.com and
+Microsoft 365 are not supported: Microsoft only allows OAuth logins, which
+afmail does not implement yet.
 
 ## What your agent gets to work with
 
-A pull leaves behind a workspace that keeps active attention, finished work, and
-machine evidence in separate places:
-
 - **`triage/`** — readable Markdown views of new mail, to decide what needs
   attention.
-- **`cases/`** — a folder per ongoing issue, holding notes, the messages
-  involved, and draft replies.
-- **`archived-cases/`** — both archiving cases waiting for confirmed effects and
-  fully archived cases, distinguished by canonical `collection.status`.
+- **`cases/`** and **`archived-cases/`** — a folder per ongoing issue: notes,
+  the messages involved, draft replies; archived once its effects are
+  confirmed.
 - **`notifications/`** — completed notification mail filed out of the way.
-- **Stable refs** — every message, case, and notification collection has a durable id,
-  so an agent can point at the same thing across runs.
-- **Locator lists** — `triage list`, `case list`, `notification list`,
-  `case list`, and `case list --archived` return
-  compact stable ids plus path templates; the agent expands those templates or
-  uses the matching `show` command to read detail.
+- **Stable refs and locator lists** — every message, case, and notification
+  has a durable id, and `triage list`, `case list`, `notification list`
+  return those ids with path templates the agent expands or hands to `show`.
 
-That is the shape. The [docs](#docs) cover the exact files, fields, and commands.
+The [Workspace Model](docs/workspace.md) and [File Formats](docs/file-formats.md)
+cover the exact layout.
 
 ## Review with your agent
 
-Review commands are blocking, local human-in-the-loop sessions for work that
-benefits from dense reading or an explicit decision. There is no batch: each
-item a review shows — a triage message, or the one case/notification a
-case/notification review is about — settles the moment the person decides it,
-written straight to the workspace. A proposal from the agent is optional, not
-a precondition; `afmail triage suggestion set` (and its case/notification
-equivalents) still let an agent make one first, living in canonical JSON
-metadata, never in Markdown or a separate review file, but a review opens and
-shows the item even when nothing has proposed anything. With no current
-suggestion it shows no speculative action menu: the person can inspect the item
-or ask the agent through the open Review. Review itself never files a message,
-changes a case, queues a push, or touches the remote mailbox — settling records
-a decision, not a mailbox change.
+Some decisions want a screen, not a chat transcript. `afmail triage review`,
+`afmail case review CASE_REF`, and `afmail case draft review CASE_REF DRAFT`
+open a blocking, local human-in-the-loop page: the person reads the actual
+mail, settles each item on the spot, edits notes or a draft in place, and can
+type a question that reaches the agent on the command's event stream.
+Closing the window is the ordinary end of a review; whatever was settled
+stays settled, whatever was not stays open. Review never files a message,
+queues a push, or touches the remote mailbox — settling records a decision,
+and the normal preview/confirm flow still applies.
 
-Case and notification suggestions use the same lifecycle in their canonical
-JSON through `afmail case suggestion set|clear` and
-`afmail notification suggestion set|clear`. Notes and draft fields remain
-canonical user content and autosave through the Workspace API under an
-exclusive lock and base-hash check; each result records those writes in
-`saved_files`. A new Agent suggestion replaces the previous round and clears
-its human response. Deletion proposals that set `allow_notes: true` require a
-separate destructive confirmation before that item can be settled.
-
-The open Review is bidirectional. A message typed in the page reaches the agent
-on the command's ordered AFDATA stream, correlated by a request id. The agent
-can answer directly, or first use ordinary afmail commands to update a
-canonical draft, note, or suggestion and then ask the page to reread the
-workspace. Text on the channel cannot inject those artifacts into the page.
-The built-in frontend displays every turn during that page load; AFUI only
-transports typed values and owns no conversation history or replay.
-
-There is no page-wide Done. Closing the window is the ordinary, unremarkable
-end of every review, not a decision — whatever was settled by then stays
-settled, and whatever was not stays unsettled, available for another review
-later. A settled item can be resettled: the record is replaced, not appended.
-Notes and drafts show no save badge on open; save progress begins only after
-an edit, and `Saved locally` appears only after the canonical file write
-succeeds.
-
-`afmail case review CASE_REF` opens the case and its notes;
-`afmail notification review NOTIFICATION_REF` opens a notification and its
-notes; `afmail case draft review CASE_REF DRAFT_NAME` opens one draft. The
-terminal result is read back from the workspace after the session ends, not
-carried out of it: `settled` lists every item a person decided (`ref`,
-`outcome`, and — when there is one — `suggested_action`/`reason`), `unsettled`
-lists every item nobody decided, and `ended` says whether the window closed or
-an unattended `--mode link` page reached the end of AFUI's warning grace.
-Silence is not a decision — an unsettled
-item can be proposed or reviewed again — and the agent must re-check hashes
-before applying anything. A settled `human_suggestion` is feedback, not proof
-that the formal action ran and not authorization for push or send; those still
-use the normal commands and preview/confirm flow.
-
-If a suggestion `set` or `clear` may be retried after interrupted output, use a
-stable `--request-id` for that exact command and inputs. Case and
-notification review hashes include every canonical document visible to Review.
-Message hashes include the exact message context and related messages; case
-hashes include the exact collection, contained messages, current notes, and
-active drafts; notification hashes include the exact collection, contained
-messages, and current notes. Changing any of them makes an older proposal stale
-and requires a fresh suggestion.
-
-Use `--mode link` with any review command to use a phone or another browser on
-the same trusted IPv4 local network. afmail prints a clickable `review_url` and
-waits for that review to finish. The URL is an AFUI-owned page: by default it
-warns after 15 unattended minutes and lapses after a further 5-minute grace,
-while visible attention or Review traffic renews it. `--mode session`
-registers the Review without opening or
-advertising it itself; reach it later through `afui session open` or
-`afui session serve`. Review mode defaults to `window`; every mode emits
-`review_ready` when the surface is ready. Link mode uses local HTTP and must not
-be used on public or untrusted networks.
-
-The workspace's `.afmail/config.json` owns the limits that belong to afmail's
-Review provider. They can be changed with `afmail config set`:
-
-| Key | Default | Scope |
-|---|---:|---|
-| `review.max_channel_text_bytes` | `65536` | Maximum UTF-8 bytes in one Review user message or controller response |
-| `review.max_inline_image_bytes` | `16777216` | Maximum declared, read, and decoded bytes for one raster attachment preview |
-
-Remote lifetime is not an afmail Review limit. Direct links and pages created
-by `afui session serve` both read `attention.idle_timeout_s` and
-`attention.grace_period_s` from AFUI's global `config.json`
-(`~/Library/Application Support/afui/config.json` on macOS,
-`$XDG_CONFIG_HOME/afui/config.json` on Linux (or
-`~/.config/afui/config.json` when `XDG_CONFIG_HOME` is unset), or
-`%APPDATA%\afui\config.json` on Windows). `AFUI_CONFIG_DIR` replaces that
-file's parent directory. The `session serve` CLI may override them for that
-process with `--idle-minutes` and `--grace-minutes`. A local `window` is
-bounded by closing the window; a registered `session` itself does not expire.
-In a Link `review_ready` event, disabled attention expiry is reported as
-`idle_timeout_s: null`.
-
-Review HTML uses the same MiniJinja system and the same typed render documents
-as generated Markdown. Export editable multilingual templates with
-`afmail render templates`; language entries live under `templates/<language>/`
-and shared layouts under `templates/shared/`. Workspace Review templates may
-provide HTML and CSS but never JavaScript. See the [template
-contract](docs/templates.md).
+`--mode link` hands the same page to a phone on your trusted local network;
+`--mode session` registers it for an [Agent-First UI](https://agentfirstkit.com/agent-first-ui)
+session to pick up later. Review pages render from the same editable
+templates as generated Markdown; see the [template contract](docs/templates.md).
 
 ## Typed local HTTP API
 
-Trusted Agent runtimes and applications can use afmail through the same domain
-core over HTTP. `afmail api serve` publishes OpenAPI 3.2 plus standalone JSON
-Schemas and reuses the CLI's workspace locks, transaction guard, persistent
-idempotency records, suggestion hashes, audit behavior, and push plan
-confirmation. It does not expose a shell or generic command endpoint.
-
-Set a random 32–512-character bearer-safe ASCII credential, then start the API
-from a mailbox workspace:
-
-```bash
-export AFMAIL_API_ACCESS_TOKEN_SECRET='replace-with-a-random-32-character-value'
-afmail api serve --mode local
-```
-
-The ready event prints the API and OpenAPI URLs without printing the credential.
-Use `--mode lan` only on a trusted IPv4 local network. For arbitrary-network
-access, keep loopback mode and use an established encrypted tunnel or TLS
-reverse proxy instead of exposing afmail directly. Human `review` remains an
-afmail-owned interactive UI action; OpenAPI does not replace it with a generic
-HTTP command.
-
-See the [HTTP API contract](docs/api.md).
+Trusted agent runtimes and applications can drive afmail over HTTP through the
+same domain core. `afmail api serve` publishes OpenAPI 3.2 plus standalone JSON
+Schemas and reuses the CLI's locks, idempotency records, audit behavior, and
+push plan confirmation. It exposes no shell or generic command endpoint. See
+the [HTTP API contract](docs/api.md).
 
 ## Adopt it: hand afmail to your agent
 
-The fastest way to get going is to let your agent read what afmail is and set it
-up for you. Paste this to your agent:
+The quickest way to find out whether afmail earns a place in your toolkit is to
+let your agent read it and tell you. Paste this to your agent:
 
 > Read what Agent-First Mail is at https://agentfirstkit.com/agent-first-mail and
 > tell me in plain terms what it would do for me. If I want it, install it — the
@@ -420,7 +203,7 @@ up for you. Paste this to your agent:
 > review of the repo if you'd rather read what you run — then run `afmail skill
 > install` so you follow its behavior rules. Then set up my mailbox: afmail uses
 > one workspace directory per account, so make a folder, run `afmail init` in it,
-> and help me connect my mailbox.
+> and help me connect my mailbox following https://agentfirstkit.com/agent-first-mail/docs/setup/.
 
 If it's a fit, install it — a prebuilt package, or from source if you want to
 read it first:
@@ -436,32 +219,33 @@ cd agent-first-mail
 cargo install --path . --bin afmail --locked --force
 ```
 
-Then install the embedded [Agent Skill](skills/agent-first-mail/SKILL.md) so the agent
-follows afmail's behavior rules, and restart the agent afterward so it reloads
-them:
+Prebuilt archives are also available from
+[GitHub Releases](https://github.com/agentfirstkit/agent-first-mail/releases).
+Default builds include the `demo`, `api`, and `review` features;
+`cargo build --no-default-features` gives a core mail-workspace binary whose
+excluded commands return a structured `feature_disabled` error.
+
+Then install the embedded [Agent Skill](skills/agent-first-mail/SKILL.md) so the
+agent follows afmail's behavior rules, and restart the agent so it reloads
+them. `skill install` targets Codex, Claude Code, opencode, and Hermes;
+`skill status` reports whether each install is present, valid, and current:
 
 ```bash
-afmail skill install --agent codex --scope workspace
-afmail skill status --agent codex --scope workspace
+afmail skill install
+afmail skill status
 ```
 
-Then it's **one workspace directory per mailbox**: run `afmail init` in a fresh
-folder or `afmail init email-a` from your agent root, connect the account, and
-your agent works that mailbox from its files.
-`init` creates only mailbox-workspace files; it never installs a Skill or edits
-the Agent root's `AGENTS.md`. Its structured `created_files`, `changed_files`,
-and `next_steps` fields drive setup without guessing config keys. After applying
-those steps, use `afmail status` for local readiness and `afmail remote test`
-for IMAP plus configured SMTP handshake/authentication. The remote test sends no
-mail.
-See the [Workspace Model](docs/workspace.md).
+To remove it, run `afmail skill uninstall`.
 
 ## Docs
 
+- [Connect a Mailbox](docs/setup.md) — workspace setup, credentials, Gmail / Fastmail / iCloud / generic IMAP
 - [Core Design Principles](docs/design-principles.md) — what afmail guarantees, and why
+- [Authorization Contract](docs/authorization.md) — the permission line for reads, local changes, remote effects, deletion
 - [Workspace Model](docs/workspace.md) — the folder layout and what each part is for
 - [File Formats](docs/file-formats.md) — the exact files a pull and your commands produce
 - [HTTP API](docs/api.md) — OpenAPI discovery, authentication, idempotency, and network modes
+- [Templates](docs/templates.md) — the Markdown and Review template contract
 - [CLI Contract](docs/cli.md) — every command and flag for the `afmail` binary
 - [Code Structure](docs/code-structure.md) — where crate responsibilities live
 - [Agent Skill](skills/agent-first-mail/SKILL.md) — the behavior contract agents follow

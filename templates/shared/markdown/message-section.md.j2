@@ -1,8 +1,13 @@
 {%- import "i18n/catalog.j2" as i18n -%}
 {%- set mail = document.message -%}
 {%- set analysis = document.analysis -%}
-{%- set authored = analysis.body.segments | selectattr("kind", "equalto", "authored") | first -%}
-{%- set authored_text = mail.body_text | text_range(authored.start_bytes, authored.end_bytes) if authored else '' -%}
+{%- if mail.body_markdown and analysis.body_markdown -%}
+{%- set body_source = mail.body_markdown -%}{%- set body_segments = analysis.body_markdown.segments -%}{%- set body_fence_language = 'markdown' -%}
+{%- else -%}
+{%- set body_source = mail.body_text -%}{%- set body_segments = analysis.body.segments -%}{%- set body_fence_language = 'text' -%}
+{%- endif -%}
+{%- set authored = body_segments | selectattr("kind", "equalto", "authored") | first -%}
+{%- set authored_text = body_source | text_range(authored.start_bytes, authored.end_bytes) if authored else '' -%}
 {%- set auth = mail.authentication -%}
 {%- if analysis.direction == 'inbound' %}{% set message_time = mail.received_rfc3339 or mail.sent_rfc3339 %}{% else %}{% set message_time = mail.sent_rfc3339 or mail.received_rfc3339 %}{% endif -%}
 ### {% if analysis.direction == 'inbound' %}{{ i18n.t('received_from') }}{% else %}{{ i18n.t('sent_to') }}{% endif %} {% if analysis.direction == 'inbound' %}{% if mail.from %}{{ mail.from | inline }}{% else %}{{ i18n.t('unknown') }}{% endif %}{% else %}{% if mail.to %}{{ mail.to | map("inline") | join(", ") }}{% else %}{{ i18n.t('unknown') }}{% endif %}{% endif %} - {% if message_time %}{{ message_time | datetime }}{% else %}{{ i18n.t('unknown_time') }}{% endif %}
@@ -20,7 +25,7 @@
 {% elif mail.mailing_list_headers %}  - {{ i18n.t('mailing_list_headers') }}: {{ mail.mailing_list_headers | map("plain") | join(" | ") }}
 {% endif %}{% endif %}
 
-{% if authored %}{% set fence = authored_text | markdown_fence %}{{ fence }}text
+{% if authored %}{% set fence = authored_text | markdown_fence %}{{ fence }}{{ body_fence_language }}
 {{ authored_text }}
 {{ fence }}
 {% else %}_{{ i18n.t('no_readable_body') }}_

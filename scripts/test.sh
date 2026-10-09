@@ -141,6 +141,7 @@ case "$MODE" in
   message)       run_target message_contract ;;
   notes)         run_target notes_contract ;;
   render)        run_target render_contract ;;
+  file-descriptors) run_target file_descriptor_contract ;;
   render-perf)   run_render_perf ;;
   e2e)           run_e2e ;;
   greenmail)          "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" run ;;
@@ -153,7 +154,7 @@ case "$MODE" in
   release)       run_static; run_unit; run_minimal; run_e2e ;;
   full)          run_static; run_unit; run_minimal; run_e2e; "$ROOTPATH/scripts/demo-greenmail-mail-batch-workflow.sh" run ;;
   *)
-    echo "Usage: $0 [static|unit|minimal|cli [FILTER]|request-id [FILTER]|workspace [FILTER]|config [FILTER]|surface [FILTER]|draft [FILTER]|push [FILTER]|pull [FILTER]|notification [FILTER]|case [FILTER]|contact [FILTER]|message [FILTER]|notes [FILTER]|render [FILTER]|render-perf|e2e [FILTER]|greenmail|greenmail-prepare|greenmail-review|all|release|full]" >&2
+    echo "Usage: $0 [static|unit|minimal|cli [FILTER]|request-id [FILTER]|workspace [FILTER]|config [FILTER]|surface [FILTER]|draft [FILTER]|push [FILTER]|pull [FILTER]|notification [FILTER]|case [FILTER]|contact [FILTER]|message [FILTER]|notes [FILTER]|render [FILTER]|file-descriptors [FILTER]|render-perf|e2e [FILTER]|greenmail|greenmail-prepare|greenmail-review|all|release|full]" >&2
     exit 2
     ;;
 esac

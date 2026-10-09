@@ -25,6 +25,33 @@ impl Workspace {
     where
         F: FnOnce() -> Result<Value>,
     {
+        self.run_idempotent_request_with_precheck(
+            request_id,
+            command,
+            input,
+            || Ok(()),
+            |()| operation(),
+        )
+    }
+
+    /// Replay an existing request before checking a new operation's inputs.
+    ///
+    /// `precheck` must not change the workspace or a remote system. Its result
+    /// is passed directly to `operation`, after the pending record is written.
+    /// A precheck error leaves no record; an operation error keeps the pending
+    /// record because the effect may already have happened.
+    pub fn run_idempotent_request_with_precheck<T, P, F>(
+        &self,
+        request_id: &str,
+        command: &str,
+        input: Value,
+        precheck: P,
+        operation: F,
+    ) -> Result<Value>
+    where
+        P: FnOnce() -> Result<T>,
+        F: FnOnce(T) -> Result<Value>,
+    {
         self.require_workspace()?;
         validate_id("request_id", request_id)?;
         validate_id("idempotency command", command)?;
@@ -80,6 +107,7 @@ impl Workspace {
             })));
         }
 
+        let prepared = precheck()?;
         let now = now_rfc3339();
         let pending = IdempotencyRecord {
             schema_name: "idempotency_request".to_string(),
@@ -93,7 +121,7 @@ impl Workspace {
             result: None,
         };
         write_json_pretty(&path, &pending)?;
-        let result = operation()?;
+        let result = operation(prepared)?;
         maybe_fail_idempotency_after_operation(request_id, command)?;
         let completed = IdempotencyRecord {
             schema_name: "idempotency_request".to_string(),

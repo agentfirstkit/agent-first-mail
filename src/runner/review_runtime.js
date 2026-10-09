@@ -477,6 +477,92 @@
     });
   }
 
+  /* Links in a message body never navigate this surface: a window has no
+   * address bar, so a person could not see where they had gone, and the
+   * session they were in would be over. A click fills the server-rendered
+   * link panel with the destination and offers the two safe moves — copy the
+   * address, or hand it to the system browser through AFUI, which opens it
+   * outside the page (a new tab when this is a remote view). The URL is only
+   * ever written as text. */
+  const linkPanel = root.querySelector('[data-afmail-link-panel]');
+  const linkHost = linkPanel ? linkPanel.querySelector('[data-afmail-link-host]') : null;
+  const linkUrl = linkPanel ? linkPanel.querySelector('[data-afmail-link-url]') : null;
+  const linkStatus = linkPanel ? linkPanel.querySelector('[data-afmail-link-status]') : null;
+  const linkOpen = linkPanel ? linkPanel.querySelector('[data-afmail-link-open]') : null;
+  const linkCopy = linkPanel ? linkPanel.querySelector('[data-afmail-link-copy]') : null;
+  const linkClose = linkPanel ? linkPanel.querySelector('[data-afmail-link-close]') : null;
+
+  function showLinkPanel(href, hostLabel) {
+    if (!linkPanel || !linkHost || !linkUrl) return;
+    linkHost.textContent = hostLabel;
+    linkUrl.textContent = href;
+    if (linkStatus) linkStatus.textContent = '';
+    if (typeof linkPanel.showModal === 'function') linkPanel.showModal();
+    else linkPanel.setAttribute('open', '');
+  }
+
+  if (linkOpen && linkUrl) {
+    linkOpen.addEventListener('click', async () => {
+      if (linkStatus) linkStatus.textContent = '';
+      linkOpen.disabled = true;
+      try {
+        await sessionRuntime.openExternal(linkUrl.textContent);
+        if (linkStatus) linkStatus.textContent = copy('copyLinkOpened');
+      } catch (failure) {
+        const code = failure && failure.code ? ' (' + failure.code + ')' : '';
+        if (linkStatus) linkStatus.textContent = copy('copyLinkOpenFailed') + code;
+      } finally {
+        linkOpen.disabled = false;
+      }
+    });
+  }
+  if (linkCopy && linkUrl) {
+    linkCopy.addEventListener('click', async () => {
+      const text = linkUrl.textContent;
+      let copied = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+          copied = true;
+        }
+      } catch (_failure) {
+        copied = false;
+      }
+      if (!copied) {
+        // A loopback page is not always a secure context for the async
+        // clipboard; selecting the text lets the person copy it themselves.
+        const selection = window.getSelection();
+        if (selection) {
+          const range = document.createRange();
+          range.selectNodeContents(linkUrl);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      }
+      if (linkStatus) linkStatus.textContent = copied ? copy('copyLinkCopied') : '';
+    });
+  }
+  if (linkClose && linkPanel) linkClose.addEventListener('click', () => linkPanel.close());
+
+  function linkFrom(target) {
+    return target && typeof target.closest === 'function'
+      ? target.closest('.md-link[data-afmail-href]')
+      : null;
+  }
+  root.addEventListener('click', event => {
+    const link = linkFrom(event.target);
+    if (!link) return;
+    event.preventDefault();
+    showLinkPanel(link.dataset.afmailHref || '', link.dataset.afmailHost || '');
+  });
+  root.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const link = linkFrom(event.target);
+    if (!link) return;
+    event.preventDefault();
+    showLinkPanel(link.dataset.afmailHref || '', link.dataset.afmailHost || '');
+  });
+
   sessionRuntime = afui.connect({
     onState: state => {
       if (state && state.type === 'changed') requestReviewRefresh();

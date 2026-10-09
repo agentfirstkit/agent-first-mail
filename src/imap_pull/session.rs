@@ -1,5 +1,6 @@
 use super::*;
 use crate::imap_client::ImapClientSession;
+use ring::rand::{SecureRandom, SystemRandom};
 
 const BODY_FETCH_BATCH_SIZE: usize = 25;
 const PULL_RESULT_MESSAGE_ID_LIMIT: usize = 50;
@@ -45,9 +46,9 @@ struct PullCursorUpdate {
     highest_uid: u64,
 }
 
-struct MailboxEnvelopeFetch {
+struct MailboxHeaderSelection {
     uid_validity: u64,
-    envelopes: Vec<RemoteEnvelope>,
+    uids: Vec<u64>,
     cursor_used: bool,
     uid_validity_reset: bool,
     previous_highest_uid: Option<u64>,
@@ -78,20 +79,81 @@ fn empty_pull_cursors() -> PullCursorFile {
     }
 }
 
-fn load_pull_cursors(root: &Path) -> PullCursorFile {
+fn load_pull_cursors(root: &Path) -> Result<(PullCursorFile, Option<Value>)> {
+    load_pull_cursors_with(root, |from, to| fs::rename(from, to))
+}
+
+fn load_pull_cursors_with(
+    root: &Path,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(PullCursorFile, Option<Value>)> {
     let path = pull_cursor_path(root);
-    let Ok(data) = fs::read_to_string(path) else {
-        return empty_pull_cursors();
+    let (reason, cursors) = match fs::read_to_string(&path) {
+        Ok(data) => match serde_json::from_str::<PullCursorFile>(&data) {
+            Ok(cursors) => ("schema_mismatch", Some(cursors)),
+            Err(_error) => ("invalid_json", None),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((empty_pull_cursors(), None));
+        }
+        Err(_error) => ("read_failed", None),
     };
-    let Ok(cursors) = serde_json::from_str::<PullCursorFile>(&data) else {
-        return empty_pull_cursors();
-    };
-    if cursors.schema_name != PULL_CURSOR_SCHEMA_NAME
-        || cursors.schema_version != PULL_CURSOR_SCHEMA_VERSION
+    if let Some(cursors) = cursors
+        && cursors.schema_name == PULL_CURSOR_SCHEMA_NAME
+        && cursors.schema_version == PULL_CURSOR_SCHEMA_VERSION
     {
-        return empty_pull_cursors();
+        return Ok((cursors, None));
     }
-    cursors
+    // A fresh suffix keeps every failed source, including a second corruption
+    // after a successful recovery. Never fall back to overwriting this source.
+    let mut random = [0u8; 16];
+    SystemRandom::new().fill(&mut random).map_err(|_error| {
+        AppError::new(
+            "pull_cursor_quarantine_failed",
+            "could not choose a cursor quarantine path",
+        )
+    })?;
+    let suffix = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let quarantine = path.with_file_name(format!("cursors.{suffix}.json.corrupt"));
+    // A collision, however unlikely, must preserve the older evidence.
+    match fs::symlink_metadata(&quarantine) {
+        Ok(_) => {
+            return Err(AppError::new(
+                "pull_cursor_quarantine_failed",
+                "cursor quarantine path already exists",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_error) => {
+            return Err(AppError::new(
+                "pull_cursor_quarantine_failed",
+                "could not inspect the cursor quarantine path",
+            ));
+        }
+    }
+    rename(&path, &quarantine).map_err(|_error| {
+        AppError::new(
+            "pull_cursor_quarantine_failed",
+            "could not preserve the unreadable pull cursor",
+        )
+    })?;
+    let quarantine_path = quarantine.strip_prefix(root).map_err(|_error| {
+        AppError::new(
+            "pull_cursor_quarantine_failed",
+            "cursor quarantine path is outside the workspace",
+        )
+    })?;
+    Ok((
+        empty_pull_cursors(),
+        Some(json!({
+            "warning_code": "pull_cursor_recovered",
+            "reason": reason,
+            "quarantine_path": quarantine_path,
+        })),
+    ))
 }
 
 fn pull_cursor_for_target(cursors: &PullCursorFile, target: &PullTarget) -> Option<PullCursorView> {
@@ -122,7 +184,14 @@ pub(super) fn commit_pull_cursor_updates(
     if updates.is_empty() {
         return Ok(());
     }
-    let mut cursors = load_pull_cursors(root);
+    let (mut cursors, warning) = load_pull_cursors(root)?;
+    if let Some(warning) = warning {
+        return Err(AppError::new(
+            "pull_cursor_changed",
+            "pull cursor became unreadable before commit; retry the pull",
+        )
+        .with_details(warning));
+    }
     let now = crate::store::now_rfc3339();
     for update in updates {
         let update = serde_json::from_value::<PullCursorUpdate>(update.clone())
@@ -170,20 +239,12 @@ pub(super) fn uid_store_flags_with_operation(
     session.uid_store_flags(source_folder, None, uid, flags, add)
 }
 
-pub(super) fn fetch_selected_mailbox_envelopes<T: std::io::Read + std::io::Write>(
-    session: &mut imap::Session<T>,
-    mailbox: &str,
-    since_days: Option<u32>,
-) -> Result<Vec<RemoteEnvelope>> {
-    Ok(fetch_selected_mailbox_envelopes_with_cursor(session, mailbox, since_days, None)?.envelopes)
-}
-
-fn fetch_selected_mailbox_envelopes_with_cursor<T: std::io::Read + std::io::Write>(
+fn select_mailbox_header_uids<T: std::io::Read + std::io::Write>(
     session: &mut imap::Session<T>,
     mailbox: &str,
     since_days: Option<u32>,
     cursor: Option<PullCursorView>,
-) -> Result<MailboxEnvelopeFetch> {
+) -> Result<MailboxHeaderSelection> {
     let mailbox_status = session
         .examine(mailbox)
         .map_err(|e| AppError::new("imap_select_failed", e.to_string()))?;
@@ -192,16 +253,53 @@ fn fetch_selected_mailbox_envelopes_with_cursor<T: std::io::Read + std::io::Writ
     let valid_cursor = cursor.filter(|cursor| cursor.uid_validity == uid_validity);
     let previous_highest_uid = valid_cursor.map(|cursor| cursor.highest_uid);
     let effective_since_days = if uid_validity_reset { None } else { since_days };
-    let sequence = mailbox_uid_sequence(session, effective_since_days, previous_highest_uid)?;
-    if sequence.is_empty() {
-        return Ok(MailboxEnvelopeFetch {
-            uid_validity,
-            envelopes: Vec::new(),
-            cursor_used: valid_cursor.is_some(),
-            uid_validity_reset,
-            previous_highest_uid,
-        });
-    }
+    let query = match previous_highest_uid {
+        Some(u64::MAX) => None,
+        Some(uid) => Some(format!("UID {}:*", uid + 1)),
+        None => Some(match effective_since_days {
+            Some(days) => {
+                let cutoff = (Utc::now() - ChronoDuration::days(i64::from(days)))
+                    .format("%d-%b-%Y")
+                    .to_string();
+                format!("SINCE {cutoff}")
+            }
+            None => "ALL".to_string(),
+        }),
+    };
+    let mut uids = match query {
+        Some(query) => session
+            .uid_search(query)
+            .map_err(|error| AppError::new("imap_search_failed", error.to_string()))?
+            .into_iter()
+            .map(u64::from)
+            // An IMAP range n:* can run backwards when n is past the last UID.
+            .filter(|uid| previous_highest_uid.is_none_or(|previous| *uid > previous))
+            .collect::<Vec<_>>(),
+        None => Vec::new(),
+    };
+    uids.sort_unstable();
+    uids.dedup();
+    Ok(MailboxHeaderSelection {
+        uid_validity,
+        uids,
+        cursor_used: valid_cursor.is_some(),
+        uid_validity_reset,
+        previous_highest_uid,
+    })
+}
+
+fn fetch_header_batch<T: std::io::Read + std::io::Write>(
+    session: &mut imap::Session<T>,
+    mailbox: &str,
+    uid_validity: u64,
+    uids: &[u64],
+) -> Result<Vec<RemoteEnvelope>> {
+    let requested = uids.iter().copied().collect::<BTreeSet<_>>();
+    let sequence = uids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     let fetches = session
         .uid_fetch(&sequence, "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])")
         .map_err(|e| AppError::new("imap_fetch_failed", e.to_string()))?;
@@ -210,6 +308,9 @@ fn fetch_selected_mailbox_envelopes_with_cursor<T: std::io::Read + std::io::Writ
         let Some(uid) = fetch.uid else {
             continue;
         };
+        if !requested.contains(&u64::from(uid)) {
+            continue;
+        }
         // rust-imap exposes BODY[HEADER] via header(); BODY[HEADER.FIELDS ...]
         // is parsed as a section the public Fetch API does not return.
         let Some(header) = fetch.header().or_else(|| fetch.body()) else {
@@ -224,13 +325,9 @@ fn fetch_selected_mailbox_envelopes_with_cursor<T: std::io::Read + std::io::Writ
             header: header.to_vec(),
         });
     }
-    Ok(MailboxEnvelopeFetch {
-        uid_validity,
-        envelopes: out,
-        cursor_used: valid_cursor.is_some(),
-        uid_validity_reset,
-        previous_highest_uid,
-    })
+    out.sort_unstable_by_key(|envelope| envelope.uid);
+    out.dedup_by_key(|envelope| envelope.uid);
+    Ok(out)
 }
 
 struct BodyFetchBatch {
@@ -486,6 +583,7 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
     let mut spam_message_count = 0usize;
     let mut trashed_message_count = 0usize;
     let mut updated_location_count = 0usize;
+    let mut reclassified_message_count = 0usize;
     let mut flags_updated_count = 0usize;
     let mut new_message_ids = Vec::new();
     let mut triage_created_message_ids = Vec::new();
@@ -495,7 +593,10 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
     let mut budget_skipped_count = 0usize;
     let mut skipped_messages = Vec::new();
     let mut stored_new_message_bytes = 0u64;
-    let cursors = load_pull_cursors(root);
+    let (cursors, cursor_warning) = load_pull_cursors(root)?;
+    if let Some(warning) = &cursor_warning {
+        crate::progress::emit(progress, "pull_cursor_warning", warning.clone());
+    }
     let mut cursor_updates = Vec::new();
     let mut uid_validity_reset_mailbox_ids = Vec::new();
     let mut all_targets_used_incremental = !targets.is_empty();
@@ -509,7 +610,7 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
             json!({}),
         );
         let cursor = pull_cursor_for_target(&cursors, target);
-        let envelope_fetch = fetch_selected_mailbox_envelopes_with_cursor(
+        let envelope_fetch = select_mailbox_header_uids(
             session,
             &target.mailbox,
             options.effective_since_days(),
@@ -522,51 +623,56 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
         }
         all_targets_used_incremental &= cursor_used;
         let previous_highest_uid = envelope_fetch.previous_highest_uid.unwrap_or(0);
-        let envelopes = envelope_fetch.envelopes;
-        let envelope_count = envelopes.len();
+        let mut envelope_count = 0usize;
         let mut mailbox_existing_location_count = 0usize;
         let mut mailbox_flags_updated_count = 0usize;
         let mut mailbox_blocked_cursor_uid: Option<u64> = None;
         let mut mailbox_highest_observed_uid = previous_highest_uid;
         let mut new_uids = BTreeSet::new();
         let mut new_envelopes = BTreeMap::new();
-        for envelope in envelopes {
-            mailbox_highest_observed_uid = mailbox_highest_observed_uid.max(envelope.uid);
-            let key = ImapKey {
-                mailbox: envelope.mailbox.clone(),
-                uid_validity: envelope.uid_validity,
-                uid: envelope.uid,
-            };
-            if existing.imap_keys.contains(&key) {
-                if let Some(existing_message_id) = existing.imap_locations.get(&key) {
-                    let update = update_remote_location_flags_from_envelope(
-                        root,
-                        existing_message_id,
-                        &envelope,
-                    )?;
-                    if update.flags_updated {
-                        flags_updated_count += 1;
-                        mailbox_flags_updated_count += 1;
+        for batch in envelope_fetch.uids.chunks(BODY_FETCH_BATCH_SIZE) {
+            let envelopes = fetch_header_batch(session, &target.mailbox, uid_validity, batch)?;
+            envelope_count += envelopes.len();
+            // Only candidates admitted by the global budget survive this
+            // batch. Known-location flags still reconcile after budget expiry.
+            for envelope in envelopes {
+                mailbox_highest_observed_uid = mailbox_highest_observed_uid.max(envelope.uid);
+                let key = ImapKey {
+                    mailbox: envelope.mailbox.clone(),
+                    uid_validity: envelope.uid_validity,
+                    uid: envelope.uid,
+                };
+                if existing.imap_keys.contains(&key) {
+                    if let Some(existing_message_id) = existing.imap_locations.get(&key) {
+                        let update = update_remote_location_flags_from_envelope(
+                            root,
+                            existing_message_id,
+                            &envelope,
+                        )?;
+                        if update.flags_updated {
+                            flags_updated_count += 1;
+                            mailbox_flags_updated_count += 1;
+                        }
+                        mailbox_existing_location_count += 1;
                     }
-                    mailbox_existing_location_count += 1;
+                    continue;
                 }
-                continue;
+                let budget_size = envelope.size_bytes.unwrap_or(u64::from(MAX_MESSAGE_BYTES));
+                if remaining_message_count == 0 || budget_size > remaining_total_bytes {
+                    budget_limited = true;
+                    budget_skipped_count += 1;
+                    mailbox_blocked_cursor_uid = Some(
+                        mailbox_blocked_cursor_uid
+                            .unwrap_or(envelope.uid)
+                            .min(envelope.uid),
+                    );
+                    continue;
+                }
+                remaining_message_count -= 1;
+                remaining_total_bytes -= budget_size;
+                new_uids.insert(envelope.uid);
+                new_envelopes.insert(envelope.uid, envelope);
             }
-            let budget_size = envelope.size_bytes.unwrap_or(u64::from(MAX_MESSAGE_BYTES));
-            if remaining_message_count == 0 || budget_size > remaining_total_bytes {
-                budget_limited = true;
-                budget_skipped_count += 1;
-                mailbox_blocked_cursor_uid = Some(
-                    mailbox_blocked_cursor_uid
-                        .unwrap_or(envelope.uid)
-                        .min(envelope.uid),
-                );
-                continue;
-            }
-            remaining_message_count -= 1;
-            remaining_total_bytes -= budget_size;
-            new_uids.insert(envelope.uid);
-            new_envelopes.insert(envelope.uid, envelope);
         }
         emit_mailbox_progress(
             progress,
@@ -699,6 +805,12 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
                         &remote.flags,
                         Some(target.id.as_str()),
                     )?;
+                    if crate::store::Workspace::at(root).restore_remote_deleted_message(
+                        existing_message_id,
+                        MessageStatus::parse(target.import_as.as_str())?,
+                    )? {
+                        reclassified_message_count += 1;
+                    }
                     existing.imap_keys.insert(key.clone());
                     existing
                         .imap_locations
@@ -808,7 +920,7 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
         "draft_message_count": 0,
         "indexed_message_count": 0,
         "flagged_message_count": 0,
-        "reclassified_message_count": 0,
+        "reclassified_message_count": reclassified_message_count,
         "updated_location_count": updated_location_count,
         "flags_updated_count": flags_updated_count,
         "uid_validity_reset_count": uid_validity_reset_mailbox_ids.len(),
@@ -830,6 +942,12 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
         "mailbox_count": targets.len(),
         "duration_ms": started.elapsed().as_millis() as u64
     });
+    if let Some(warning) = cursor_warning
+        && let Some(map) = result.as_object_mut()
+    {
+        map.insert("warning_count".to_string(), json!(1));
+        map.insert("warnings".to_string(), json!([warning]));
+    }
     if let Value::Object(map) = &mut result {
         map.insert(
             "__afmail_pull_all_incremental".to_string(),
@@ -863,45 +981,50 @@ pub(super) fn estimate_pull_workspace_session<T: std::io::Read + std::io::Write>
     let mut skipped = Vec::new();
     let mut remote_envelope_count = 0usize;
     for target in targets {
-        let envelopes = fetch_selected_mailbox_envelopes(
+        let selected = select_mailbox_header_uids(
             session,
             &target.mailbox,
             options.effective_since_days(),
+            None,
         )?;
-        remote_envelope_count += envelopes.len();
-        for envelope in envelopes {
-            let key = ImapKey {
-                mailbox: envelope.mailbox.clone(),
-                uid_validity: envelope.uid_validity,
-                uid: envelope.uid,
-            };
-            // Location is all a dry run can check. Cross-mailbox duplicates are
-            // recognized by the bytes of the body, which is exactly what a dry
-            // run does not fetch — so a copy of a message already stored under
-            // another mailbox counts here and drops out during the real pull.
-            // That makes every count below an upper bound, which
-            // `candidate_count_is_upper_bound` says out loud rather than
-            // leaving a caller to discover it by diffing against the pull.
-            let known_by_location = existing.imap_keys.contains(&key);
-            if known_by_location {
-                continue;
+        for batch in selected.uids.chunks(BODY_FETCH_BATCH_SIZE) {
+            let envelopes =
+                fetch_header_batch(session, &target.mailbox, selected.uid_validity, batch)?;
+            remote_envelope_count += envelopes.len();
+            for envelope in envelopes {
+                let key = ImapKey {
+                    mailbox: envelope.mailbox.clone(),
+                    uid_validity: envelope.uid_validity,
+                    uid: envelope.uid,
+                };
+                // Location is all a dry run can check. Cross-mailbox duplicates are
+                // recognized by the bytes of the body, which is exactly what a dry
+                // run does not fetch — so a copy of a message already stored under
+                // another mailbox counts here and drops out during the real pull.
+                // That makes every count below an upper bound, which
+                // `candidate_count_is_upper_bound` says out loud rather than
+                // leaving a caller to discover it by diffing against the pull.
+                let known_by_location = existing.imap_keys.contains(&key);
+                if known_by_location {
+                    continue;
+                }
+                let budget_size = envelope.size_bytes.unwrap_or(u64::from(MAX_MESSAGE_BYTES));
+                let item = json!({
+                    "mailbox_id": target.id,
+                    "mailbox_name": target.mailbox,
+                    "uid_validity": envelope.uid_validity,
+                    "uid": envelope.uid,
+                    "declared_size_bytes": envelope.size_bytes,
+                    "budget_size_bytes": budget_size,
+                });
+                if remaining_message_count == 0 || budget_size > remaining_total_bytes {
+                    skipped.push(item);
+                    continue;
+                }
+                remaining_message_count -= 1;
+                remaining_total_bytes -= budget_size;
+                candidates.push(item);
             }
-            let budget_size = envelope.size_bytes.unwrap_or(u64::from(MAX_MESSAGE_BYTES));
-            let item = json!({
-                "mailbox_id": target.id,
-                "mailbox_name": target.mailbox,
-                "uid_validity": envelope.uid_validity,
-                "uid": envelope.uid,
-                "declared_size_bytes": envelope.size_bytes,
-                "budget_size_bytes": budget_size,
-            });
-            if remaining_message_count == 0 || budget_size > remaining_total_bytes {
-                skipped.push(item);
-                continue;
-            }
-            remaining_message_count -= 1;
-            remaining_total_bytes -= budget_size;
-            candidates.push(item);
         }
     }
     Ok(json!({
@@ -966,4 +1089,85 @@ pub(super) fn fetch_uid_snapshots_session<T: std::io::Read + std::io::Write>(
         snapshots.push(fetch_uid_snapshot_session(session, mailbox)?);
     }
     Ok(snapshots)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        commit_pull_cursor_updates, load_pull_cursors, load_pull_cursors_with, pull_cursor_path,
+    };
+    use serde_json::json;
+    use std::fs;
+
+    #[test]
+    fn missing_pull_cursors_are_quiet_and_bad_sources_are_preserved_uniquely() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let path = pull_cursor_path(workspace.path());
+        let (cursors, warning) = load_pull_cursors(workspace.path()).expect("first pull");
+        assert!(cursors.mailboxes.is_empty());
+        assert!(warning.is_none());
+        fs::create_dir_all(path.parent().expect("parent")).expect("cursor directory");
+        let sources = [
+            (b"{CursorValueCanary".to_vec(), "invalid_json"),
+            (
+                serde_json::to_vec(&json!({
+                    "schema_name": "pull_cursors", "schema_version": 2, "mailboxes": {},
+                }))
+                .expect("future schema"),
+                "schema_mismatch",
+            ),
+            (vec![0xff], "read_failed"),
+        ];
+        let mut preserved = Vec::new();
+        for (source, reason) in sources {
+            fs::write(&path, &source).expect("bad cursor");
+            let (cursors, warning) =
+                load_pull_cursors(workspace.path()).expect("full-scan recovery");
+            assert!(cursors.mailboxes.is_empty());
+            let warning = warning.expect("visible warning");
+            assert_eq!(warning["warning_code"], "pull_cursor_recovered");
+            assert_eq!(warning["reason"], reason);
+            assert!(!warning.to_string().contains("CursorValueCanary"));
+            let relative = warning["quarantine_path"]
+                .as_str()
+                .expect("relative quarantine path");
+            assert!(relative.ends_with(".corrupt"));
+            let quarantined = workspace.path().join(relative);
+            assert!(!preserved.contains(&quarantined));
+            assert_eq!(fs::read(&quarantined).expect("preserved original"), source);
+            assert!(!path.exists());
+            preserved.push(quarantined);
+        }
+        commit_pull_cursor_updates(
+            workspace.path(),
+            &json!({
+                "__afmail_pull_cursor_updates": [{
+                    "mailbox_id": "inbox", "mailbox_name": "INBOX", "uid_validity": 44,
+                    "highest_uid": 7,
+                }],
+            }),
+            true,
+        )
+        .expect("commit fresh cursor after recovery");
+        let (cursors, warning) = load_pull_cursors(workspace.path()).expect("valid cursor");
+        assert!(warning.is_none());
+        assert_eq!(cursors.mailboxes["inbox"].highest_uid, 7);
+        assert!(preserved.iter().all(|path| path.is_file()));
+    }
+
+    #[test]
+    fn failed_cursor_quarantine_refuses_to_replace_the_source() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let path = pull_cursor_path(workspace.path());
+        fs::create_dir_all(path.parent().expect("parent")).expect("cursor directory");
+        let source = b"{CursorValueCanary";
+        fs::write(&path, source).expect("bad cursor");
+        let failure = load_pull_cursors_with(workspace.path(), |_from, _to| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .expect_err("quarantine failure prevents recovery");
+        assert_eq!(failure.error_code, "pull_cursor_quarantine_failed");
+        assert!(!failure.to_string().contains("CursorValueCanary"));
+        assert_eq!(fs::read(path).expect("untouched source"), source);
+    }
 }

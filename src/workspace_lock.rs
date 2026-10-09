@@ -27,7 +27,7 @@ impl WorkspaceLock {
         let dir = path.parent().ok_or_else(|| {
             AppError::new(
                 "workspace_lock_invalid",
-                "runtime workspace lock path has no parent directory",
+                "workspace lock path has no parent directory",
             )
         })?;
         std::fs::create_dir_all(dir).map_err(|e| AppError::io("create lock directory", &e))?;
@@ -51,11 +51,7 @@ impl WorkspaceLock {
 }
 
 pub(crate) fn workspace_lock_path(root: &Path) -> PathBuf {
-    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let digest = blake3::hash(canonical.as_os_str().as_encoded_bytes()).to_hex();
-    std::env::temp_dir()
-        .join("afmail-workspace-locks")
-        .join(format!("{digest}.lock"))
+    root.join(".afmail/cache/workspace.lock")
 }
 
 fn workspace_locked_error() -> AppError {

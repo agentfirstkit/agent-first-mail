@@ -108,6 +108,19 @@ pub fn edit_frontmatter<T: Serialize>(source: &str, frontmatter: &T, body: &str)
             .set(key, want)
             .map_err(|e| AppError::new("internal", format!("edit frontmatter `{key}`: {e}")))?;
     }
+    let removed: Vec<String> = document
+        .value()
+        .as_object()
+        .into_iter()
+        .flat_map(|fields| fields.keys())
+        .filter(|key| !desired.contains_key(*key))
+        .cloned()
+        .collect();
+    for key in removed {
+        document
+            .unset(&key)
+            .map_err(|e| AppError::new("internal", format!("remove frontmatter `{key}`: {e}")))?;
+    }
     let edited = document.source();
     // The body is the caller's to replace, but most callers hand back the one
     // they read. Keeping the edited source whole in that case preserves the

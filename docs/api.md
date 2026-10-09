@@ -75,6 +75,8 @@ HTTP status and the structured `error.code` are both significant. In
 particular, the API preserves `405` for an unsupported method, `413` for a JSON
 body over the 8 MiB limit, and `415` when a body endpoint does not receive
 `application/json`; those failures use the same redacted AFDATA error envelope.
+JSON, query and path extractor failures use fixed messages and a static
+`error.details.kind`, without echoing rejected values or serde diagnostics.
 
 ## Operations
 
@@ -105,6 +107,14 @@ Idempotency-Key: <8-to-200-character-path-safe-id>
 Reuse the key only for an exact retry of the same operation and input. afmail
 persists the request and result in the workspace's machine state. Reusing a key
 with changed input returns a conflict.
+
+Case creation performs its read-only preparation before writing a new pending
+record. If that preparation fails, no key has been consumed and corrected input
+can use the same key. Existing completed, conflicting and incomplete records
+are handled before preparation: a completed retry still returns its cached
+result even if the current configuration or source message has changed. Once
+the local operation starts, a failure keeps the pending record so an uncertain
+effect cannot be repeated blindly.
 
 Suggestion writes also require the current object-specific review base hash.
 Draft patch distinguishes omission from clearing: omitted fields are unchanged,

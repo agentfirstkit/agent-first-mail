@@ -111,10 +111,12 @@ fn afmail_workspace_gitignore_body() -> String {
         r#"# This workspace is meant to live in a PRIVATE repository: pulled mail bodies,
 # attachments, and .afmail/config.json (which may hold an inline imap/smtp
 # password_secret) are intentionally NOT ignored, so they are committed as part
-# of your private mailbox state. If this repo could ever be public or shared, set
-# credentials via password_secret_env instead of storing them inline in config.
+# of your private mailbox state. If this repo could ever be public or shared, point
+# password_secret at an env:NAME_SECRET or file:PATH#KEY source outside the
+# workspace instead of storing the credential inline in config.
 
-# Machine-local state. Only .afmail/cache/ is safe to delete at any time.
+# Machine-local state. Only .afmail/cache/ is safe to delete, and only while no
+# afmail process is running: it holds the workspace lock file.
 .{afmail}/{push}/
 .{afmail}/{transactions}/
 .{afmail}/{requests}/
@@ -626,6 +628,7 @@ impl Workspace {
     }
 
     fn init_with_workspace_ref(&self, workspace_ref: &str) -> Result<Value> {
+        prepare_init_target(&self.root)?;
         let managed_paths = [
             ".afmail",
             ".afmail/workspace.json",
@@ -652,6 +655,10 @@ impl Workspace {
             .filter(|path| !self.root.join(path).exists())
             .copied()
             .collect::<BTreeSet<_>>();
+        let _lock = crate::workspace_lock::WorkspaceLock::acquire(
+            &self.root,
+            crate::workspace_lock::LockMode::Exclusive,
+        )?;
         prepare_init_target(&self.root)?;
         create_dir_all(&self.root.join(".afmail"))?;
         let identity_state = crate::workspace_identity::workspace_identity_for_init(&self.root)?;
@@ -760,9 +767,9 @@ impl Workspace {
             "next_steps": [
                 format!("Run afmail commands with workdir set to {}.", workspace_ref),
                 "Install the agent skill explicitly: afmail skill install --agent all --scope workspace".to_string(),
-                "Set IMAP fields with afmail config set imap.host HOST, imap.username USER, and imap.password_secret_env ENV_NAME.".to_string(),
-                "Set SMTP fields with afmail config set smtp.host HOST, smtp.username USER, and smtp.password_secret_env ENV_NAME.".to_string(),
-                "Replace the placeholder identity with afmail config set identities ... before drafting mail.".to_string(),
+                "Set IMAP fields with afmail config set imap.host HOST, imap.username USER, and imap.password_secret SOURCE (env:NAME_SECRET, file:PATH#KEY, or the literal password).".to_string(),
+                "Set SMTP fields with afmail config set smtp.host HOST, smtp.username USER, and smtp.password_secret SOURCE.".to_string(),
+                "Replace the placeholder identity with afmail config add identities SLUG name=NAME email=ADDRESS default=true, then afmail config remove identities me, before drafting mail.".to_string(),
                 "Run afmail status for local readiness, then afmail remote test before the first pull.".to_string()
             ]
         }))
@@ -800,7 +807,7 @@ impl Workspace {
             missing_config.push("imap.username");
         }
         if !imap_credentials_configured {
-            missing_config.push("imap.password_secret or imap.password_secret_env");
+            missing_config.push("imap.password_secret");
         }
         if config.smtp.host.is_none() {
             missing_config.push("smtp.host");
@@ -809,7 +816,7 @@ impl Workspace {
             missing_config.push("smtp.username");
         }
         if !smtp_credentials_configured {
-            missing_config.push("smtp.password_secret or smtp.password_secret_env");
+            missing_config.push("smtp.password_secret");
         }
         if placeholder_identity {
             missing_config.push("identities (replace Me <me@example.com>)");

@@ -94,6 +94,7 @@ account-workspace/
     pull/
       cursors.json
     cache/
+      workspace.lock
       progress.json
       render-cache.json
     logs/events.jsonl
@@ -170,7 +171,9 @@ The managed ignore block covers the machine-local `.afmail/push/`,
 `.codex/skills/agent-first-mail/` or `.claude/skills/agent-first-mail/`,
 `messages/*.json`, `triage/*.md`,
 `spam/*.md`, `trash/*.md`, `deleted/*.md`, and generated object Markdown views.
-Only `.afmail/cache/` is safe to delete at any time. The other ignored state
+Only `.afmail/cache/` is safe to delete, and only while no afmail process is
+running: it holds `workspace.lock`, and removing the lock file under a running
+process lets a second writer take a fresh lock beside it. The other ignored state
 contains pending intent, recovery sentinels, idempotency records, or audit
 history and is machine-local but lossy to remove.
 

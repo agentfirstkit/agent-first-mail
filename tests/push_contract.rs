@@ -236,11 +236,7 @@ fn sent_message_id_for_push_id(push_id: &str) -> String {
 }
 
 fn workspace_runtime_lock_path(root: &std::path::Path) -> std::path::PathBuf {
-    let canonical = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let digest = blake3::hash(canonical.as_os_str().as_encoded_bytes()).to_hex();
-    std::env::temp_dir()
-        .join("afmail-workspace-locks")
-        .join(format!("{digest}.lock"))
+    root.join(".afmail/cache/workspace.lock")
 }
 
 fn configure_default_identity(root: &std::path::Path) {
@@ -1385,6 +1381,122 @@ fn triage_spam_accepts_multiple_message_ids() {
     }));
 
     let _ = fs::remove_dir_all(root);
+}
+
+fn discarded_message_with_pending_push(
+    root: &std::path::Path,
+    disposition: &str,
+) -> std::path::PathBuf {
+    assert!(fs::create_dir_all(root).is_ok());
+    assert_eq!(run(root, &["init"]).0, 0);
+    write_message(root, "message_discard", 44, None);
+    write_triage(root, "message_discard", "discard fixture");
+    let (status, stdout) = run(
+        root,
+        &[
+            "message",
+            disposition,
+            "message_discard",
+            "--reason",
+            "discard fixture",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let queue = parse_one(&run(root, &["push", "list"]).1);
+    let push_id = queue["items"][0]["push_id"].as_str().unwrap_or_default();
+    assert!(!push_id.is_empty(), "{queue}");
+    root.join(format!(".afmail/push/{push_id}.json"))
+}
+
+fn write_legacy_discard_undo_transaction(root: &std::path::Path, kind: &str) -> std::path::PathBuf {
+    let transaction_id = format!("transaction_20261009T110151Z_{kind}");
+    let path = root.join(format!(".afmail/transactions/{transaction_id}.json"));
+    write_json(
+        &path,
+        &json!({
+            "schema_name": "local_transaction",
+            "schema_version": 1,
+            "transaction_id": transaction_id,
+            "kind": kind,
+            "created_rfc3339": "2026-10-09T11:01:51Z",
+            "paths": ["messages/message_discard.json", ".afmail/push"],
+        }),
+    );
+    path
+}
+
+#[test]
+fn discard_undo_started_push_rejection_and_legacy_repair_preserve_the_original_action() {
+    for (disposition, undo, transaction_kind, expected_status) in [
+        ("spam", "unspam", "message_unspammed", "spam"),
+        ("trash", "untrash", "message_untrashed", "trashed"),
+    ] {
+        let root = temp_root("discard-undo-started");
+        let push_path = discarded_message_with_pending_push(&root, disposition);
+        let mut item = read_json(&push_path);
+        item["attempt_count"] = json!(1);
+        item["step_states"] = json!([{
+            "index": 0,
+            "label": if disposition == "spam" { "add_flags" } else { "move_to_mailbox_id_trash" },
+            "status": "remote_outcome_unknown",
+            "started_rfc3339": "2026-10-09T11:00:00Z",
+            "retryable": false,
+        }]);
+        write_json(&push_path, &item);
+
+        let (status, stdout) = run(
+            &root,
+            &[
+                "message",
+                undo,
+                "message_discard",
+                "--reason",
+                "undo fixture",
+            ],
+        );
+        assert_eq!(status, 1, "{stdout}");
+        assert_eq!(parse_one(&stdout)["code"], "push_already_started");
+        assert_eq!(parse_one(&run(&root, &["doctor"]).1)["issue_count"], 0);
+
+        let transaction_path = write_legacy_discard_undo_transaction(&root, transaction_kind);
+        let doctor = parse_one(&run(&root, &["doctor"]).1);
+        assert_eq!(doctor["repairable_count"], 1, "{doctor}");
+        let (status, stdout) = run(&root, &["doctor", "repair", "--confirm"]);
+        assert_eq!(status, 0, "{stdout}");
+        assert_eq!(parse_one(&stdout)["after_issue_count"], 0);
+        assert!(!transaction_path.exists());
+        assert_eq!(
+            read_json(&push_path),
+            item,
+            "the original push must remain intact"
+        );
+        assert_eq!(
+            read_json(&root.join("messages/message_discard.json"))["workspace"]["status"],
+            expected_status,
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn doctor_refuses_discard_undo_repair_without_evidence_of_a_started_original_push() {
+    for (disposition, transaction_kind) in [
+        ("spam", "message_unspammed"),
+        ("trash", "message_untrashed"),
+    ] {
+        let root = temp_root("discard-undo-unproven");
+        let push_path = discarded_message_with_pending_push(&root, disposition);
+        let original = read_json(&push_path);
+        let transaction_path = write_legacy_discard_undo_transaction(&root, transaction_kind);
+        let doctor = parse_one(&run(&root, &["doctor"]).1);
+        assert_eq!(doctor["repairable_count"], 0, "{doctor}");
+        let (status, stdout) = run(&root, &["doctor", "repair", "--confirm"]);
+        assert_eq!(status, 1, "{stdout}");
+        assert_eq!(parse_one(&stdout)["code"], "transaction_incomplete");
+        assert!(transaction_path.exists());
+        assert_eq!(read_json(&push_path), original);
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 #[test]

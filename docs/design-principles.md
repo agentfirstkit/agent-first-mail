@@ -133,10 +133,10 @@ may point at one account; coordination between them happens through IMAP itself
 through afmail. Nothing prevents two such workspaces from independently drafting
 and sending, so concurrent operators on one account is out of scope by design.
 
-The runtime workspace lock is stored outside the workspace under the current
-user's temporary runtime directory and keyed by the canonical workspace path.
-It serializes local afmail processes without making shared reads dirty the
-workspace; it is not cross-host coordination. `.afmail/cache/progress.json` is only the latest local
+The workspace lock is stored at `.afmail/cache/workspace.lock`, independent of
+each process's temporary directory. The ignored cache keeps shared reads from
+making Git status dirty. It serializes local afmail processes; it is not
+cross-host coordination. `.afmail/cache/progress.json` is only the latest local
 push/pull progress snapshot for observers; it is not durable coordination or an
 audit log.
 

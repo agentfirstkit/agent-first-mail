@@ -69,6 +69,26 @@ main { width: min(960px, calc(100% - 2rem)); margin: 2rem auto 5rem; }
 .message-address, .message-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-subject { margin-top: .15rem; color: var(--afui-ink); font-size: .95rem; }
 .message-body { max-width: 78ch; padding: 1rem; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.message-body-markdown { white-space: normal; }
+.message-body-markdown p { margin: 0 0 .65rem; white-space: pre-wrap; }
+.message-body-markdown p:last-child { margin-bottom: 0; }
+.message-body-markdown .md-heading { font-weight: 600; }
+.message-body-markdown .md-quote { border-left: 3px solid var(--afui-line); padding-left: .8rem; color: var(--afui-muted); }
+.message-body-markdown .md-list_item { padding-left: 1.2rem; }
+.message-body-markdown .md-marker { display: inline-block; width: 1.2rem; margin-left: -1.2rem; color: var(--afui-muted); }
+.message-body-markdown .md-code { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .92em; }
+.message-body-markdown .md-link { color: var(--afui-accent, #1d4ed8); text-decoration: underline; text-underline-offset: .15em; cursor: pointer; overflow-wrap: anywhere; }
+.message-body-markdown .md-link:focus-visible { outline: 2px solid var(--afui-accent, #1d4ed8); outline-offset: 2px; }
+.message-body-markdown .link-host { margin-left: .3em; font-size: .78em; color: var(--afui-muted); white-space: nowrap; }
+.message-body-markdown .link-host.foreign { color: var(--afui-danger, #b91c1c); }
+.link-panel { border: 1px solid var(--afui-line); border-radius: .6rem; padding: 1rem 1.1rem; max-width: min(36rem, calc(100vw - 2rem)); color: inherit; background: var(--afui-surface, #fff); }
+.link-panel::backdrop { background: rgba(0, 0, 0, .35); }
+.link-panel h3 { margin: 0 0 .5rem; font-size: 1rem; }
+.link-panel .link-panel-host { font-weight: 600; overflow-wrap: anywhere; }
+.link-panel .link-panel-url { margin: .5rem 0 .9rem; padding: .6rem .7rem; border: 1px solid var(--afui-line); border-radius: .4rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82em; overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; max-height: 9rem; overflow: auto; }
+.link-panel .link-panel-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.link-panel .save-state { margin-left: auto; }
+.message-body-markdown hr { border: 0; border-top: 1px solid var(--afui-line); margin: .8rem 0; }
 .quoted-message { margin-top: .9rem; color: var(--afui-muted); }
 .quoted-message > summary { width: fit-content; cursor: pointer; font-size: .86rem; }
 .quoted-body { margin-top: .75rem; padding-left: 1rem; border-left: 3px solid var(--afui-line); color: var(--afui-muted); }

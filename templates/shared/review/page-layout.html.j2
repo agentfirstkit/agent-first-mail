@@ -24,7 +24,10 @@
   data-copy-channel-live="{{ i18n.t('agent_live') }}"
   data-copy-channel-waiting="{{ i18n.t('agent_waiting') }}"
   data-copy-channel-disconnected="{{ i18n.t('agent_disconnected') }}"
-  data-copy-channel-error="{{ i18n.t('agent_channel_error') }}">
+  data-copy-channel-error="{{ i18n.t('agent_channel_error') }}"
+  data-copy-link-copied="{{ i18n.t('link_copied') }}"
+  data-copy-link-opened="{{ i18n.t('link_opened') }}"
+  data-copy-link-open-failed="{{ i18n.t('link_open_failed') }}">
   <header class="app-bar">
     <div class="brand" aria-label="afmail {{ i18n.t('review') }}"><span class="brand-mark" aria-hidden="true">af</span><span><strong>afmail</strong><br><small>{{ page_title }}</small></span></div>
     <div class="app-actions">
@@ -68,6 +71,17 @@
     {% include "review/agent-workbench-layout.html.j2" %}
     {% endif %}
   </main>
+  <dialog class="link-panel" data-afmail-link-panel>
+    <h3>{{ i18n.t('link_destination') }}</h3>
+    <div class="link-panel-host" data-afmail-link-host></div>
+    <div class="link-panel-url" data-afmail-link-url></div>
+    <div class="link-panel-actions">
+      <button type="button" class="primary-action" data-afmail-link-open>{{ i18n.t('link_open_in_browser') }}</button>
+      <button type="button" data-afmail-link-copy>{{ i18n.t('link_copy') }}</button>
+      <span class="save-state" data-afmail-link-status aria-live="polite"></span>
+      <button type="button" data-afmail-link-close>{{ i18n.t('link_close') }}</button>
+    </div>
+  </dialog>
   <!-- afmail:trusted-runtime -->
 </body>
 </html>

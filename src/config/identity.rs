@@ -475,6 +475,7 @@ mod tests {
             received_rfc3339: None,
             sent_rfc3339: None,
             body_text: String::new(),
+            body_markdown: None,
             eml_path: None,
             attachments: Vec::new(),
             contact: None,

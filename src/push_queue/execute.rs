@@ -216,6 +216,16 @@ pub(super) fn execute_tracked_steps(
             }
             continue;
         }
+        if step_remote_outcome_unknown(item, index)
+            && legacy_move_message_id_preflight_failed(item, index, step)
+        {
+            // This exact legacy error was emitted while reading all message
+            // metadata, before any MOVE. Resume the pure move step, preserving
+            // successful earlier steps and the original approved action.
+            mark_step_pending(item, index, step);
+            item.last_error = None;
+            write_item(context.root, item)?;
+        }
         if step_remote_outcome_unknown(item, index) {
             if recover_remote_outcome_unknown_step(context, item, index, step)? {
                 crate::progress::emit(
@@ -286,7 +296,7 @@ pub(super) fn execute_tracked_steps(
             }
             Err(err) => {
                 let err = if step_remote_outcome_unknown(item, index)
-                    && !remote_calls_not_started(&err)
+                    && !remote_effect_not_applied(&err)
                 {
                     let unknown =
                         remote_outcome_unknown_error(context.root, item, index, step, Some(&err));
@@ -321,13 +331,26 @@ pub(super) fn execute_tracked_steps(
     Ok(())
 }
 
-fn remote_calls_not_started(error: &AppError) -> bool {
+fn remote_effect_not_applied(error: &AppError) -> bool {
+    let Some(details) = error.details.as_ref() else {
+        return false;
+    };
+    details.get("remote_calls_started").and_then(Value::as_bool) == Some(false)
+        || details
+            .get("remote_effect_rejected")
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
+/// A rejection proves only that the rejected call changed nothing. Once an
+/// earlier call in the same step has succeeded, retrying the step would replay
+/// that call — a second copy of an appended message — so the step has to stay
+/// `remote_outcome_unknown` and go through recovery instead.
+fn rejection_after_applied_effect(mut error: AppError) -> AppError {
+    if let Some(Value::Object(details)) = error.details.as_mut() {
+        details.remove("remote_effect_rejected");
+    }
     error
-        .details
-        .as_ref()
-        .and_then(|details| details.get("remote_calls_started"))
-        .and_then(Value::as_bool)
-        == Some(false)
 }
 
 fn refresh_after_successful_step(
@@ -438,6 +461,34 @@ fn step_remote_outcome_unknown(item: &PushItem, index: usize) -> bool {
     item.step_states
         .iter()
         .any(|state| state.index == index && state.status == PushStepStatus::RemoteOutcomeUnknown)
+}
+
+fn legacy_move_message_id_preflight_failed(
+    item: &PushItem,
+    index: usize,
+    step: &ActionStep,
+) -> bool {
+    if item.message_action().is_none()
+        || step.move_to_mailbox_id.is_none()
+        || !step.add_flags.is_empty()
+        || step.append_to_mailbox_id.is_some()
+        || step.smtp_send.is_some()
+    {
+        return false;
+    }
+    item.step_states.iter().any(|state| {
+        state.index == index
+            && state.error_code.as_deref() == Some("rfc822_message_id_missing")
+            && item.message_ids().iter().any(|message_id| {
+                state.error.as_deref()
+                    == Some(
+                        format!(
+                            "message cannot be relocated after remote move without Message-ID: {message_id}"
+                        )
+                        .as_str(),
+                    )
+            })
+    })
 }
 
 fn step_state_mut(item: &mut PushItem, index: usize) -> Option<&mut PushStepState> {
@@ -904,6 +955,7 @@ pub(super) fn execute_message_step(
     if let Some(mailbox_id) = &step.append_to_mailbox_id {
         let folder = context.remote.action_mailbox_folder(mailbox_id)?;
         let mut marked_unknown = false;
+        let mut appended_any = false;
         let message_ids = item.message_ids().to_vec();
         for message_id in message_ids {
             let raw = match item.planned_message_rfc822.get(&message_id) {
@@ -919,7 +971,17 @@ pub(super) fn execute_message_step(
                 persist_remote_outcome_unknown(context.root, item, index, step)?;
                 marked_unknown = true;
             }
-            context.remote.append_message(&folder, &raw, false)?;
+            context
+                .remote
+                .append_message(&folder, &raw, false)
+                .map_err(|error| {
+                    if appended_any {
+                        rejection_after_applied_effect(error)
+                    } else {
+                        error
+                    }
+                })?;
+            appended_any = true;
         }
     }
     if step.smtp_send.is_some() {
@@ -1007,16 +1069,7 @@ pub(super) fn execute_move(
             continue;
         }
         let message = workspace.read_message_by_id(message_id)?;
-        let Some(rfc822_message_id) = message.rfc822_message_id else {
-            return Err(AppError::new(
-                "rfc822_message_id_missing",
-                format!(
-                    "message cannot be relocated after remote move without Message-ID: {}",
-                    message_id
-                ),
-            ));
-        };
-        rfc822_ids.insert(message_id.clone(), rfc822_message_id);
+        rfc822_ids.insert(message_id.clone(), message.rfc822_message_id);
         active_locations.insert(
             message_id.clone(),
             message
@@ -1038,13 +1091,19 @@ pub(super) fn execute_move(
         }
         let rfc822_message_id = rfc822_ids
             .get(&location.message_id)
-            .ok_or_else(|| AppError::new("rfc822_message_id_missing", "Message-ID missing"))?;
+            .ok_or_else(|| {
+                AppError::new(
+                    "message_not_found",
+                    "message not found during remote relocation",
+                )
+            })?
+            .as_deref();
         let outcome = remote.move_message(
             &location.mailbox_name,
             location.uid_validity,
             location.uid,
             &target,
-            Some(rfc822_message_id.as_str()),
+            rfc822_message_id,
         )?;
         let target_location = outcome.target_location.ok_or_else(|| {
             AppError::new(
@@ -1291,6 +1350,152 @@ mod tests {
                 .and_then(|message| message.message_action_snapshot.as_ref()),
             item.planned_message_action.as_ref()
         );
+    }
+
+    #[test]
+    fn explicit_remote_rejections_fail_normally_and_can_be_retried() {
+        for step in [
+            ActionStep::smtp_send(),
+            ActionStep::append_to_mailbox_id("sent"),
+            ActionStep::move_to_mailbox_id("archive"),
+        ] {
+            for rejected in [true, false] {
+                let root = temp_root("remote-rejection");
+                let config = MailConfig::default();
+                let remote = crate::remote::FakeMailRemote::default();
+                let error = AppError::new("remote_failed", "server reply or lost connection")
+                    .with_details(json!({"remote_effect_rejected": rejected}));
+                remote
+                    .send_results
+                    .borrow_mut()
+                    .push_back(Err(error.clone()));
+                remote
+                    .append_results
+                    .borrow_mut()
+                    .push_back(Err(error.clone()));
+                remote.move_results.borrow_mut().push_back(Err(error));
+                let mut item = outbound_item(
+                    "push_rejection",
+                    vec![step_state(0, &step, PushStepStatus::Pending)],
+                );
+                let steps = [step.clone()];
+                let execute = |context: PushExecutionContext<'_>,
+                               item: &mut PushItem,
+                               index,
+                               step: &ActionStep| {
+                    mark_step_remote_outcome_unknown(item, index, step, None);
+                    if step.smtp_send.is_some() {
+                        context
+                            .remote
+                            .send_raw_message("sender@example.com", &[], b"message")
+                    } else if step.append_to_mailbox_id.is_some() {
+                        context.remote.append_message("sent", b"message", false)
+                    } else {
+                        context
+                            .remote
+                            .move_message("INBOX", 1, 1, "archive", None)
+                            .map(|_| ())
+                    }
+                };
+                let first = execute_tracked_steps(
+                    context(&root, &config, &remote),
+                    &mut item,
+                    &steps,
+                    None,
+                    execute,
+                );
+                assert!(first.is_err());
+                assert_eq!(
+                    item.step_states[0].status,
+                    if rejected {
+                        PushStepStatus::Failed
+                    } else {
+                        PushStepStatus::RemoteOutcomeUnknown
+                    }
+                );
+                if !rejected {
+                    // Recovery cannot find evidence of success for append/move.
+                    remote.find_results.borrow_mut().push_back(Ok(None));
+                }
+                let retried = execute_tracked_steps(
+                    context(&root, &config, &remote),
+                    &mut item,
+                    &steps,
+                    None,
+                    execute,
+                );
+                assert_eq!(
+                    retried.is_ok(),
+                    rejected,
+                    "{}: {retried:?}",
+                    step_label(&step)
+                );
+                if rejected {
+                    assert_eq!(item.step_states[0].status, PushStepStatus::Succeeded);
+                }
+                let _ = fs::remove_dir_all(root);
+            }
+        }
+    }
+
+    #[test]
+    fn a_rejection_after_an_applied_append_in_the_same_step_is_not_retryable() {
+        let rejection = || {
+            AppError::new("imap_append_failed", "NO quota exceeded")
+                .with_details(json!({"remote_effect_rejected": true}))
+        };
+        for (first_attempt, expected_status, expected_code) in [
+            // Nothing was appended before the rejection: plainly retryable.
+            (
+                vec![Err(rejection())],
+                PushStepStatus::Failed,
+                "imap_append_failed",
+            ),
+            // The first message is already in the mailbox: a retry would
+            // append it a second time.
+            (
+                vec![Ok(()), Err(rejection())],
+                PushStepStatus::RemoteOutcomeUnknown,
+                "push_remote_outcome_unknown",
+            ),
+        ] {
+            let root = temp_root("append-partial-rejection");
+            let config = MailConfig::default();
+            let remote = crate::remote::FakeMailRemote::default();
+            remote.append_results.borrow_mut().extend(first_attempt);
+            let step = ActionStep::append_to_mailbox_id("archive");
+            let steps = [step.clone()];
+            let mut item = message_action_item(
+                "push_append_partial",
+                MessagePushAction::CaseAdd,
+                vec!["message_one".to_string(), "message_two".to_string()],
+                Vec::new(),
+            );
+            item.planned_message_rfc822
+                .insert("message_one".to_string(), b"Subject: one\r\n\r\n".to_vec());
+            item.planned_message_rfc822
+                .insert("message_two".to_string(), b"Subject: two\r\n\r\n".to_vec());
+
+            let result = execute_tracked_steps(
+                context(&root, &config, &remote),
+                &mut item,
+                &steps,
+                None,
+                execute_message_step,
+            );
+
+            assert_eq!(
+                result.err().map(|error| error.error_code),
+                Some(expected_code)
+            );
+            assert_eq!(item.step_states[0].status, expected_status);
+            assert_eq!(
+                item.step_states[0].error_code.as_deref(),
+                Some("imap_append_failed")
+            );
+            assert!(remote.append_results.borrow().is_empty());
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]

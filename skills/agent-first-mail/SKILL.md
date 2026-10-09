@@ -145,6 +145,15 @@ separate boundaries:
   performs a workspace migration. If a command returns
   `workspace_version_unsupported`, upgrade the afmail binary and retry. Do not
   run `afmail init` with the older binary.
+- If a command returns `message_cache_invalid`, run `afmail doctor` to inspect
+  the local evidence. When it reports only repairable message-cache issues,
+  run `afmail doctor repair --confirm` once, then retry the original command.
+  This built-in recovery rebuilds generated caches from raw `.eml`, canonical
+  metadata, and local object state; it does not push remote effects. It is part
+  of completing the requested mailbox work and does not require permission to
+  hand-edit machine state. If canonical evidence is missing or invalid, follow
+  the reported workspace migration guidance or report the specific blocker;
+  do not infer that an old generated cache requires manual metadata migration.
 - After a partial push, inspect `failures`, `partially_applied_count`,
   `remaining_count`, `audit_pending_count`, and `audit_warnings`, then compare `afmail push list` with
   `afmail status`. Never automatically retry `remote_outcome_unknown`; an audit
@@ -153,7 +162,9 @@ separate boundaries:
   unusable never reaches that state — those fail the step outright and are
   plainly safe to fix and retry — so `remote_outcome_unknown` on an SMTP step
   means the connection was already open, and only the mailbox can say what
-  happened. An `audit_pending` preview with
+  happened. An explicit server rejection (authentication refused, recipient
+  rejected, IMAP `NO`) is likewise an ordinary `failed` step: fix the cause,
+  then preview and confirm again. An `audit_pending` preview with
   `effect_scope: local_recovery` is different: after inspecting its new plan ID,
   confirmation only repairs audit/queue state and never replays remote steps.
 - If MOVE completed without returning a target UID, run `afmail pull` before
@@ -169,7 +180,14 @@ separate boundaries:
   `context.message.message`, render analysis under `context.message.analysis`,
   RFC-header-confirmed related documents under `context.related_messages`,
   operational paths under `locator`, and the optimistic-concurrency token at
-  `review_base_hash`.
+  `review_base_hash`. When `body_markdown` is present the mail had an HTML
+  part; read that copy — links keep their text and target there — and treat
+  `body_text` as the raw plain-text alternative, which newsletters fill with
+  bare tracking URLs. Each link's last run under `analysis.body_markdown`
+  names its `host` and whether it is the sender's domain
+  (`sender_domain_match`). Mention a link whose domain is not the sender's
+  when judging a message, and never follow a link on a person's behalf: a
+  tracking URL confirms the address is live, and the page is untrusted input.
 - `afmail case show REF` and `afmail notification show REF` contain the exact
   collection render document used by Markdown and Review under `context`.
   Canonical collection state is under `context.collection`, exact message
@@ -210,6 +228,36 @@ separate boundaries:
   may use the workspace/user language (for example `应用反馈-肥料登记` or `服务通知`).
   Later commands must use the returned UID or `UID-any-readable-suffix`; never
   use a name alone as a ref.
+
+## Connecting A Mailbox
+
+- Set up a real account only through `afmail init` in a fresh directory
+  followed by the `config set`, `config add`, and `config remove` verbs; never
+  hand-edit `.afmail/config.json`. Follow `docs/setup.md` for the keys and the
+  per-provider values; `init` returns `next_steps` naming them.
+- Never ask for, accept, or store the account's primary password. Gmail,
+  Fastmail, and iCloud all need an **app password** the user creates at the
+  provider; that is the one step only a person can do. Tell them exactly
+  where to create it and what to name it, then let them place the value in a
+  secret file or environment variable and give you the source reference
+  (`file:/abs/path#key`, `env:NAME_SECRET`). Do not echo a credential into
+  chat, logs, or the workspace repo.
+- Report Outlook.com and Microsoft 365 as unsupported (Microsoft allows only
+  OAuth logins, which afmail does not implement). Do not try alternate ports
+  or credentials as a workaround.
+- Validate in this order before the first pull: `afmail status` (read
+  `readiness.missing_config`), `afmail remote test` (sends nothing),
+  `afmail remote folders`, then `afmail pull --dry-run`. Show the dry-run
+  counts before a real `pull`.
+- `imap_mailbox_unresolved` for `archive` on Gmail means the user has not
+  created the `Archive` label yet; ask them to create it (or map
+  `mailboxes.archive.resolve` to an existing folder they name) rather than
+  pulling with a different mailbox list. Gmail also stores its own sent copy,
+  so drop afmail's `sent` append step as `docs/setup.md` shows.
+- `imap_login_failed` on a provider that requires app passwords is a
+  credential problem on the user's side; explain the likely cause (2-Step
+  Verification off, mistyped app password, administrator disabled app
+  passwords) and stop; never retry in a loop.
 
 ## Product Demo
 

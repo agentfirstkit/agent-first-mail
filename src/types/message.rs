@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const MESSAGE_SCHEMA_VERSION: u64 = 2;
+pub const MESSAGE_SCHEMA_VERSION: u64 = 3;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -156,6 +156,13 @@ pub struct MessageFile {
     pub sent_rfc3339: Option<String>,
     #[serde(default)]
     pub body_text: String,
+    /// Markdown made from the HTML part for reading: links keep their text and
+    /// target, images become their alt text, structure becomes paragraphs,
+    /// lists and quotes. Present only when the message has an HTML part;
+    /// `body_text` stays the verbatim plain-text source that hashes and
+    /// quote segmentation are computed over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_markdown: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eml_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

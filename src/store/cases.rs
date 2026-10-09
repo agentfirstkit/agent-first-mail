@@ -15,6 +15,18 @@ pub(super) struct ResolvedCase {
     pub(super) status: String,
 }
 
+/// Validated inputs and the destination for a case that has not been written.
+pub(crate) struct PreparedCaseCreate<'a> {
+    name: &'a str,
+    group: &'a str,
+    message_id: Option<&'a str>,
+    summary: Option<&'a str>,
+    reason: Option<&'a str>,
+    config: MailConfig,
+    case_uid: String,
+    case_path: PathBuf,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CaseMessageRemovalContext<'a> {
     event_kind: &'a str,
@@ -284,6 +296,19 @@ impl Workspace {
         summary: Option<&str>,
         reason: Option<&str>,
     ) -> Result<Value> {
+        let prepared = self.prepare_case_create(name, group, message_id, summary, reason)?;
+        self.create_prepared_case(prepared)
+    }
+
+    /// Validate and resolve a case creation without writing any state.
+    pub(crate) fn prepare_case_create<'a>(
+        &self,
+        name: &'a str,
+        group: Option<&'a str>,
+        message_id: Option<&'a str>,
+        summary: Option<&'a str>,
+        reason: Option<&'a str>,
+    ) -> Result<PreparedCaseCreate<'a>> {
         self.require_workspace()?;
         let reason = if message_id.is_some() {
             self.checked_reason(reason)?
@@ -319,6 +344,29 @@ impl Workspace {
                 format!("case path already exists: {}", path_to_string(&case_path)),
             ));
         }
+        Ok(PreparedCaseCreate {
+            name,
+            group,
+            message_id,
+            summary,
+            reason,
+            config,
+            case_uid,
+            case_path,
+        })
+    }
+
+    pub(crate) fn create_prepared_case(&self, prepared: PreparedCaseCreate<'_>) -> Result<Value> {
+        let PreparedCaseCreate {
+            name,
+            group,
+            message_id,
+            summary,
+            reason,
+            config,
+            case_uid,
+            case_path,
+        } = prepared;
         let mut transaction_paths = vec![rel_path(&self.root, &case_path)];
         if let Some(message_id) = message_id {
             transaction_paths.push(format!("messages/{message_id}.json"));

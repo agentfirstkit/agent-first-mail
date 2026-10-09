@@ -1338,3 +1338,71 @@ fn draft_save_send_validate_current_content_without_freshness_gate() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn draft_clear_recipients_without_body_change_preserves_comments() {
+    let root = temp_root("draft-clear-recipients");
+    fs::create_dir_all(&root).unwrap();
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let (case_uid, case_path) = create_case(&root, "clear-thread", "clear recipients");
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "draft",
+            "new",
+            &case_uid,
+            "--to",
+            "alice@example.com",
+            "--cc",
+            "old-cc@example.com",
+            "--bcc",
+            "old-bcc@example.com",
+            "--subject",
+            "Subject",
+            "--body",
+            "Original body",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let draft_name = parse_one(&stdout)["draft_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = case_path.join(format!("drafts/{draft_name}"));
+    let source =
+        fs::read_to_string(&path)
+            .unwrap()
+            .replacen("---\n", "---\n# keep this comment\n", 1);
+    fs::write(&path, &source).unwrap();
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "draft",
+            "change",
+            &case_uid,
+            &draft_name,
+            "--clear-cc",
+            "--clear-bcc",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["changed_fields"], json!(["cc", "bcc"]));
+    let changed = fs::read_to_string(&path).unwrap();
+    assert!(!changed.contains("old-cc@example.com"));
+    assert!(!changed.contains("old-bcc@example.com"));
+    assert!(changed.contains("# keep this comment"));
+    assert_eq!(
+        source.split_once("\n---\n").unwrap().1,
+        changed.split_once("\n---\n").unwrap().1
+    );
+    let (status, stdout) = run(&root, &["case", "draft", "send", &case_uid, &draft_name]);
+    assert_eq!(status, 0, "{stdout}");
+    let (status, stdout) = run(&root, &["push"]);
+    assert_eq!(status, 0, "{stdout}");
+    let preview = parse_one(&stdout);
+    assert_eq!(preview["items"][0]["outbound"]["cc"], json!([]));
+    assert_eq!(preview["items"][0]["outbound"]["bcc"], json!([]));
+    let _ = fs::remove_dir_all(root);
+}

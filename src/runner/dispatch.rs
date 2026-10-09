@@ -55,7 +55,18 @@ pub(crate) fn execute_command_at(
         )),
         command => {
             let lock = command_lock(&command, cwd)?;
-            let _lock = WorkspaceLock::acquire(&lock.root, lock.mode)?;
+            // Initialization validates its target before creating the lock directory.
+            let _lock = if matches!(
+                command,
+                Command::Init { .. }
+                    | Command::Demo {
+                        action: DemoAction::Init { .. }
+                    }
+            ) {
+                None
+            } else {
+                Some(WorkspaceLock::acquire(&lock.root, lock.mode)?)
+            };
             let mut workspace_progress = workspace_progress_command(&command)
                 .map(|name| WorkspaceProgressSink::start(&lock.root, name));
             if lock.mode == LockMode::Exclusive
@@ -445,7 +456,7 @@ fn execute_command_unlocked(
         Command::Case { action } => {
             let ws = Workspace::discover(cwd)?;
             match action {
-                CaseCommand::Create(args) => idempotent_value(
+                CaseCommand::Create(args) => idempotent_value_with_precheck(
                     &ws,
                     request_id,
                     "case_create",
@@ -457,7 +468,7 @@ fn execute_command_unlocked(
                         "reason": args.reason,
                     }),
                     || {
-                        ws.create_case(
+                        ws.prepare_case_create(
                             &args.name,
                             args.group.as_deref(),
                             args.message.as_deref(),
@@ -465,6 +476,7 @@ fn execute_command_unlocked(
                             args.reason.as_deref(),
                         )
                     },
+                    |prepared| ws.create_prepared_case(prepared),
                 ),
                 CaseCommand::List { archived, all } => ws.case_list(archived, all),
                 CaseCommand::Show { case_ref } => ws.case_show(&case_ref),
@@ -1390,6 +1402,25 @@ where
     match request_id {
         Some(request_id) => workspace.run_idempotent_request(request_id, command, input, operation),
         None => operation(),
+    }
+}
+
+fn idempotent_value_with_precheck<T, P, F>(
+    workspace: &Workspace,
+    request_id: Option<&str>,
+    command: &str,
+    input: Value,
+    precheck: P,
+    operation: F,
+) -> Result<Value>
+where
+    P: FnOnce() -> Result<T>,
+    F: FnOnce(T) -> Result<Value>,
+{
+    match request_id {
+        Some(request_id) => workspace
+            .run_idempotent_request_with_precheck(request_id, command, input, precheck, operation),
+        None => operation(precheck()?),
     }
 }
 

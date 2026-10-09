@@ -265,8 +265,9 @@ fn render_refresh_rebuilds_generated_views_and_removes_obsolete_case_indexes() {
     );
     let timezone_case_view = fs::read_to_string(active_path.join("case.md")).unwrap_or_default();
     assert_ne!(timezone_case_view, canonical_case_view);
+    // 10:00Z shown in the workspace's +08:00 as a readable local time.
     assert!(
-        timezone_case_view.contains("+08:00"),
+        timezone_case_view.contains("2026-05-21 18:00"),
         "{timezone_case_view}"
     );
 

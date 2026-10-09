@@ -113,10 +113,41 @@ Raw message evidence lives at `.afmail/messages/<message_id>.eml`. Canonical
 message metadata lives beside it at `.afmail/messages/<message_id>.json`; this
 single document owns remote IMAP state plus the current Agent/human suggestion
 round. Parsed root `messages/<message_id>.json` files are rebuildable projections
-with `schema_name: "message"` and `schema_version: 2`; they expose the canonical
+with `schema_name: "message"` and `schema_version: 3`; they expose the canonical
 suggestions at the message top level alongside parsed headers, attachment
 metadata, `body_text`, remote and workspace overlays, contact links, and identity
 matches.
+
+An older generated message schema can cause ordinary read commands to return
+`message_cache_invalid`. Run `afmail doctor` to inspect it: an invalid cache is
+marked `repairable: true` only when the current program can reconstruct it from
+the raw `.eml`, valid canonical metadata, and local object state without writing
+anything. `afmail doctor repair --confirm` rebuilds those projections locally;
+it does not push remote effects. If the workspace itself needs migration, run
+`afmail init` first. Never change a cache's schema number by hand.
+
+`body_text` is the sender's `text/plain` part verbatim (or a tag-stripped text
+when the mail has only HTML); hashes and quote segmentation are computed over
+it and it never changes shape. A message with a real HTML part also carries
+`body_markdown`, the reading copy: that part converted to Markdown, so links
+keep their text and target (`[选购](https://…)`), images become their alt
+text, and code, styling, and interactive content are dropped. Both are
+rebuilt from the `.eml` whenever the cache is materialized. The render
+document's `analysis.body_markdown` splits it into authored/quoted byte ranges
+like `analysis.body` and additionally lays each part out as `authored` /
+`quoted` block lists (`kind` paragraph, heading, list_item, quote, code, rule;
+`runs` of text with optional `href`, `emphasis`, `strong`, `code`). The last
+run of a link also says where it goes without anyone following it: `host` is
+the registrable domain of `href` (Public Suffix List, ASCII form, so a
+Unicode host and its punycode twin compare equal), and
+`sender_domain_match` says whether that is the sender's own registrable
+domain — the authenticated domain, else the `From` domain — by plain
+equality, with no lookalike heuristics; it is absent when the sender's domain
+is unknown. Review renders those blocks: a link is text with its destination
+shown beside it, marked when it is not the sender's, and never navigates the
+window — opening goes through the system browser. Generated Markdown views
+quote the Markdown text itself in a ```` ```markdown ```` fence.
+link claimed another domain or imitates the sender's.
 
 Shared reads parse canonical EML/metadata evidence and apply workspace, identity,
 and contact projections in memory without rewriting this cache. Pull, explicit
@@ -324,8 +355,10 @@ workspace skill directories such as `.codex/skills/agent-first-mail/` or
 `.afmail/messages/`. If you track
 `.afmail/messages/` in git, the repository will contain private mail bodies,
 canonical message metadata, and raw attachment bytes.
-`.afmail/cache/` is the only metadata directory that is always safe to remove;
-the other ignored directories contain lossy machine-local state.
+`.afmail/cache/` is the only metadata directory that is safe to remove, and only
+while no afmail process is running: it holds `workspace.lock`, and removing the
+lock file under a running process lets a second writer take a fresh lock beside
+it. The other ignored directories contain lossy machine-local state.
 
 ## Triage View
 
@@ -661,10 +694,14 @@ optional `local_stage`, optional `audit_pending`, and `last_error`. All version-
 push items are rejected; afmail does not guess a message action that was never
 persisted.
 
-A move step whose remote effect completed without a target UID remains
-`remote_outcome_unknown`. After `pull`, recovery may finish that step without
-replaying MOVE only when the target message is present and every planned source
-location is no longer active. A target copy by itself is not completion evidence.
+The target UID of a move comes from the server's `COPYUID` response code
+when it sends one (RFC 4315 for COPY, RFC 6851 for MOVE); only without it does
+afmail search the target mailbox by `Message-ID`, and a search that finds
+nothing or several candidates is not resolved by guessing. A move step whose
+remote effect completed without a target UID remains `remote_outcome_unknown`.
+After `pull`, recovery may finish that step without replaying MOVE only when
+the target message is present and every planned source location is no longer
+active. A target copy by itself is not completion evidence.
 
 After all remote steps and local finalize stages succeed, the item first enters
 `local_stage: "audit_pending"` and persists:
@@ -779,6 +816,13 @@ effect after a crash or interrupted output path.
 `afmail doctor` reports pending records as `idempotency_incomplete`; review the
 workspace effect before retrying with a new request id.
 
+For `case create`, read-only preparation happens before a new pending record is
+written. Invalid names, groups, source messages, configuration or target paths
+therefore leave the request ID unused; corrected input can reuse it. Existing
+records are checked first, so a completed request is replayed without running
+preparation again. The prepared values are used by the local operation, and
+failures after that operation starts still retain `pending`.
+
 ## Workspace Progress
 
 The latest long-running `pull` or confirmed `push` writes a runtime snapshot to
@@ -809,8 +853,24 @@ mailbox id. Each entry records the resolved `mailbox_name`, `uid_validity`,
 Cursor hits let a normal subsequent pull request only UIDs after `highest_uid`.
 Cursor absence, corruption, schema mismatch, mailbox rename, UIDVALIDITY reset,
 or the periodic full-reconcile interval safely falls back to the full scan path.
+The cursor bounds only header and body fetches: every pull, incremental or
+not, still lists the UIDs of each selected mailbox and marks local remote
+locations that are no longer present as missing, so a message moved or
+deleted remotely is noticed even when no new mail arrived.
 Dry-run pulls do not update this file. A pull that skips a UID because of budget
 or body-fetch limits does not advance the cursor beyond the skipped UID.
+
+Header fetches use ascending windows of at most 25 UIDs. Each window is processed
+before the next one, including known-message flag updates and the shared
+count/bytes budgets; only selected new-message headers are retained for the
+body stage. The dry-run estimate also processes headers in windows.
+
+A missing cursor file is an ordinary first pull. Other read, parse or schema
+failures produce a structured warning and preserve the old entry under a unique
+`.corrupt` name beside it before falling back to a full scan. If preservation
+fails, the pull stops rather than overwriting that entry. These retained copies
+are for manual inspection; `doctor` does not automatically parse or restore
+them.
 
 ## Audit Events
 

@@ -2,10 +2,10 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-mail",
   "name": "Agent-First Mail",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
-  "synopsis": "Let your AI agent work your inbox — email pulled into plain files it reads, sorts, and drafts on your machine, with nothing sent until you confirm.",
+  "synopsis": "Let your AI agent work your inbox the way it works a git checkout — mail pulled into local files it reads, sorts, and drafts on your machine, and nothing reaches your real mailbox until you confirm the push.",
   "intent": [
     "Give AI agents a local-first email workspace where pulled messages become editable case files rather than a traditional inbox app",
     "Preserve raw RFC822 mail while exposing mechanically cleaned text, message metadata, active cases, archived cases, contacts, notification collections, send identities, drafts, notes, and files through stable filesystem conventions, with human-readable Markdown rendered in the workspace language",
@@ -14,30 +14,29 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Settle each review item the moment a person decides it, so closing the window ends the session instead of discarding unsettled work, and re-read the terminal result from the workspace afterwards — a process killed mid-session loses nothing already settled",
-    "Drop the session-level submitted/cancelled/dismissed vocabulary and the Deferred outcome, add Decided for a disposition the agent never proposed, and check the three outcome invariants right after deserialization instead of leaving each writer to remember them",
-    "Move stale-suggestion detection from a whole-session gate to a per-item flag, so one item whose message has moved on no longer refuses to open the rest of the queue",
-    "Open a draft's attachments through one primitive that checks the directory and the file separately, refuses non-regular files before any open, and compares the opened handle's identity with what was checked — a symlink under files/ can no longer be read, hashed and attached while the push plan shows a harmless case-relative path",
-    "Switch review delivery to AFUI's window|link|session and delete afmail's own LAN implementation and discovery, keeping the one-shot fifteen-minute link expiry and review_ready carrying review_url",
-    "Render the real page in doctor, one render per surface, so a frontend called healthy cannot still fail the escaping policy, rendered-markup guard and element contract that only the serving side applied",
-    "Declare the four review hooks a page cannot render without and check them before a window opens, leaving the other twenty-one undeclared because they belong to surfaces that legitimately lack them",
-    "Put the review page's routing, session channel and unload guard on AFUI's page kernel, keeping only what is afmail's: which update ends a turn, flushing dirty editors before a send, and selection clamping",
-    "Stop drawing a second head inside a framed session — the page hides its brand and saving line and sends up only what a frame cannot know, keeping the local-workspace pill",
-    "Bound triage review with no message ids to the current queue newest-first and say in the result whether any were left out, instead of implying every current suggestion is included",
-    "Pin the IMAP push contract with a recording test server, and pin the per-file locale overlay so a frontend overriding one template still gets the rest of the active language pack rather than falling back to English",
-    "Stop quoting values from credential-bearing arguments in error events, and run the local container gates on Apple's container runtime as well as Docker",
-    "Upgrade Agent-First Data to 0.34.0, Agent-First UI to 0.5.0 and Agent-First Slug to 0.7.1"
+    "Read HTML mail through a Markdown copy so links keep their targets",
+    "Show each link's domain and whether it is the sender's, and open it in the system browser",
+    "Show times as the workspace's local clock time",
+    "Actually remove Cc and Bcc from a draft when they are cleared",
+    "Reconcile locations on every pull and take move targets from COPYUID",
+    "Move messages that have no Message-ID, and resume pushes stalled on that refusal",
+    "Fail and allow retry when the server explicitly rejects a send, append or move",
+    "Restore a remotely deleted message that reappears on the server",
+    "Fetch headers in windows of 25 UIDs and time out each IMAP connect after 30 seconds",
+    "Validate case create before consuming its request id, and stop echoing rejected values in API errors",
+    "Keep the workspace lock in .afmail/cache and let doctor repair invalid message caches",
+    "Upgrade to Agent-First UI 0.6.1, Agent-First Data 0.35.0, Agent-First Slug 0.8.0 and minijinja 3"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.BmXjdNCjzm7ChFXVQ6FeKzfhuSjt3HvfGRbfCepefMUR",
+      "uri": "cmn://agentfirstkit.com/b3.DfMUqiQWZqqo1YkmzSwxZuG75PLy6dRGMQmuNrSiEidg",
       "id": "agent-first-data",
       "reason": "All structured output, field suffixes, secret handling, and JSONL events follow Agent-First Data conventions"
     },
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.4sTciwy86YHMLDRNQrmmbQcCZQNuK8diafTpdZzL5ibV",
+      "uri": "cmn://agentfirstkit.com/b3.76pbFk2NcMUqayLeiYUt8xWdHfnGkAr1eQzxsKCSXtL3",
       "id": "agent-first-slug",
       "reason": "Path/URL slug generation and path-segment validation use Agent-First Slug"
     }

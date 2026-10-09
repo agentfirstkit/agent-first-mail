@@ -331,8 +331,8 @@ fn collect_files(path: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
         return Ok(());
     }
     if metadata.is_dir() {
-        for entry in read_dir(path, "read purge artifact directory")? {
-            collect_files(&entry.path(), paths)?;
+        for child in read_dir_paths(path, "read purge artifact directory")? {
+            collect_files(&child, paths)?;
         }
         return Ok(());
     }

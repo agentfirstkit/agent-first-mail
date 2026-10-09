@@ -1,7 +1,7 @@
 use crate::config::TemplateLanguage;
 use crate::error::{AppError, Result};
 use agent_first_ui::{reject_frontend_script, reject_rendered_script};
-use chrono::{DateTime, FixedOffset, SecondsFormat};
+use chrono::{DateTime, FixedOffset};
 use include_dir::{Dir, include_dir};
 use minijinja::value::Value as MiniValue;
 use minijinja::{
@@ -898,10 +898,10 @@ pub(crate) fn json_value_to_minijinja(value: &Value) -> MiniValue {
         }
         Value::String(value) => MiniValue::from(value.as_str()),
         Value::Array(items) => items.iter().map(json_value_to_minijinja).collect(),
-        Value::Object(map) => map
-            .iter()
-            .map(|(key, value)| (key.as_str(), json_value_to_minijinja(value)))
-            .collect(),
+        Value::Object(map) => MiniValue::from_pairs(
+            map.iter()
+                .map(|(key, value)| (key.as_str(), json_value_to_minijinja(value))),
+        ),
     }
 }
 
@@ -984,18 +984,23 @@ fn template_yaml_filter(value: String) -> String {
     out
 }
 
+/// The time a person reads: the RFC 3339 instant moved into the workspace
+/// timezone and written as `YYYY-MM-DD HH:MM`. No `T`, no seconds, no offset
+/// — those stay in the machine fields and in `<time datetime=…>`, which
+/// templates fill from the raw value. Numeric-only, so it needs no
+/// localization and sorts as it reads. An unparseable value is shown as is.
 fn template_datetime_filter(value: &str, offset: Option<FixedOffset>) -> String {
-    let Some(offset) = offset else {
+    let Ok(datetime) = DateTime::parse_from_rfc3339(value) else {
         return value.to_string();
     };
-    DateTime::parse_from_rfc3339(value)
-        .map(|datetime| {
-            datetime
-                .with_timezone(&offset)
-                .to_rfc3339_opts(SecondsFormat::Secs, true)
-        })
-        .unwrap_or_else(|_| value.to_string())
+    match offset {
+        Some(offset) => datetime.with_timezone(&offset).format(READABLE_DATETIME),
+        None => datetime.format(READABLE_DATETIME),
+    }
+    .to_string()
 }
+
+const READABLE_DATETIME: &str = "%Y-%m-%d %H:%M";
 
 fn template_asset_path_filter(
     root: Option<&Path>,
@@ -1336,6 +1341,20 @@ mod tests {
         assert_eq!(template_bytes_filter(1024), "1 KiB");
         assert_eq!(template_bytes_filter(1025), "2 KiB");
         assert_eq!(template_bytes_filter(1024 * 1024), "1.0 MiB");
+    }
+
+    #[test]
+    fn datetime_filter_shows_a_readable_local_time_and_keeps_unparseable_input() {
+        let offset = FixedOffset::east_opt(8 * 3600);
+        assert_eq!(
+            template_datetime_filter("2026-05-21T10:00:00Z", offset),
+            "2026-05-21 18:00"
+        );
+        assert_eq!(
+            template_datetime_filter("2026-05-21T10:00:05+13:00", None),
+            "2026-05-21 10:00"
+        );
+        assert_eq!(template_datetime_filter("not a time", offset), "not a time");
     }
 
     #[test]

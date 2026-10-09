@@ -681,11 +681,11 @@ fn case_index_renders_thread_blocks_with_local_times_and_actions() {
     }
 
     let index = fs::read_to_string(case_path.join("case.md")).unwrap_or_default();
-    let received = index.find("### Received from alice@example.com - 2026-05-21T09:00:00+08:00");
-    let sent_reply = index.find("### Sent to alice@example.com - 2026-05-21T10:00:00+08:00");
-    let re_subject = index.find("### Received from alice@example.com - 2026-05-21T11:00:00+08:00");
-    let fwd = index.find("### Received from alice@example.com - 2026-05-21T12:00:00+08:00");
-    let fw_sent = index.find("### Sent to alice@example.com - 2026-05-21T13:00:00+08:00");
+    let received = index.find("### Received from alice@example.com - 2026-05-21 09:00");
+    let sent_reply = index.find("### Sent to alice@example.com - 2026-05-21 10:00");
+    let re_subject = index.find("### Received from alice@example.com - 2026-05-21 11:00");
+    let fwd = index.find("### Received from alice@example.com - 2026-05-21 12:00");
+    let fw_sent = index.find("### Sent to alice@example.com - 2026-05-21 13:00");
     assert!(received.is_some(), "{index}");
     assert!(sent_reply.is_some(), "{index}");
     assert!(re_subject.is_some(), "{index}");

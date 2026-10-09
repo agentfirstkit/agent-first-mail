@@ -332,7 +332,6 @@ fn config_effect_id(config: &MailConfig, workspace_uid: &str) -> Result<String> 
     for section in ["imap", "smtp"] {
         if let Some(object) = value.get_mut(section).and_then(Value::as_object_mut) {
             object.remove("password_secret");
-            object.remove("password_secret_env");
         }
     }
     crate::plan_id::canonical_plan_id("push_effect_config", workspace_uid, &value)

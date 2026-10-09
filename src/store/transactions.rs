@@ -19,6 +19,11 @@ pub(crate) struct LocalTransaction {
     path: PathBuf,
 }
 
+enum TransactionRepair {
+    CaseArchive(String),
+    AbortedDiscardUndo,
+}
+
 impl Workspace {
     pub(crate) fn begin_transaction(
         &self,
@@ -103,7 +108,7 @@ impl Workspace {
         let transactions = self.incomplete_transactions()?;
         let mut recoveries = Vec::new();
         for transaction in &transactions {
-            let Some(case_uid) = transaction.repairable_case_archive_uid() else {
+            let Some(repair) = transaction.repair_action(self)? else {
                 return Err(AppError::new(
                     "transaction_incomplete",
                     format!(
@@ -115,10 +120,15 @@ impl Workspace {
                     "Inspect the transaction paths and restore a consistent workspace state before retrying.",
                 ));
             };
-            recoveries.push((transaction, case_uid));
+            recoveries.push((transaction, repair));
         }
-        for (transaction, case_uid) in recoveries {
-            self.recover_case_archive_transaction(&case_uid)?;
+        for (transaction, repair) in recoveries {
+            match repair {
+                TransactionRepair::CaseArchive(case_uid) => {
+                    self.recover_case_archive_transaction(&case_uid)?;
+                }
+                TransactionRepair::AbortedDiscardUndo => {}
+            }
             if transaction.path.exists() {
                 remove_file(&transaction.path)?;
             }
@@ -128,8 +138,46 @@ impl Workspace {
 }
 
 impl TransactionFile {
-    pub(super) fn is_repairable(&self) -> bool {
-        self.repairable_case_archive_uid().is_some()
+    pub(super) fn is_repairable(&self, workspace: &Workspace) -> Result<bool> {
+        Ok(self.repair_action(workspace)?.is_some())
+    }
+
+    fn repair_action(&self, workspace: &Workspace) -> Result<Option<TransactionRepair>> {
+        if let Some(case_uid) = self.repairable_case_archive_uid() {
+            return Ok(Some(TransactionRepair::CaseArchive(case_uid)));
+        }
+        let (status, action) = match self.kind.as_str() {
+            "message_unspammed" => (MessageStatus::Spam, MessagePushAction::Spam),
+            "message_untrashed" => (MessageStatus::Trashed, MessagePushAction::Trash),
+            _ => return Ok(None),
+        };
+        if self.paths.len() != 2 || !self.paths.iter().any(|path| path == ".afmail/push") {
+            return Ok(None);
+        }
+        let Some(message_id) = self
+            .paths
+            .iter()
+            .find_map(|path| path.strip_prefix("messages/")?.strip_suffix(".json"))
+        else {
+            return Ok(None);
+        };
+        if validate_id("message_id", message_id).is_err() {
+            return Ok(None);
+        }
+        let message = workspace.read_message_by_id(message_id)?;
+        if message.workspace.status != status.as_str() {
+            return Ok(None);
+        }
+        let pushes = crate::push_queue::message_push_items(&workspace.root, message_id)?;
+        // Undo removes the original queue item before making any local changes.
+        // A single started original item proves that the legacy transaction
+        // stopped at that guard and never changed the disposition or queue.
+        let blocked_before_writes = pushes.len() == 1
+            && pushes[0].has_started_effects()
+            && pushes[0]
+                .message()
+                .is_some_and(|payload| payload.action == action);
+        Ok(blocked_before_writes.then_some(TransactionRepair::AbortedDiscardUndo))
     }
 
     fn repairable_case_archive_uid(&self) -> Option<String> {

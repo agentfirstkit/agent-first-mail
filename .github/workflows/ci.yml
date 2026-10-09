@@ -70,7 +70,7 @@ jobs:
           AFMAIL_TEST_CONTAINER_RUNTIME: docker
         run: |
           docker version
-          docker pull greenmail/standalone:2.1.8
+          docker pull greenmail/standalone:2.1.14
           ./scripts/test.sh e2e
 
   # This spore ships a Windows binary in every release and, until now, tested it

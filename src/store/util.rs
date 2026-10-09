@@ -360,6 +360,19 @@ pub(super) fn read_dir(path: &Path, context: &str) -> Result<Vec<fs::DirEntry>> 
     Ok(out)
 }
 
+/// Snapshot paths before descending into another directory. Unix `DirEntry`
+/// values retain their shared directory handle even after `ReadDir` is gone.
+pub(super) fn read_dir_paths(path: &Path, context: &str) -> Result<Vec<PathBuf>> {
+    fs::read_dir(path)
+        .map_err(|error| AppError::io(context, &error))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|error| AppError::io(context, &error))
+        })
+        .collect()
+}
+
 pub(super) fn count_files_with_ext(path: &Path, ext: &str) -> Result<usize> {
     if !path.exists() {
         return Ok(0);

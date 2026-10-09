@@ -184,9 +184,16 @@ pub fn send_raw_message(
     let (sender, envelope) = prepare_send(config, envelope_from, envelope_to)?;
     // From here on the outcome genuinely can be unknown: the connection, the
     // handshake, the envelope exchange and DATA all happen inside this call.
-    sender
-        .send_raw(&envelope, raw)
-        .map_err(|e| AppError::new("smtp_send_failed", e.to_string()))?;
+    // A negative SMTP reply is different: the server explicitly rejected it.
+    sender.send_raw(&envelope, raw).map_err(|error| {
+        let rejected = error.is_permanent() || error.is_transient();
+        let app_error = AppError::new("smtp_send_failed", error.to_string());
+        if rejected {
+            app_error.with_details(serde_json::json!({"remote_effect_rejected": true}))
+        } else {
+            app_error
+        }
+    })?;
     Ok(())
 }
 
@@ -569,6 +576,111 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy)]
+    enum SmtpScript {
+        RejectRecipient,
+        DeferSender,
+        CloseAfterData,
+    }
+
+    /// One-connection SMTP server on a loopback port that follows `script`.
+    fn scripted_smtp_server(script: SmtpScript) -> (u16, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind SMTP listener");
+        let port = listener.local_addr().expect("SMTP listener address").port();
+        let handle = std::thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let Ok(mut writer) = stream.try_clone() else {
+                return;
+            };
+            let mut reader = BufReader::new(stream);
+            let _ = writer.write_all(b"220 localhost ESMTP\r\n");
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                let upper = line.to_ascii_uppercase();
+                let reply: &[u8] = if upper.starts_with("MAIL FROM") {
+                    match script {
+                        SmtpScript::DeferSender => b"451 4.3.0 try again later\r\n",
+                        _ => b"250 OK\r\n",
+                    }
+                } else if upper.starts_with("RCPT TO") {
+                    match script {
+                        SmtpScript::RejectRecipient => b"550 5.1.1 no such user\r\n",
+                        _ => b"250 OK\r\n",
+                    }
+                } else if upper.starts_with("DATA") {
+                    let _ = writer.write_all(b"354 end with <CRLF>.<CRLF>\r\n");
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if line == ".\r\n" {
+                            break;
+                        }
+                    }
+                    match script {
+                        // The whole message arrived and the server said
+                        // nothing: it may or may not have accepted it.
+                        SmtpScript::CloseAfterData => return,
+                        _ => b"250 OK\r\n",
+                    }
+                } else if upper.starts_with("QUIT") {
+                    let _ = writer.write_all(b"221 bye\r\n");
+                    return;
+                } else {
+                    b"250 OK\r\n"
+                };
+                if writer.write_all(reply).is_err() {
+                    return;
+                }
+            }
+        });
+        (port, handle)
+    }
+
+    fn send_to_scripted_server(script: SmtpScript) -> AppError {
+        let (port, server) = scripted_smtp_server(script);
+        let mut config = MailConfig::default();
+        config.smtp.host = Some("127.0.0.1".to_string());
+        config.smtp.port = port;
+        config.smtp.starttls = false;
+        config.smtp.tls_wrapper = false;
+        let result = send_raw_message(
+            &config,
+            "me@example.com",
+            &["you@example.com".to_string()],
+            b"Subject: test\r\n\r\nbody\r\n",
+        );
+        assert!(server.join().is_ok());
+        result.expect_err("the scripted server never accepts a message")
+    }
+
+    #[test]
+    fn a_negative_smtp_reply_is_rejected_and_a_dropped_connection_is_unknown() {
+        for script in [SmtpScript::RejectRecipient, SmtpScript::DeferSender] {
+            let error = send_to_scripted_server(script);
+            assert_eq!(error.error_code, "smtp_send_failed");
+            assert_eq!(
+                error
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("remote_effect_rejected")),
+                Some(&serde_json::json!(true)),
+                "{error:?}"
+            );
+        }
+        let error = send_to_scripted_server(SmtpScript::CloseAfterData);
+        assert_eq!(error.error_code, "smtp_send_failed");
+        assert!(error.details.is_none(), "{error:?}");
+    }
+
     #[test]
     fn sent_message_record_is_idempotent_but_never_overwrites_different_raw() {
         let root = temp_root("sent-message-conflict");
@@ -782,6 +894,7 @@ mod tests {
             received_rfc3339: None,
             sent_rfc3339: None,
             body_text: String::new(),
+            body_markdown: None,
             eml_path: None,
             attachments: Vec::new(),
             contact: None,

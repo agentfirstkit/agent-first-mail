@@ -189,7 +189,7 @@ impl Workspace {
                 ),
                 Some(rel_path(&self.root, &transaction.path)),
             );
-            issue.repairable = transaction.is_repairable();
+            issue.repairable = transaction.is_repairable(self)?;
             issues.push(issue);
         }
         Ok(())
@@ -197,16 +197,23 @@ impl Workspace {
 
     fn check_messages(&self, issues: &mut Vec<DoctorIssue>) -> Result<()> {
         let mut ids = BTreeSet::new();
+        let mut rebuild_context = None;
         for path in message_json_paths(&self.root)? {
             let rel = rel_path(&self.root, &path);
             let message = match read_message(&path) {
                 Ok(message) => message,
                 Err(err) => {
-                    issues.push(DoctorIssue::error(
-                        "message_cache_invalid",
-                        err.message,
-                        Some(rel),
-                    ));
+                    let mut issue =
+                        DoctorIssue::error("message_cache_invalid", err.message, Some(rel));
+                    if let Some(message_id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                        let context =
+                            rebuild_context.get_or_insert_with(|| self.materialization_context());
+                        issue.repairable = context.as_ref().is_ok_and(|context| {
+                            self.validate_message_cache_rebuild(message_id, context)
+                                .is_ok()
+                        });
+                    }
+                    issues.push(issue);
                     continue;
                 }
             };
@@ -662,6 +669,7 @@ fn doctor_message(status: &str, message_id: &str, body_text: &str) -> MessageFil
         received_rfc3339: Some("2026-06-09T00:00:00Z".to_string()),
         sent_rfc3339: None,
         body_text: body_text.to_string(),
+        body_markdown: None,
         eml_path: Some(format!(".afmail/messages/{message_id}.eml")),
         attachments: vec![AttachmentRef {
             part_id: "2".to_string(),

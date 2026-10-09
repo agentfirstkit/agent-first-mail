@@ -257,10 +257,11 @@ fn notification_index_renders_thread_blocks_with_summary_fallbacks() {
     assert!(index.contains(
         "- Message: [message_notification_reply](views/messages/message_notification_reply.md)"
     ));
-    assert!(index.contains("- Time: 2026-05-21T15:00:00+08:00"));
-    assert!(index.contains("- Time: 2026-05-21T09:00:00+08:00"));
+    assert!(index.contains("- Time: 2026-05-21 15:00"));
+    assert!(index.contains("- Time: 2026-05-21 09:00"));
     assert!(!index.contains(" — "));
-    assert!(!index.contains("2026-05-21 15:00"));
+    // The human line carries the readable form only; RFC 3339 stays in JSON.
+    assert!(!index.contains("- Time: 2026-05-21T15:00:00"));
     let _ = fs::remove_dir_all(root);
 }
 

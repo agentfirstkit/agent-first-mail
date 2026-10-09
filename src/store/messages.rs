@@ -280,7 +280,8 @@ pub(super) fn read_message(path: &Path) -> Result<MessageFile> {
         return Err(AppError::new(
             "message_cache_invalid",
             format!("unsupported message cache schema: {}", path_to_string(path)),
-        ));
+        )
+        .with_hint("Run `afmail doctor` to inspect the canonical evidence. If the cache issues are repairable, run `afmail doctor repair --confirm` to rebuild them; run `afmail init` first if the workspace needs migration."));
     }
     MessageStatus::parse(&message.workspace.status)?;
     if let Some(direction) = message.direction.as_deref() {
@@ -583,7 +584,7 @@ impl Workspace {
         Ok(message)
     }
 
-    fn materialization_context(&self) -> Result<MaterializationContext> {
+    pub(super) fn materialization_context(&self) -> Result<MaterializationContext> {
         let static_inputs = RenderStaticInputs::load(self, MailConfig::load(&self.root)?)?;
         self.materialization_context_with_static_inputs(static_inputs)
     }
@@ -605,6 +606,15 @@ impl Workspace {
     ) -> Result<MessageFile> {
         let context = self.materialization_context()?;
         self.read_message_from_eml_with_context(message_id, cache_read_mode, &context)
+    }
+
+    pub(super) fn validate_message_cache_rebuild(
+        &self,
+        message_id: &str,
+        context: &MaterializationContext,
+    ) -> Result<()> {
+        self.read_message_from_eml_with_context(message_id, MessageCacheReadMode::Repair, context)
+            .map(|_| ())
     }
 
     fn read_message_from_eml_with_context(
@@ -1677,6 +1687,11 @@ impl Workspace {
                 ),
             ));
         }
+        crate::push_queue::ensure_pending_message_pushes_removable(
+            &self.root,
+            message_id,
+            context.undo_push_kind,
+        )?;
         let transaction = self.begin_transaction(
             context.result_code,
             vec![

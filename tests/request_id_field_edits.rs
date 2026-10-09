@@ -78,7 +78,7 @@ fn write_json(path: &Path, value: &Value) {
 fn write_message(root: &Path, message_id: &str, uid: u64) {
     let message = json!({
         "schema_name": "message",
-        "schema_version": 2,
+        "schema_version": 3,
         "message_id": message_id,
         "rfc822_message_id": format!("<{message_id}@example.com>"),
         "remote": {"locations": [{
@@ -238,6 +238,129 @@ fn create_draft(root: &Path, case_uid: &str) -> String {
 }
 
 #[test]
+fn request_id_case_create_validation_failures_can_be_corrected_without_reserving_the_id() {
+    for (scenario, name, group, message, expected_code) in [
+        ("name", "   ", Some("support"), None, "invalid_request"),
+        (
+            "group",
+            "Recovery",
+            Some("bad/group"),
+            None,
+            "invalid_request",
+        ),
+        (
+            "message-id",
+            "Recovery",
+            Some("support"),
+            Some("bad/id"),
+            "invalid_request",
+        ),
+        (
+            "missing-message",
+            "Recovery",
+            Some("support"),
+            Some("missing-message"),
+            "store_error",
+        ),
+        ("config", "Recovery", Some("support"), None, "store_error"),
+        (
+            "case-scan",
+            "Recovery",
+            Some("support"),
+            None,
+            "store_error",
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        let root = temp.path();
+        let (status, output) = run(root, &["init"]);
+        assert_eq!(status, 0, "{output}");
+        let config_path = root.join(".afmail/config.json");
+        let config = fs::read(&config_path).expect("workspace config");
+        if scenario == "config" {
+            fs::write(&config_path, b"{unfinished").expect("a corrupt config");
+        }
+        if scenario == "case-scan" {
+            fs::remove_dir_all(root.join("cases")).expect("replace the case scan root");
+            fs::write(root.join("cases"), b"not a directory").expect("an unreadable case index");
+        }
+        let audit_path = root.join(".afmail/logs/events.jsonl");
+        let audit_before = fs::read(&audit_path).unwrap_or_default();
+        let request_id = format!("precheck-{scenario}");
+        let record_path = root.join(format!(".afmail/requests/{request_id}.json"));
+        let mut args = vec!["case", "create", "--name", name];
+        if let Some(group) = group {
+            args.extend(["--group", group]);
+        }
+        if let Some(message) = message {
+            args.extend(["--message", message]);
+        }
+        args.extend(["--reason", "test precheck", "--request-id", &request_id]);
+        let (status, output) = run(root, &args);
+        assert_eq!(status, 1, "{scenario}: {output}");
+        assert_eq!(
+            parse_one(&output)["code"],
+            expected_code,
+            "{scenario}: {output}"
+        );
+        assert!(
+            !record_path.exists(),
+            "{scenario} must not reserve its request id"
+        );
+        assert_eq!(fs::read(&audit_path).unwrap_or_default(), audit_before);
+        let has_transaction =
+            fs::read_dir(root.join(".afmail/transactions")).is_ok_and(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "json")
+                })
+            });
+        assert!(
+            !has_transaction,
+            "precheck must not begin a transaction: {scenario}"
+        );
+
+        fs::write(&config_path, &config).expect("restore config");
+        if scenario == "case-scan" {
+            fs::remove_file(root.join("cases")).expect("remove the blocked case scan root");
+            fs::create_dir_all(root.join("cases")).expect("restore the case scan root");
+        }
+        let corrected = [
+            "case",
+            "create",
+            "--name",
+            "Recovered",
+            "--group",
+            "support",
+            "--reason",
+            "corrected inputs",
+            "--request-id",
+            &request_id,
+        ];
+        let (status, output) = run(root, &corrected);
+        assert_eq!(status, 0, "{scenario}: {output}");
+        let created = parse_one(&output);
+        let (status, output) = run(root, &corrected);
+        assert_eq!(status, 0, "{scenario}: {output}");
+        assert_eq!(parse_one(&output)["case_uid"], created["case_uid"]);
+        let case_count = fs::read_dir(root.join("cases/support"))
+            .expect("the recovered case group")
+            .filter_map(Result::ok)
+            .count();
+        assert_eq!(
+            case_count, 1,
+            "correcting and replaying must create only one case"
+        );
+        let record: Value =
+            serde_json::from_slice(&fs::read(&record_path).expect("completed record"))
+                .expect("completed JSON");
+        assert_eq!(record["status"], "completed");
+    }
+}
+
+#[test]
 fn request_id_replays_create_and_notes_without_duplicate_effects() {
     let root = temp_root("request-id-create-notes");
     assert!(fs::create_dir_all(&root).is_ok());
@@ -261,10 +384,14 @@ fn request_id_replays_create_and_notes_without_duplicate_effects() {
     let case_uid = created["case_uid"].as_str().unwrap_or_default().to_string();
     assert!(!case_uid.is_empty());
 
+    let config_path = root.join(".afmail/config.json");
+    let config = fs::read(&config_path).expect("workspace config");
+    fs::write(&config_path, b"{unfinished").expect("config that current precheck would reject");
     let (status, stdout) = run(&root, &args);
     assert_eq!(status, 0, "{stdout}");
     let replayed = parse_one(&stdout);
     assert_eq!(replayed["case_uid"], created["case_uid"]);
+    fs::write(&config_path, config).expect("restore config after replay");
     let support_cases = fs::read_dir(root.join("cases/support"))
         .map(|entries| entries.filter_map(Result::ok).count())
         .unwrap_or_default();
@@ -392,9 +519,13 @@ fn request_id_blocks_retry_after_effect_before_record_completion() {
         .unwrap_or_default();
     assert_eq!(support_cases, 1);
 
+    let config_path = root.join(".afmail/config.json");
+    let config = fs::read(&config_path).expect("workspace config");
+    fs::write(&config_path, b"{unfinished").expect("config that current precheck would reject");
     let (status, stdout) = run(&root, &args);
     assert_eq!(status, 1, "{stdout}");
     assert_eq!(parse_one(&stdout)["code"], "idempotency_incomplete");
+    fs::write(&config_path, config).expect("restore config after incomplete retry");
     let support_cases = fs::read_dir(root.join("cases/support"))
         .map(|entries| entries.filter_map(Result::ok).count())
         .unwrap_or_default();

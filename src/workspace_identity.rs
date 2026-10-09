@@ -326,9 +326,22 @@ fn metadata_root_has_workspace_data(metadata_root: &Path) -> Result<bool> {
         .map_err(|err| AppError::io("inspect workspace metadata", &err))?;
     for entry in entries {
         let entry = entry.map_err(|err| AppError::io("inspect workspace metadata", &err))?;
-        if entry.file_name() != "workspace.lock" {
-            return Ok(true);
+        if entry.file_name() == "workspace.lock" {
+            continue;
         }
+        if entry.file_name() == "cache" && entry.path().is_dir() {
+            let cache_entries = fs::read_dir(entry.path())
+                .map_err(|err| AppError::io("inspect workspace cache", &err))?;
+            for cache_entry in cache_entries {
+                let cache_entry =
+                    cache_entry.map_err(|err| AppError::io("inspect workspace cache", &err))?;
+                if cache_entry.file_name() != "workspace.lock" {
+                    return Ok(true);
+                }
+            }
+            continue;
+        }
+        return Ok(true);
     }
     Ok(false)
 }

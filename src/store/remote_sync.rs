@@ -1,6 +1,24 @@
 use super::*;
 
 impl Workspace {
+    pub(crate) fn restore_remote_deleted_message(
+        &self,
+        message_id: &str,
+        status: MessageStatus,
+    ) -> Result<bool> {
+        let mut message = self.read_message_by_id(message_id)?;
+        if message.workspace.status != MessageStatus::DeletedRemote.as_str() {
+            return Ok(false);
+        }
+        message.workspace.status = status.as_str().to_string();
+        self.clear_message_disposition(MessageStatus::DeletedRemote, message_id)?;
+        if matches!(status, MessageStatus::Spam | MessageStatus::Trashed) {
+            self.set_message_disposition(status, message_id, None, &now_rfc3339())?;
+        }
+        self.write_message_artifacts(&message)?;
+        Ok(true)
+    }
+
     pub fn pull(&self, ids: &[String]) -> Result<Value> {
         self.pull_with_progress(ids, crate::imap_pull::PullOptions::default(), None)
     }
@@ -61,11 +79,13 @@ impl Workspace {
                 "mailbox_count": imap.mailboxes.len(),
             }),
         );
-        let reconciliation = if all_targets_used_incremental {
-            skipped_reconciliation()
-        } else {
-            self.reconcile_remote_missing(&imap)?
-        };
+        // Headers and bodies are pulled incrementally, but the location check
+        // runs on every pull: "no new messages" says nothing about whether an
+        // old message was moved or deleted remotely, and push recovery for a
+        // MOVE whose target UID was never returned depends on the source
+        // location being reconciled as missing. The incremental flag still
+        // decides the periodic full header rescan below.
+        let reconciliation = self.reconcile_remote_missing(&imap)?;
         crate::imap_pull::commit_pull_cursors(&self.root, &result, !all_targets_used_incremental)?;
         crate::imap_pull::remove_internal_pull_fields(&mut result);
         let mut reconcile_progress = reconciliation.clone();
@@ -398,20 +418,6 @@ fn notification_refresh_progress_fields(refresh: &NotificationViewRefresh) -> Va
         "notification_index_unchanged_count": refresh.notification_index_unchanged_count,
         "notification_message_written_count": refresh.notification_message_count,
         "notification_message_unchanged_count": refresh.notification_message_unchanged_count,
-    })
-}
-
-fn skipped_reconciliation() -> Value {
-    json!({
-        "checked_location_count": 0,
-        "missing_location_count": 0,
-        "deleted_remote_message_count": 0,
-        "deleted_remote_message_ids": [],
-        "tombstoned_message_count": 0,
-        "tombstoned_message_ids": [],
-        "kept_message_count": 0,
-        "kept_message_ids": [],
-        "duration_ms": 0
     })
 }
 
@@ -1508,6 +1514,7 @@ mod tests {
             received_rfc3339: Some("2026-05-21T10:00:00Z".to_string()),
             sent_rfc3339: None,
             body_text: "Body".to_string(),
+            body_markdown: None,
             eml_path: Some(".afmail/messages/message_uidvalidity.eml".to_string()),
             attachments: Vec::new(),
             contact: None,

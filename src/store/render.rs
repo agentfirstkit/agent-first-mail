@@ -192,6 +192,17 @@ pub(super) fn build_message_render_document(
     let direction = message_thread_direction(&canonical_message);
     let action = message_thread_action(&canonical_message);
     let body = body_analysis(&canonical_message.body_text);
+    let link_context = crate::body_markdown::LinkContext::for_sender(
+        canonical_message
+            .authentication
+            .authenticated_domain
+            .as_deref()
+            .or(canonical_message.authentication.from_domain.as_deref()),
+    );
+    let body_markdown = canonical_message
+        .body_markdown
+        .as_deref()
+        .map(|markdown| markdown_body_analysis(markdown, &link_context));
     let from = canonical_message.from.as_deref().unwrap_or_default();
     let possible_bcc = possible_bcc(&canonical_message, account_email);
     let reply_to_differs = !canonical_message.reply_to.is_empty()
@@ -221,6 +232,7 @@ pub(super) fn build_message_render_document(
                 ThreadAction::Forward => RenderMessageAction::Forward,
             },
             body,
+            body_markdown,
             security: MessageSecurityAnalysis {
                 authentication_warning: authentication_check
                     && canonical_message.authentication.is_warning(),
@@ -258,6 +270,35 @@ fn possible_bcc(message: &MessageFile, account_email: Option<&str>) -> bool {
 #[derive(Clone, Debug, Default)]
 struct BodySplit {
     quote_start_bytes: Option<usize>,
+}
+
+fn markdown_body_analysis(
+    markdown: &str,
+    link_context: &crate::body_markdown::LinkContext,
+) -> crate::render_document::MarkdownBodyAnalysis {
+    let analysis = body_analysis(markdown);
+    let text_of = |kind: MessageBodySegmentKind| {
+        analysis
+            .segments
+            .iter()
+            .filter(|segment| segment.kind == kind)
+            .map(|segment| &markdown[segment.start_bytes..segment.end_bytes])
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let authored = crate::body_markdown::markdown_blocks(
+        &text_of(MessageBodySegmentKind::Authored),
+        link_context,
+    );
+    let quoted = crate::body_markdown::markdown_blocks(
+        &text_of(MessageBodySegmentKind::Quoted),
+        link_context,
+    );
+    crate::render_document::MarkdownBodyAnalysis {
+        segments: analysis.segments,
+        authored,
+        quoted,
+    }
 }
 
 fn body_analysis(body_text: &str) -> MessageBodyAnalysis {

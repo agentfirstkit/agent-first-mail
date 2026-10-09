@@ -1,4 +1,4 @@
-use super::util::read_dir;
+use super::util::read_dir_paths;
 use crate::error::{AppError, Result};
 use crate::layout;
 use serde_json::{Value, json};
@@ -58,8 +58,7 @@ fn inbound_attachment_bytes(root: &Path) -> Result<u64> {
         return Ok(0);
     }
     let mut total = 0u64;
-    for entry in read_dir(&dir, "read message attachment dirs")? {
-        let path = entry.path();
+    for path in read_dir_paths(&dir, "read message attachment dirs")? {
         if path.is_dir()
             && path
                 .file_name()
@@ -77,8 +76,7 @@ fn recursive_named_dir_bytes(root: &Path, dirname: &str) -> Result<u64> {
         return Ok(0);
     }
     let mut total = 0u64;
-    for entry in read_dir(root, "read storage directories")? {
-        let path = entry.path();
+    for path in read_dir_paths(root, "read storage directories")? {
         if path.is_dir() {
             if path.file_name().and_then(|name| name.to_str()) == Some(dirname) {
                 total += recursive_file_bytes(&path)?;
@@ -95,8 +93,7 @@ fn recursive_named_file_bytes(root: &Path, filename: &str) -> Result<u64> {
         return Ok(0);
     }
     let mut total = 0u64;
-    for entry in read_dir(root, "read storage files")? {
-        let path = entry.path();
+    for path in read_dir_paths(root, "read storage files")? {
         if path.is_dir() {
             total += recursive_named_file_bytes(&path, filename)?;
         } else if path.file_name().and_then(|name| name.to_str()) == Some(filename) {
@@ -111,8 +108,7 @@ fn direct_child_ext_bytes(path: &Path, ext: &str) -> Result<u64> {
         return Ok(0);
     }
     let mut total = 0u64;
-    for entry in read_dir(path, "read storage files")? {
-        let path = entry.path();
+    for path in read_dir_paths(path, "read storage files")? {
         if path.is_file() && path.extension().and_then(|value| value.to_str()) == Some(ext) {
             total += file_bytes(&path)?;
         }
@@ -125,8 +121,7 @@ fn direct_child_file_bytes(path: &Path) -> Result<u64> {
         return Ok(0);
     }
     let mut total = 0u64;
-    for entry in read_dir(path, "read storage files")? {
-        let path = entry.path();
+    for path in read_dir_paths(path, "read storage files")? {
         if path.is_file() {
             total += file_bytes(&path)?;
         }
@@ -142,8 +137,8 @@ fn recursive_file_bytes(path: &Path) -> Result<u64> {
         return file_bytes(path);
     }
     let mut total = 0u64;
-    for entry in read_dir(path, "read storage files")? {
-        total += recursive_file_bytes(&entry.path())?;
+    for child in read_dir_paths(path, "read storage files")? {
+        total += recursive_file_bytes(&child)?;
     }
     Ok(total)
 }
