@@ -17,8 +17,16 @@ pub enum Command {
     Demo { action: DemoAction },
     /// Initialize the current directory or a child path as an afmail workspace.
     Init { path: Option<String> },
-    /// Read configured IMAP mailbox ids into local message files without changing remote mail.
+    /// Write an Email Worker project into an absent or empty directory.
+    CloudflareScaffold { path: String },
+    /// Consume one batch of mail events and dispatch durable local work.
+    CloudflareConsume { reconcile: bool },
+    /// Run the Queue consumer continuously without polling an agent.
+    CloudflareWatch,
+    /// Import messages from configured sources.
     Pull {
+        cloudflare: bool,
+        files: bool,
         ids: Vec<String>,
         dry_run: bool,
         since_days: Option<u32>,

@@ -2,6 +2,7 @@ mod identity;
 mod session;
 mod special_use;
 
+use crate::ingest::*;
 use identity::*;
 use session::*;
 use special_use::*;
@@ -9,8 +10,8 @@ use special_use::*;
 pub use special_use::resolve_special_use_from_mailboxes;
 
 use crate::config::{
-    ImapConfig, MailConfig, MailDirection, PullImportAs, ResolvedIdentity, SpecialUseKind,
-    SpecialUseSource, SpecialUseTarget, match_message_identity_with_profiles,
+    ImapConfig, MailConfig, MailDirection, PullImportAs, SpecialUseKind, SpecialUseSource,
+    SpecialUseTarget,
 };
 use crate::error::{AppError, Result};
 pub use crate::imap_client::{MailboxInfo, MoveOutcome};
@@ -19,20 +20,19 @@ use crate::imap_client::{
     capability_uidplus, list_mailboxes, login_plain, login_tls, require_move,
     uid_mark_and_move_session, uid_move_session,
 };
-use crate::mail::parse_inbound_message;
 use crate::progress::ProgressCallback;
-use crate::types::{
-    CaseRelationshipEvidence, CaseRelationshipSuggestion, ImapRef, MessageFile, MessageStatus,
-    RemoteLocation, RemoteState,
-};
+#[cfg(test)]
+use crate::types::MessageFile;
+use crate::types::{MessageStatus, RemoteLocation, RemoteState};
+use crate::util::canonical_flags;
 #[cfg(test)]
 use crate::util::write_json_pretty;
-use crate::util::{canonical_flags, write_bytes_atomic, write_string_atomic};
-use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Utc};
-use mail_parser::{HeaderValue, MessageParser};
+#[cfg(test)]
+use chrono::FixedOffset;
+use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
@@ -593,7 +593,6 @@ struct RemoteEnvelope {
     uid: u64,
     flags: Vec<String>,
     size_bytes: Option<u64>,
-    header: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -716,29 +715,32 @@ mod tests {
         let _ = fs::create_dir_all(root.join("triage"));
         let raw = b"Message-ID: <m1@example.com>\r\nFrom: Alice <alice@example.com>\r\nTo: Me <me@example.com>\r\nSubject: Hello\r\nContent-Type: text/plain\r\n\r\nHello";
         let config = MailConfig::default();
-        let render_context = PullIngestRenderContext::new(&root, &config)?;
-        let result = save_remote_message(
+        let render_context = IngestRenderContext::new(&root, &config)?;
+        let result = ingest_message(
             &root,
-            RemoteMessage {
-                mailbox: "INBOX".to_string(),
-                uid_validity: 10,
-                uid: 20,
-                flags: Vec::new(),
+            &mut ExistingIndex::default(),
+            &render_context,
+            &config,
+            IngestMessage {
                 raw_eml: raw.to_vec(),
-            },
-            &CaseSuggestion::default(),
-            &PullTarget {
-                id: "inbox".to_string(),
-                mailbox: "INBOX".to_string(),
+                remote_location: Some(RemoteLocation {
+                    mailbox_id: Some("inbox".into()),
+                    mailbox_name: "INBOX".into(),
+                    uid_validity: Some(10),
+                    uid: Some(20),
+                    flags: vec![],
+                    observed_rfc3339: crate::store::now_rfc3339(),
+                    missing_rfc3339: None,
+                }),
+                delivery: None,
                 import_as: PullImportAs::Triage,
                 direction: MailDirection::Inbound,
             },
-            chrono::Offset::fix(&chrono::Utc),
-            &config,
-            &render_context,
         );
         assert!(result.is_ok());
-        let id = result.map(|saved| saved.message_id).unwrap_or_default();
+        let id = result
+            .map(|saved| saved.message_id().to_string())
+            .unwrap_or_default();
         assert!(root.join(format!(".afmail/messages/{id}.eml")).exists());
         assert!(
             !root
@@ -768,13 +770,13 @@ mod tests {
         let utc = chrono::Offset::fix(&chrono::Utc);
         let plus8 =
             FixedOffset::east_opt(8 * 3600).unwrap_or_else(|| chrono::Offset::fix(&chrono::Utc));
-        let id_utc = stable_message_id(&root, &remote, utc);
-        let id_plus8 = stable_message_id(&root, &remote, plus8);
+        let id_utc = stable_message_id(&remote.raw_eml, utc);
+        let id_plus8 = stable_message_id(&remote.raw_eml, plus8);
         // 02:24 +08:00 is the previous day in UTC, the same day in +08:00.
         assert!(id_utc.starts_with("message_20250615_"), "{id_utc}");
         assert!(id_plus8.starts_with("message_20250616_"), "{id_plus8}");
         // Same offset is deterministic; the hash suffix is offset-independent.
-        assert_eq!(id_plus8, stable_message_id(&root, &remote, plus8));
+        assert_eq!(id_plus8, stable_message_id(&remote.raw_eml, plus8));
         assert_eq!(id_utc.rsplit('_').next(), id_plus8.rsplit('_').next());
         let _ = fs::remove_dir_all(root);
     }
@@ -793,14 +795,13 @@ mod tests {
         };
         let plus8 =
             FixedOffset::east_opt(8 * 3600).unwrap_or_else(|| chrono::Offset::fix(&chrono::Utc));
-        let id = stable_message_id(&root, &remote, plus8);
+        let id = stable_message_id(&remote.raw_eml, plus8);
         assert!(id.starts_with("message_20260415_"), "{id}");
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn message_id_distinguishes_duplicate_rfc822_ids_by_content() {
-        let root = temp_root("id-duplicate-rfc822");
         let offset = chrono::Offset::fix(&chrono::Utc);
         let first = RemoteMessage {
             mailbox: "INBOX".to_string(),
@@ -826,9 +827,9 @@ mod tests {
             raw_eml: first.raw_eml.clone(),
         };
 
-        let first_id = stable_message_id(&root, &first, offset);
-        let second_id = stable_message_id(&root, &second, offset);
-        let copy_id = stable_message_id(&root, &exact_copy, offset);
+        let first_id = stable_message_id(&first.raw_eml, offset);
+        let second_id = stable_message_id(&second.raw_eml, offset);
+        let copy_id = stable_message_id(&exact_copy.raw_eml, offset);
         assert_ne!(first_id, second_id);
         assert_eq!(first_id, copy_id);
     }
@@ -857,7 +858,7 @@ mod tests {
         };
         let plus8 =
             FixedOffset::east_opt(8 * 3600).unwrap_or_else(|| chrono::Offset::fix(&chrono::Utc));
-        let id = stable_message_id(&root, &remote, plus8);
+        let id = stable_message_id(&remote.raw_eml, plus8);
         assert!(id.starts_with("message_20260415_"), "{id}");
         let _ = fs::remove_dir_all(root);
     }
@@ -874,6 +875,7 @@ mod tests {
             schema_name: "message".to_string(),
             schema_version: crate::types::MESSAGE_SCHEMA_VERSION,
             message_id: "message_case_1".to_string(),
+            origin: None,
             rfc822_message_id: Some("<Case-One@Example.com>".to_string()),
             in_reply_to: None,
             references: Vec::new(),
@@ -918,6 +920,7 @@ mod tests {
         };
         let second = MessageFile {
             message_id: "message_case_2".to_string(),
+            origin: None,
             rfc822_message_id: Some("<case-two@example.com>".to_string()),
             workspace: crate::types::WorkspaceState {
                 status: "case".to_string(),

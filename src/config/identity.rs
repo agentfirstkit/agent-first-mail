@@ -451,6 +451,7 @@ mod tests {
             schema_name: "message".to_string(),
             schema_version: crate::types::MESSAGE_SCHEMA_VERSION,
             message_id: "message_id".to_string(),
+            origin: None,
             rfc822_message_id: None,
             in_reply_to: None,
             references: Vec::new(),

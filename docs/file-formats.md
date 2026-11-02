@@ -1,6 +1,6 @@
 # File Formats
 
-This document describes the afmail v2 archive-oriented disk model.
+This document describes afmail's file-first workspace model.
 
 Persisted JSON state documents use `schema_name` plus `schema_version` to
 identify their on-disk format. Agent-First Data protocol outputs and audit
@@ -91,6 +91,10 @@ header-based: a `Message-ID` is supplied by the sender, is not unique in
 practice, and a mailbox that rewrites headers per folder would otherwise make
 two materially different documents share one identity.
 
+Reply headers that reference a shared `Message-ID` link to every retained raw
+variant. These links preserve the variants as separate messages; sharing a
+`Message-ID` alone does not establish a reply relationship.
+
 The practical consequences:
 
 - One message can hold several remote locations (Inbox and All Mail, say). Those
@@ -111,7 +115,7 @@ The practical consequences:
 
 Raw message evidence lives at `.afmail/messages/<message_id>.eml`. Canonical
 message metadata lives beside it at `.afmail/messages/<message_id>.json`; this
-single document owns remote IMAP state plus the current Agent/human suggestion
+single document owns delivery envelopes, remote IMAP state, plus the current Agent/human suggestion
 round. Parsed root `messages/<message_id>.json` files are rebuildable projections
 with `schema_name: "message"` and `schema_version: 3`; they expose the canonical
 suggestions at the message top level alongside parsed headers, attachment
@@ -193,7 +197,7 @@ Canonical message metadata:
 ```json
 {
   "schema_name": "message_metadata",
-  "schema_version": 2,
+  "schema_version": 3,
   "message_id": "message_20260521_3af9c1b2e8d04f6a",
   "remote": {
     "locations": [
@@ -223,10 +227,36 @@ Canonical message metadata:
 }
 ```
 
+Cloudflare delivery metadata is kept in this sidecar, never injected into MIME:
+
+```json
+{
+  "delivery": {
+    "envelope_from": "sender@example.net",
+    "envelope_to": ["hidden@example.com", "alias@example.com"],
+    "received_rfc3339": "2026-10-21T00:00:00Z",
+    "sources": [
+      {"kind": "cloudflare_r2", "bucket": "afmail-spool", "key": "inbox/20261021T000000Z-01234567.eml"}
+    ]
+  }
+}
+```
+
+Delivery fields are optional. `sources` also supports `{"kind":"file","path":"incoming.eml"}`.
+When identical raw bytes arrive again, afmail merges them into the existing
+message: recipient addresses form a case-insensitive, order-preserving union,
+source records are unique, and the earliest delivery timestamp is retained.
+The first available envelope sender is retained. Reading the sidecar merges
+its recipient addresses into `MessageFile.envelope_to` before identity matching,
+so a recipient hidden from To/Cc is still recognized. A matching Message-ID
+header alone never merges messages with different bytes. IMAP locations and
+Cloudflare delivery sources coexist independently on the same content identity.
+
 `human_suggestion`, when present, holds one of four outcomes. `accepted` and
 `changed` bind the current `agent_suggestion_uid` and the same review hash —
-`accepted` copies the complete Agent action, `changed` stores a complete
-replacement action. `rejected` stores no action and requires a reason, whether
+`accepted` copies the complete Agent action and may carry an optional reason,
+the person's note on what they approved; `changed` stores a complete
+replacement action and requires a reason. `rejected` stores no action and requires a reason, whether
 or not it answers a current `agent_suggestion`. `decided` has no
 `agent_suggestion_uid` at all — the person originated the disposition
 themselves — and stores a complete action. A new Agent suggestion or explicit
@@ -703,6 +733,60 @@ After `pull`, recovery may finish that step without replaying MOVE only when
 the target message is present and every planned source location is no longer
 active. A target copy by itself is not completion evidence.
 
+For an uncertain first Drafts APPEND in a send item, with every later step
+(including SMTP) explicitly pending and unstarted, use the recovery command
+instead of editing `.afmail` state:
+
+```bash
+afmail push recover PUSH_ID
+afmail push recover PUSH_ID --confirm PLAN_ID
+```
+
+The first command only checks the configured Drafts and Sent mailboxes for the
+stable RFC822 Message-ID. Confirmation repeats the checks under the workspace
+lock and repairs local state only. A unique Drafts match with no Sent match
+marks APPEND succeeded; absence in both returns APPEND to pending and retryable,
+retaining its original error. Normal local draft cancellation/requeueing is
+then available again. A Sent copy, ambiguous lookup, failed query,
+changed step plan, incomplete step evidence or started SMTP prevents recovery.
+An audit event records the checks and intended transition before writing the
+item; a failed audit write leaves the uncertain item untouched. Absence is a
+point-in-time observation and cannot exclude later server visibility or work
+by another client. Recovery never appends, sends, moves or flags remote mail.
+Preview `afmail push` again and authorize its new plan separately to continue.
+
+A send step — `smtp_send`, `cloudflare_send`, or a file reply's `file_send` —
+whose outcome is unknown can be settled only by a person, because only they can
+check whether the mail actually left:
+
+```bash
+afmail push recover PUSH_ID
+afmail push recover PUSH_ID --sent --confirm PLAN_ID
+afmail push recover PUSH_ID --not-sent --confirm PLAN_ID
+```
+
+The first command changes nothing. It returns `recovery_kind: "send_outcome"`,
+a `plan_id`, and `evidence`: the step index and label, when it started, its
+error, any provider message id and send receipt, and for email the RFC822
+Message-ID and envelope, or for a file reply its route and whether matching
+output exists. Confirmation with `--sent` marks that step succeeded; the
+remaining steps (such as appending the Sent copy) run on the next confirmed
+`afmail push`. Confirmation with `--not-sent` returns the step to pending and
+retryable, which makes any earlier push plan stale, so sending again requires a
+new preview and confirmation. `--not-sent` is refused with
+`push_recovery_sent_evidence_found` when the file output already exists with the
+same bytes. A plan id from an earlier preview is refused with
+`push_recovery_plan_changed`. Each confirmation writes a `push_recovery_settled`
+audit event recording `asserted_by: "person"` and the previous and new step
+states. The step is never replayed automatically.
+
+APPEND errors retain the server's status response, including its response code
+and text, in the error message and `server_response` error field when available.
+The durable step error retains that response for later `push list` inspection.
+An explicit rejection, or failure before the message literal is uploaded, is a
+failed step; a connection loss after upload remains `remote_outcome_unknown`.
+Old records cannot reconstruct server responses that the old library discarded.
+
 After all remote steps and local finalize stages succeed, the item first enters
 `local_stage: "audit_pending"` and persists:
 
@@ -759,6 +843,19 @@ succeeded, failed, partially applied, audit-pending, reconciled, and remaining
 items. Outbound reply send defaults mark the replied-to message with `\Seen` and
 `\Answered`; adding a message to a case does not mark remote mail as seen by
 default.
+
+Push summaries distinguish these counts:
+
+| Field | Meaning |
+| --- | --- |
+| `failed_count` | Items attempted in this batch that failed and remain queued. |
+| `unattempted_count` | Later items this batch did not attempt. |
+| `pending_queue_count` | Items from this plan still queued: unattempted + failed + audit-pending. |
+| `recovery_required_count` | Partially applied/uncertain failures + audit-pending successes. |
+
+For 31 items with 9 successes followed by 1 uncertain APPEND failure, the counts
+are `failed_count: 1`, `unattempted_count: 21`, `pending_queue_count: 22`, and
+`recovery_required_count: 1`.
 
 When a case with queued send drafts is archived locally, the archive move is a
 separate message push item persisted with `kind: "message"`. The case stays `status: archiving` under
@@ -845,9 +942,9 @@ with `afmail status`; it is a progress surface, not an audit log. A final
 
 ## Pull Cursors
 
-`.afmail/pull/cursors.json` is an afmail-managed optimization file. It uses
-`schema_name: "pull_cursors"` and `schema_version: 1`, keyed by configured
-mailbox id. Each entry records the resolved `mailbox_name`, `uid_validity`,
+`.afmail/pull/cursors.json` is an afmail-managed optimization file used only by
+IMAP pulls. It uses `schema_name: "pull_cursors"` and `schema_version: 1`, keyed
+by configured mailbox id. Each entry records the resolved `mailbox_name`, `uid_validity`,
 `highest_uid`, count of pulls since the last full reconcile, and update time.
 
 Cursor hits let a normal subsequent pull request only UIDs after `highest_uid`.
@@ -905,3 +1002,14 @@ attachments, or config secrets) and may still be present in the private
 workspace repository according to the mailbox evidence trust boundary. Treat
 `--reason` text and short summaries as durable audit metadata; use `notes.md`
 only when the user wants long-term working memory.
+
+
+## Native channel evidence
+
+Non-email messages retain original UTF-8 JSON in
+`.afmail/messages/MESSAGE_ID.message`, with the configured source id, direction,
+and timestamp. Their common materialized message includes `origin` with the
+external id and typed `reply_route`; it has no `eml_path` or RFC822 id. Native
+render documents use `content_provenance.source: file_message`. Draft frontmatter
+inherits `reply_route`. This is the same fact in Markdown and Review. See
+[channels.md](channels.md) for the v1 record and file adapter contract.

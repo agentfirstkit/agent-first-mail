@@ -14,7 +14,7 @@ mod test_fixtures;
 
 use test_container_runtime::TestContainerRuntime;
 
-const GREENMAIL_IMAGE: &str = "greenmail/standalone:2.1.14";
+const GREENMAIL_IMAGE: &str = "greenmail/standalone:2.1.15";
 const DOVECOT_IMAGE: &str = "dovecot/dovecot:2.4.5";
 const DOVECOT_VMAIL_TMPFS: &str = "/srv/vmail:uid=1000,gid=1000,mode=0755";
 const MAIL_DOMAIN: &str = "localhost";
@@ -521,7 +521,7 @@ fn container_greenmail_pull_reply_send_e2e() {
     let (status, stdout) = run(root.path(), &["remote", "test"]);
     assert_eq!(status, 0, "{stdout}");
     let remote = parse_one(&stdout);
-    assert_eq!(remote["capabilities"]["move"], true);
+    assert_eq!(remote["imap"]["capabilities"]["move"], true);
 
     // GreenMail's `setup.test.all` only provisions INBOX, so create the standard
     // mail folders the workspace config pins by name (drafts/sent/archive/junk/
@@ -586,7 +586,7 @@ fn container_greenmail_pull_reply_send_e2e() {
     assert_eq!(status, 0, "{stdout}");
     let queued = parse_one(&stdout);
     let push_id = queued["push_id"].as_str().unwrap_or_default();
-    let outbound_message_id = agent_first_mail::smtp_send::message_id_for_push(push_id);
+    let outbound_message_id = agent_first_mail::outbound::message_id_for_push(push_id);
     assert!(!outbound_message_id.is_empty());
 
     let (status, stdout) = run_confirmed_push(root.path());
@@ -806,9 +806,6 @@ fn test_config(
                     "drafts": {"import_as": "triage", "direction": "outbound"}
                 }
             },
-            // case.add queues a "case" push item that no `push` subcommand
-            // drains (categories are drafts/archive/spam/trash), so keep it
-            // effect-free — matching afmail's default — or the queue never empties.
             "case": {"add": {"steps": []}},
             "draft": {
                 "save": {"steps": [{"append_to_mailbox_id": "drafts"}]},
@@ -1201,8 +1198,8 @@ fn imap_tls_session(
 ) -> Result<imap::Session<TlsStream<TcpStream>>, String> {
     let pem =
         fs::read(tls_root_cert_path).map_err(|err| format!("read Dovecot TLS root: {err}"))?;
-    let mut pem = pem.as_slice();
-    let certs = rustls_pemfile::certs(&mut pem)
+    use rustls_connector::rustls_pki_types::{CertificateDer, pem::PemObject};
+    let certs = CertificateDer::pem_slice_iter(&pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("parse Dovecot TLS root: {err}"))?;
     let connector = RustlsConnectorConfig::new_with_webpki_root_certs()
@@ -1534,7 +1531,7 @@ fn minimal_config() -> Value {
             "case": {"add": {"steps": []}},
             "draft": {
                 "save": {"steps": []},
-                "send": {"steps": []}
+                "send": {"steps": [{"smtp_send": {}}]}
             },
             "message": {
                 "spam": {"steps": []},
@@ -2074,4 +2071,121 @@ fn container_greenmail_contact_cards_e2e() {
     let (status, stdout) = run(root.path(), &["contact", "list"]);
     assert_eq!(status, 0);
     assert_eq!(parse_one(&stdout)["count"], 1, "only p001 should be active");
+}
+
+#[cfg(feature = "cloudflare")]
+#[test]
+#[ignore]
+fn container_minio_cloudflare_spool_e2e() -> Result<(), Box<dyn std::error::Error>> {
+    use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
+    let runtime = TestContainerRuntime::selected();
+    let name = format!("afmail-minio-e2e-{}", unique_suffix());
+    let _guard = ContainerE2eGuard {
+        runtime,
+        containers: vec![name.clone()],
+    };
+    let image = std::env::var("AFMAIL_TEST_MINIO_IMAGE")
+        .unwrap_or_else(|_| "afmail-test-minio:2025-10-15".into());
+    let ports = runtime.published_ports(&[9000]);
+    runtime.success(
+        &[
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            &name,
+            "-e",
+            "MINIO_ROOT_USER=afmail-test-access",
+            "-e",
+            "MINIO_ROOT_PASSWORD=afmail-test-secret",
+            "-e",
+            "MINIO_REGION_NAME=auto",
+            "-p",
+            &ports[0].spec,
+            &image,
+            "server",
+            "/data",
+        ],
+        "start MinIO",
+    );
+    let port = runtime.mapped_port(&name, &ports[0]);
+    let endpoint = format!("http://127.0.0.1:{port}");
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .into();
+    assert!(
+        wait_until(Duration::from_secs(60), || agent
+            .get(&format!("{endpoint}/minio/health/live"))
+            .call()
+            .is_ok()),
+        "MinIO did not become ready"
+    );
+    let bucket = Bucket::new(endpoint.parse()?, UrlStyle::Path, "spool", "auto")?;
+    let credentials = Credentials::new("afmail-test-access", "afmail-test-secret");
+    agent
+        .put(
+            bucket
+                .create_bucket(&credentials)
+                .sign(Duration::from_secs(60))
+                .as_str(),
+        )
+        .send_empty()?;
+    let raw = b"Message-ID: <minio@example.net>\r\nFrom: sender@example.net\r\nTo: visible@example.net\r\nSubject: MinIO\r\n\r\nExact bytes\r\n";
+    let key = "inbox/a b+%unicode-\u{4fe1}.eml";
+    let mut put = bucket.put_object(Some(&credentials), key);
+    for (name, value) in [
+        ("x-amz-meta-envelope_from", "sender@example.net"),
+        ("x-amz-meta-envelope_to", "hidden@example.com"),
+        ("x-amz-meta-received_rfc3339", "2026-10-21T00:00:00Z"),
+    ] {
+        put.headers_mut().insert(name, value);
+    }
+    agent
+        .put(put.sign(Duration::from_secs(60)).as_str())
+        .header("x-amz-meta-envelope_from", "sender@example.net")
+        .header("x-amz-meta-envelope_to", "hidden@example.com")
+        .header("x-amz-meta-received_rfc3339", "2026-10-21T00:00:00Z")
+        .send(raw.as_slice())?;
+    let root = TempRoot::new("minio-cloudflare");
+    fs::create_dir_all(root.path())?;
+    assert_eq!(run(root.path(), &["init"]).0, 0);
+    write_json(
+        &root.path().join(".afmail/config.json"),
+        &json!({"cloudflare":{"r2":{"endpoint_url":endpoint,"bucket":"spool","access_key_id":"afmail-test-access","secret_access_key_secret":"afmail-test-secret","imported_prefix":"imported/"}},"identities":[{"identity":"me","name":"Me","email":"hidden@example.com","default":true}]}),
+    );
+    let (status, output) = run(root.path(), &["remote", "test"]);
+    assert_eq!(status, 0, "{output}");
+    let (status, output) = run(root.path(), &["pull", "--cloudflare"]);
+    assert_eq!(status, 0, "{output}");
+    let pulled = parse_one(&output);
+    assert_eq!(pulled["new_message_count"], 1);
+    assert_eq!(pulled["cloudflare"]["moved_object_count"], 1, "{pulled}");
+    let id = pulled["new_message_ids"][0]
+        .as_str()
+        .ok_or("missing message id")?;
+    assert_eq!(
+        fs::read(root.path().join(format!(".afmail/messages/{id}.eml")))?,
+        raw
+    );
+    let mut copied = agent
+        .get(
+            bucket
+                .get_object(Some(&credentials), "imported/a b+%unicode-\u{4fe1}.eml")
+                .sign(Duration::from_secs(60))
+                .as_str(),
+        )
+        .call()?;
+    assert_eq!(
+        copied
+            .headers()
+            .get("x-amz-meta-envelope_to")
+            .and_then(|value| value.to_str().ok()),
+        Some("hidden@example.com")
+    );
+    assert_eq!(copied.body_mut().read_to_vec()?, raw);
+    let (status, output) = run(root.path(), &["pull", "--cloudflare"]);
+    assert_eq!(status, 0, "{output}");
+    assert_eq!(parse_one(&output)["new_message_count"], 0);
+    Ok(())
 }

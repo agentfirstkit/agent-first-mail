@@ -1,3 +1,12 @@
+mod step_state;
+
+use step_state::{
+    ensure_step_states, legacy_move_message_id_preflight_failed, mark_step_failed,
+    mark_step_pending, mark_step_remote_outcome_unknown, step_remote_outcome_unknown,
+    step_succeeded,
+};
+pub(super) use step_state::{mark_step_recovered_pending, mark_step_succeeded};
+
 use super::*;
 use crate::remote::MailRemote;
 use crate::types::{MessageFile, RemoteLocation};
@@ -27,27 +36,29 @@ pub(super) fn push_outbound(
     let outbound = item
         .outbound()
         .ok_or_else(|| AppError::new("push_item_invalid", "push item is not outbound"))?;
+    // A local stage is written only after every remote step succeeded. Resolving
+    // steps again would read a draft that finalization may already have removed.
+    if item.local_stage.is_some() {
+        return Ok(());
+    }
     let steps = if outbound.steps.is_empty() {
         let configured = match outbound.action {
-            OutboundAction::SaveDraft => {
-                if config.actions.draft.save.steps.is_empty() {
-                    vec![ActionStep::append_to_mailbox_id("drafts")]
-                } else {
-                    config.actions.draft.save.steps.clone()
-                }
-            }
-            OutboundAction::Send => {
-                if config.actions.draft.send.steps.is_empty() {
-                    crate::config::default_draft_send_steps()
-                } else {
-                    config.actions.draft.send.steps.clone()
-                }
-            }
+            OutboundAction::SaveDraft => config.actions.draft.save.steps.clone(),
+            OutboundAction::Send => config.actions.draft.send.steps.clone(),
         };
         filter_reply_to_steps(root, item, configured)?
     } else {
         outbound.steps.clone()
     };
+    // Before the first step: a missing send feature must not leave an earlier
+    // Drafts APPEND applied with nothing to send it.
+    require_compiled_send_features(&steps)?;
+    if outbound.action == OutboundAction::SaveDraft && steps.is_empty() {
+        return Err(
+            AppError::new("draft_upload_unavailable", "draft upload is not configured")
+                .with_hint("Configure actions.draft.save.steps before uploading drafts."),
+        );
+    }
     execute_tracked_steps(
         PushExecutionContext {
             root,
@@ -67,6 +78,31 @@ pub(super) fn filter_reply_to_steps(
     item: &PushItem,
     steps: Vec<ActionStep>,
 ) -> Result<Vec<ActionStep>> {
+    if let Some(outbound) = item.outbound()
+        && let Some(fm) = draft_frontmatter(root, &outbound.case_uid, &outbound.draft_name)?
+        && fm.reply_route.is_some()
+    {
+        if outbound.action != OutboundAction::Send {
+            return Err(AppError::new(
+                "channel_operation_unsupported",
+                "file channels do not upload remote drafts",
+            ));
+        }
+        let steps = vec![ActionStep {
+            file_send: Some(BTreeMap::new()),
+            ..ActionStep::default()
+        }];
+        return Ok(steps);
+    }
+    // file_send is chosen only from a reply route above. An email draft has no
+    // file destination, so a configured one could only fail after earlier steps.
+    if steps.iter().any(|step| step.file_send.is_some()) {
+        return Err(AppError::new(
+            "channel_operation_unsupported",
+            "file_send applies only to drafts with a file reply route; this email draft cannot use it",
+        )
+        .with_details(json!({"push_id": item.push_id.as_str(), "remote_calls_started": false})));
+    }
     if !steps
         .iter()
         .any(|step| step.on == Some(ActionStepOn::ReplyToMessage))
@@ -80,6 +116,45 @@ pub(super) fn filter_reply_to_steps(
             .collect());
     }
     Ok(steps)
+}
+
+/// Refuse while planning a send this build cannot perform. Execution would
+/// otherwise reach it only after earlier steps, such as a Drafts APPEND, had
+/// already changed the mailbox.
+pub(super) fn require_compiled_send_features(steps: &[ActionStep]) -> Result<()> {
+    const COMPILED: [(&str, bool); 3] = [
+        ("cloudflare", cfg!(feature = "cloudflare")),
+        ("smtp", cfg!(feature = "smtp")),
+        ("files", cfg!(feature = "files")),
+    ];
+    match missing_send_feature(steps, |feature| COMPILED.contains(&(feature, true))) {
+        None => Ok(()),
+        Some((label, feature)) => Err(AppError::new(
+            "feature_disabled",
+            format!(
+                "{label} requires the {feature} feature, which this afmail build does not include"
+            ),
+        )
+        .with_details(json!({"feature": feature, "step": label, "remote_calls_started": false}))),
+    }
+}
+
+fn missing_send_feature(
+    steps: &[ActionStep],
+    compiled: impl Fn(&str) -> bool,
+) -> Option<(&'static str, &'static str)> {
+    steps.iter().find_map(|step| {
+        let required = if step.cloudflare_send.is_some() {
+            ("cloudflare_send", "cloudflare")
+        } else if step.smtp_send.is_some() {
+            ("smtp_send", "smtp")
+        } else if step.file_send.is_some() {
+            ("file_send", "files")
+        } else {
+            return None;
+        };
+        (!compiled(required.1)).then_some(required)
+    })
 }
 
 pub(super) fn should_skip_reply_to_steps(root: &Path, item: &PushItem) -> Result<bool> {
@@ -142,13 +217,13 @@ pub(super) fn prepare_current_outbound(
     ensure_draft_file_exists(root, case_uid, draft_name, &draft_path)?;
     let workspace = crate::store::Workspace::at(root);
     workspace.validate_draft_for_push(case_uid, draft_name, &case_path, outbound.action)?;
-    crate::smtp_send::prepare_outbound(
+    crate::outbound::prepare_outbound(
         root,
         &case_path,
         case_uid,
         draft_name,
         config,
-        Some(&crate::smtp_send::message_id_for_push(&item.push_id)),
+        Some(&crate::outbound::message_id_for_push(&item.push_id)),
         Some(&item.created_rfc3339),
     )
 }
@@ -431,130 +506,6 @@ fn push_step_progress_fields(
     value
 }
 
-fn ensure_step_states(item: &mut PushItem, steps: &[ActionStep]) {
-    for (index, step) in steps.iter().enumerate() {
-        if !item.step_states.iter().any(|state| state.index == index) {
-            item.step_states.push(PushStepState {
-                index,
-                label: step_label(step),
-                status: PushStepStatus::Pending,
-                started_rfc3339: None,
-                completed_rfc3339: None,
-                result_summary: None,
-                error_code: None,
-                error: None,
-                retryable: None,
-            });
-        }
-    }
-    item.step_states.retain(|state| state.index < steps.len());
-    item.step_states.sort_by_key(|state| state.index);
-}
-
-fn step_succeeded(item: &PushItem, index: usize) -> bool {
-    item.step_states
-        .iter()
-        .any(|state| state.index == index && state.status == PushStepStatus::Succeeded)
-}
-
-fn step_remote_outcome_unknown(item: &PushItem, index: usize) -> bool {
-    item.step_states
-        .iter()
-        .any(|state| state.index == index && state.status == PushStepStatus::RemoteOutcomeUnknown)
-}
-
-fn legacy_move_message_id_preflight_failed(
-    item: &PushItem,
-    index: usize,
-    step: &ActionStep,
-) -> bool {
-    if item.message_action().is_none()
-        || step.move_to_mailbox_id.is_none()
-        || !step.add_flags.is_empty()
-        || step.append_to_mailbox_id.is_some()
-        || step.smtp_send.is_some()
-    {
-        return false;
-    }
-    item.step_states.iter().any(|state| {
-        state.index == index
-            && state.error_code.as_deref() == Some("rfc822_message_id_missing")
-            && item.message_ids().iter().any(|message_id| {
-                state.error.as_deref()
-                    == Some(
-                        format!(
-                            "message cannot be relocated after remote move without Message-ID: {message_id}"
-                        )
-                        .as_str(),
-                    )
-            })
-    })
-}
-
-fn step_state_mut(item: &mut PushItem, index: usize) -> Option<&mut PushStepState> {
-    item.step_states
-        .iter_mut()
-        .find(|state| state.index == index)
-}
-
-fn mark_step_pending(item: &mut PushItem, index: usize, step: &ActionStep) {
-    freeze_message_action_snapshot(item);
-    let now = crate::store::now_rfc3339();
-    if let Some(state) = step_state_mut(item, index) {
-        state.label = step_label(step);
-        state.status = PushStepStatus::Pending;
-        state.started_rfc3339 = Some(now);
-        state.completed_rfc3339 = None;
-        state.result_summary = None;
-        state.error_code = None;
-        state.error = None;
-        state.retryable = None;
-    }
-    item.updated_rfc3339 = crate::store::now_rfc3339();
-}
-
-fn freeze_message_action_snapshot(item: &mut PushItem) {
-    let snapshot = item.planned_message_action.clone();
-    let PushPayload::Message(message) = &mut item.payload else {
-        return;
-    };
-    if message.message_action_snapshot.is_none() {
-        message.message_action_snapshot = snapshot;
-    }
-}
-
-fn mark_step_succeeded(item: &mut PushItem, index: usize, step: &ActionStep) {
-    let now = crate::store::now_rfc3339();
-    if let Some(state) = step_state_mut(item, index) {
-        state.label = step_label(step);
-        state.status = PushStepStatus::Succeeded;
-        if state.started_rfc3339.is_none() {
-            state.started_rfc3339 = Some(now.clone());
-        }
-        state.completed_rfc3339 = Some(now);
-        state.result_summary = Some(step_result_summary(step).to_string());
-        state.error_code = None;
-        state.error = None;
-        state.retryable = None;
-    }
-}
-
-fn mark_step_failed(item: &mut PushItem, index: usize, step: &ActionStep, err: &AppError) {
-    let now = crate::store::now_rfc3339();
-    if let Some(state) = step_state_mut(item, index) {
-        state.label = step_label(step);
-        state.status = PushStepStatus::Failed;
-        if state.started_rfc3339.is_none() {
-            state.started_rfc3339 = Some(now.clone());
-        }
-        state.completed_rfc3339 = Some(now);
-        state.result_summary = None;
-        state.error_code = Some(err.error_code.to_string());
-        state.error = Some(err.message.clone());
-        state.retryable = Some(err.retryable);
-    }
-}
-
 fn persist_remote_outcome_unknown(
     root: &Path,
     item: &mut PushItem,
@@ -567,33 +518,23 @@ fn persist_remote_outcome_unknown(
     write_item(root, item)
 }
 
-fn mark_step_remote_outcome_unknown(
-    item: &mut PushItem,
-    index: usize,
-    step: &ActionStep,
-    err: Option<&AppError>,
-) {
-    let now = crate::store::now_rfc3339();
-    if let Some(state) = step_state_mut(item, index) {
-        state.label = step_label(step);
-        state.status = PushStepStatus::RemoteOutcomeUnknown;
-        if state.started_rfc3339.is_none() {
-            state.started_rfc3339 = Some(now);
-        }
-        state.completed_rfc3339 = None;
-        state.result_summary = Some("remote outcome unknown".to_string());
-        state.error_code = err.map(|err| err.error_code.to_string());
-        state.error = err.map(|err| err.message.clone());
-        state.retryable = Some(false);
-    }
-}
-
 fn recover_remote_outcome_unknown_step(
     context: PushExecutionContext<'_>,
     item: &mut PushItem,
     index: usize,
     step: &ActionStep,
 ) -> Result<bool> {
+    if step.file_send.is_some() {
+        let prepared = prepare_current_outbound(context.root, context.config, item)?;
+        if !crate::channels::output_confirmed(context.root, context.config, &prepared)? {
+            return Ok(false);
+        }
+        mark_step_succeeded(item, index, step);
+        item.updated_rfc3339 = crate::store::now_rfc3339();
+        item.last_error = None;
+        write_item(context.root, item)?;
+        return Ok(true);
+    }
     if let Some(mailbox_id) = &step.append_to_mailbox_id {
         return recover_remote_outcome_unknown_append(context, item, index, step, mailbox_id);
     }
@@ -804,10 +745,10 @@ fn append_rfc822_message_ids(root: &Path, item: &PushItem) -> Result<Vec<String>
         .collect()
 }
 
-fn outbound_rfc822_message_id(item: &PushItem) -> String {
+pub(super) fn outbound_rfc822_message_id(item: &PushItem) -> String {
     format!(
         "<{}@afmail.local>",
-        crate::smtp_send::message_id_for_push(&item.push_id)
+        crate::outbound::message_id_for_push(&item.push_id)
     )
 }
 
@@ -824,24 +765,51 @@ fn remote_outcome_unknown_error(
         "step_index": index + 1,
         "label": label.as_str(),
         "step_status": "remote_outcome_unknown",
-        "suggested_commands": [
-            "afmail push list",
-            "afmail doctor"
-        ]
+        "suggested_commands": ["afmail push list", "afmail doctor"]
     });
     if let Some(mailbox_id) = step.append_to_mailbox_id.as_deref()
         && let Value::Object(map) = &mut details
     {
         map.insert("append_to_mailbox_id".to_string(), json!(mailbox_id));
+        if index == 0 && item.draft().is_some() && label == "append_to_mailbox_id_drafts" {
+            map.insert(
+                "suggested_commands".to_string(),
+                json!([
+                    format!("afmail push recover {}", item.push_id),
+                    "afmail push list".to_string(),
+                    "afmail doctor".to_string()
+                ]),
+            );
+        }
         if let Ok(message_ids) = append_rfc822_message_ids(root, item) {
             map.insert("rfc822_message_ids".to_string(), json!(message_ids));
         }
+    }
+    if step.is_send()
+        && item.draft().is_some()
+        && let Value::Object(map) = &mut details
+    {
+        map.insert(
+            "suggested_commands".to_string(),
+            json!([
+                format!("afmail push recover {}", item.push_id),
+                "afmail push list".to_string()
+            ]),
+        );
     }
     if let Some(cause) = cause
         && let Value::Object(map) = &mut details
     {
         map.insert("cause_error_code".to_string(), json!(cause.error_code));
         map.insert("cause_error".to_string(), json!(cause.message.as_str()));
+        map.insert("cause_details".to_string(), json!(cause.details));
+    }
+    if cause.is_none()
+        && let Some(state) = item.step_states.iter().find(|state| state.index == index)
+        && let Value::Object(map) = &mut details
+    {
+        map.insert("cause_error_code".to_string(), json!(state.error_code));
+        map.insert("cause_error".to_string(), json!(state.error));
     }
     AppError::new(
         "push_remote_outcome_unknown",
@@ -850,23 +818,9 @@ fn remote_outcome_unknown_error(
         ),
     )
     .with_hint(
-        "Inspect the remote mailbox or SMTP outcome before retrying. Append steps and moves whose target-UID lookup failed after a completed move can resume only after the target Message-ID is found.",
+        "Inspect the remote mailbox or sending provider outcome; afmail never retries it automatically. For an uncertain first Drafts APPEND with sending unstarted, or an uncertain send, run `afmail push recover PUSH_ID` and confirm the recovery plan it returns (a send is settled with --sent or --not-sent after checking the provider or recipient). Other append steps and completed moves require positive target Message-ID evidence.",
     )
     .with_details(details)
-}
-
-fn step_result_summary(step: &ActionStep) -> &'static str {
-    if step.smtp_send.is_some() {
-        "smtp_send succeeded"
-    } else if step.append_to_mailbox_id.is_some() {
-        "append succeeded"
-    } else if step.move_to_mailbox_id.is_some() {
-        "move succeeded"
-    } else if !step.add_flags.is_empty() {
-        "flags updated"
-    } else {
-        "noop succeeded"
-    }
 }
 
 pub(super) fn execute_outbound_step(
@@ -878,8 +832,49 @@ pub(super) fn execute_outbound_step(
     item.outbound()
         .ok_or_else(|| AppError::new("push_item_invalid", "push item is not outbound"))?;
     let prepared = prepare_current_outbound(context.root, context.config, item)?;
+    if step.file_send.is_some() {
+        // Local preconditions first, and they fail the step outright: the
+        // delivery must be a file route whose source is configured and whose
+        // stored message decodes. The check only reads, so nothing is published.
+        if !matches!(prepared.delivery, crate::types::OutboundDelivery::File(_)) {
+            return Err(AppError::new(
+                "channel_operation_unsupported",
+                "file_send requires a draft with a file reply route",
+            )
+            .with_details(json!({"remote_calls_started": false})));
+        }
+        crate::channels::output_confirmed(context.root, context.config, &prepared)?;
+        // Persist uncertainty before the atomic publication. A consumer might
+        // remove the output immediately, so absence can never authorize replay.
+        // A publish error tagged `remote_calls_started: false` still fails the
+        // step as not applied (see `remote_effect_not_applied`).
+        persist_remote_outcome_unknown(context.root, item, index, step)?;
+        crate::channels::publish(context.root, context.config, &prepared)?;
+    }
+    if step.cloudflare_send.is_some() {
+        context.remote.prepare_cloudflare_send(&prepared)?;
+        persist_remote_outcome_unknown(context.root, item, index, step)?;
+        let receipt = context.remote.send_cloudflare_raw_message(&prepared)?;
+        let accepted = !receipt.delivered.is_empty() || !receipt.queued.is_empty();
+        let state = item
+            .step_states
+            .iter_mut()
+            .find(|state| state.index == index)
+            .ok_or_else(|| AppError::new("push_item_invalid", "send step state is missing"))?;
+        state.send_receipt = Some(receipt);
+        if !accepted {
+            return Err(AppError::new(
+                "cloudflare_send_no_recipients_accepted",
+                "Cloudflare reported no accepted recipients; inspect the send receipt",
+            )
+            .with_details(
+                json!({"remote_effect_rejected": true, "send_receipt": state.send_receipt}),
+            ));
+        }
+    }
     if step.smtp_send.is_some() {
         validate_smtp_send_attempt(context.config, &prepared)?;
+        let prepared = prepared.email()?;
         // Local construction first, and it fails the step outright. Only what
         // happens after this line could have delivered mail, so only what
         // happens after it deserves an unknown outcome.
@@ -916,6 +911,7 @@ fn validate_smtp_send_attempt(
     prepared: &crate::types::PreparedOutbound,
 ) -> Result<()> {
     config.require_smtp()?;
+    let prepared = prepared.email()?;
     prepared
         .envelope_from
         .parse::<lettre::address::Address>()
@@ -984,10 +980,10 @@ pub(super) fn execute_message_step(
             appended_any = true;
         }
     }
-    if step.smtp_send.is_some() {
+    if step.is_send() {
         return Err(AppError::new(
             "push_item_invalid",
-            "smtp_send is only valid for outbound push items",
+            "send operations are only valid for outbound push items",
         ));
     }
     Ok(())
@@ -1089,6 +1085,16 @@ pub(super) fn execute_move(
         if location.mailbox_name == target {
             continue;
         }
+        // Each success is relocated locally before the next MOVE, so a retry
+        // after a later location failed finds the earlier source gone and the
+        // message already in the target. Replaying it would MOVE a UID that no
+        // longer exists there.
+        if active_locations
+            .get(&location.message_id)
+            .is_some_and(|existing| already_moved(existing, location, &target))
+        {
+            continue;
+        }
         let rfc822_message_id = rfc822_ids
             .get(&location.message_id)
             .ok_or_else(|| {
@@ -1149,6 +1155,19 @@ pub(super) fn execute_move(
         workspace.relocate_message(&location.message_id, message_locations)?;
     }
     Ok(())
+}
+
+fn already_moved(
+    existing: &[crate::types::RemoteLocation],
+    source: &PushLocation,
+    target: &str,
+) -> bool {
+    !existing
+        .iter()
+        .any(|location| remote_location_matches_push(location, source))
+        && existing
+            .iter()
+            .any(|location| location.mailbox_name == target)
 }
 
 pub(super) fn mailbox_is_kind(config: &MailConfig, mailbox_id: &str, kind: SpecialUseKind) -> bool {
@@ -1212,6 +1231,236 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recovered_step_retains_diagnostic_until_a_new_attempt_starts() {
+        let step = ActionStep::default();
+        let mut item = outbound_item("push_recovered", Vec::new());
+        ensure_step_states(&mut item, std::slice::from_ref(&step));
+        mark_step_pending(&mut item, 0, &step);
+        mark_step_remote_outcome_unknown(
+            &mut item,
+            0,
+            &step,
+            Some(&AppError::new("connection_lost", "remote reply lost")),
+        );
+        let receipt = crate::senders::SendReceipt {
+            message_id: "<receipt@example.com>".into(),
+            delivered: vec![],
+            queued: vec![],
+            permanent_bounces: vec![],
+            suppressed_recipients: vec![],
+        };
+        item.step_states[0].send_receipt = Some(receipt.clone());
+        mark_step_recovered_pending(&mut item.step_states[0], "settled as not sent");
+        let recovered = &item.step_states[0];
+        assert_eq!(recovered.status, PushStepStatus::Pending);
+        assert_eq!(recovered.error_code.as_deref(), Some("connection_lost"));
+        assert_eq!(recovered.send_receipt, Some(receipt));
+        assert!(recovered.started_rfc3339.is_none());
+        assert!(recovered.completed_rfc3339.is_none());
+        assert_eq!(recovered.retryable, Some(true));
+
+        mark_step_pending(&mut item, 0, &step);
+        let attempt = &item.step_states[0];
+        assert!(attempt.started_rfc3339.is_some());
+        assert!(attempt.completed_rfc3339.is_none());
+        assert!(attempt.error_code.is_none());
+        assert!(attempt.error.is_none());
+        assert!(attempt.retryable.is_none());
+        assert!(attempt.send_receipt.is_none());
+        let started = attempt.started_rfc3339.clone();
+        mark_step_succeeded(&mut item, 0, &step);
+        assert_eq!(item.step_states[0].started_rfc3339, started);
+        assert!(item.step_states[0].completed_rfc3339.is_some());
+    }
+
+    #[test]
+    fn cloudflare_submission_retains_receipt_and_never_replays_a_started_send() {
+        for outcome in ["accepted", "rejected", "unknown", "no_recipients"] {
+            let root = temp_root(outcome);
+            assert!(crate::store::Workspace::at(&root).init().is_ok());
+            let config = MailConfig::default();
+            let remote = crate::remote::FakeMailRemote::default();
+            let step = ActionStep::cloudflare_send();
+            let receipt = crate::senders::SendReceipt {
+                message_id: "<provider@example.com>".into(),
+                delivered: if outcome == "no_recipients" {
+                    vec![]
+                } else {
+                    vec!["visible@example.com".into()]
+                },
+                queued: vec![],
+                permanent_bounces: if outcome == "no_recipients" {
+                    vec!["visible@example.com".into(), "hidden@example.com".into()]
+                } else {
+                    vec!["hidden@example.com".into()]
+                },
+                suppressed_recipients: vec![],
+            };
+            remote
+                .cloudflare_send_results
+                .borrow_mut()
+                .push_back(match outcome {
+                    "rejected" => Err(AppError::new("cloudflare_send_rejected", "rejected")
+                        .with_details(json!({"remote_effect_rejected": true}))),
+                    "unknown" => Err(AppError::new("cloudflare_send_failed", "lost response")),
+                    _ => Ok(receipt.clone()),
+                });
+            let mut item = outbound_item("push_cloudflare", vec![]);
+            item.planned_outbound_message = Some(crate::types::PreparedOutbound {
+                message_id: "<local@example.com>".into(),
+                raw: b"private evidence".to_vec(),
+                delivery: crate::types::OutboundDelivery::Email(crate::types::PreparedEmail {
+                    delivery_raw: b"delivery MIME".to_vec(),
+                    envelope_from: "sender@example.com".into(),
+                    envelope_to: vec!["visible@example.com".into(), "hidden@example.com".into()],
+                }),
+            });
+            let result = execute_tracked_steps(
+                context(&root, &config, &remote),
+                &mut item,
+                std::slice::from_ref(&step),
+                None,
+                execute_outbound_step,
+            );
+            let persisted =
+                PushItem::parse_json(&fs::read_to_string(push_path(&root, &item.push_id)).unwrap())
+                    .unwrap();
+            assert_eq!(persisted.step_states, item.step_states);
+            if outcome == "accepted" {
+                assert!(result.is_ok());
+                assert_eq!(persisted.step_states[0].send_receipt, Some(receipt));
+                assert_eq!(
+                    super::super::push_success_value(&item)["send_receipts"][0]["permanent_bounces"],
+                    json!(["hidden@example.com"])
+                );
+            } else {
+                assert!(result.is_err());
+                assert_eq!(
+                    item.step_states[0].status,
+                    if outcome == "unknown" {
+                        PushStepStatus::RemoteOutcomeUnknown
+                    } else {
+                        PushStepStatus::Failed
+                    }
+                );
+            }
+            if outcome == "accepted" || outcome == "unknown" {
+                let second = execute_tracked_steps(
+                    context(&root, &config, &remote),
+                    &mut item,
+                    std::slice::from_ref(&step),
+                    None,
+                    execute_outbound_step,
+                );
+                assert_eq!(second.is_ok(), outcome == "accepted");
+                assert_eq!(remote.cloudflare_send_requests.borrow().len(), 1);
+            }
+            if outcome == "accepted" {
+                super::super::prepare_push_audit_pending(&root, &mut item).unwrap();
+                super::super::complete_successful_push_audit(&root, &mut item).unwrap();
+                assert!(!push_path(&root, &item.push_id).exists());
+                let audit = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap();
+                let event: Value = audit
+                    .lines()
+                    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                    .find(|event| event["kind"] == "push_succeeded")
+                    .unwrap();
+                assert_eq!(
+                    event["send_receipts"][0]["message_id"],
+                    "<provider@example.com>"
+                );
+            }
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn file_send_local_precondition_failures_fail_the_step_without_uncertainty() {
+        let route = crate::channels::ReplyRoute {
+            channel: crate::channels::ChannelKind::File,
+            source_id: "unconfigured".into(),
+            conversation_id: "thread".into(),
+        };
+        let email = crate::types::OutboundDelivery::Email(crate::types::PreparedEmail {
+            delivery_raw: b"delivery MIME".to_vec(),
+            envelope_from: "sender@example.com".into(),
+            envelope_to: vec!["visible@example.com".into()],
+        });
+        for (name, delivery, code) in [
+            ("email", email, "channel_operation_unsupported"),
+            (
+                "unrouted",
+                crate::types::OutboundDelivery::File(route),
+                if cfg!(feature = "files") {
+                    "config_missing"
+                } else {
+                    "feature_disabled"
+                },
+            ),
+        ] {
+            let root = temp_root(&format!("file-send-{name}"));
+            assert!(crate::store::Workspace::at(&root).init().is_ok());
+            let config = MailConfig::default();
+            let remote = crate::remote::FakeMailRemote::default();
+            let step = ActionStep {
+                file_send: Some(BTreeMap::new()),
+                ..ActionStep::default()
+            };
+            let mut item = outbound_item("push_file_send", vec![]);
+            item.planned_outbound_message = Some(crate::types::PreparedOutbound {
+                message_id: "local".into(),
+                raw: b"{}".to_vec(),
+                delivery,
+            });
+            let error = execute_tracked_steps(
+                context(&root, &config, &remote),
+                &mut item,
+                std::slice::from_ref(&step),
+                None,
+                execute_outbound_step,
+            )
+            .unwrap_err();
+            assert_eq!(error.error_code, code);
+            let persisted =
+                PushItem::parse_json(&fs::read_to_string(push_path(&root, &item.push_id)).unwrap())
+                    .unwrap();
+            assert_eq!(persisted.step_states[0].status, PushStepStatus::Failed);
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn send_steps_need_their_feature_compiled_before_any_plan_is_offered() {
+        let steps = vec![
+            ActionStep {
+                append_to_mailbox_id: Some("drafts".into()),
+                ..ActionStep::default()
+            },
+            ActionStep::cloudflare_send(),
+        ];
+        assert_eq!(missing_send_feature(&steps, |_| true), None);
+        assert_eq!(
+            missing_send_feature(&steps, |feature| feature != "cloudflare"),
+            Some(("cloudflare_send", "cloudflare"))
+        );
+        let smtp = [ActionStep {
+            smtp_send: Some(BTreeMap::new()),
+            ..ActionStep::default()
+        }];
+        assert_eq!(
+            missing_send_feature(&smtp, |feature| feature != "smtp"),
+            Some(("smtp_send", "smtp"))
+        );
+        // The real gate mirrors this build's features.
+        let compiled = require_compiled_send_features(&steps);
+        if cfg!(feature = "cloudflare") {
+            assert!(compiled.is_ok());
+        } else {
+            assert_eq!(compiled.unwrap_err().error_code, "feature_disabled");
+        }
+    }
+
     fn message_action_item(
         push_id: &str,
         action: MessagePushAction,
@@ -1256,6 +1505,7 @@ mod tests {
             started_rfc3339: Some("2026-06-09T00:00:00Z".to_string()),
             completed_rfc3339: None,
             result_summary: None,
+            send_receipt: None,
             error_code: None,
             error: None,
             retryable: None,
@@ -1952,6 +2202,15 @@ mod tests {
             json!("INBOX")
         );
         assert_eq!(second["remote"]["locations"][0]["uid"], json!(2));
+
+        // A retry moves only what is still in its source mailbox.
+        remote.move_requests.borrow_mut().clear();
+        let retry = execute_move(&root, &remote, &item, &locations, "junk");
+        assert!(retry.is_ok(), "{retry:?}");
+        assert_eq!(
+            remote.move_requests.borrow().as_slice(),
+            &[("INBOX".to_string(), 44, 2, "junk".to_string())]
+        );
         let _ = fs::remove_dir_all(root);
     }
 

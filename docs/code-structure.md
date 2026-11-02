@@ -19,8 +19,9 @@ maintenance guide for contributors; user-facing mailbox behavior is documented i
    serving, and thin handlers that enter the same runner dispatch as CLI calls.
 
 Most behavior then lands in `src/store/Workspace`, which owns the file-first
-mailbox workspace. Network-facing code stays outside the store in `imap_pull/`,
-`imap_client.rs`, `smtp_send.rs`, `remote.rs`, and `push_queue/`.
+mailbox workspace. Network-facing and channel I/O stays outside the store in
+`sources/`, `channels/`, `imap_client.rs`, `outbound.rs`, `senders/`,
+`remote.rs`, and `push_queue/`.
 
 ## Source Map
 
@@ -32,9 +33,13 @@ src/
   api/               HTTP handlers, typed DTOs, OpenAPI/Schema generation and export
   config/            typed config schema, defaults, key access, and validation
   store/             workspace file model and local state transitions
-  imap_pull/         read-only IMAP pull sessions, remote identity, special-use folders
+  ingest/            shared content identity, deduplication, storage, and delivery merging
+  sources/imap/      IMAP sessions, UID cursors, flags, and special-use folders
+  sources/cloudflare/ R2 S3 client, object ingestion, Queue consumption, durable agent tasks, and Worker scaffold
+  channels/          native JSON file adapter: bounded inbox reads and atomic outbox publication
   imap_client.rs     low-level IMAP session, mailbox info, and move outcomes
-  smtp_send.rs       outbound message construction and SMTP sending
+  outbound.rs        transport-independent MIME construction and local sent evidence
+  senders/           feature-gated SMTP and Cloudflare REST submission
   remote.rs          MailRemote trait over IMAP/SMTP side effects, plus the test fake
   push_queue/        durable local push items plus preview/execute helpers
   types/             stable ids, message/case/archive/push DTOs
@@ -50,9 +55,12 @@ src/
   progress.rs        workspace progress snapshot sink and status projection
   error.rs           AppError type with structured error codes and hints
   util.rs            crate-wide atomic-write, hashing, and flag helpers
+  layout.rs          workspace directory and file name constants
+  demo/              demo workspace and server
   workspace_identity.rs  immutable workspace UID file
   workspace_lock.rs      external runtime lock-file guard
   plan_id.rs             canonical workspace-bound plan digest
+  sources/consumer_shutdown.rs CLI-owned consumer signal cancellation and idle waits
 ```
 
 ## Store Modules
@@ -75,15 +83,21 @@ high-level wiring. Sibling modules add focused `impl Workspace` blocks:
 - `remote_sync.rs` owns the `pull` entrypoint (`Workspace::pull` /
   `pull_with_progress`, dispatched for `afmail pull`), reconciles local references
   with remote IMAP locations, and exposes remote-location helpers used by push
-  execution. The IMAP I/O it drives lives in `imap_pull/`.
+  execution. It selects IMAP, Cloudflare, and file sources; their I/O lives in
+  `sources/imap/`, `sources/cloudflare/`, and `channels/files.rs`.
 - `triage.rs` and `render.rs` build generated Markdown read views and shared
   message rendering context.
+- Relationship reads use complete current caches, consulting native evidence
+  only for legacy caches. Unreadable unrelated records become shared typed
+  diagnostics; disposition guards require a complete index.
 - `drafts.rs` owns draft creation, queue validation, and attachment bookkeeping
   for cases. `draft_content.rs` owns the body schema and authored/outbound
   projections; `types/draft.rs` owns intent/status/completeness enums shared by
   CLI output and typed Review documents.
-- `push_state.rs`, `purge.rs`, `doctor.rs`, and `transactions.rs` own narrower
-  maintenance concerns.
+- `readiness.rs` derives `status.readiness` from configuration alone.
+- `push_state.rs`, `purge.rs`, `doctor.rs`, `transactions.rs`, `migration.rs`,
+  `idempotency.rs`, `render_cache.rs`, `storage_usage.rs`, and `suggestions.rs`
+  own narrower maintenance concerns.
 - `util.rs` contains store-private filesystem, id, path, timestamp, and audit
   helpers shared by the modules above.
 
@@ -219,16 +233,24 @@ repository root:
 ```
 
 `static` covers formatting, Clippy for the default set, the empty feature set,
-and each standalone `api`, `demo`, and `review` feature, plus generated CLI
+and each standalone `api`, `demo`, `review`, `cloudflare`, `files`, and `smtp` feature, plus generated CLI
 documentation drift, manifest JSON validity, and a dependency-tree assertion
-that `axum` and `tokio` are absent when default features are disabled. `unit`
-runs default-feature tests; `minimal` runs the same crate with no default
-features. `all` runs all three. Do not replace these entry points with
+that `axum`, `tokio`, `ureq`, `rusty-s3`, and SMTP transport are absent when
+default features are disabled. It also checks the live-test script's argument
+parser without touching cloud resources. `lib [FILTER]` runs focused library
+tests. `unit`
+runs all-feature tests; `minimal` runs the same crate with no default
+features. `all` runs those gates plus the Worker gate. Do not replace these entry points with
 hand-written Cargo command sequences.
 
-The default feature set is `api,demo,review`. Disabled implementations are not
-compiled, but their command shapes remain discoverable and return a structured
-`feature_disabled` error. Keep the small fallback modules free of the optional
+The default feature set is `api,demo,review,cloudflare,smtp,files`. IMAP remains part of
+the core because remote reconciliation and the push queue depend on it. SMTP
+transport is optional; the core retains only lettre's MIME builder. Cloudflare
+receiving and sending share the `cloudflare` feature; file channels use `files`.
+Disabled implementations are not compiled, but their command shapes remain
+discoverable and return a structured `feature_disabled` error. A push plan with a
+send step whose feature is not compiled in is rejected with `feature_disabled` at
+preview time, before any remote effect. Keep the small fallback modules free of the optional
 dependencies so `--no-default-features` remains a real capability boundary.
 
 Use focused modes for large integration targets instead of ad hoc Cargo command
@@ -309,3 +331,26 @@ For an automated scripted demo pass, use:
 ```bash
 ./scripts/test.sh greenmail
 ```
+
+## Cloudflare Worker validation
+
+`scripts/test.sh worker` generates the embedded project in a temporary directory,
+installs its lockfile, checks TypeScript, runs the Workers runtime tests, and
+runs both Wrangler and cf deployment dry-runs. Build outputs and dependencies
+never enter the embedded template. This gate is included in all, release, and
+full checks and requires Node.js 24+.
+
+The MinIO container e2e uses a local image built from the fixed official
+`RELEASE.2025-10-15T17-29-55Z` source because the original public image is no
+longer available. The fixed e2e script builds that image on first use, using
+Go 1.24.8 and a scratch Dockerfile; subsequent runs reuse it. It verifies real
+S3 signatures, delivery metadata, exact bytes, and CopyObject with encoded keys.
+
+## Event-driven receipt
+
+`cloudflare consume` runs one Queue tick; `cloudflare watch` supervises ticks and
+periodic R2 scans without a model. `sources/cloudflare/queue.rs` owns the HTTP
+pull/ack wire boundary, `journal.rs` owns import receipts and durable notification
+intent, and `consumer.rs` owns replay, cleanup, and handler dispatch outside the
+workspace lock. The process lock still excludes overlapping consumer ticks.
+See [the design and deployment guide](cloudflare-consumer.md).

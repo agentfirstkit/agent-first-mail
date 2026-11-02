@@ -388,7 +388,11 @@ impl Workspace {
             }
         }
         if !change.to.is_empty() {
-            let to = normalize_recipient_list(change.to, "to")?;
+            let to = if fm.reply_route.is_some() {
+                change.to.to_vec()
+            } else {
+                normalize_recipient_list(change.to, "to")?
+            };
             if fm.to != to {
                 fm.to = to;
                 changed_fields.push("to".to_string());
@@ -400,7 +404,11 @@ impl Workspace {
                 changed_fields.push("cc".to_string());
             }
         } else if !change.cc.is_empty() {
-            let cc = normalize_recipient_list(change.cc, "cc")?;
+            let cc = if fm.reply_route.is_some() {
+                change.cc.to_vec()
+            } else {
+                normalize_recipient_list(change.cc, "cc")?
+            };
             if fm.cc != cc {
                 fm.cc = cc;
                 changed_fields.push("cc".to_string());
@@ -412,7 +420,11 @@ impl Workspace {
                 changed_fields.push("bcc".to_string());
             }
         } else if !change.bcc.is_empty() {
-            let bcc = normalize_recipient_list(change.bcc, "bcc")?;
+            let bcc = if fm.reply_route.is_some() {
+                change.bcc.to_vec()
+            } else {
+                normalize_recipient_list(change.bcc, "bcc")?
+            };
             if fm.bcc != bcc {
                 fm.bcc = bcc;
                 changed_fields.push("bcc".to_string());
@@ -494,6 +506,19 @@ impl Workspace {
     }
 
     pub fn upload_draft(&self, case_ref: &str, draft_name: &str) -> Result<Value> {
+        if MailConfig::load(&self.root)?
+            .actions
+            .draft
+            .save
+            .steps
+            .is_empty()
+        {
+            return Err(AppError::new(
+                "draft_upload_unavailable",
+                "draft upload is not configured",
+            )
+            .with_hint("Configure actions.draft.save.steps before uploading drafts."));
+        }
         self.queue_draft(case_ref, draft_name, OutboundAction::SaveDraft)
     }
 
@@ -606,24 +631,28 @@ impl Workspace {
         if outbound.action == OutboundAction::Send {
             let prepared = match &item.planned_outbound_message {
                 Some(prepared) => prepared.clone(),
-                None => crate::smtp_send::prepare_outbound(
+                None => crate::outbound::prepare_outbound(
                     &self.root,
                     &case_path,
                     &case_uid,
                     &outbound.draft_name,
                     config,
-                    Some(&crate::smtp_send::message_id_for_push(&item.push_id)),
+                    Some(&crate::outbound::message_id_for_push(&item.push_id)),
                     Some(&item.created_rfc3339),
                 )?,
             };
-            crate::smtp_send::mark_sent_and_append_case(
-                &self.root,
-                &case_path,
-                &case_uid,
-                &prepared.message_id,
-                &prepared.raw,
-                config,
-            )?;
+            if matches!(prepared.delivery, crate::types::OutboundDelivery::File(_)) {
+                crate::channels::record_sent(&self.root, &case_path, &case_uid, &prepared)?;
+            } else {
+                crate::outbound::mark_sent_and_append_case(
+                    &self.root,
+                    &case_path,
+                    &case_uid,
+                    &prepared.message_id,
+                    &prepared.raw,
+                    config,
+                )?;
+            }
         }
         Ok(())
     }
@@ -747,8 +776,33 @@ impl Workspace {
                 }
             }
         }
+        if let Some(origin) = &message.origin {
+            if draft.reply_all || !draft.bcc.is_empty() {
+                return Err(AppError::new(
+                    "channel_operation_unsupported",
+                    "file replies do not support reply-all or bcc",
+                ));
+            }
+            to = message.from.iter().cloned().collect();
+            cc.clear();
+            crate::channels::require_files()?;
+            if !config
+                .files
+                .sources
+                .contains_key(&origin.reply_route.source_id)
+            {
+                return Err(AppError::new(
+                    "config_missing",
+                    "file reply source is no longer configured",
+                ));
+            }
+        }
         let bcc = normalize_recipient_list(draft.bcc, "bcc")?;
         let fm = DraftFrontmatter {
+            reply_route: message
+                .origin
+                .as_ref()
+                .map(|origin| origin.reply_route.clone()),
             kind: Some("draft".to_string()),
             case_uid: case_uid.to_string(),
             send_intent: Some("reply".to_string()),
@@ -805,6 +859,7 @@ impl Workspace {
         let cc = normalize_recipient_list(draft.cc, "cc")?;
         let bcc = normalize_recipient_list(draft.bcc, "bcc")?;
         let fm = DraftFrontmatter {
+            reply_route: None,
             kind: Some("draft".to_string()),
             case_uid: case_uid.to_string(),
             send_intent: Some("new".to_string()),
@@ -945,9 +1000,13 @@ impl Workspace {
                 "draft requires at least one to or bcc recipient",
             ));
         }
-        normalize_recipient_list(&fm.to, "to")?;
-        normalize_recipient_list(&fm.cc, "cc")?;
-        normalize_recipient_list(&fm.bcc, "bcc")?;
+        if fm.reply_route.is_some() {
+            crate::channels::validate_draft(&fm)?;
+        } else {
+            normalize_recipient_list(&fm.to, "to")?;
+            normalize_recipient_list(&fm.cc, "cc")?;
+            normalize_recipient_list(&fm.bcc, "bcc")?;
+        }
         let config = MailConfig::load(&self.root)?;
         config
             .resolve_identity(&self.root, fm.identity.as_deref())
@@ -1015,9 +1074,11 @@ impl Workspace {
         }
         let saved_filename = safe_attachment_filename(&attachment.filename, part_id);
         let dest = unique_dest_path(dest_dir, &saved_filename);
-        if let Some(source_path) = attachment.source_path.clone() {
-            fs::copy(self.root.join(source_path), &dest)
-                .map_err(|e| AppError::io("copy attachment", &e))?;
+        // Atomic: a later pull relinks any file found under this name as the
+        // fetched attachment, so an interrupted write must leave nothing behind.
+        let bytes = if let Some(source_path) = attachment.source_path.clone() {
+            fs::read(self.root.join(source_path))
+                .map_err(|e| AppError::io("read attachment", &e))?
         } else {
             let eml_path = message
                 .eml_path
@@ -1025,9 +1086,9 @@ impl Workspace {
                 .unwrap_or_else(|| format!(".afmail/messages/{message_id}.eml"));
             let raw =
                 fs::read(self.root.join(eml_path)).map_err(|e| AppError::io("read eml", &e))?;
-            let bytes = crate::mail::attachment_bytes(&raw, part_id)?;
-            fs::write(&dest, bytes).map_err(|e| AppError::io("write attachment", &e))?;
-        }
+            crate::mail::attachment_bytes(&raw, part_id)?
+        };
+        crate::util::write_bytes_atomic(&dest, &bytes, "write attachment")?;
         let download_marked = mark_downloaded(&dest);
         let size_bytes = fs::metadata(&dest)
             .map_err(|e| AppError::io("stat attachment", &e))?
@@ -1130,7 +1191,7 @@ fn identity_draft_error(err: AppError) -> AppError {
 fn normalize_recipient_list(values: &[String], field: &str) -> Result<Vec<String>> {
     values
         .iter()
-        .map(|value| crate::smtp_send::normalize_recipient_address(value, field))
+        .map(|value| crate::outbound::normalize_recipient_address(value, field))
         .collect()
 }
 

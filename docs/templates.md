@@ -5,6 +5,17 @@ scaffolds, and Review HTML. Markdown and Review contain the same versioned,
 typed render documents. Review does not build an HTML-specific copy of message,
 collection, draft, notes, suggestion, or attachment data.
 
+The version 3 message contract includes the optional native-channel
+`origin.reply_to_external_message_id`. Native reply relationships use the same
+contained `related_messages` documents in Markdown and Review; templates must
+not reconstruct relationships from subjects or conversation labels.
+
+`MessageContextDocument.related_message_issues` contains optional operational
+diagnostics (`code`, `message_id`, `path`) when unrelated cache/evidence problems
+prevent a complete relationship index. It is omitted when empty. Markdown and
+Review receive the same typed issues and format their warning text in templates.
+An empty related-message list with non-empty issues does not prove independence.
+
 ## Two Trees, One Override Point Each
 
 Content — mail, drafts, notes, contacts, generated Markdown — is overridden in
@@ -310,7 +321,32 @@ case/notification review is about) settles on its own, and closing the window
 is the ordinary end of every review. The runtime does not create visible
 markup or carry user-facing copy. Templates supply localized runtime messages
 through the `data-copy-*` attributes and opt controls into behavior with the
-documented `data-afmail-*` hooks.
+`data-afmail-*` hooks below.
+
+Every review page needs `data-afmail-review`, `data-afmail-review-content`, and
+the `data-afmail-agent-workbench` / `data-afmail-agent-suggestion-content` pair;
+AFUI checks the rendered page for them. Settle hooks are conditional: render them only
+where an agent suggestion exists to settle. A settle form follows this contract:
+
+- `form[data-afmail-settle]` inside `data-afmail-review-content`; the value names
+  the item kind (`message`, `case`, or `notification`). A triage form also
+  carries a hidden `message_id` input. The runtime posts the form's fields.
+- `[data-afmail-decision]` groups radio inputs `name="decision"`, each inside a
+  `[data-afmail-decision-choice]` card. Preselect nothing: a decision is the
+  person's answer, never a default.
+- One `textarea[data-afmail-reason]` (`name="reason"`). The runtime moves it
+  into the chosen card, requires it for `reject` and `override_*`, and treats it
+  as an optional note on `accept`. Its label and placeholder come from
+  `data-afmail-note-label`, `data-afmail-reason-label`, and
+  `data-afmail-reason-placeholder`.
+- `[data-afmail-settle-button]`, disabled until a decision is chosen, and an
+  optional `[data-afmail-settle-status]` for progress and error copy.
+- A destructive accept carries a checkbox with
+  `data-afmail-required-confirmation` and
+  `data-afmail-required-when="decision:accept"`; settling is refused until it is
+  checked.
+- For `decide_NAME` decisions, controls inside `[data-afmail-decide-fields="NAME"]`
+  are shown, enabled, and required only while that decision is chosen.
 
 Raster attachment previews are read-only and limited to 16 MiB by default.
 `review.max_inline_image_bytes` in `.afmail/config.json` controls the declared,

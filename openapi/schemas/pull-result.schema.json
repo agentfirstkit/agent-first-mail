@@ -321,6 +321,285 @@
         "remaining_bytes_budget"
       ],
       "type": "object"
+    },
+    {
+      "additionalProperties": true,
+      "properties": {
+        "cloudflare": {
+          "properties": {
+            "bucket": {
+              "type": "string"
+            },
+            "deleted_object_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "duration_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "imported_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "listed_object_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "merged_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "moved_object_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "prefix": {
+              "type": "string"
+            },
+            "skipped_object_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "skipped_objects": {
+              "items": {
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "size_bytes": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "key",
+                  "reason",
+                  "size_bytes"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "warnings": {
+              "items": true,
+              "type": "array"
+            }
+          },
+          "required": [
+            "bucket",
+            "prefix",
+            "listed_object_count",
+            "imported_count",
+            "merged_count",
+            "deleted_object_count",
+            "moved_object_count",
+            "skipped_object_count",
+            "skipped_objects",
+            "warnings",
+            "duration_ms"
+          ],
+          "type": "object"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "new_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "spam_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stored_new_message_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trashed_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "triage_created_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cloudflare",
+        "dry_run",
+        "new_message_count",
+        "triage_created_count",
+        "spam_message_count",
+        "trashed_message_count",
+        "stored_new_message_bytes"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": true,
+      "description": "A pull that selected only native file channels (no IMAP, no Cloudflare).",
+      "properties": {
+        "budget_limited": {
+          "type": "boolean"
+        },
+        "candidate_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "files": {
+          "properties": {
+            "capabilities": {
+              "properties": {
+                "acknowledge_input": {
+                  "type": "boolean"
+                },
+                "attachments": {
+                  "type": "boolean"
+                },
+                "idempotent_publish": {
+                  "type": "boolean"
+                },
+                "remote_mailboxes": {
+                  "type": "boolean"
+                },
+                "reply": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "reply",
+                "attachments",
+                "acknowledge_input",
+                "remote_mailboxes",
+                "idempotent_publish"
+              ],
+              "type": "object"
+            },
+            "merged_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "skipped_input_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "skipped_inputs": {
+              "description": "Inputs left unimported because the pull budget ran out; they remain for\na later pull and must not be retired.",
+              "items": {
+                "properties": {
+                  "input_path": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "size_bytes": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "source_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source_id",
+                  "input_path",
+                  "reason",
+                  "size_bytes"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "warnings": {
+              "description": "Per-input and per-source problems; each names its `source_id` and `code`.",
+              "items": true,
+              "type": "array"
+            }
+          },
+          "required": [
+            "merged_count",
+            "skipped_input_count",
+            "skipped_inputs",
+            "warnings",
+            "capabilities"
+          ],
+          "type": "object"
+        },
+        "new_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining_bytes_budget": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining_message_budget": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "spam_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stored_new_message_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trashed_message_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "triage_created_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "files",
+        "dry_run",
+        "new_message_count",
+        "triage_created_count",
+        "spam_message_count",
+        "trashed_message_count",
+        "stored_new_message_bytes",
+        "candidate_count",
+        "remaining_message_budget",
+        "remaining_bytes_budget",
+        "budget_limited"
+      ],
+      "type": "object"
     }
   ],
   "title": "PullResult"

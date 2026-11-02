@@ -11,12 +11,26 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(any(feature = "demo", feature = "review"))]
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, mpsc};
+#[cfg(feature = "smtp")]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NETWORK_TEST_LOCK: Mutex<()> = Mutex::new(());
 static COMMAND_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+// An assertion failure must not leave a Review listener running after the test.
+#[cfg(feature = "review")]
+struct ReviewProcess(std::process::Child);
+
+#[cfg(feature = "review")]
+impl Drop for ReviewProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 
 type ImapCommands = Arc<Mutex<Vec<String>>>;
 type AppendedMessages = Arc<Mutex<Vec<(String, bool, String)>>>;
@@ -89,7 +103,7 @@ fn case_review_marks_a_stale_persisted_suggestion_in_place_rather_than_refusing_
     let _command_guard = COMMAND_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut child = Command::new(bin())
+    let child = Command::new(bin())
         .current_dir(&root)
         .env("AFUI_CONFIG_DIR", &afui_config_dir)
         .args(["case", "review", case_uid, "--mode", "link"])
@@ -97,6 +111,8 @@ fn case_review_marks_a_stale_persisted_suggestion_in_place_rather_than_refusing_
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn case review");
+    let mut process = ReviewProcess(child);
+    let child = &mut process.0;
     let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
     let mut progress_line = String::new();
     assert!(child_stdout.read_line(&mut progress_line).is_ok());
@@ -200,7 +216,7 @@ fn case_review_follows_dark_mode_and_serves_only_its_raster_images() {
     let _command_guard = COMMAND_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut child = Command::new(bin())
+    let child = Command::new(bin())
         .current_dir(&root)
         .env("AFUI_CONFIG_DIR", &afui_config_dir)
         .args(["case", "review", &case_uid, "--mode", "link"])
@@ -208,6 +224,8 @@ fn case_review_follows_dark_mode_and_serves_only_its_raster_images() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn image review");
+    let mut process = ReviewProcess(child);
+    let child = &mut process.0;
     let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
     let mut progress_line = String::new();
     assert!(child_stdout.read_line(&mut progress_line).is_ok());
@@ -487,7 +505,7 @@ fn triage_review_rejects_request_ids_but_no_longer_refuses_a_stale_suggestion() 
     let _command_guard = COMMAND_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut child = Command::new(bin())
+    let child = Command::new(bin())
         .current_dir(&root)
         .env("AFUI_CONFIG_DIR", &afui_config_dir)
         .args(["triage", "review", message_id, "--mode", "link"])
@@ -495,6 +513,8 @@ fn triage_review_rejects_request_ids_but_no_longer_refuses_a_stale_suggestion() 
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn triage review");
+    let mut process = ReviewProcess(child);
+    let child = &mut process.0;
     let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
     let mut progress_line = String::new();
     assert!(child_stdout.read_line(&mut progress_line).is_ok());
@@ -585,10 +605,12 @@ fn triage_review_link_outputs_a_reachable_url_and_settles_one_item_without_endin
         .stderr(Stdio::piped())
         .spawn();
     assert!(child.is_ok());
-    let mut child = match child {
+    let child = match child {
         Ok(child) => child,
         Err(_) => return,
     };
+    let mut process = ReviewProcess(child);
+    let child = &mut process.0;
     let child_stdout = child.stdout.take();
     assert!(child_stdout.is_some());
     let mut child_stdout = BufReader::new(match child_stdout {
@@ -753,10 +775,12 @@ fn triage_review_exchanges_a_user_instruction_and_controller_response() {
         .stderr(Stdio::piped())
         .spawn();
     assert!(child.is_ok());
-    let mut child = match child {
+    let child = match child {
         Ok(child) => child,
         Err(_) => return,
     };
+    let mut process = ReviewProcess(child);
+    let child = &mut process.0;
     let mut child_stdin = match child.stdin.take() {
         Some(stdin) => stdin,
         None => return,
@@ -905,10 +929,12 @@ fn triage_review_session_registers_in_the_afui_registry_and_settles_one_item() {
         .stderr(Stdio::piped())
         .spawn();
     assert!(child.is_ok());
-    let mut child = match child {
+    let child = match child {
         Ok(child) => child,
         Err(_) => return,
     };
+    let mut process = ReviewProcess(child);
+    let child = &mut process.0;
     let child_stdout = child.stdout.take();
     assert!(child_stdout.is_some());
     let mut child_stdout = BufReader::new(match child_stdout {
@@ -1084,7 +1110,7 @@ fn a_settled_item_survives_the_review_process_being_kill_9d() {
     let _command_guard = COMMAND_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut child = Command::new(bin())
+    let child = Command::new(bin())
         .current_dir(&root)
         .env("AFUI_CONFIG_DIR", &afui_config_dir)
         .args(["triage", "review", message_id, "--mode", "link"])
@@ -1092,6 +1118,8 @@ fn a_settled_item_survives_the_review_process_being_kill_9d() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn triage review");
+    let mut process = ReviewProcess(child);
+    let child = &mut process.0;
     let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
     let mut progress_line = String::new();
     assert!(child_stdout.read_line(&mut progress_line).is_ok());
@@ -1241,7 +1269,7 @@ fn triage_review_opens_a_message_with_no_suggestion_and_a_person_can_decide_it()
     let _command_guard = COMMAND_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut child = Command::new(bin())
+    let child = Command::new(bin())
         .current_dir(&root)
         .env("AFUI_CONFIG_DIR", &afui_config_dir)
         .args(["triage", "review", message_id, "--mode", "link"])
@@ -1249,6 +1277,8 @@ fn triage_review_opens_a_message_with_no_suggestion_and_a_person_can_decide_it()
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn triage review");
+    let mut process = ReviewProcess(child);
+    let child = &mut process.0;
     let mut child_stdout = BufReader::new(child.stdout.take().expect("child stdout"));
     let mut progress_line = String::new();
     assert!(child_stdout.read_line(&mut progress_line).is_ok());
@@ -1649,6 +1679,7 @@ fn first_json_file_in(directory: &Path) -> Option<PathBuf> {
     })
 }
 
+#[cfg(feature = "smtp")]
 fn draft_with_compose(raw: String) -> String {
     let Some((frontmatter, body)) = raw.split_once("\n---\n") else {
         return raw;
@@ -1736,6 +1767,7 @@ fn test_config(imap_port: Option<u16>, smtp_port: Option<u16>) -> Value {
     })
 }
 
+#[cfg(feature = "smtp")]
 fn sent_message_id_for_push_id(push_id: &str) -> String {
     let suffix = push_id
         .strip_prefix("push_")
@@ -1791,7 +1823,7 @@ fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Option<&s
         &root.join(format!(".afmail/messages/{message_id}.json")),
         &json!({
             "schema_name": "message_metadata",
-            "schema_version": 2,
+            "schema_version": 3,
             "message_id": message_id,
             "remote": msg["remote"].clone()
         }),
@@ -1845,7 +1877,7 @@ fn update_message_json(root: &Path, message_id: &str, update: impl FnOnce(&mut V
         if !metadata.is_object() {
             metadata = json!({
                 "schema_name": "message_metadata",
-                "schema_version": 2,
+                "schema_version": 3,
                 "message_id": message_id,
             });
         }
@@ -2155,6 +2187,7 @@ struct ImapTestServer {
     addr: SocketAddr,
     commands: ImapCommands,
     header_batches: ImapCommands,
+    #[cfg(feature = "smtp")]
     appended: AppendedMessages,
     moved: MovedMessages,
     handle: thread::JoinHandle<()>,
@@ -2254,8 +2287,11 @@ fn start_imap_server_with_messages(
                     // process exiting and another starting; under a loaded
                     // parallel test run that gap passes one second, so the
                     // post-connection idle limit has to sit well above it.
+                    // The first connection waits longer: the clock starts
+                    // before the test's `run` queues on COMMAND_TEST_LOCK,
+                    // which other tests can hold for many seconds.
                     let idle_limit = if served == 0 {
-                        Duration::from_secs(5)
+                        Duration::from_secs(60)
                     } else {
                         Duration::from_secs(2)
                     };
@@ -2272,6 +2308,7 @@ fn start_imap_server_with_messages(
         addr,
         commands,
         header_batches,
+        #[cfg(feature = "smtp")]
         appended,
         moved,
         handle,
@@ -2293,7 +2330,9 @@ fn serve_imap_connection(
         Ok(stream) => stream,
         Err(_) => return,
     };
-    let _ = writer.set_read_timeout(Some(Duration::from_secs(5)));
+    // Only a client that stalls mid-session reaches this; a loaded parallel
+    // run can keep afmail busy between two commands for several seconds.
+    let _ = writer.set_read_timeout(Some(Duration::from_secs(30)));
     let mut reader = BufReader::new(reader_stream);
     if write_imap(&mut writer, b"* OK afmail test imap ready\r\n").is_err() {
         return;
@@ -2669,6 +2708,12 @@ fn write_imap_fetch(
     let matching = messages
         .iter()
         .filter(|(uid, _)| uid_fetch_query_matches_uid(&query, *uid))
+        // A server that answers a header fetch without one of the requested
+        // UIDs, as one does for a message expunged mid-pull.
+        .filter(|(_, raw)| {
+            !(header_only
+                && String::from_utf8_lossy(raw).contains("X-Afmail-Test-Omit-Header: true"))
+        })
         .collect::<Vec<_>>();
     for (idx, (uid, raw)) in matching.iter().enumerate() {
         let seq = idx + 1;
@@ -2750,16 +2795,19 @@ fn test_flags_from_raw(raw: &[u8]) -> String {
         .to_string()
 }
 
+#[cfg(feature = "smtp")]
 struct SmtpTestServer {
     addr: SocketAddr,
     data_rx: mpsc::Receiver<String>,
     handle: thread::JoinHandle<()>,
 }
 
+#[cfg(feature = "smtp")]
 fn start_smtp_server() -> Option<SmtpTestServer> {
     start_smtp_server_connections(1)
 }
 
+#[cfg(feature = "smtp")]
 fn start_smtp_server_connections(connection_count: usize) -> Option<SmtpTestServer> {
     let listener = bind_loopback_listener()?;
     let addr = listener.local_addr().ok()?;
@@ -2780,6 +2828,7 @@ fn start_smtp_server_connections(connection_count: usize) -> Option<SmtpTestServ
     })
 }
 
+#[cfg(feature = "smtp")]
 fn serve_smtp_connection(mut writer: TcpStream, data_tx: mpsc::Sender<String>) {
     let reader_stream = match writer.try_clone() {
         Ok(stream) => stream,
@@ -2842,6 +2891,7 @@ fn serve_smtp_connection(mut writer: TcpStream, data_tx: mpsc::Sender<String>) {
     }
 }
 
+#[cfg(feature = "smtp")]
 fn write_smtp(writer: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
     writer.write_all(data)?;
     writer.flush()
@@ -3159,6 +3209,13 @@ struct DemoServerProcess {
 #[cfg(feature = "demo")]
 impl DemoServerProcess {
     fn start(workspace: &Path) -> std::io::Result<Self> {
+        // Keep process creation serialized with the finite CLI helpers. On
+        // macOS a concurrent spawn can inherit their temporary output pipe,
+        // preventing EOF after that command exits while this server stays up.
+        // The caller must be able to run another command before stopping it.
+        let _command_guard = COMMAND_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut child = Command::new(bin())
             .current_dir(workspace)
             .args(["demo", "serve", "--output-to", "stdout"])
@@ -3896,7 +3953,13 @@ fn doctor_repairs_old_and_malformed_message_caches_from_canonical_evidence() {
     let root = temp_root("doctor-message-cache-recovery");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
-    write_json(&root.join(".afmail/config.json"), &test_config(None, None));
+    assert_eq!(
+        run(&root, &["config", "set", "imap.host", "imap.example.com"]).0,
+        0
+    );
+    let mut config = test_config(None, None);
+    config["imap"]["host"] = json!("imap.example.com");
+    write_json(&root.join(".afmail/config.json"), &config);
     let case_message_id = "message_cache_case";
     let pending_message_id = "message_cache_pending";
     write_message(&root, case_message_id, 1, None);
@@ -4046,6 +4109,10 @@ fn doctor_marks_message_cache_unrepairable_when_canonical_evidence_is_unusable()
     let root = temp_root("doctor-message-cache-unrepairable");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
+    assert_eq!(
+        run(&root, &["config", "set", "imap.host", "imap.example.com"]).0,
+        0
+    );
     for (index, message_id) in [
         "message_missing_eml",
         "message_invalid_eml",
@@ -4084,10 +4151,80 @@ fn doctor_marks_message_cache_unrepairable_when_canonical_evidence_is_unusable()
 }
 
 #[test]
+fn doctor_claims_an_orphaned_metadata_repair_only_when_the_raw_message_exists() {
+    let root = temp_root("doctor-orphaned-metadata");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    assert_eq!(
+        run(&root, &["config", "set", "imap.host", "imap.example.com"]).0,
+        0
+    );
+    for (uid, message_id) in [
+        (1, "message_orphan_rebuildable"),
+        (2, "message_orphan_bare"),
+    ] {
+        write_message(&root, message_id, uid, None);
+        assert!(fs::remove_file(root.join(format!("messages/{message_id}.json"))).is_ok());
+    }
+    assert!(fs::remove_file(root.join(".afmail/messages/message_orphan_bare.eml")).is_ok());
+
+    let doctor = parse_one(&run(&root, &["doctor"]).1);
+    let orphan = |doctor: &serde_json::Value, message_id: &str| {
+        doctor["issues"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|issue| {
+                issue["code"] == "message_metadata_orphaned"
+                    && issue["path"]
+                        .as_str()
+                        .is_some_and(|path| path.contains(message_id))
+            })
+            .cloned()
+    };
+    assert_eq!(
+        orphan(&doctor, "message_orphan_rebuildable").map(|issue| issue["repairable"].clone()),
+        Some(json!(true)),
+        "{doctor}"
+    );
+    assert_eq!(
+        orphan(&doctor, "message_orphan_bare").map(|issue| issue["repairable"].clone()),
+        Some(json!(false)),
+        "{doctor}"
+    );
+
+    let (_, stdout) = run(&root, &["doctor", "repair", "--confirm"]);
+    let repaired = parse_one(&stdout);
+    let remaining = json!({"issues": repaired["remaining_issues"]});
+    assert!(
+        orphan(&remaining, "message_orphan_rebuildable").is_none(),
+        "{repaired}"
+    );
+    assert!(
+        orphan(&remaining, "message_orphan_bare").is_some(),
+        "{repaired}"
+    );
+    assert!(
+        root.join("messages/message_orphan_rebuildable.json")
+            .is_file()
+    );
+    // The bare metadata may be the only record left; repair keeps it.
+    assert!(
+        root.join(".afmail/messages/message_orphan_bare.json")
+            .is_file()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn doctor_reports_and_repairs_afmail_state_only() {
     let root = temp_root("doctor");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
+    assert_eq!(
+        run(&root, &["config", "set", "imap.host", "imap.example.com"]).0,
+        0
+    );
     write_message(&root, "message_doctor", 1, None);
     write_json(
         &root.join(".afmail/messages/message_doctor.state.json"),
@@ -4194,6 +4331,10 @@ fn doctor_repair_resumes_incomplete_case_archive_transaction() {
     let root = temp_root("repair-case-archive-transaction");
     assert!(fs::create_dir_all(&root).is_ok());
     assert_eq!(run(&root, &["init"]).0, 0);
+    assert_eq!(
+        run(&root, &["config", "set", "imap.host", "imap.example.com"]).0,
+        0
+    );
     write_message(&root, "message_repair_case_archive", 1, None);
     write_triage(
         &root,
@@ -5343,6 +5484,46 @@ fn expected_header_batches(first: u64, last: u64) -> Vec<String> {
 }
 
 #[test]
+fn pull_cursor_does_not_pass_a_uid_the_header_fetch_left_out() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = temp_root("pull-header-missing-cursor");
+    fs::create_dir_all(&root).expect("workspace");
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let mut omitted = header_batch_messages(2);
+    let first = omitted
+        .iter_mut()
+        .find(|(uid, _)| *uid == 1)
+        .expect("first mail");
+    first.1 = [b"X-Afmail-Test-Omit-Header: true\r\n".as_slice(), &first.1].concat();
+    for (messages, expected_new, expected_cursor) in
+        [(omitted, 1, 0), (header_batch_messages(2), 1, 2)]
+    {
+        let server = start_imap_server(messages, 3).expect("mock IMAP");
+        write_json(
+            &root.join(".afmail/config.json"),
+            &test_config(Some(server.addr.port()), None),
+        );
+        let (status, stdout) = run(&root, &["pull", "--all-history", "inbox"]);
+        assert_eq!(status, 0, "{stdout}");
+        let result = parse_one(&stdout);
+        assert_eq!(result["new_message_count"], expected_new, "{result}");
+        if expected_cursor == 0 {
+            assert_eq!(result["skipped_messages"][0]["reason"], "header_missing");
+            assert_eq!(result["skipped_messages"][0]["uid"], 1);
+        }
+        let cursor = read_json(&root.join(".afmail/pull/cursors.json"));
+        assert_eq!(
+            cursor["mailboxes"]["inbox"]["highest_uid"], expected_cursor,
+            "{cursor}"
+        );
+        assert!(server.handle.join().is_ok());
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn pull_header_batches_keep_budgeted_uids_for_the_next_pull() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -6405,7 +6586,7 @@ fn remote_folders_lists_mailboxes_and_config_matches() {
     let (status, stdout) = run(&root, &["remote", "test"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
-    assert_eq!(value["capabilities"]["move"], true);
+    assert_eq!(value["imap"]["capabilities"]["move"], true);
     let (status, stdout) = run(&root, &["remote", "folders"]);
     assert_eq!(status, 0, "{stdout}");
     let value = parse_one(&stdout);
@@ -6488,6 +6669,7 @@ fn imap_connect_failure_is_retryable_and_emits_retry_log() {
 }
 
 #[test]
+#[cfg(feature = "smtp")]
 fn smtp_remote_test_failure_is_retryable_and_emits_retry_log() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -7702,6 +7884,14 @@ fn purge_deletes_old_local_discard_records() {
     assert_eq!(status, 0, "{stdout}");
     let plan = parse_one(&stdout);
     let plan_id = plan["plan_id"].as_str().unwrap_or_default();
+    // The hint names the exact command that rebuilds this plan, target and
+    // age window included; a bare `purge --confirm` would plan all discards.
+    assert!(
+        plan["hint"].as_str().unwrap_or_default().contains(&format!(
+            "`afmail purge spam --older-than-days 30 --confirm {plan_id}`"
+        )),
+        "{plan}"
+    );
     let (status, stdout) = run(&root, &["purge", "spam", "--confirm", plan_id]);
     assert_eq!(status, 0, "{stdout}");
     let purged = parse_one(&stdout);
@@ -7733,6 +7923,12 @@ fn purge_deletes_old_local_discard_records() {
     let plan = parse_one(&stdout);
     assert!(root.join("messages/message_trash_old.json").is_file());
     let plan_id = plan["plan_id"].as_str().unwrap_or_default();
+    assert!(
+        plan["hint"].as_str().unwrap_or_default().contains(&format!(
+            "`afmail purge --older-than-days 30 --confirm {plan_id}`"
+        )),
+        "{plan}"
+    );
     let (status, stdout) = run(&root, &["purge", "--confirm", plan_id]);
     assert_eq!(status, 0, "{stdout}");
     let purged = parse_one(&stdout);
@@ -8279,6 +8475,7 @@ fn workspace_lock_blocks_writers_but_allows_shared_readers() {
 }
 
 #[test]
+#[cfg(feature = "smtp")]
 fn triage_assign_move_draft_and_send_contract_work() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -8589,5 +8786,67 @@ fn spam_attachment_fetch_is_blocked() {
             .exists()
     );
 
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(feature = "cloudflare")]
+#[path = "support/fake_s3.rs"]
+mod fake_s3;
+
+#[cfg(feature = "cloudflare")]
+#[test]
+fn mixed_sources_share_content_identity_selection_and_budgets() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("mixed-mail-sources");
+    fs::create_dir_all(&root).unwrap();
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let raw = b"Message-ID: <mixed@example.net>\r\nFrom: sender@example.net\r\nTo: visible@example.net\r\nDate: Wed, 21 Oct 2026 00:00:00 +0000\r\nSubject: Mixed sources\r\n\r\nOriginal\r\n";
+    let imap = start_imap_server(vec![(17, raw.to_vec())], 8).expect("mock IMAP");
+    let r2 = fake_s3::FakeS3::new();
+    r2.put("inbox/shared.eml", raw, "hidden@example.com");
+    let mut config = test_config(Some(imap.addr.port()), None);
+    config["actions"]["pull"]["default_mailbox_ids"] = json!(["inbox"]);
+    config["cloudflare"] = json!({"r2":{"endpoint_url":r2.endpoint,"bucket":"spool","access_key_id":"test-access","secret_access_key_secret":"test-secret"}});
+    write_json(&root.join(".afmail/config.json"), &config);
+    let (status, output) = run(&root, &["pull", "--max-new-messages", "2"]);
+    assert_eq!(status, 0, "{output}");
+    let pulled = parse_one(&output);
+    assert_eq!(pulled["new_message_count"], 1);
+    assert_eq!(pulled["cloudflare"]["merged_count"], 1);
+    let id = pulled["new_message_ids"][0].as_str().unwrap();
+    let metadata = read_json(&root.join(format!(".afmail/messages/{id}.json")));
+    assert_eq!(metadata["remote"]["locations"].as_array().unwrap().len(), 1);
+    assert_eq!(metadata["delivery"]["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        fs::read(root.join(format!(".afmail/messages/{id}.eml"))).unwrap(),
+        raw
+    );
+    r2.put(
+        "inbox/new1.eml",
+        b"From: other@example.net\r\nSubject: New one\r\n\r\nOne\r\n",
+        "hidden@example.com",
+    );
+    r2.put(
+        "inbox/new2.eml",
+        b"From: other@example.net\r\nSubject: New two\r\n\r\nTwo\r\n",
+        "hidden@example.com",
+    );
+    let (status, output) = run(&root, &["pull", "inbox"]);
+    assert_eq!(status, 0, "{output}");
+    assert!(parse_one(&output).get("cloudflare").is_none());
+    assert_eq!(r2.state.lock().unwrap().objects.len(), 2);
+    let (status, output) = run(&root, &["pull", "--max-new-messages", "1"]);
+    assert_eq!(status, 0, "{output}");
+    let pulled = parse_one(&output);
+    assert_eq!(pulled["new_message_count"], 1);
+    assert_eq!(pulled["remaining_message_budget"], 0);
+    assert_eq!(
+        pulled["cloudflare"]["skipped_objects"][0]["reason"],
+        "message_count_budget_exceeded"
+    );
+    assert_eq!(r2.state.lock().unwrap().objects.len(), 1);
+    assert!(imap.handle.join().is_ok());
     let _ = fs::remove_dir_all(root);
 }

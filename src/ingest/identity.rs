@@ -2,50 +2,40 @@ use super::*;
 use crate::layout;
 use ring::digest::{SHA256, digest};
 
-#[derive(Clone, Debug)]
-pub(super) struct SavedMessage {
-    pub(super) message_id: String,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct RemoteLocationUpdate {
-    pub(super) flags_updated: bool,
-    pub(super) location_restored: bool,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) struct ImapKey {
-    pub(super) mailbox: String,
-    pub(super) uid_validity: u64,
-    pub(super) uid: u64,
+pub(crate) struct ImapKey {
+    pub(crate) mailbox: String,
+    pub(crate) uid_validity: u64,
+    pub(crate) uid: u64,
 }
 
 #[derive(Default)]
-pub(super) struct RemoteIndex {
-    pub(super) imap_keys: HashSet<ImapKey>,
-    pub(super) imap_locations: HashMap<ImapKey, String>,
-    pub(super) rfc822_cases: HashMap<String, BTreeSet<String>>,
-    pub(super) content_ids: HashMap<String, String>,
+pub(crate) struct ExistingIndex {
+    pub(crate) imap_keys: HashSet<ImapKey>,
+    pub(crate) imap_locations: HashMap<ImapKey, String>,
+    pub(crate) rfc822_cases: HashMap<String, BTreeSet<String>>,
+    pub(crate) rfc822_messages: HashMap<String, BTreeSet<String>>,
+    pub(crate) content_ids: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct CaseSuggestion {
-    pub(super) case_uids: Vec<String>,
-    pub(super) evidence: Option<CaseRelationshipEvidence>,
+pub(crate) struct CaseSuggestion {
+    pub(crate) case_uids: Vec<String>,
+    pub(crate) evidence: Option<CaseRelationshipEvidence>,
 }
 
-pub(super) struct PullIngestRenderContext {
+pub(crate) struct IngestRenderContext {
     resolved_identities: Vec<ResolvedIdentity>,
 }
 
-impl PullIngestRenderContext {
-    pub(super) fn new(root: &Path, config: &MailConfig) -> Result<Self> {
+impl IngestRenderContext {
+    pub(crate) fn new(root: &Path, config: &MailConfig) -> Result<Self> {
         Ok(Self {
             resolved_identities: config.identity_profiles(root)?,
         })
     }
 
-    fn apply_identity(&self, message: &mut MessageFile) {
+    pub(super) fn apply_identity(&self, message: &mut MessageFile) {
         let matched = match_message_identity_with_profiles(&self.resolved_identities, message);
         message.identity = matched.identity;
         message.identity_email = matched.identity_email;
@@ -55,8 +45,8 @@ impl PullIngestRenderContext {
     }
 }
 
-impl RemoteIndex {
-    pub(super) fn suggest_case(&self, raw_eml: &[u8]) -> CaseSuggestion {
+impl ExistingIndex {
+    pub(crate) fn suggest_case(&self, raw_eml: &[u8]) -> CaseSuggestion {
         let mut case_uids = BTreeSet::new();
         for message_id in reply_header_message_ids(raw_eml) {
             if let Some(ids) = self.rfc822_cases.get(&message_id) {
@@ -76,110 +66,8 @@ impl RemoteIndex {
     }
 }
 
-pub(super) fn save_remote_message(
-    root: &Path,
-    remote: RemoteMessage,
-    suggestion: &CaseSuggestion,
-    target: &PullTarget,
-    offset: FixedOffset,
-    mail_config: &MailConfig,
-    render_context: &PullIngestRenderContext,
-) -> Result<SavedMessage> {
-    let message_id = stable_message_id(root, &remote, offset);
-    let mut parsed = parse_inbound_message(
-        message_id.clone(),
-        &remote.raw_eml,
-        ImapRef {
-            mailbox_name: remote.mailbox.clone(),
-            uid_validity: remote.uid_validity,
-            uid: remote.uid,
-        },
-    )?;
-    if let Some(state) = parsed.message.remote.as_mut()
-        && let Some(location) = state.locations.first_mut()
-    {
-        location.mailbox_id = Some(target.id.clone());
-        location.flags = remote.flags.clone();
-    }
-    apply_pull_target(&mut parsed.message, target);
-    render_context.apply_identity(&mut parsed.message);
-    parsed.message.case_relationship_suggestion =
-        suggestion
-            .evidence
-            .map(|evidence| CaseRelationshipSuggestion {
-                case_uids: suggestion.case_uids.clone(),
-                evidence,
-            });
-    let messages_dir = root.join(".afmail/messages");
-    create_dir_all(&messages_dir)?;
-    let workspace = crate::store::Workspace::at(root);
-    let cache_path = root
-        .join(layout::MESSAGES)
-        .join(format!("{message_id}.json"));
-    if messages_dir.join(format!("{message_id}.eml")).exists() || cache_path.exists() {
-        let eml_path = messages_dir.join(format!("{message_id}.eml"));
-        let same_raw = eml_path
-            .is_file()
-            .then(|| fs::read(&eml_path))
-            .transpose()
-            .map_err(|error| AppError::io("read existing message eml", &error))?
-            .is_some_and(|existing| existing == remote.raw_eml);
-        let existing = workspace.read_message_by_id(&message_id)?;
-        if !same_raw || existing.rfc822_message_id != parsed.message.rfc822_message_id {
-            return Err(AppError::new(
-                "message_id_conflict",
-                format!(
-                    "message id {message_id} already exists with different local message content"
-                ),
-            )
-            .with_details(serde_json::json!({
-                "message_id": message_id,
-            })));
-        }
-        return Err(AppError::new(
-            "message_already_exists",
-            format!("message id is already stored: {message_id}"),
-        ));
-    }
-    write_bytes_atomic(
-        &messages_dir.join(format!("{message_id}.eml")),
-        &remote.raw_eml,
-        "write eml",
-    )?;
-    if let Ok(status) = MessageStatus::parse(target.import_as.as_str())
-        && matches!(status, MessageStatus::Spam | MessageStatus::Trashed)
-    {
-        workspace.set_message_disposition(
-            status,
-            &message_id,
-            None,
-            &crate::store::now_rfc3339(),
-        )?;
-    }
-    workspace.write_message_artifacts(&parsed.message)?;
-    if target.import_as == PullImportAs::Triage {
-        create_dir_all(&root.join(layout::TRIAGE))?;
-        write_string_atomic(
-            &root.join(layout::TRIAGE).join(format!("{message_id}.md")),
-            &crate::store::render_triage_view(root, mail_config, &parsed.message, Vec::new())?,
-        )?;
-    }
-    Ok(SavedMessage { message_id })
-}
-
-pub(super) fn apply_pull_target(message: &mut MessageFile, target: &PullTarget) {
-    message.workspace.status = target.import_as.as_str().to_string();
-    message.direction = Some(target.direction.as_str().to_string());
-    if target.direction == MailDirection::Outbound {
-        if message.sent_rfc3339.is_none() {
-            message.sent_rfc3339 = message.received_rfc3339.clone();
-        }
-        message.received_rfc3339 = None;
-    }
-}
-
-pub(super) fn load_existing_remote_index(root: &Path) -> Result<RemoteIndex> {
-    let mut out = RemoteIndex::default();
+pub(crate) fn load_existing_remote_index(root: &Path) -> Result<ExistingIndex> {
+    let mut out = ExistingIndex::default();
     let cases_by_message_id = load_case_refs_by_message_id(root)?;
     let dir = root.join(".afmail/messages");
     if !dir.exists() {
@@ -196,6 +84,7 @@ pub(super) fn load_existing_remote_index(root: &Path) -> Result<RemoteIndex> {
         .collect::<Result<Vec<_>>>()?;
     paths.retain(|path| path.extension().and_then(|s| s.to_str()) == Some("eml"));
     paths.sort();
+    let reader = workspace.message_reader()?;
     for path in paths {
         let Some(message_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
@@ -204,9 +93,15 @@ pub(super) fn load_existing_remote_index(root: &Path) -> Result<RemoteIndex> {
         out.content_ids
             .entry(message_content_key(&raw))
             .or_insert_with(|| message_id.to_string());
-        let message = workspace.read_message_by_id(message_id)?;
+        let message = reader.read(message_id)?;
         if let Some(rfc822_id) = message.rfc822_message_id.clone() {
             let key = normalize_message_id(&rfc822_id);
+            if !key.is_empty() {
+                out.rfc822_messages
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(message_id.to_string());
+            }
             if let Some(case_uids) = cases_by_message_id.get(&message.message_id) {
                 out.rfc822_cases
                     .entry(key)
@@ -236,7 +131,7 @@ pub(super) fn load_existing_remote_index(root: &Path) -> Result<RemoteIndex> {
     Ok(out)
 }
 
-pub(super) fn load_case_refs_by_message_id(
+pub(crate) fn load_case_refs_by_message_id(
     root: &Path,
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -281,122 +176,8 @@ pub(super) fn load_case_refs_by_message_id(
     Ok(out)
 }
 
-pub(super) fn add_remote_location_parts(
-    root: &Path,
-    message_id: &str,
-    mailbox: &str,
-    uid_validity: u64,
-    uid: u64,
-    flags: &[String],
-    mailbox_id: Option<&str>,
-) -> Result<RemoteLocationUpdate> {
-    let workspace = crate::store::Workspace::at(root);
-    let mut message = workspace.read_message_by_id(message_id)?;
-    let location = RemoteLocation {
-        mailbox_id: mailbox_id.map(ToString::to_string),
-        mailbox_name: mailbox.to_string(),
-        uid_validity: Some(uid_validity),
-        uid: Some(uid),
-        flags: flags.to_vec(),
-        observed_rfc3339: crate::store::now_rfc3339(),
-        missing_rfc3339: None,
-    };
-    let state = message.remote.get_or_insert_with(|| RemoteState {
-        locations: Vec::new(),
-    });
-    let mut update = RemoteLocationUpdate::default();
-    if let Some(existing) = state.locations.iter_mut().find(|existing| {
-        existing.mailbox_name == location.mailbox_name
-            && existing.uid_validity == location.uid_validity
-            && existing.uid == location.uid
-    }) {
-        if existing.mailbox_id.is_none() {
-            existing.mailbox_id = mailbox_id.map(ToString::to_string);
-        }
-        if existing.missing_rfc3339.take().is_some() {
-            update.location_restored = true;
-        }
-        update.flags_updated = set_location_flags(existing, flags);
-    } else {
-        state.locations.push(location);
-    }
-    workspace.persist_message_metadata(&message)?;
-    workspace.write_message_materialized_cache(&message)?;
-    Ok(update)
-}
-
-pub(super) fn update_remote_location_flags_from_envelope(
-    root: &Path,
-    message_id: &str,
-    remote: &RemoteEnvelope,
-) -> Result<RemoteLocationUpdate> {
-    update_remote_location_flags_parts(
-        root,
-        message_id,
-        &remote.mailbox,
-        remote.uid_validity,
-        remote.uid,
-        &remote.flags,
-    )
-}
-
-pub(super) fn update_remote_location_flags_parts(
-    root: &Path,
-    message_id: &str,
-    mailbox: &str,
-    uid_validity: u64,
-    uid: u64,
-    flags: &[String],
-) -> Result<RemoteLocationUpdate> {
-    let workspace = crate::store::Workspace::at(root);
-    let mut message = workspace.read_message_by_id(message_id)?;
-    let mut update = RemoteLocationUpdate::default();
-    let mut changed = false;
-    let state = message.remote.get_or_insert_with(|| RemoteState {
-        locations: Vec::new(),
-    });
-    if let Some(location) = state.locations.iter_mut().find(|location| {
-        location.mailbox_name == mailbox
-            && location.uid_validity == Some(uid_validity)
-            && location.uid == Some(uid)
-    }) {
-        if location.missing_rfc3339.take().is_some() {
-            update.location_restored = true;
-            changed = true;
-        }
-        update.flags_updated = set_location_flags(location, flags);
-        changed |= update.flags_updated;
-    } else {
-        state.locations.push(RemoteLocation {
-            mailbox_id: None,
-            mailbox_name: mailbox.to_string(),
-            uid_validity: Some(uid_validity),
-            uid: Some(uid),
-            flags: flags.to_vec(),
-            observed_rfc3339: crate::store::now_rfc3339(),
-            missing_rfc3339: None,
-        });
-        update.flags_updated = !flags.is_empty();
-        changed = true;
-    }
-    if changed {
-        workspace.persist_message_metadata(&message)?;
-        workspace.write_message_materialized_cache(&message)?;
-    }
-    Ok(update)
-}
-
-pub(super) fn set_location_flags(location: &mut RemoteLocation, flags: &[String]) -> bool {
-    let flags = canonical_flags(flags.iter().cloned());
-    if location.flags == flags {
-        return false;
-    }
-    location.flags = flags;
-    true
-}
-
-pub(super) fn reply_header_message_ids(raw_eml: &[u8]) -> Vec<String> {
-    let Some(message) = MessageParser::default().parse(raw_eml) else {
+pub(crate) fn reply_header_message_ids(raw_eml: &[u8]) -> Vec<String> {
+    let Some(message) = MessageParser::default().parse_headers(raw_eml) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -407,18 +188,15 @@ pub(super) fn reply_header_message_ids(raw_eml: &[u8]) -> Vec<String> {
     out
 }
 
-pub(super) fn header_message_ids(value: &HeaderValue<'_>) -> Vec<String> {
-    match value {
-        HeaderValue::Text(text) => extract_message_ids(text.as_ref()),
-        HeaderValue::TextList(items) => items
-            .iter()
-            .flat_map(|item| extract_message_ids(item.as_ref()))
-            .collect(),
-        _ => Vec::new(),
-    }
+pub(crate) fn header_message_ids(value: Option<TextList<'_>>) -> Vec<String> {
+    value
+        .into_iter()
+        .flat_map(|list| list.iter())
+        .flat_map(extract_message_ids)
+        .collect()
 }
 
-pub(super) fn extract_message_ids(text: &str) -> Vec<String> {
+pub(crate) fn extract_message_ids(text: &str) -> Vec<String> {
     let mut ids = Vec::new();
     let mut rest = text;
     while let Some(start) = rest.find('<') {
@@ -444,7 +222,7 @@ pub(super) fn extract_message_ids(text: &str) -> Vec<String> {
     ids
 }
 
-pub(super) fn normalize_message_id(value: &str) -> String {
+pub(crate) fn normalize_message_id(value: &str) -> String {
     value
         .trim()
         .trim_matches(|ch| matches!(ch, '<' | '>' | ',' | ';'))
@@ -452,11 +230,11 @@ pub(super) fn normalize_message_id(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
-pub(super) fn create_dir_all(path: &Path) -> Result<()> {
+pub(crate) fn create_dir_all(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(|e| AppError::io("create directory", &e))
 }
 
-pub(super) fn message_content_key(raw_eml: &[u8]) -> String {
+pub(crate) fn message_content_key(raw_eml: &[u8]) -> String {
     digest(&SHA256, raw_eml)
         .as_ref()
         .iter()
@@ -464,17 +242,13 @@ pub(super) fn message_content_key(raw_eml: &[u8]) -> String {
         .collect()
 }
 
-pub(super) fn stable_message_id(
-    _root: &Path,
-    remote: &RemoteMessage,
-    offset: FixedOffset,
-) -> String {
-    let parsed = MessageParser::default().parse(&remote.raw_eml);
+pub(crate) fn stable_message_id(raw_eml: &[u8], offset: FixedOffset) -> String {
+    let parsed = MessageParser::default().parse_headers(raw_eml);
     // Prefer parser-normalized Date, accept common sender Date variants, then
     // fall back to the sender-side Received timestamp when Date is absent.
-    let date_prefix = stable_message_datetime(parsed.as_ref(), &remote.raw_eml)
+    let date_prefix = stable_message_datetime(parsed.as_ref(), raw_eml)
         .map(|date| date.with_timezone(&offset).format("%Y%m%d").to_string());
-    let content_key = message_content_key(&remote.raw_eml);
+    let content_key = message_content_key(raw_eml);
     let content_id = &content_key[..32];
     match date_prefix {
         Some(date) => format!("message_{date}_{content_id}"),

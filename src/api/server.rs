@@ -1548,6 +1548,69 @@ mod tests {
         assert_eq!(confirm.status(), StatusCode::OK);
     }
 
+    #[cfg(feature = "files")]
+    #[tokio::test]
+    async fn files_only_pull_returns_a_documented_result() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        Workspace::at(temp.path()).init().expect("init workspace");
+        std::fs::create_dir_all(temp.path().join("input")).expect("create inbox");
+        let config_path = temp.path().join(".afmail/config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).expect("read config"))
+                .expect("parse config");
+        config["files"] = serde_json::json!({"sources":{
+            "inquiries":{"inbox_path":"input","outbox_path":"output"},
+            "later":{"inbox_path":"missing-input","outbox_path":"later-output"}
+        }});
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec_pretty(&config).expect("serialize config"),
+        )
+        .expect("write config");
+        std::fs::write(
+            temp.path().join("input/one.json"),
+            serde_json::json!({
+                "schema_name":"channel_message","schema_version":1,
+                "external_message_id":"web/one","conversation_id":"inquiry/1",
+                "sender_id":"visitor/1","recipient_ids":["support"],
+                "subject":"Hello","body_text":"Hi"
+            })
+            .to_string(),
+        )
+        .expect("write input");
+        let app = router(ApiState::new(temp.path().to_path_buf(), TOKEN.to_string()));
+        for body in [
+            r#"{"files":true}"#,
+            r#"{"files":true,"dry_run":true}"#,
+            "{}",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/pull")
+                        .header("authorization", format!("Bearer {TOKEN}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{body}");
+            let value = response_json(response).await;
+            assert_eq!(value["kind"], "result", "{body}: {value}");
+            assert_eq!(
+                value["result"]["files"]["warnings"][0]["code"], "channel_inbox_unavailable",
+                "{body}: {value}"
+            );
+            assert_eq!(
+                value["result"]["files"]["warnings"][0]["source_id"],
+                "later"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn api_writer_obeys_incomplete_transaction_guard() {
         let temp = tempfile::tempdir().expect("create temp dir");

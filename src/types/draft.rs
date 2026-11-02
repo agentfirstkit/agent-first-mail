@@ -166,6 +166,7 @@ mod tests {
                         .then(|| "2026-07-11T00:00:01Z".to_string()),
                     completed_rfc3339: None,
                     result_summary: None,
+                    send_receipt: None,
                     error_code: None,
                     error: None,
                     retryable: None,

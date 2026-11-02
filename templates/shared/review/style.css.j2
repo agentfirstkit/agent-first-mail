@@ -102,6 +102,17 @@ main { width: min(960px, calc(100% - 2rem)); margin: 2rem auto 5rem; }
 .suggestion { border-left: 4px solid var(--afui-accent); }
 .suggestion blockquote { margin: .6rem 0; color: var(--afui-muted); }
 .suggestion form[data-afmail-settle] { display: grid; gap: .8rem; }
+/* Decisions are cards with nothing preselected; the reason opens inside the chosen one. */
+.decision-choices { min-width: 0; margin: 0; padding: 0; border: 0; display: grid; gap: .5rem; }
+.decision-choices legend { padding: 0; margin-bottom: .4rem; font-weight: 600; }
+.decision-choice { border: 1px solid var(--afui-line); border-radius: .6rem; background: var(--afui-panel); }
+.decision-choice:has(> .decision-head input:checked) { border-color: var(--afui-accent); box-shadow: inset 0 0 0 1px var(--afui-accent); }
+.decision-head { display: flex; align-items: center; gap: .65rem; min-height: 44px; padding: .55rem .75rem; cursor: pointer; }
+.decision-head input { width: 18px; height: 18px; margin: 0; flex: 0 0 auto; accent-color: var(--afui-accent); }
+.decision-choice textarea[data-afmail-reason] { display: block; width: calc(100% - 2.85rem - .75rem); margin: 0 .75rem .75rem 2.85rem; min-height: 2.6rem; field-sizing: content; max-height: 12rem; padding: .5rem .65rem; }
+.decision-choice textarea[data-afmail-reason][hidden] { display: none; }
+.decision-choice .destructive-confirmation { display: block; margin: 0 .75rem .75rem 2.85rem; }
+.decision-choice:not(:has(> .decision-head input:checked)) .destructive-confirmation { display: none; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; }
 label { display: grid; gap: .35rem; color: var(--afui-muted); }
 input, select, textarea { width: 100%; border: 1px solid var(--afui-line); border-radius: .6rem; padding: .65rem .75rem; background: var(--afui-panel); color: var(--afui-ink); }

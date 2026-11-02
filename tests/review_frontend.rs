@@ -5,9 +5,10 @@
 //! with a stub standing in for the browser, and asserts on the page the stub
 //! actually fetched.
 //!
-//! `AFUI_BROWSER_BINARY` names the stub. It records the `--app=<url>` it was
-//! launched with, curls it into a file, and exits — which is the person
-//! closing the window, so the review ends and the command returns.
+//! `AFUI_BROWSER_BINARY` names the stub. It records the URL its
+//! `--app=file://…` launch page forwards to, curls it into a file, and exits
+//! — which is the person closing the window, so the review ends and the
+//! command returns.
 //!
 //! `AFUI_CONFIG_DIR` moves AFUI's global directory into the test's temp tree,
 //! so the trust store these tests write is theirs and not the developer's.
@@ -33,7 +34,8 @@ set -eu
 url=""
 for arg in "$@"; do
   case "$arg" in
-    --app=*) url="${arg#--app=}" ;;
+    --app=file://*) url="$(sed -n 's/.*location\.replace("\(.*\)");.*/\1/p' "${arg#--app=file://}")" ;;
+    --app=*) printf 'credential in arguments' > "$AFMAIL_STUB_DIR/url"; exit 1 ;;
   esac
 done
 printf '%s' "$url" > "$AFMAIL_STUB_DIR/url"
@@ -127,8 +129,8 @@ impl Workspace {
             command.env(name, value);
         }
         let output = command.output().expect("run afmail");
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy_owned(output.stdout);
+        let stderr = String::from_utf8_lossy_owned(output.stderr);
         let events = format!("{stdout}{stderr}")
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -187,7 +189,7 @@ impl Workspace {
     /// Calling AFUI's own helper is the stronger version of that: there is no
     /// second implementation left to drift.
     fn trust(&self, ui_kind: &str) {
-        FrontendOnDisk::at(self.frontend_root(ui_kind), "afmail", ui_kind)
+        FrontendOnDisk::at(self.frontend_root(ui_kind))
             .trust_in(&self.config_dir)
             .expect("trust the frontend");
     }

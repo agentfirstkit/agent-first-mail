@@ -24,6 +24,7 @@ pub(super) fn workspace_storage_usage(root: &Path) -> Result<Value> {
             + recursive_file_bytes(&root.join(crate::layout::afmail_path(
                 crate::layout::AFMAIL_TRANSACTIONS,
             )))?
+            + recursive_file_bytes(&root.join(".afmail/cloudflare-consumer"))?
             + file_bytes(&root.join(layout::afmail_path(layout::AFMAIL_PROGRESS)))?;
     let total_bytes =
         raw_bytes + cache_bytes + attachment_bytes + view_bytes + audit_bytes + queue_bytes;

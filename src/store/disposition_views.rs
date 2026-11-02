@@ -227,36 +227,18 @@ impl Workspace {
         Ok(true)
     }
 
-    pub(super) fn disposition_state_for_message(
+    /// Every message's disposition and when it entered it.
+    pub(super) fn disposition_state_by_message(
         &self,
-        message_id: &str,
-    ) -> Result<Option<(MessageStatus, String)>> {
-        let mut state: Option<(MessageStatus, String)> = None;
-        for spec in DISPOSITION_VIEW_SPECS {
-            let data = self.read_disposition_messages(spec)?;
-            if let Some(item) = data.items.iter().find(|item| item.message_id == message_id) {
-                if let Some((existing_status, _)) = &state {
-                    return Err(AppError::new(
-                        "disposition_state_invalid",
-                        format!(
-                            "message {message_id} is present in both {} and {} dispositions",
-                            existing_status.as_str(),
-                            spec.status.as_str()
-                        ),
-                    ));
-                }
-                state = Some((spec.status, item.added_rfc3339.clone()));
-            }
-        }
-        Ok(state)
-    }
-
-    pub(super) fn disposition_state_by_message(&self) -> Result<BTreeMap<String, MessageStatus>> {
+    ) -> Result<BTreeMap<String, (MessageStatus, String)>> {
         let mut out = BTreeMap::new();
         for spec in DISPOSITION_VIEW_SPECS {
             let data = self.read_disposition_messages(spec)?;
             for item in data.items {
-                if let Some(existing_status) = out.insert(item.message_id.clone(), spec.status) {
+                if let Some((existing_status, _)) = out.insert(
+                    item.message_id.clone(),
+                    (spec.status, item.added_rfc3339.clone()),
+                ) {
                     return Err(AppError::new(
                         "disposition_state_invalid",
                         format!(
@@ -314,14 +296,12 @@ impl Workspace {
             unchanged.insert(spec.dir, 0);
         }
 
+        let source = self.message_source(render_context)?;
         for spec in DISPOSITION_VIEW_SPECS {
             let data = self.read_disposition_messages(spec)?;
             collections.insert(spec.dir, data.clone());
             for item in &data.items {
-                let mut message = match render_context {
-                    Some(context) => context.read_message(self, &item.message_id)?,
-                    None => self.read_message_by_id(&item.message_id)?,
-                };
+                let mut message = source.read(self, &item.message_id)?;
                 validate_disposition_message(spec, &message)?;
                 if render_context.is_none() {
                     self.apply_identity_match(&mut message, config)?;

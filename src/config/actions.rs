@@ -342,10 +342,25 @@ pub struct ActionStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp_send: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflare_send: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_send: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<ActionStepOn>,
 }
 
 impl ActionStep {
+    pub fn is_send(&self) -> bool {
+        self.smtp_send.is_some() || self.cloudflare_send.is_some() || self.file_send.is_some()
+    }
+
+    pub fn cloudflare_send() -> Self {
+        Self {
+            cloudflare_send: Some(BTreeMap::new()),
+            ..Self::default()
+        }
+    }
+
     pub fn add_flags(flags: Vec<String>) -> Self {
         Self {
             add_flags: flags,

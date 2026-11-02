@@ -105,7 +105,7 @@ fn write_message(root: &Path, message_id: &str, uid: u64) {
         &root.join(format!(".afmail/messages/{message_id}.json")),
         &json!({
             "schema_name": "message_metadata",
-            "schema_version": 2,
+            "schema_version": 3,
             "message_id": message_id,
             "remote": message["remote"].clone()
         }),

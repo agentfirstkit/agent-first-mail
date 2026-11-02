@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 
 # Runs a human-facing GreenMail workflow demo against the mail-batch fixtures.
@@ -7,44 +8,19 @@ CRATE_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 FIXTURE_DIR="$CRATE_DIR/tests/fixtures/mail-batch"
 MODE=${1:-prepare}
 WORKSPACE=${AFMAIL_DEMO_WORKSPACE:-$(mktemp -d "${TMPDIR:-/tmp}/afmail-demo.XXXXXX")}
-IMAGE=greenmail/standalone:2.1.14
+IMAGE=greenmail/standalone:2.1.15
 CONTAINER=${AFMAIL_DEMO_CONTAINER:-afmail-demo-greenmail-$(date +%s)-$$}
 STEP_DELAY_S=${AFMAIL_DEMO_STEP_DELAY_S:-0}
 
-CONTAINER_RUNTIME=${AFMAIL_TEST_CONTAINER_RUNTIME:-}
-if [[ -z "$CONTAINER_RUNTIME" ]]; then
-  if [[ "${CI:-}" == "true" ]]; then
-    CONTAINER_RUNTIME=docker
-  elif [[ "$(uname -s)" == "Darwin" ]]; then
-    CONTAINER_RUNTIME=apple
-  else
-    CONTAINER_RUNTIME=docker
-  fi
+# shellcheck source=container-runtime.sh
+source "$SCRIPT_DIR/container-runtime.sh"
+af_container_resolve "${AFMAIL_TEST_CONTAINER_RUNTIME:-}"
+af_container_start >/dev/null
+if [ "$CONTAINER_RUNTIME" = apple ]; then
+  CONTAINER_STOP_COMMAND="container delete --force $CONTAINER"
+else
+  CONTAINER_STOP_COMMAND="$CONTAINER_BIN rm -f $CONTAINER"
 fi
-case "$CONTAINER_RUNTIME" in
-  apple)
-    CONTAINER_BIN=container
-    CONTAINER_STOP_COMMAND="container delete --force $CONTAINER"
-    command -v container >/dev/null 2>&1 || {
-      echo "Apple container is required for this local demo" >&2
-      exit 2
-    }
-    container system start >/dev/null
-    ;;
-  docker)
-    CONTAINER_BIN=docker
-    CONTAINER_STOP_COMMAND="docker rm -f $CONTAINER"
-    command -v docker >/dev/null 2>&1 || {
-      echo "Docker is required for this CI demo runtime" >&2
-      exit 2
-    }
-    docker info >/dev/null
-    ;;
-  *)
-    echo "AFMAIL_TEST_CONTAINER_RUNTIME must be apple or docker" >&2
-    exit 2
-    ;;
-esac
 
 case "$MODE" in
   prepare | review | run) ;;
@@ -65,7 +41,7 @@ cleanup() {
     if [[ "$CONTAINER_RUNTIME" == "apple" ]]; then
       container delete --force "$CONTAINER" >/dev/null 2>&1 || true
     else
-      docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+      "$CONTAINER_BIN" rm -f "$CONTAINER" >/dev/null 2>&1 || true
     fi
   fi
 }

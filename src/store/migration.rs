@@ -88,7 +88,10 @@ impl WorkspaceMigration {
                     }
                     message_ids.insert(message_id.to_string());
                     legacy_message_paths.push(path);
-                } else if let Some(message_id) = name.strip_suffix(".eml") {
+                } else if let Some(message_id) = name
+                    .strip_suffix(".eml")
+                    .or_else(|| name.strip_suffix(".message"))
+                {
                     validate_id("message_id", message_id)?;
                     message_ids.insert(message_id.to_string());
                 }
@@ -122,9 +125,10 @@ impl WorkspaceMigration {
                 (
                     MessageMetadata {
                         schema_name: "message_metadata".to_string(),
-                        schema_version: 2,
+                        schema_version: 3,
                         message_id,
                         remote,
+                        delivery: None,
                         agent_suggestion: None,
                         human_suggestion: None,
                         case_relationship_suggestion: None,
@@ -254,7 +258,7 @@ fn read_message_metadata_for_migration(
         }))
     })?;
     if metadata.schema_name != "message_metadata"
-        || !matches!(metadata.schema_version, 1 | 2)
+        || !matches!(metadata.schema_version, 1..=3)
         || metadata.message_id != message_id
     {
         return Err(AppError::new(
@@ -270,8 +274,8 @@ fn read_message_metadata_for_migration(
         metadata.human_suggestion.as_ref(),
     )?;
     validate_case_relationship_suggestion(metadata.case_relationship_suggestion.as_ref())?;
-    let rewrite_required = metadata.schema_version != 2;
-    metadata.schema_version = 2;
+    let rewrite_required = metadata.schema_version != 3;
+    metadata.schema_version = 3;
     Ok(Some((metadata, rewrite_required)))
 }
 

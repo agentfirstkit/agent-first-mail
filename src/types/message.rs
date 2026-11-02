@@ -111,6 +111,8 @@ pub struct MessageFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rfc822_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::channels::MessageOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<String>,
@@ -193,6 +195,8 @@ pub struct MessageMetadata {
     pub message_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryEnvelope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_suggestion: Option<MessageAgentSuggestion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -390,4 +394,24 @@ pub struct WorkspacePendingPush {
     pub queued_rfc3339: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub envelope_to: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_rfc3339: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<DeliverySource>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeliverySource {
+    CloudflareR2 { bucket: String, key: String },
+    File { path: String },
 }

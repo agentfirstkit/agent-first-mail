@@ -962,9 +962,24 @@ fn save_draft_in_workspace(
             "draft requires at least one to or bcc recipient",
         ));
     }
-    let to = crate::smtp_send::normalize_recipient_list_text(&edit.to, "to")?;
-    let cc = crate::smtp_send::normalize_recipient_list_text(&edit.cc, "cc")?;
-    let bcc = crate::smtp_send::normalize_recipient_list_text(&edit.bcc, "bcc")?;
+    let recipients = |text: &str, field: &str| {
+        if current.draft.frontmatter.reply_route.is_some() {
+            let values = text
+                .lines()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            for value in &values {
+                crate::channels::validate_identifier(value)?;
+            }
+            Ok(values)
+        } else {
+            crate::outbound::normalize_recipient_list_text(text, field)
+        }
+    };
+    let to = recipients(&edit.to, "to")?;
+    let cc = recipients(&edit.cc, "cc")?;
+    let bcc = recipients(&edit.bcc, "bcc")?;
     let changed = workspace.change_draft(
         case_ref,
         draft_name,
@@ -2188,6 +2203,55 @@ mod tests {
     }
 
     #[test]
+    fn settling_offers_decisions_without_a_default_and_keeps_a_note_on_accept() {
+        let (root, workspace, case_ref, _) = temp_workspace("settle-no-default");
+        let case_hash = workspace
+            .case_review_base_hash(&case_ref)
+            .expect("case review hash");
+        workspace
+            .set_case_agent_suggestion(
+                &case_ref,
+                &case_hash,
+                crate::types::CaseSuggestedAction::CaseArchive,
+                "This case is complete",
+                None,
+            )
+            .expect("case suggestion");
+        let model = case_review_document(&workspace, &case_ref);
+        let page = render_builtin_page(&workspace, &model).expect("case Review page renders");
+        // Settling the agent's suggestion is an answer the person gives: the
+        // decisions are cards, none checked, and the reason opens only inside
+        // the one chosen.
+        assert!(page.contains(r#"data-afmail-settle="case""#), "{page}");
+        assert!(!page.contains(r#"<select name="decision""#), "{page}");
+        assert!(page.contains(r#"<input type="radio" name="decision" value="accept" required>"#));
+        assert!(page.contains(r#"<input type="radio" name="decision" value="reject" required>"#));
+        assert!(!page.contains(r#"name="decision" value="accept" required checked"#));
+        assert!(page.contains(r#"<textarea name="reason" rows="1" hidden data-afmail-reason"#));
+
+        let agent = current_case_agent_suggestion(&workspace, &case_ref)
+            .expect("read suggestion")
+            .expect("current suggestion");
+        let human = settle_case_in_workspace(
+            &workspace,
+            &case_ref,
+            &case_hash,
+            Some(&agent.agent_suggestion_uid),
+            &HashMap::from([
+                ("decision".to_string(), "accept".to_string()),
+                (
+                    "reason".to_string(),
+                    "Archive after Friday's call".to_string(),
+                ),
+            ]),
+        )
+        .expect("accept with a note settles");
+        assert_eq!(human.outcome, HumanSuggestionOutcome::Accepted);
+        assert_eq!(human.reason.as_deref(), Some("Archive after Friday's call"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn case_review_contains_the_exact_markdown_collection_document() {
         let (root, workspace, case_ref, draft_name) = temp_workspace("shared-document");
         let case_hash = workspace
@@ -2342,6 +2406,115 @@ mod tests {
             panic!("draft Review must contain draft contents");
         };
         assert_eq!(contents.draft.document, document);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "files")]
+    #[test]
+    fn native_reply_review_contains_the_exact_markdown_documents_in_every_language() {
+        let root = tempfile::tempdir().expect("native workspace");
+        let workspace = Workspace::at(root.path());
+        workspace.init().expect("init");
+        let mut config = MailConfig::load(root.path()).expect("config");
+        config.files.sources = serde_json::from_value(json!({
+            "inquiries": {"inbox_path":"input", "outbox_path":"output"}
+        }))
+        .expect("native source");
+        config.write(root.path()).expect("write config");
+        std::fs::create_dir(root.path().join("input")).expect("inbox");
+        for (id, parent) in [("parent", None), ("reply", Some("parent"))] {
+            crate::util::write_json_pretty(
+                &root.path().join(format!("input/{id}.json")),
+                &json!({
+                    "schema_name":"channel_message", "schema_version":1,
+                    "external_message_id":id, "conversation_id":"inquiry/42",
+                    "sender_id":"visitor/42", "recipient_ids":["support"],
+                    "subject":id, "body_text":if id == "parent" { "Parent <unsafe> & context" } else { "Native conversation" },
+                    "reply_to_external_message_id":parent
+                }),
+            )
+            .expect("input");
+        }
+        let pulled = workspace
+            .pull_sources_with_progress(
+                &[],
+                false,
+                true,
+                crate::sources::imap::PullOptions::default(),
+                None,
+            )
+            .expect("pull native messages");
+        let reply_id = pulled["new_message_ids"][1]
+            .as_str()
+            .expect("reply id")
+            .to_string();
+        for language in crate::config::TemplateLanguage::ALL {
+            config.workspace.language_bcp47 = Some(language.as_str().to_string());
+            config.write(root.path()).expect("language");
+            let markdown = workspace
+                .triage_template_document(&reply_id)
+                .expect("Markdown document");
+            assert_eq!(markdown.context.related_messages.len(), 1);
+            let contents =
+                build_triage_review_contents(&workspace, std::slice::from_ref(&reply_id), None)
+                    .expect("Review contents");
+            assert_eq!(
+                serde_json::to_value(&contents.items[0].document).expect("Review JSON"),
+                serde_json::to_value(&markdown).expect("Markdown JSON")
+            );
+            let model = review_render_document(
+                &workspace,
+                ReviewSurfaceKind::Triage,
+                ReviewContents::Triage(contents),
+            )
+            .expect("Review document");
+            let html = render_builtin_page(&workspace, &model).expect("localized native Review");
+            assert!(html.contains("Native conversation"));
+            assert!(html.contains("data-afmail-related-messages"));
+            assert!(html.contains("Parent &lt;unsafe&gt; &amp; context"));
+            assert!(!html.contains("Parent <unsafe>"));
+        }
+    }
+
+    #[cfg(feature = "files")]
+    #[test]
+    fn incomplete_relationships_are_visible_in_both_outputs_for_every_language() {
+        let (root, workspace, _, _) = temp_workspace("relation-issues");
+        write_test_message(&workspace, "message_a", "Readable message");
+        let broken = workspace.root().join("messages/message_broken.json");
+        std::fs::write(&broken, b"{").expect("corrupt unrelated cache");
+        for language in crate::config::TemplateLanguage::ALL {
+            let mut config = MailConfig::load(workspace.root()).expect("config");
+            config.workspace.language_bcp47 = Some(language.as_str().to_string());
+            config.write(workspace.root()).expect("language");
+            let contents =
+                build_triage_review_contents(&workspace, &["message_a".to_string()], None)
+                    .expect("read with issues");
+            assert_eq!(
+                contents.items[0]
+                    .document
+                    .context
+                    .related_message_issues
+                    .len(),
+                1
+            );
+            let markdown = crate::templates::TemplateRenderer::new(workspace.root(), language)
+                .render(
+                    crate::templates::TemplateKey::TriageView,
+                    &contents.items[0].document,
+                )
+                .expect("Markdown warning");
+            assert!(markdown.contains("message_broken"));
+            let model = review_render_document(
+                &workspace,
+                ReviewSurfaceKind::Triage,
+                ReviewContents::Triage(contents),
+            )
+            .expect("Review model");
+            let html = render_builtin_page(&workspace, &model).expect("Review warning");
+            assert!(html.contains("data-afmail-related-issues"));
+            assert!(html.contains("message_broken"));
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3051,6 +3224,65 @@ mod tests {
                 .text,
             moved.text
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "files")]
+    #[test]
+    fn native_draft_review_preserves_opaque_recipient_ids_and_shows_the_route() {
+        let (root, workspace, case_ref, draft_name) = temp_workspace("native-draft-save");
+        let mut config = MailConfig::load(&root).expect("config");
+        config.files.sources.insert(
+            "inquiries".into(),
+            crate::channels::FileSourceConfig {
+                inbox_path: "input".into(),
+                outbox_path: "output".into(),
+                max_message_bytes: 4096,
+                max_input_files: 20,
+            },
+        );
+        config.write(&root).expect("file config");
+        let initial = workspace
+            .draft_render_document(&case_ref, &draft_name)
+            .expect("draft document");
+        let mut fm = initial.draft.frontmatter;
+        fm.reply_route = Some(crate::channels::ReplyRoute {
+            channel: crate::channels::ChannelKind::File,
+            source_id: "inquiries".into(),
+            conversation_id: "web/42".into(),
+        });
+        fm.to = vec![" visitor,42 ".into(), "visitor/43".into()];
+        std::fs::write(
+            root.join(initial.locator.draft_path),
+            crate::markdown::render_frontmatter(&fm, &initial.draft.body_markdown)
+                .expect("native frontmatter"),
+        )
+        .expect("write native draft");
+        let current = workspace
+            .draft_render_document(&case_ref, &draft_name)
+            .expect("native document");
+        let model = case_review_document(&workspace, &case_ref);
+        let page = render_builtin_page(&workspace, &model).expect("native Review page");
+        assert!(page.contains("inquiries / web&#x2f;42"), "{page}");
+        assert!(page.contains(" visitor,42 \nvisitor&#x2f;43"), "{page}");
+        assert!(!page.contains("inputmode=\"email\""), "{page}");
+        let edit = DraftEdit {
+            base_hash: value_hash(&current).expect("hash"),
+            draft_name: draft_name.clone(),
+            subject: None,
+            to: " visitor,42 \nvisitor/43".into(),
+            cc: String::new(),
+            bcc: String::new(),
+            body: Some("Updated native answer".into()),
+        };
+        save_draft_in_workspace(&workspace, &case_ref, &draft_name, &edit)
+            .expect("save native draft")
+            .expect("current draft");
+        let updated = workspace
+            .draft_render_document(&case_ref, &draft_name)
+            .expect("updated native document");
+        assert_eq!(updated.draft.frontmatter.to, fm.to);
+        assert_eq!(updated.draft.frontmatter.reply_route, fm.reply_route);
         let _ = std::fs::remove_dir_all(root);
     }
 

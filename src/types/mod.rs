@@ -21,14 +21,15 @@ pub use draft::{
 pub use ids::{CaseUid, MessageId, NotificationUid, PushId};
 pub use message::{
     AttachmentRef, AuthAlignment, AuthVerdict, CaseRelationshipEvidence,
-    CaseRelationshipSuggestion, ImapRef, MESSAGE_SCHEMA_VERSION, MailDirection,
-    MessageAuthentication, MessageFile, MessageMetadata, MessageStatus, RemoteLocation,
-    RemoteState, RemoteSyncState, WorkspacePendingPush, WorkspacePushState, WorkspaceState,
+    CaseRelationshipSuggestion, DeliveryEnvelope, DeliverySource, ImapRef, MESSAGE_SCHEMA_VERSION,
+    MailDirection, MessageAuthentication, MessageFile, MessageMetadata, MessageStatus,
+    RemoteLocation, RemoteState, RemoteSyncState, WorkspacePendingPush, WorkspacePushState,
+    WorkspaceState,
 };
 pub use push::{
-    DraftPush, MessageActionPush, MessagePush, MessagePushAction, OutboundAction, OutboundPush,
-    PUSH_ITEM_SCHEMA_VERSION, PreparedOutbound, PushAuditPending, PushItem, PushKind,
-    PushLocalStage, PushLocation, PushPayload, PushStepState, PushStepStatus,
+    DraftPush, MessageActionPush, MessagePush, MessagePushAction, OutboundAction, OutboundDelivery,
+    OutboundPush, PUSH_ITEM_SCHEMA_VERSION, PreparedEmail, PreparedOutbound, PushAuditPending,
+    PushItem, PushKind, PushLocalStage, PushLocation, PushPayload, PushStepState, PushStepStatus,
 };
 pub use suggestion::{
     CaseAgentSuggestion, CaseHumanSuggestion, CaseSuggestedAction, HumanSuggestionOutcome,

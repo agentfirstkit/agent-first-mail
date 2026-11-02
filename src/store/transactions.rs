@@ -157,7 +157,7 @@ impl TransactionFile {
         let Some(message_id) = self
             .paths
             .iter()
-            .find_map(|path| path.strip_prefix("messages/")?.strip_suffix(".json"))
+            .find_map(|path| path.strip_circumfix("messages/", ".json"))
         else {
             return Ok(None);
         };

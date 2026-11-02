@@ -7,6 +7,12 @@ message_id: {{ mail.message_id }}
 # {% if mail.subject %}{{ mail.subject | inline }}{% else %}{{ i18n.t('incoming_mail') }}{% endif %}
 
 {% with document = triage.context.message %}{% include "message/section.md.j2" %}{% endwith %}
+{% if triage.context.related_message_issues %}
+
+> {{ i18n.t('related_messages_incomplete') }}
+{% for issue in triage.context.related_message_issues %}
+- `{{ issue.message_id | markdown_code }}`: `{{ issue.code | markdown_code }}` (`{{ issue.path | markdown_code }}`)
+{% endfor %}{% endif %}
 {% if relationship %}
 
 {{ i18n.t('suggested_case_uids') }}: {% for case_uid in relationship.case_uids %}{% if not loop.first %}, {% endif %}`{{ case_uid }}`{% endfor %}

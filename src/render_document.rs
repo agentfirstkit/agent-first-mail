@@ -40,6 +40,7 @@ pub(crate) struct ContentProvenance {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ContentSource {
     RemoteMail,
+    FileMessage,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -146,6 +147,16 @@ pub(crate) struct MessageContextDocument {
     pub message: MessageRenderDocument,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub related_messages: Vec<MessageRenderDocument>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_message_issues: Vec<RelatedMessageIssue>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RelatedMessageIssue {
+    pub code: String,
+    pub message_id: String,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]

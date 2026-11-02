@@ -1,6 +1,4 @@
 use crate::error::{AppError, Result};
-use atomic_write_file::AtomicWriteFile;
-use std::io::Write as _;
 use std::path::Path;
 
 /// Serialize `value` as pretty JSON with a trailing newline and write it to
@@ -19,10 +17,8 @@ pub(crate) fn write_bytes_atomic(path: &Path, data: &[u8], context: &str) -> Res
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| AppError::io("create directory", &e))?;
     }
-    let mut file = AtomicWriteFile::open(path).map_err(|e| AppError::io(context, &e))?;
-    file.write_all(data)
-        .map_err(|e| AppError::io(context, &e))?;
-    file.commit().map_err(|e| AppError::io(context, &e))
+    agent_first_data::document::write_atomic(path, data)
+        .map_err(|error| AppError::io(context, &std::io::Error::other(error)))
 }
 
 /// True if `host` is a loopback address or local hostname, where plaintext
@@ -36,6 +32,12 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
         return true;
     }
     match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(addr)) => {
+            addr.is_loopback()
+                || addr
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| mapped.is_loopback())
+        }
         Ok(addr) => addr.is_loopback(),
         Err(_) => false,
     }
@@ -93,10 +95,20 @@ mod tests {
             "localhost",
             "LocalHost",
             " 127.0.0.1 ",
+            "::ffff:127.0.0.1",
+            "[::ffff:127.0.0.42]",
         ] {
             assert!(is_loopback_host(host), "{host} should be loopback");
         }
-        for host in ["imap.example.com", "10.0.0.5", "192.168.1.2", "", "example"] {
+        for host in [
+            "imap.example.com",
+            "10.0.0.5",
+            "192.168.1.2",
+            "",
+            "example",
+            "::ffff:192.0.2.10",
+            "2001:db8::1",
+        ] {
             assert!(!is_loopback_host(host), "{host} should not be loopback");
         }
     }
@@ -106,6 +118,8 @@ mod tests {
         // Loopback: allowed even with credentials (local test servers).
         assert!(ensure_plaintext_credentials_allowed("IMAP", "127.0.0.1", true).is_ok());
         assert!(ensure_plaintext_credentials_allowed("SMTP", "localhost", true).is_ok());
+        assert!(ensure_plaintext_credentials_allowed("SMTP", "::ffff:127.0.0.1", true).is_ok());
+        assert!(ensure_plaintext_credentials_allowed("SMTP", "::ffff:192.0.2.10", true).is_err());
         // Remote host with no credentials: nothing to leak, allowed.
         assert!(ensure_plaintext_credentials_allowed("IMAP", "imap.example.com", false).is_ok());
         // Remote host with credentials over plaintext: refused.

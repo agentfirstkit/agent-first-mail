@@ -1,8 +1,11 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(feature = "smtp")]
 use std::process::Command;
-use std::sync::{Arc, Mutex, mpsc};
+#[cfg(feature = "smtp")]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -169,6 +172,7 @@ fn confirmed_push_items(value: &Value) -> &[Value] {
         .unwrap_or_default()
 }
 
+#[cfg(feature = "smtp")]
 fn run_confirmed_push_with_global_args(
     cwd: &std::path::Path,
     extra_args: &[&str],
@@ -179,6 +183,7 @@ fn run_confirmed_push_with_global_args(
     run(cwd, &args)
 }
 
+#[cfg(feature = "smtp")]
 fn run_confirmed_push_with_env(cwd: &std::path::Path, envs: &[(&str, &str)]) -> (i32, String) {
     let plan_id = current_push_plan_id(cwd);
     let output = Command::new(env!("CARGO_BIN_EXE_afmail"))
@@ -203,6 +208,7 @@ fn run_confirmed_push_with_env(cwd: &std::path::Path, envs: &[(&str, &str)]) -> 
     )
 }
 
+#[cfg(feature = "smtp")]
 fn parse_lines(stdout: &str) -> Vec<serde_json::Value> {
     stdout
         .lines()
@@ -211,6 +217,7 @@ fn parse_lines(stdout: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+#[cfg(feature = "smtp")]
 fn parse_raw_json_lines(stdout: &str) -> Vec<serde_json::Value> {
     stdout
         .lines()
@@ -246,6 +253,7 @@ fn configure_default_identity(root: &std::path::Path) {
     write_json(&root.join(".afmail/config.json"), &config);
 }
 
+#[cfg(feature = "smtp")]
 fn configure_smtp_send_only(root: &std::path::Path, smtp_port: u16) {
     let mut config = read_json(&root.join(".afmail/config.json"));
     config["actions"]["draft"]["send"]["steps"] = json!([{"smtp_send": {}}]);
@@ -260,6 +268,7 @@ fn configure_smtp_send_only(root: &std::path::Path, smtp_port: u16) {
     write_json(&root.join(".afmail/config.json"), &config);
 }
 
+#[cfg(feature = "smtp")]
 fn configure_smtp_then_sent_append(root: &std::path::Path, smtp_port: u16) {
     let mut config = read_json(&root.join(".afmail/config.json"));
     config["actions"]["draft"]["send"]["steps"] = json!([
@@ -311,6 +320,7 @@ fn configure_spam_without_seen(root: &std::path::Path, imap_port: Option<u16>) {
     write_json(&root.join(".afmail/config.json"), &config);
 }
 
+#[cfg(feature = "smtp")]
 fn configure_remote(root: &std::path::Path, imap_port: u16, smtp_port: u16) {
     let mut config = read_json(&root.join(".afmail/config.json"));
     config["imap"]["host"] = json!("127.0.0.1");
@@ -330,6 +340,7 @@ fn configure_remote(root: &std::path::Path, imap_port: u16, smtp_port: u16) {
     write_json(&root.join(".afmail/config.json"), &config);
 }
 
+#[cfg(feature = "smtp")]
 fn configure_remote_send_only(root: &std::path::Path, imap_port: u16, smtp_port: u16) {
     configure_remote(root, imap_port, smtp_port);
     let mut config = read_json(&root.join(".afmail/config.json"));
@@ -339,6 +350,8 @@ fn configure_remote_send_only(root: &std::path::Path, imap_port: u16, smtp_port:
 
 struct ImapTestServer {
     addr: SocketAddr,
+    // Read only by the SMTP send tests; the server records appends in every build.
+    #[cfg_attr(not(feature = "smtp"), allow(dead_code))]
     appended: AppendedMessages,
     commands: ImapCommands,
     copied: CopiedMessages,
@@ -348,8 +361,23 @@ struct ImapTestServer {
     handle: thread::JoinHandle<()>,
 }
 
-#[derive(Clone, Copy)]
+// Only the SMTP recovery tests ask for anything but `Found`.
+#[cfg_attr(not(feature = "smtp"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default)]
+enum SearchResponse {
+    #[default]
+    Found,
+    Absent,
+    DraftOnly,
+    Ambiguous,
+    Failed,
+}
+
+#[derive(Clone, Copy, Default)]
 struct ImapServerCapabilities {
+    search: SearchResponse,
+    reject_append_before_literal: bool,
+    wait_for_all_connections: bool,
     move_supported: bool,
     uidplus_supported: bool,
 }
@@ -360,6 +388,7 @@ fn start_imap_server(accept_count: usize) -> Option<ImapTestServer> {
         ImapServerCapabilities {
             move_supported: true,
             uidplus_supported: false,
+            ..Default::default()
         },
     )
 }
@@ -409,7 +438,12 @@ fn start_imap_server_with_capabilities(
                     } else {
                         Duration::from_millis(800)
                     };
-                    if last.elapsed() > idle_limit {
+                    // Multi-attempt tests can wait behind other CLI tests' lock.
+                    // Their scripted next connection must not lose a race with
+                    // the normal short idle shutdown between attempts.
+                    if last.elapsed() > idle_limit
+                        && !(served > 0 && capabilities.wait_for_all_connections)
+                    {
                         break;
                     }
                     thread::sleep(Duration::from_millis(5));
@@ -458,6 +492,16 @@ fn serve_imap_connection(
         };
         if read == 0 {
             return;
+        }
+        if capabilities.reject_append_before_literal
+            && String::from_utf8_lossy(&line).contains(" APPEND ")
+        {
+            let tag = tag_from_line(&line).unwrap_or_else(|| "bad".to_string());
+            let _ = write_imap(
+                &mut writer,
+                format!("{tag} NO [OVERQUOTA] Drafts quota exceeded\r\n").as_bytes(),
+            );
+            continue;
         }
         if handle_append_command(&mut writer, &mut reader, &line, appended).is_some() {
             continue;
@@ -545,7 +589,21 @@ fn serve_imap_connection(
                 }
             }
             "SEARCH" => {
-                let response = format!("* SEARCH 900\r\n{tag} OK SEARCH completed\r\n");
+                let response = match capabilities.search {
+                    SearchResponse::Found => {
+                        format!("* SEARCH 900\r\n{tag} OK SEARCH completed\r\n")
+                    }
+                    SearchResponse::DraftOnly if selected_mailbox == "Drafts" => {
+                        format!("* SEARCH 900\r\n{tag} OK SEARCH completed\r\n")
+                    }
+                    SearchResponse::DraftOnly | SearchResponse::Absent => {
+                        format!("* SEARCH\r\n{tag} OK SEARCH completed\r\n")
+                    }
+                    SearchResponse::Ambiguous => {
+                        format!("* SEARCH 900 901\r\n{tag} OK SEARCH completed\r\n")
+                    }
+                    SearchResponse::Failed => format!("{tag} NO [UNAVAILABLE] search failed\r\n"),
+                };
                 if write_imap(&mut writer, response.as_bytes()).is_err() {
                     return;
                 }
@@ -767,16 +825,19 @@ fn write_imap(writer: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
     writer.flush()
 }
 
+#[cfg(feature = "smtp")]
 struct SmtpTestServer {
     addr: SocketAddr,
     data_rx: mpsc::Receiver<String>,
     handle: thread::JoinHandle<()>,
 }
 
+#[cfg(feature = "smtp")]
 fn start_smtp_server() -> Option<SmtpTestServer> {
     start_smtp_server_connections(1)
 }
 
+#[cfg(feature = "smtp")]
 fn start_smtp_server_connections(connection_count: usize) -> Option<SmtpTestServer> {
     let listener = TcpListener::bind("127.0.0.1:0").ok()?;
     let addr = listener.local_addr().ok()?;
@@ -796,6 +857,7 @@ fn start_smtp_server_connections(connection_count: usize) -> Option<SmtpTestServ
     })
 }
 
+#[cfg(feature = "smtp")]
 fn serve_smtp_connection(mut writer: TcpStream, data_tx: mpsc::Sender<String>) {
     let reader_stream = match writer.try_clone() {
         Ok(stream) => stream,
@@ -854,6 +916,7 @@ fn serve_smtp_connection(mut writer: TcpStream, data_tx: mpsc::Sender<String>) {
     }
 }
 
+#[cfg(feature = "smtp")]
 fn write_smtp(writer: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
     writer.write_all(data)?;
     writer.flush()
@@ -964,6 +1027,7 @@ fn push_defaults_to_preview_and_rejects_dry_run_confirm() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(feature = "smtp")]
 #[test]
 fn push_failure_records_step_level_state() {
     let root = temp_root("push-step-state");
@@ -1008,6 +1072,7 @@ fn push_failure_records_step_level_state() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(feature = "smtp")]
 #[test]
 fn push_remote_outcome_unknown_without_succeeded_steps_is_partial() {
     let root = temp_root("push-remote-outcome-unknown");
@@ -1054,6 +1119,10 @@ fn push_remote_outcome_unknown_without_succeeded_steps_is_partial() {
     );
     assert_eq!(value["failures"][0]["succeeded_step_count"], 0);
     assert_eq!(value["failures"][0]["partially_applied"], true);
+    assert_eq!(
+        value["failures"][0]["error"]["cause_error"],
+        "connection ended after DATA"
+    );
     let queued = parse_one(&run(&root, &["push", "list"]).1);
     assert_eq!(
         queued["items"][0]["step_states"][0]["status"],
@@ -1389,6 +1458,10 @@ fn discarded_message_with_pending_push(
 ) -> std::path::PathBuf {
     assert!(fs::create_dir_all(root).is_ok());
     assert_eq!(run(root, &["init"]).0, 0);
+    assert_eq!(
+        run(root, &["config", "set", "imap.host", "imap.example.com"]).0,
+        0
+    );
     write_message(root, "message_discard", 44, None);
     write_triage(root, "message_discard", "discard fixture");
     let (status, stdout) = run(
@@ -1406,6 +1479,73 @@ fn discarded_message_with_pending_push(
     let push_id = queue["items"][0]["push_id"].as_str().unwrap_or_default();
     assert!(!push_id.is_empty(), "{queue}");
     root.join(format!(".afmail/push/{push_id}.json"))
+}
+
+#[test]
+fn case_add_refuses_a_started_push_before_writing_the_case() {
+    let root = temp_root("case-add-started");
+    let push_path = discarded_message_with_pending_push(&root, "spam");
+    let mut item = read_json(&push_path);
+    item["attempt_count"] = json!(1);
+    item["step_states"] = json!([{
+        "index": 0,
+        "label": "add_flags",
+        "status": "remote_outcome_unknown",
+        "started_rfc3339": "2026-10-09T11:00:00Z",
+        "retryable": false,
+    }]);
+    write_json(&push_path, &item);
+    let mut config = read_json(&root.join(".afmail/config.json"));
+    config["actions"]["case"]["add"]["steps"] = json!([{"add_flags": ["$Case"]}]);
+    write_json(&root.join(".afmail/config.json"), &config);
+    let (case_uid, case_path) = create_case(&root, "started-push", "case fixture");
+
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "add",
+            &case_uid,
+            "message_discard",
+            "--reason",
+            "belongs to the case",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "push_already_started");
+    // `case create --message` takes the same check before creating anything.
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "create",
+            "--name",
+            "started-push-create",
+            "--group",
+            "support",
+            "--message",
+            "message_discard",
+            "--reason",
+            "belongs to a new case",
+        ],
+    );
+    assert_eq!(status, 1, "{stdout}");
+    assert_eq!(parse_one(&stdout)["code"], "push_already_started");
+    assert_eq!(parse_one(&run(&root, &["doctor"]).1)["issue_count"], 0);
+    // Refused before any write: the case is untouched and the message keeps
+    // its spam disposition rather than ending up half-moved.
+    let case_data = read_json(&case_path.join("data/case.json"));
+    assert_eq!(
+        case_data["items"].as_array().map(Vec::len),
+        Some(0),
+        "{case_data}"
+    );
+    assert!(root.join("spam/message_discard.md").is_file());
+    assert_eq!(
+        read_json(&root.join("messages/message_discard.json"))["workspace"]["status"],
+        "spam"
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 fn write_legacy_discard_undo_transaction(root: &std::path::Path, kind: &str) -> std::path::PathBuf {
@@ -1712,6 +1852,70 @@ fn push_spam_can_skip_marking_remote_seen_by_config() {
 }
 
 #[test]
+fn push_drains_case_add_remote_steps() {
+    let _network_guard = NETWORK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = temp_root("case-add-push");
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let server = start_imap_server(3);
+    assert!(server.is_some());
+    let server = match server {
+        Some(server) => server,
+        None => return,
+    };
+    configure_imap_without_smtp(&root, server.addr.port());
+    let mut config = read_json(&root.join(".afmail/config.json"));
+    config["actions"]["case"]["add"]["steps"] = json!([{"add_flags": ["$Case"]}]);
+    write_json(&root.join(".afmail/config.json"), &config);
+    write_message(&root, "message_case_push", 42, None);
+    write_triage(&root, "message_case_push", "case push note");
+    let (case_uid, _) = create_case(&root, "case-push", "case with remote effect");
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "add",
+            &case_uid,
+            "message_case_push",
+            "--reason",
+            "belongs to the case",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+
+    let (status, stdout) = run(&root, &["push", "list"]);
+    assert_eq!(status, 0, "{stdout}");
+    let plan = parse_one(&stdout);
+    assert_eq!(plan["count"], 1, "{plan}");
+    assert_eq!(plan["items"][0]["action"], "case", "{plan}");
+
+    // A configured case.add effect is ordinary queued work: push applies it
+    // and the queue empties, rather than the item lingering undrained.
+    let (status, stdout) = run_confirmed_push(&root);
+    assert_eq!(status, 0, "{stdout}");
+    let value = parse_one(&stdout);
+    assert_eq!(confirmed_push_items(&value).len(), 1, "{value}");
+    assert!(server.handle.join().is_ok());
+    let stored = server
+        .stored
+        .lock()
+        .map(|items| items.clone())
+        .unwrap_or_default();
+    assert!(
+        stored.iter().any(|(mailbox, uid, query)| mailbox == "INBOX"
+            && *uid == 42
+            && query.contains("$Case")),
+        "{stored:?}"
+    );
+    let (status, stdout) = run(&root, &["push", "list"]);
+    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(parse_one(&stdout)["count"], 0, "{stdout}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn push_spam_moves_remote_to_junk_keeping_local_id() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -1935,6 +2139,7 @@ fn push_archive_falls_back_to_uidplus_copy_delete_when_move_is_unsupported() {
         ImapServerCapabilities {
             move_supported: false,
             uidplus_supported: true,
+            ..Default::default()
         },
     );
     assert!(server.is_some());
@@ -2008,6 +2213,7 @@ fn push_archive_without_move_or_uidplus_fails_before_copy_delete_fallback() {
         ImapServerCapabilities {
             move_supported: false,
             uidplus_supported: false,
+            ..Default::default()
         },
     );
     assert!(server.is_some());
@@ -2054,6 +2260,7 @@ fn push_archive_without_move_or_uidplus_fails_before_copy_delete_fallback() {
 }
 
 #[test]
+#[cfg(feature = "smtp")]
 fn queued_send_case_archive_transitions_through_archiving_after_push() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -2530,7 +2737,7 @@ fn special_use_push_list_and_push_lock_work() {
     assert_eq!(error["message"], "unknown command");
     assert_eq!(
         error["hint"],
-        "run `afmail push --help` and choose one registered combination"
+        "run `afmail push --help` to list the registered commands"
     );
 
     let (status, stdout) = run(&root, &["push", "list"]);
@@ -2913,6 +3120,7 @@ fn case_trash_rejects_cases_with_local_drafts() {
 }
 
 #[test]
+#[cfg(feature = "smtp")]
 fn push_confirmation_rejects_changed_identity_attachment_and_draft_before_smtp() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -3048,6 +3256,7 @@ fn push_confirmation_rejects_changed_identity_attachment_and_draft_before_smtp()
 }
 
 #[test]
+#[cfg(feature = "smtp")]
 fn push_drafts_send_new_message_skips_reply_to_step() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -3127,6 +3336,7 @@ fn push_drafts_send_new_message_skips_reply_to_step() {
 }
 
 #[test]
+#[cfg(feature = "smtp")]
 fn push_drafts_send_does_not_require_imap_move() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -3200,6 +3410,7 @@ fn push_drafts_send_does_not_require_imap_move() {
 }
 
 #[test]
+#[cfg(feature = "smtp")]
 fn push_multiple_sends_logs_incremental_refresh_progress() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -3279,6 +3490,7 @@ fn push_multiple_sends_logs_incremental_refresh_progress() {
 }
 
 #[test]
+#[cfg(feature = "smtp")]
 fn push_send_recovers_from_each_local_finalize_stage() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -3300,6 +3512,15 @@ fn push_send_recovers_from_each_local_finalize_stage() {
             None => return,
         };
         configure_smtp_send_only(&root, smtp.addr.port());
+        // A reply-only step is resolved from the draft, which finalization
+        // removes; resuming must not need the draft again.
+        let config_path = root.join(".afmail/config.json");
+        let mut config = read_json(&config_path);
+        config["actions"]["draft"]["send"]["steps"] = json!([
+            {"smtp_send": {}},
+            {"add_flags": ["\\Answered"], "on": "reply_to_message"}
+        ]);
+        write_json(&config_path, &config);
         let (case_uid, case_path) = create_case(&root, &format!("recover-{stage}"), "recover send");
         let draft_path = case_path.join("drafts/recover.md");
         let draft = draft_with_compose(format!(
@@ -3387,6 +3608,7 @@ fn push_send_recovers_from_each_local_finalize_stage() {
 }
 
 #[test]
+#[cfg(feature = "smtp")]
 fn push_audit_warning_is_partial_after_remote_effect_succeeds() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -3483,6 +3705,7 @@ fn push_audit_warning_is_partial_after_remote_effect_succeeds() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(feature = "smtp")]
 #[test]
 fn push_drafts_send_resumes_after_completed_smtp_step() {
     let _network_guard = NETWORK_TEST_LOCK
@@ -3560,6 +3783,7 @@ fn push_drafts_send_resumes_after_completed_smtp_step() {
 }
 
 #[test]
+#[cfg(feature = "smtp")]
 fn push_confirm_stops_after_first_failure() {
     let _network_guard = NETWORK_TEST_LOCK
         .lock()
@@ -3602,7 +3826,9 @@ fn push_confirm_stops_after_first_failure() {
     assert_eq!(value["pushed_count"], 0, "{value}");
     assert_eq!(value["failed_count"], 1, "{value}");
     assert_eq!(value["stopped_after_failure"], true);
-    assert_eq!(value["remaining_count"], 1);
+    assert_eq!(value["unattempted_count"], 1);
+    assert_eq!(value["pending_queue_count"], 2);
+    assert_eq!(value["recovery_required_count"], 1);
     assert_eq!(value["failures"].as_array().map(Vec::len), Some(1));
     assert_eq!(value["failures"][0]["partially_applied"], true);
     assert_eq!(value["failures"][0]["succeeded_step_count"], 1);
@@ -3831,4 +4057,502 @@ fn a_new_queue_lifecycle_for_the_same_draft_gets_a_new_outbound_identity() {
         sent_message_id_for_push_id(&second_push_id)
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(feature = "smtp")]
+fn uncertain_draft_fixture(name: &str) -> (std::path::PathBuf, String, std::path::PathBuf) {
+    let root = temp_root(name);
+    assert!(fs::create_dir_all(&root).is_ok());
+    assert_eq!(run(&root, &["init"]).0, 0);
+    configure_default_identity(&root);
+    let (case_uid, case_path) = create_case(&root, "recover", "recover uncertain draft append");
+    let draft = draft_with_compose(format!(
+        "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nto:\n  - bob@example.com\ncc: []\nsubject: Recovery\nattachments:\n---\n\nRecovery body\n"
+    ));
+    assert!(fs::write(case_path.join("drafts/recover.md"), draft).is_ok());
+    assert_eq!(
+        run(&root, &["case", "draft", "send", &case_uid, "recover.md"]).0,
+        0
+    );
+    let plan = parse_one(&run(&root, &["push"]).1);
+    let push_id = plan["items"][0]["push_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!push_id.is_empty(), "{plan}");
+    let push_path = root.join(format!(".afmail/push/{push_id}.json"));
+    let mut item = read_json(&push_path);
+    item["attempt_count"] = json!(1);
+    item["step_states"] = json!([
+        {"index":0,"label":"append_to_mailbox_id_drafts","status":"remote_outcome_unknown", "started_rfc3339":"2026-10-19T09:32:17Z", "error_code":"imap_append_failed", "error":"Could not append mail to mailbox", "retryable":false},
+        {"index":1,"label":"smtp_send","status":"pending"},
+        {"index":2,"label":"append_to_mailbox_id_sent","status":"pending"}
+    ]);
+    write_json(&push_path, &item);
+    (root, push_id, push_path)
+}
+
+#[cfg(feature = "smtp")]
+#[test]
+fn push_recover_rechecks_drafts_and_sent_and_changes_only_local_state() {
+    let _guard = NETWORK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    for (search, resolution, step_status) in [
+        (SearchResponse::Absent, "draft_absent", "pending"),
+        (SearchResponse::DraftOnly, "draft_found", "succeeded"),
+    ] {
+        let (root, push_id, path) = uncertain_draft_fixture(&format!("recover-{search:?}"));
+        let server = start_imap_server_with_capabilities(
+            3,
+            ImapServerCapabilities {
+                search,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        configure_imap_without_smtp(&root, server.addr.port());
+        let before = fs::read(&path).unwrap();
+        let old_plan_id = current_push_plan_id(&root);
+        let (status, output) = run(&root, &["push", "recover", &push_id]);
+        assert_eq!(status, 0, "{output}");
+        let value = parse_one(&output);
+        assert_eq!(value["resolution"], resolution);
+        assert_eq!(value["confirmed"], false);
+        assert_eq!(value["evidence"].as_array().unwrap().len(), 2);
+        assert_eq!(value["recovery_kind"], "drafts_append");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let plan_id = value["plan_id"].as_str().unwrap().to_string();
+        let (status, output) = run(&root, &["push", "recover", &push_id, "--confirm", &plan_id]);
+        assert_eq!(status, 0, "{output}");
+        let value = parse_one(&output);
+        assert_eq!(value["confirmed"], true);
+        let item = read_json(&path);
+        assert_eq!(item["step_states"][0]["status"], step_status);
+        assert_eq!(item["step_states"][1]["status"], "pending");
+        assert_eq!(item["push_id"], push_id);
+        if resolution == "draft_absent" {
+            assert_eq!(
+                item["step_states"][0]["error"],
+                "Could not append mail to mailbox"
+            );
+            assert_eq!(item["step_states"][0]["retryable"], true);
+            assert!(item["step_states"][0].get("started_rfc3339").is_none());
+            assert!(item["step_states"][0].get("completed_rfc3339").is_none());
+        }
+        assert_ne!(current_push_plan_id(&root), old_plan_id);
+        let audit = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap();
+        assert!(audit.contains("push_recovery_checked"));
+        assert!(server.appended.lock().unwrap().is_empty());
+        assert!(server.stored.lock().unwrap().is_empty());
+        assert!(server.moved.lock().unwrap().is_empty());
+        let commands = server.commands.lock().unwrap().clone();
+        assert_eq!(
+            commands.iter().filter(|c| c.as_str() == "SEARCH").count(),
+            4
+        );
+        // Ordinary confirmed push resumes at the repaired step. SMTP is not
+        // configured, so it stops before sending; a found draft is not appended again.
+        let (status, output) = run_confirmed_push(&root);
+        assert_eq!(status, 3, "{output}");
+        assert_eq!(read_json(&path)["step_states"][0]["status"], "succeeded");
+        assert_eq!(
+            server.appended.lock().unwrap().len(),
+            usize::from(resolution == "draft_absent")
+        );
+        assert!(server.handle.join().is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(feature = "smtp")]
+#[test]
+fn push_recover_refuses_sent_copy_ambiguous_results_and_search_errors() {
+    let _guard = NETWORK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    for (search, code) in [
+        (SearchResponse::Found, "push_recovery_sent_copy_found"),
+        (SearchResponse::Ambiguous, "imap_uid_ambiguous"),
+        (SearchResponse::Failed, "imap_search_failed"),
+    ] {
+        let (root, push_id, path) = uncertain_draft_fixture(&format!("recover-refuse-{search:?}"));
+        let server = start_imap_server_with_capabilities(
+            1,
+            ImapServerCapabilities {
+                search,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        configure_imap_without_smtp(&root, server.addr.port());
+        let before = fs::read(&path).unwrap();
+        let (status, output) = run(
+            &root,
+            &[
+                "push",
+                "recover",
+                &push_id,
+                "--confirm",
+                "push_recover_plan_unseen",
+            ],
+        );
+        assert_eq!(status, 1, "{output}");
+        assert_eq!(parse_one(&output)["code"], code, "{output}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(server.appended.lock().unwrap().is_empty());
+        server.handle.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(feature = "smtp")]
+#[test]
+fn push_recover_refuses_smtp_progress_incomplete_evidence_and_changed_plans() {
+    for (variant, code) in [
+        ("smtp", "push_recovery_unsupported"),
+        ("started", "push_recovery_unsupported"),
+        ("truncated", "push_recovery_unsupported"),
+        ("changed", "push_plan_changed_after_start"),
+        ("local", "push_recovery_unsupported"),
+    ] {
+        let (root, push_id, path) = uncertain_draft_fixture(&format!("recover-{variant}"));
+        let mut item = read_json(&path);
+        match variant {
+            "smtp" => item["step_states"][1]["status"] = json!("remote_outcome_unknown"),
+            "started" => item["step_states"][1]["started_rfc3339"] = json!("2026-10-19T09:32:18Z"),
+            "truncated" => {
+                item["step_states"].as_array_mut().unwrap().pop();
+            }
+            "changed" => {
+                let mut config = read_json(&root.join(".afmail/config.json"));
+                config["actions"]["draft"]["send"]["steps"] = json!([{"smtp_send": {}}]);
+                write_json(&root.join(".afmail/config.json"), &config);
+            }
+            "local" => item["local_stage"] = json!("remote_succeeded"),
+            _ => unreachable!(),
+        }
+        write_json(&path, &item);
+        let before = fs::read(&path).unwrap();
+        let (status, output) = run(
+            &root,
+            &[
+                "push",
+                "recover",
+                &push_id,
+                "--confirm",
+                "push_recover_plan_unseen",
+            ],
+        );
+        assert_eq!(status, 1, "{output}");
+        assert_eq!(parse_one(&output)["code"], code, "{output}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(feature = "smtp")]
+#[test]
+fn push_append_rejection_before_literal_keeps_server_response_and_allows_retry() {
+    let _guard = NETWORK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (root, push_id, path) = uncertain_draft_fixture("append-preflight-rejection");
+    let mut item = read_json(&path);
+    item["step_states"] = json!([]);
+    write_json(&path, &item);
+    let server = start_imap_server_with_capabilities(
+        2,
+        ImapServerCapabilities {
+            reject_append_before_literal: true,
+            wait_for_all_connections: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    configure_imap_without_smtp(&root, server.addr.port());
+    for _ in 0..2 {
+        let (status, output) = run_confirmed_push(&root);
+        assert_eq!(status, 1, "{output}");
+        let result = parse_one(&output);
+        assert_eq!(result["failures"][0]["push_id"], push_id);
+        assert_eq!(result["failures"][0]["error"]["code"], "imap_append_failed");
+        assert!(
+            result["failures"][0]["error"]["server_response"]
+                .as_str()
+                .unwrap()
+                .contains("[OVERQUOTA] Drafts quota exceeded")
+        );
+        let item = read_json(&path);
+        assert_eq!(item["step_states"][0]["status"], "failed");
+        assert!(
+            item["step_states"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("[OVERQUOTA]")
+        );
+        assert_eq!(item["step_states"][1]["status"], "pending");
+    }
+    assert!(server.appended.lock().unwrap().is_empty());
+    server.handle.join().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "smtp")]
+#[test]
+fn push_recover_absence_releases_the_draft_for_normal_local_cancellation() {
+    let _guard = NETWORK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (root, push_id, path) = uncertain_draft_fixture("recover-cancel");
+    let item = read_json(&path);
+    let server = start_imap_server_with_capabilities(
+        2,
+        ImapServerCapabilities {
+            search: SearchResponse::Absent,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    configure_imap_without_smtp(&root, server.addr.port());
+    let preview = parse_one(&run(&root, &["push", "recover", &push_id]).1);
+    let plan_id = preview["plan_id"].as_str().unwrap_or_default().to_string();
+    let (status, output) = run(&root, &["push", "recover", &push_id, "--confirm", &plan_id]);
+    assert_eq!(status, 0, "{output}");
+    let (status, output) = run(
+        &root,
+        &[
+            "case",
+            "draft",
+            "remove",
+            item["case_uid"].as_str().unwrap(),
+            item["draft_name"].as_str().unwrap(),
+            "--reason",
+            "cancel after explicit remote absence verification",
+        ],
+    );
+    assert_eq!(status, 0, "{output}");
+    assert!(!path.exists());
+    assert_eq!(parse_one(&run(&root, &["push", "list"]).1)["count"], 0);
+    let audit = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap();
+    assert!(audit.contains("Could not append mail to mailbox"));
+    assert!(server.appended.lock().unwrap().is_empty());
+    server.handle.join().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// An uncertain SMTP send after a completed Drafts APPEND: the shape every
+/// send-settlement test starts from.
+#[cfg(feature = "smtp")]
+fn uncertain_send_fixture(name: &str) -> (std::path::PathBuf, String, std::path::PathBuf) {
+    let (root, push_id, path) = uncertain_draft_fixture(name);
+    let mut item = read_json(&path);
+    item["step_states"] = json!([
+        {"index":0,"label":"append_to_mailbox_id_drafts","status":"succeeded", "started_rfc3339":"2026-10-19T09:32:17Z", "completed_rfc3339":"2026-10-19T09:32:18Z"},
+        {"index":1,"label":"smtp_send","status":"remote_outcome_unknown", "started_rfc3339":"2026-10-19T09:32:19Z", "error_code":"smtp_send_failed", "error":"connection reset after DATA", "retryable":false},
+        {"index":2,"label":"append_to_mailbox_id_sent","status":"pending"}
+    ]);
+    write_json(&path, &item);
+    (root, push_id, path)
+}
+
+#[cfg(feature = "smtp")]
+fn recover_send_preview(root: &std::path::Path, push_id: &str) -> Value {
+    let (status, output) = run(root, &["push", "recover", push_id]);
+    assert_eq!(status, 0, "{output}");
+    parse_one(&output)
+}
+
+#[cfg(feature = "smtp")]
+#[test]
+fn push_recover_previews_an_uncertain_send_with_its_evidence_and_changes_nothing() {
+    let (root, push_id, path) = uncertain_send_fixture("recover-send-preview");
+    configure_imap_without_smtp(&root, 9);
+    let before = fs::read(&path).unwrap();
+    let value = recover_send_preview(&root, &push_id);
+    assert_eq!(value["recovery_kind"], "send_outcome");
+    assert_eq!(value["confirmed"], false);
+    assert_eq!(value["settlement"], Value::Null);
+    assert_eq!(value["evidence"]["step_index"], 2);
+    assert_eq!(value["evidence"]["label"], "smtp_send");
+    assert_eq!(value["evidence"]["error_code"], "smtp_send_failed");
+    assert_eq!(value["evidence"]["envelope_to"], json!(["bob@example.com"]));
+    assert!(
+        value["evidence"]["rfc822_message_id"]
+            .as_str()
+            .unwrap()
+            .ends_with("@afmail.local>")
+    );
+    assert!(
+        value["plan_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("push_recover_plan_")
+    );
+    // The check is deterministic and read-only.
+    assert_eq!(
+        recover_send_preview(&root, &push_id)["plan_id"],
+        value["plan_id"]
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    // A settlement always names its plan, and only one assertion at a time.
+    for args in [
+        vec!["--sent"],
+        vec!["--not-sent"],
+        vec![
+            "--sent",
+            "--not-sent",
+            "--confirm",
+            value["plan_id"].as_str().unwrap(),
+        ],
+    ] {
+        let mut argv = vec!["push", "recover", push_id.as_str()];
+        argv.extend(args);
+        let (status, output) = run(&root, &argv);
+        assert_ne!(status, 0, "{output}");
+    }
+    // Confirming without an assertion settles nothing.
+    let (status, output) = run(
+        &root,
+        &[
+            "push",
+            "recover",
+            &push_id,
+            "--confirm",
+            value["plan_id"].as_str().unwrap(),
+        ],
+    );
+    assert_eq!(status, 1, "{output}");
+    assert_eq!(
+        parse_one(&output)["code"],
+        "push_recovery_settlement_required"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "smtp")]
+#[test]
+fn push_recover_sent_completes_only_the_send_and_the_next_push_runs_later_steps() {
+    let _guard = NETWORK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (root, push_id, path) = uncertain_send_fixture("recover-send-sent");
+    let server = start_imap_server(1).unwrap();
+    // SMTP is unconfigured: a replayed send could not succeed.
+    configure_imap_without_smtp(&root, server.addr.port());
+    let plan_id = recover_send_preview(&root, &push_id)["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, output) = run(
+        &root,
+        &["push", "recover", &push_id, "--sent", "--confirm", &plan_id],
+    );
+    assert_eq!(status, 0, "{output}");
+    let value = parse_one(&output);
+    assert_eq!(value["confirmed"], true);
+    assert_eq!(value["settlement"], "sent");
+    assert_eq!(value["asserted_by"], "person");
+    let item = read_json(&path);
+    assert_eq!(item["step_states"][1]["status"], "succeeded");
+    assert_eq!(item["step_states"][2]["status"], "pending");
+    let audit = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap();
+    let event: Value = audit
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|event| event["kind"] == "push_recovery_settled")
+        .unwrap();
+    assert_eq!(event["settlement"], "sent");
+    assert_eq!(event["asserted_by"], "person");
+    assert_eq!(
+        event["previous_step_states"][1]["status"],
+        "remote_outcome_unknown"
+    );
+    // The same plan cannot be applied twice.
+    let (status, output) = run(
+        &root,
+        &["push", "recover", &push_id, "--sent", "--confirm", &plan_id],
+    );
+    assert_eq!(status, 1, "{output}");
+    // The next confirmed push appends the Sent copy and never sends.
+    let (status, output) = run_confirmed_push(&root);
+    assert_eq!(status, 0, "{output}");
+    assert_eq!(server.appended.lock().unwrap().len(), 1);
+    assert!(!path.exists());
+    server.handle.join().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "smtp")]
+#[test]
+fn push_recover_not_sent_requires_a_new_confirmed_push_before_sending_again() {
+    let (root, push_id, path) = uncertain_send_fixture("recover-send-not-sent");
+    configure_imap_without_smtp(&root, 9);
+    let old_push_plan_id = current_push_plan_id(&root);
+    let plan_id = recover_send_preview(&root, &push_id)["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, output) = run(
+        &root,
+        &[
+            "push",
+            "recover",
+            &push_id,
+            "--not-sent",
+            "--confirm",
+            &plan_id,
+        ],
+    );
+    assert_eq!(status, 0, "{output}");
+    assert_eq!(parse_one(&output)["settlement"], "not_sent");
+    let item = read_json(&path);
+    assert_eq!(item["step_states"][0]["status"], "succeeded");
+    assert_eq!(item["step_states"][1]["status"], "pending");
+    assert_eq!(item["step_states"][1]["retryable"], true);
+    assert!(item["step_states"][1].get("started_rfc3339").is_none());
+    let audit = fs::read_to_string(root.join(".afmail/logs/events.jsonl")).unwrap();
+    assert!(audit.contains("push_recovery_settled"));
+    // A push plan reviewed before the settlement no longer applies.
+    assert_ne!(current_push_plan_id(&root), old_push_plan_id);
+    let (status, output) = run(&root, &["push", "--confirm", &old_push_plan_id]);
+    assert_eq!(status, 1, "{output}");
+    assert_eq!(parse_one(&output)["code"], "push_plan_changed");
+    assert_eq!(read_json(&path)["step_states"][1]["status"], "pending");
+    // Nothing uncertain remains to settle.
+    let (status, output) = run(
+        &root,
+        &["push", "recover", &push_id, "--sent", "--confirm", &plan_id],
+    );
+    assert_eq!(status, 1, "{output}");
+    assert_eq!(
+        parse_one(&output)["code"],
+        "push_recovery_settlement_unsupported"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "smtp")]
+#[test]
+fn push_recover_refuses_a_stale_settlement_plan() {
+    let (root, push_id, path) = uncertain_send_fixture("recover-send-stale");
+    configure_imap_without_smtp(&root, 9);
+    let plan_id = recover_send_preview(&root, &push_id)["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut item = read_json(&path);
+    item["step_states"][1]["error"] = json!("connection reset before DATA");
+    write_json(&path, &item);
+    let before = fs::read(&path).unwrap();
+    for settlement in ["--sent", "--not-sent"] {
+        let (status, output) = run(
+            &root,
+            &[
+                "push",
+                "recover",
+                &push_id,
+                settlement,
+                "--confirm",
+                &plan_id,
+            ],
+        );
+        assert_eq!(status, 1, "{output}");
+        let error = parse_one(&output);
+        assert_eq!(error["code"], "push_recovery_plan_changed", "{output}");
+        assert_ne!(error["current_plan_id"], json!(plan_id));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    fs::remove_dir_all(root).unwrap();
 }

@@ -121,8 +121,9 @@ Draft patch distinguishes omission from clearing: omitted fields are unchanged,
 an empty `cc` list clears Cc, and an empty `to` list is rejected.
 
 Pull is a repeat-safe remote read/local reconciliation and does not use an
-idempotency header. Remote push confirmation instead uses the existing,
-workspace-bound `plan_id`:
+idempotency header. A Cloudflare pull also deletes or archives the R2 spool
+objects it imported (see [Authorization](authorization.md)). Remote push
+confirmation instead uses the existing, workspace-bound `plan_id`:
 
 1. `GET /v1/push/plan` returns the complete resolved plan.
 2. The caller presents that plan to the user.

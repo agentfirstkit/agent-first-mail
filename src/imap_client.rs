@@ -1,8 +1,9 @@
 use crate::config::{ImapConfig, SpecialUseKind};
 use crate::error::{AppError, Result};
+use crate::imap_diagnostics::{AppendDiagnostics, ObservedStream};
 use crate::types::RemoteLocation;
 use rustls_connector::RustlsConnector;
-use rustls_pemfile::certs;
+use rustls_connector::rustls_pki_types::{CertificateDer, pem::PemObject};
 use serde_json::json;
 use std::fs;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -118,21 +119,29 @@ pub(crate) struct MoveFlagUpdates<'a> {
 
 pub struct ImapClientSession {
     inner: Option<ImapClientSessionInner>,
+    append_diagnostics: AppendDiagnostics,
 }
 
 enum ImapClientSessionInner {
-    Plain(imap::Session<TcpStream>),
-    Tls(Box<imap::Session<rustls_connector::TlsStream<TcpStream>>>),
+    Plain(imap::Session<ObservedStream<TcpStream>>),
+    Tls(Box<imap::Session<ObservedStream<rustls_connector::TlsStream<TcpStream>>>>),
 }
 
 impl ImapClientSession {
     pub fn connect(config: &ImapConfig) -> Result<Self> {
+        let append_diagnostics = AppendDiagnostics::default();
         let inner = if config.tls {
-            ImapClientSessionInner::Tls(Box::new(login_tls(config)?))
+            ImapClientSessionInner::Tls(Box::new(login_tls_observed(
+                config,
+                append_diagnostics.clone(),
+            )?))
         } else {
-            ImapClientSessionInner::Plain(login_plain(config)?)
+            ImapClientSessionInner::Plain(login_plain_observed(config, append_diagnostics.clone())?)
         };
-        Ok(Self { inner: Some(inner) })
+        Ok(Self {
+            inner: Some(inner),
+            append_diagnostics,
+        })
     }
 
     pub fn list_mailboxes(&mut self) -> Result<Vec<MailboxInfo>> {
@@ -143,14 +152,17 @@ impl ImapClientSession {
     }
 
     pub fn append_message(&mut self, folder: &str, raw_eml: &[u8], draft: bool) -> Result<()> {
-        match self.inner_mut()? {
+        self.append_diagnostics.clear();
+        let result = match self.inner_mut()? {
             ImapClientSessionInner::Plain(session) => {
                 append_message_session(session, folder, raw_eml, draft)
             }
             ImapClientSessionInner::Tls(session) => {
                 append_message_session(session, folder, raw_eml, draft)
             }
-        }
+        };
+        self.append_diagnostics.stop();
+        result.map_err(|error| self.append_diagnostics.enrich(error))
     }
 
     pub fn uid_mark_and_move(
@@ -253,7 +265,14 @@ impl Drop for ImapClientSession {
     }
 }
 
-pub(crate) fn login_plain(config: &ImapConfig) -> Result<imap::Session<TcpStream>> {
+pub(crate) fn login_plain(config: &ImapConfig) -> Result<imap::Session<ObservedStream<TcpStream>>> {
+    login_plain_observed(config, AppendDiagnostics::default())
+}
+
+fn login_plain_observed(
+    config: &ImapConfig,
+    diagnostics: AppendDiagnostics,
+) -> Result<imap::Session<ObservedStream<TcpStream>>> {
     crate::util::ensure_plaintext_credentials_allowed(
         "IMAP",
         &config.host,
@@ -261,7 +280,7 @@ pub(crate) fn login_plain(config: &ImapConfig) -> Result<imap::Session<TcpStream
     )?;
     let stream = connect_stream(config)?;
     configure_stream_timeout(&stream)?;
-    let mut client = imap::Client::new(stream);
+    let mut client = imap::Client::new(ObservedStream::new(stream, diagnostics));
     client.read_greeting().map_err(|e| {
         retryable_imap_network_error(config, "imap_greeting_failed", "greeting", e.to_string())
     })?;
@@ -272,14 +291,21 @@ pub(crate) fn login_plain(config: &ImapConfig) -> Result<imap::Session<TcpStream
 
 pub(crate) fn login_tls(
     config: &ImapConfig,
-) -> Result<imap::Session<rustls_connector::TlsStream<TcpStream>>> {
+) -> Result<imap::Session<ObservedStream<rustls_connector::TlsStream<TcpStream>>>> {
+    login_tls_observed(config, AppendDiagnostics::default())
+}
+
+fn login_tls_observed(
+    config: &ImapConfig,
+    diagnostics: AppendDiagnostics,
+) -> Result<imap::Session<ObservedStream<rustls_connector::TlsStream<TcpStream>>>> {
     let stream = connect_stream(config)?;
     configure_stream_timeout(&stream)?;
     let connector = tls_connector(config)?;
     let tls_stream = connector
         .connect(&config.host, stream)
         .map_err(|e| AppError::new("imap_tls_failed", e.to_string()))?;
-    let mut client = imap::Client::new(tls_stream);
+    let mut client = imap::Client::new(ObservedStream::new(tls_stream, diagnostics));
     client.read_greeting().map_err(|e| {
         retryable_imap_network_error(config, "imap_greeting_failed", "greeting", e.to_string())
     })?;
@@ -342,8 +368,7 @@ fn tls_connector(config: &ImapConfig) -> Result<RustlsConnector> {
     if let Some(path) = &config.tls_root_cert_path {
         let pem = fs::read(path)
             .map_err(|e| AppError::io(&format!("read IMAP TLS root cert {path}"), &e))?;
-        let mut slice = pem.as_slice();
-        let certs = certs(&mut slice)
+        let certs = CertificateDer::pem_slice_iter(&pem)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| AppError::new("imap_tls_failed", e.to_string()))?;
         if certs.is_empty() {
@@ -465,7 +490,14 @@ pub(crate) fn append_message_session<T: std::io::Read + std::io::Write>(
     raw_eml: &[u8],
     draft: bool,
 ) -> Result<()> {
-    let mut append = session.append(folder, raw_eml);
+    if folder.contains(['\r', '\n']) {
+        return Err(
+            AppError::new("imap_append_failed", "mailbox name contains a line break")
+                .with_details(json!({"remote_effect_rejected": true})),
+        );
+    }
+    let escaped_folder = folder.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut append = session.append(&escaped_folder, raw_eml);
     if draft {
         append.flag(imap::types::Flag::Draft);
     }
@@ -761,7 +793,13 @@ pub(crate) fn uid_copy_delete_expunge_session<T: std::io::Read + std::io::Write>
 }
 
 fn rejected_effect_error(code: &'static str, error: imap::Error) -> AppError {
-    let rejected = matches!(error, imap::Error::No(_) | imap::Error::Bad(_));
+    // The library emits Append only before it writes the message literal.
+    // Even when it discarded the pre-literal response, this call cannot have
+    // stored the message. A lost connection after the literal stays unknown.
+    let rejected = matches!(
+        error,
+        imap::Error::No(_) | imap::Error::Bad(_) | imap::Error::Append
+    );
     let app_error = AppError::new(code, error.to_string());
     if rejected {
         app_error.with_details(json!({"remote_effect_rejected": true}))

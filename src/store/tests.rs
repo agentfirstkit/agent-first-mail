@@ -226,6 +226,7 @@ fn write_sample_message(root: &Path, message_id: &str) {
         schema_name: "message".to_string(),
         schema_version: MESSAGE_SCHEMA_VERSION,
         message_id: message_id.to_string(),
+        origin: None,
         rfc822_message_id: Some(format!("<{message_id}@example.com>")),
         in_reply_to: None,
         references: Vec::new(),
@@ -653,6 +654,9 @@ fn init_migrates_legacy_message_and_collection_metadata_once() {
     write_sample_message(&root, message_id);
     let schema_one_message_id = "message_metadata_schema_one";
     write_sample_message(&root, schema_one_message_id);
+    // v0.12.0 wrote schema 2: the same fields, without the delivery envelope.
+    let schema_two_message_id = "message_metadata_schema_two";
+    write_sample_message(&root, schema_two_message_id);
 
     let created_case = ws
         .create_case("Legacy case", Some("support"), None, None, None)
@@ -697,6 +701,14 @@ fn init_migrates_legacy_message_and_collection_metadata_once() {
         .unwrap_or(Value::Null);
     schema_one_metadata["schema_version"] = json!(1);
     assert!(write_json_pretty(&schema_one_metadata_path, &schema_one_metadata).is_ok());
+    let schema_two_metadata_path =
+        root.join(format!(".afmail/messages/{schema_two_message_id}.json"));
+    let mut schema_two_metadata: Value = fs::read_to_string(&schema_two_metadata_path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or(Value::Null);
+    schema_two_metadata["schema_version"] = json!(2);
+    assert!(write_json_pretty(&schema_two_metadata_path, &schema_two_metadata).is_ok());
 
     let mut case: Value = fs::read_to_string(&case_json_path)
         .ok()
@@ -743,19 +755,21 @@ fn init_migrates_legacy_message_and_collection_metadata_once() {
 
     let upgraded = ws.init().unwrap_or(Value::Null);
     assert_eq!(upgraded["workspace_upgraded"], true);
-    assert_eq!(upgraded["message_metadata_migrated_count"], 2);
+    assert_eq!(upgraded["message_metadata_migrated_count"], 3);
     assert_eq!(upgraded["case_migrated_count"], 1);
     assert_eq!(upgraded["notification_migrated_count"], 1);
     assert_eq!(upgraded["disposition_migrated_count"], 1);
     assert!(metadata_path.is_file());
     assert!(!legacy_remote_path.exists());
-    assert_eq!(
-        fs::read_to_string(&schema_one_metadata_path)
-            .ok()
-            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
-            .unwrap_or(Value::Null)["schema_version"],
-        2
-    );
+    for path in [&schema_one_metadata_path, &schema_two_metadata_path] {
+        assert_eq!(
+            fs::read_to_string(path)
+                .ok()
+                .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+                .unwrap_or(Value::Null)["schema_version"],
+            3
+        );
+    }
     let upgraded_case = fs::read_to_string(&case_json_path)
         .ok()
         .and_then(|data| serde_json::from_str::<Value>(&data).ok())
@@ -825,6 +839,7 @@ fn update_sample_message(root: &Path, message_id: &str, update: impl FnOnce(&mut
         schema_name: "message".to_string(),
         schema_version: MESSAGE_SCHEMA_VERSION,
         message_id: message_id.to_string(),
+        origin: None,
         rfc822_message_id: None,
         in_reply_to: None,
         references: Vec::new(),
@@ -893,6 +908,7 @@ fn renders_human_conversation_with_relevant_security_notes() {
         schema_name: "message".to_string(),
         schema_version: MESSAGE_SCHEMA_VERSION,
         message_id: "message_render".to_string(),
+        origin: None,
         rfc822_message_id: Some("<render@example.com>".to_string()),
         in_reply_to: None,
         references: Vec::new(),
@@ -1002,6 +1018,7 @@ fn renders_body_with_dynamic_fence() {
         schema_name: "message".to_string(),
         schema_version: MESSAGE_SCHEMA_VERSION,
         message_id: "message_injection".to_string(),
+        origin: None,
         rfc822_message_id: Some("<injection@example.com>".to_string()),
         in_reply_to: None,
         references: Vec::new(),
@@ -1066,6 +1083,7 @@ fn crafted_headers_cannot_inject_markdown_blocks() {
         schema_name: "message".to_string(),
         schema_version: MESSAGE_SCHEMA_VERSION,
         message_id: "message_header_injection".to_string(),
+        origin: None,
         rfc822_message_id: Some("<inject@example.com>".to_string()),
         in_reply_to: None,
         references: Vec::new(),
@@ -1153,6 +1171,7 @@ fn renders_authentication_warnings_only_for_failures() {
         schema_name: "message".to_string(),
         schema_version: MESSAGE_SCHEMA_VERSION,
         message_id: "message_auth".to_string(),
+        origin: None,
         rfc822_message_id: Some("<auth@example.com>".to_string()),
         in_reply_to: None,
         references: Vec::new(),
@@ -1254,6 +1273,7 @@ fn message_context_strips_visible_quotes_but_keeps_full_body() {
         schema_name: "message".to_string(),
         schema_version: MESSAGE_SCHEMA_VERSION,
         message_id: "message_reply".to_string(),
+        origin: None,
         rfc822_message_id: Some("<reply@example.com>".to_string()),
         in_reply_to: Some("<parent@example.com>".to_string()),
         references: Vec::new(),
@@ -1404,6 +1424,7 @@ fn renders_downloaded_images_as_markdown_previews() {
         schema_name: "message".to_string(),
         schema_version: MESSAGE_SCHEMA_VERSION,
         message_id: "message_img".to_string(),
+        origin: None,
         rfc822_message_id: None,
         in_reply_to: None,
         references: Vec::new(),
@@ -2298,6 +2319,82 @@ fn spam_cancels_pending_unspam_for_remote_junk_message() {
 }
 
 #[test]
+fn reply_headers_link_every_distinct_raw_variant_without_merging_their_identity() {
+    let root = tempfile::tempdir().expect("workspace");
+    let ws = Workspace::at(root.path());
+    ws.init().expect("init");
+    for id in ["message_parent_a", "message_parent_b"] {
+        write_sample_message(root.path(), id);
+        update_sample_message(root.path(), id, |message| {
+            message.rfc822_message_id = Some("<shared@example.com>".into());
+            message.body_text = format!("Distinct raw evidence: {id}");
+        });
+    }
+    assert_ne!(
+        fs::read(root.path().join(".afmail/messages/message_parent_a.eml")).expect("a"),
+        fs::read(root.path().join(".afmail/messages/message_parent_b.eml")).expect("b")
+    );
+    // Equal Message-ID alone remains a duplicate candidate, not a relationship.
+    for id in ["message_parent_a", "message_parent_b"] {
+        assert!(
+            ws.triage_template_document(id)
+                .expect("parent")
+                .context
+                .related_messages
+                .is_empty()
+        );
+    }
+    write_sample_message(root.path(), "message_reply");
+    update_sample_message(root.path(), "message_reply", |message| {
+        message.in_reply_to = Some("<shared@example.com>".into());
+        message.references = vec!["<shared@example.com>".into()];
+    });
+    write_sample_message(root.path(), "message_unrelated");
+    let shown = ws.message_show("message_reply").expect("reply");
+    let ids: Vec<_> = shown["context"]["related_messages"]
+        .as_array()
+        .expect("relations")
+        .iter()
+        .map(|item| item["message"]["message_id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(ids, ["message_parent_a", "message_parent_b"]);
+    for id in ["message_parent_a", "message_parent_b"] {
+        let document = ws.triage_template_document(id).expect("parent relation");
+        assert_eq!(document.context.related_messages.len(), 1);
+        assert_eq!(
+            document.context.related_messages[0].message.message_id,
+            "message_reply"
+        );
+    }
+    assert!(
+        ws.triage_template_document("message_unrelated")
+            .expect("unrelated")
+            .context
+            .related_messages
+            .is_empty()
+    );
+    ws.render_refresh().expect("render views");
+    let markdown =
+        fs::read_to_string(root.path().join("triage/message_reply.md")).expect("reply Markdown");
+    assert!(markdown.contains("message_parent_a") && markdown.contains("message_parent_b"));
+    let list = ws.triage_list(None, true).expect("detailed index");
+    let reply = list["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|item| item["message_id"] == "message_reply")
+        .expect("reply row");
+    assert_eq!(
+        reply["related_messages"]
+            .as_array()
+            .expect("relations")
+            .len(),
+        2
+    );
+    assert_eq!(ws.status().expect("status")["message_count"], 4);
+}
+
+#[test]
 fn triage_list_and_view_show_related_messages() {
     let root = temp_root("related-triage");
     let ws = Workspace::at(&root);
@@ -2608,6 +2705,49 @@ fn create_case_failure_after_local_writes_leaves_transaction_marker() -> Result<
         root.join(crate::layout::afmail_path(crate::layout::AFMAIL_PUSH))
             .is_dir()
     );
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[test]
+fn create_notification_failure_after_local_writes_leaves_transaction_marker() -> Result<()> {
+    struct ResetNotificationCreateFailure;
+
+    impl Drop for ResetNotificationCreateFailure {
+        fn drop(&mut self) {
+            notification::set_notification_create_after_local_writes_failure(false);
+        }
+    }
+
+    let root = temp_root("notification-create-transaction");
+    let ws = Workspace::at(&root);
+    assert!(ws.init().is_ok());
+    write_sample_message(&root, "message_tx");
+    assert!(ws.refresh_triage_views().is_ok());
+
+    notification::set_notification_create_after_local_writes_failure(true);
+    let _reset = ResetNotificationCreateFailure;
+    let result = ws.create_notification(
+        "receipts",
+        Some("message_tx"),
+        Some("receipt"),
+        Some("file it"),
+    );
+
+    assert_eq!(
+        result.as_ref().err().map(|err| err.error_code),
+        Some("notification_create_test_failure")
+    );
+    // The message was already filed when the step failed; the marker is what
+    // tells `doctor` its notification folder is gone.
+    let message = read_message(&root.join("messages/message_tx.json"))?;
+    assert!(message.workspace.notification_uid.is_some());
+    assert!(ws.ensure_no_incomplete_transactions().is_err());
+    let transaction_paths = transaction_json_paths(&root);
+    assert_eq!(transaction_paths.len(), 1);
+    let transaction_text = fs::read_to_string(&transaction_paths[0]).unwrap_or_default();
+    assert!(transaction_text.contains("notification_create"));
+    assert!(transaction_text.contains("messages/message_tx.json"));
     let _ = fs::remove_dir_all(root);
     Ok(())
 }
@@ -2967,6 +3107,7 @@ fn relocate_keeps_id_and_updates_locations() {
         schema_name: String::new(),
         schema_version: MESSAGE_SCHEMA_VERSION,
         message_id: String::new(),
+        origin: None,
         rfc822_message_id: None,
         in_reply_to: None,
         references: Vec::new(),
@@ -3090,4 +3231,128 @@ fn clean_body_text_decodes_common_html_entities() {
         clean_body_text(input),
         "发件人: \"Ningyu Ran\"<support@example.com>\nSent from iPhone > <"
     );
+}
+
+/// Workspace-wide overlay scans each operation performs on a workspace with
+/// `triage` untriaged and `trashed` trashed messages, one case holding two more.
+fn overlay_scans_per_operation(
+    name: &str,
+    triage: usize,
+    trashed: usize,
+) -> Vec<(&'static str, usize)> {
+    let root = temp_root(name);
+    let ws = Workspace::at(&root);
+    assert!(ws.init().is_ok());
+    let ids = (0..2 + triage + trashed)
+        .map(|index| format!("message_scan_{index:03}"))
+        .collect::<Vec<_>>();
+    for id in &ids {
+        write_sample_message(&root, id);
+    }
+    assert!(ws.refresh_triage_views().is_ok());
+    let created = ws.create_case("Scan", Some("support"), Some(&ids[0]), None, Some("scan"));
+    assert!(created.is_ok(), "{created:?}");
+    let case_uid = created.unwrap_or(Value::Null)["case_uid"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let added = ws.add_message_to_case(&case_uid, &ids[1], None, Some("scan"));
+    assert!(added.is_ok(), "{added:?}");
+    for id in &ids[2 + triage..] {
+        let trashed = ws.trash_message(id, Some("scan"));
+        assert!(trashed.is_ok(), "{trashed:?}");
+    }
+
+    let mut scans = Vec::new();
+    let mut measure = |operation: &'static str, run: &dyn Fn() -> bool| {
+        overlay_builds::take();
+        assert!(run(), "{operation} failed");
+        scans.push((operation, overlay_builds::take()));
+    };
+    measure("pull remote index", &|| {
+        crate::ingest::load_existing_remote_index(&root).is_ok()
+    });
+    measure("triage list --details", &|| {
+        ws.triage_list(None, true).is_ok()
+    });
+    measure("disposition views", &|| {
+        ws.refresh_disposition_views().is_ok()
+    });
+    measure("purge plan", &|| ws.purge_trash(0, None).is_ok());
+    let _ = fs::remove_dir_all(root);
+    scans
+}
+
+#[test]
+fn loops_over_many_messages_scan_the_workspace_a_fixed_number_of_times() {
+    // Each scan reads every case, notification and push. A loop that rescans
+    // per message is quadratic: a 4000-message workspace took minutes to pull.
+    let small = overlay_scans_per_operation("overlay-scans-small", 1, 1);
+    let large = overlay_scans_per_operation("overlay-scans-large", 8, 8);
+    assert_eq!(small, large);
+}
+
+#[test]
+fn referenced_message_ids_finds_exactly_the_referenced_subset() {
+    let root = temp_root("referenced-subset");
+    let ws = Workspace::at(&root);
+    assert!(ws.init().is_ok());
+    let ids = (0..7)
+        .map(|index| format!("message_ref_{index}"))
+        .collect::<Vec<_>>();
+    for id in &ids {
+        write_sample_message(&root, id);
+    }
+    assert!(ws.refresh_triage_views().is_ok());
+    let created = ws.create_case("Refs", Some("support"), Some(&ids[1]), None, Some("refs"));
+    assert!(created.is_ok(), "{created:?}");
+    let case_uid = created.unwrap_or(Value::Null)["case_uid"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let added = ws.add_message_to_case(&case_uid, &ids[5], None, Some("refs"));
+    assert!(added.is_ok(), "{added:?}");
+
+    let referenced = ws.referenced_message_ids(&ids).unwrap_or_default();
+    assert_eq!(
+        referenced.into_iter().collect::<Vec<_>>(),
+        vec![ids[1].clone(), ids[5].clone()]
+    );
+    assert!(
+        ws.referenced_message_ids(&ids[2..5])
+            .unwrap_or_default()
+            .is_empty()
+    );
+    assert!(
+        ws.referenced_message_ids(&[])
+            .unwrap_or_default()
+            .is_empty()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_released_workspace_names_the_upgrade_until_init_runs() {
+    let root = temp_root("metadata-upgrade-required");
+    let ws = Workspace::at(&root);
+    assert!(ws.init().is_ok());
+    let message_id = "message_metadata_released";
+    write_sample_message(&root, message_id);
+    let path = root.join(format!(".afmail/messages/{message_id}.json"));
+    let mut metadata: Value = fs::read_to_string(&path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or(Value::Null);
+    metadata["schema_version"] = json!(2);
+    assert!(write_json_pretty(&path, &metadata).is_ok());
+
+    let before = ws.read_message_by_id(message_id);
+    assert_eq!(
+        before.as_ref().err().map(|error| error.error_code),
+        Some("workspace_upgrade_required"),
+        "{before:?}"
+    );
+    assert!(ws.init().is_ok());
+    assert!(ws.read_message_by_id(message_id).is_ok());
+    let _ = fs::remove_dir_all(root);
 }

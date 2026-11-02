@@ -3,6 +3,31 @@
 An afmail workspace is a local, file-first mailbox workspace. Files are the read
 interface; the CLI is the effect interface.
 
+## Mail sources
+
+A workspace may receive through IMAP, Cloudflare Email Routing + R2, or both.
+An unqualified pull reads every configured source. Mailbox ids select IMAP;
+explicit Cloudflare selection reads the spool and can accompany mailbox ids.
+History windows apply only to IMAP.
+
+Cloudflare objects are pending deliveries while they remain under the inbox
+prefix. After durable import or content deduplication, afmail deletes the object
+or copies it to the configured imported prefix before deleting it. Failed
+cleanup is reported as a warning; rerunning the pull merges any already stored
+bytes and retries cleanup. There is no R2 cursor file. Dry runs only list object
+names and declared sizes. Message count and byte budgets are shared across sources.
+
+Optional Cloudflare Queue consumption keeps durable import receipts and agent
+notification intent under `.afmail/cloudflare-consumer/`. These files are
+canonical state; preserve them with the mailbox. See
+[event-driven agent work](cloudflare-consumer.md) for dispatch and recovery.
+
+A message with no IMAP locations has no remote folder state. Spam, trash, case
+membership, and archive operations are local for such messages and do not add
+IMAP push items. Delivery envelopes stay in canonical message metadata; exact
+raw bytes define identity, and repeat deliveries merge recipient addresses and
+source records. See [file formats](file-formats.md#message-json) for the sidecar.
+
 ## Demo workspaces
 
 `afmail demo init [PATH]` creates the same workspace layout and ordinary

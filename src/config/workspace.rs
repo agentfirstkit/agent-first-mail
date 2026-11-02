@@ -130,6 +130,37 @@ impl Default for SmtpSection {
     }
 }
 
+/// Both absent selects an anonymous relay. A partially supplied identity must
+/// never silently turn into an unauthenticated SMTP connection.
+pub(crate) fn missing_smtp_auth_config(
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Vec<&'static str> {
+    if username.is_none() && password.is_none() {
+        return Vec::new();
+    }
+    [
+        ("smtp.username", username),
+        ("smtp.password_secret", password),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| {
+        value
+            .is_none_or(|value| value.trim().is_empty())
+            .then_some(key)
+    })
+    .collect()
+}
+
+pub(crate) fn validate_smtp_auth(username: Option<&str>, password: Option<&str>) -> Result<()> {
+    let missing = missing_smtp_auth_config(username, password);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::new("config_missing", "SMTP authentication requires both smtp.username and smtp.password_secret, or neither for an anonymous relay")
+        .with_details(serde_json::json!({"missing_config": missing})))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSection {

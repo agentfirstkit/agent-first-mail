@@ -7,12 +7,16 @@ Let your AI agent work your inbox the way it works a git checkout — mail pulle
 Agent-First Mail — the `afmail` command — isn't an email client, a helpdesk
 app, or an auto-replying bot. It's the **workspace your agent operates in**,
 borrowed from the `git` shape: `pull` the mailbox into a local worktree, work
-in files, and `push` deliberately. Reading your mail and changing it are two
-different commands, and only one of them can touch the server.
+in files, and `push` deliberately. IMAP pulls leave remote folders unchanged;
+Cloudflare pulls acknowledge spool objects after local import. Sending replies
+and changing IMAP folders still require a confirmed push.
 
 Supported platforms: macOS, Linux, Windows. Works with Gmail, Fastmail,
-iCloud, and any other IMAP/SMTP mailbox that accepts a password login; see
-[Connect a Mailbox](docs/setup.md).
+iCloud, other IMAP/SMTP mailboxes that accept password login, and Cloudflare
+Email Routing with an R2 spool; see
+[Connect a Mailbox](docs/setup.md). Native JSON file channels also support
+non-email conversations such as web inquiries through the same case, draft,
+Review, and confirmed push workflow; see [Message channels](docs/channels.md).
 
 ## Try it in a minute
 
@@ -181,8 +185,9 @@ and the normal preview/confirm flow still applies.
 
 `--mode link` hands the same page to a phone on your trusted local network;
 `--mode session` registers it for an [Agent-First UI](https://agentfirstkit.com/agent-first-ui)
-session to pick up later. Review pages render from the same editable
-templates as generated Markdown; see the [template contract](docs/templates.md).
+session to pick up later. Review pages and generated Markdown share typed
+render documents and one template engine. Content templates and Review frontend
+overrides live in separate trees; see the [template contract](docs/templates.md).
 
 ## Typed local HTTP API
 
@@ -221,9 +226,9 @@ cargo install --path . --bin afmail --locked --force
 
 Prebuilt archives are also available from
 [GitHub Releases](https://github.com/agentfirstkit/agent-first-mail/releases).
-Default builds include the `demo`, `api`, and `review` features;
-`cargo build --no-default-features` gives a core mail-workspace binary whose
-excluded commands return a structured `feature_disabled` error.
+Default builds include every optional feature; `cargo build --no-default-features`
+gives a core mail-workspace binary whose excluded commands return a structured
+`feature_disabled` error (see [Code Structure](docs/code-structure.md)).
 
 Then install the embedded [Agent Skill](skills/agent-first-mail/SKILL.md) so the
 agent follows afmail's behavior rules, and restart the agent so it reloads
@@ -239,7 +244,9 @@ To remove it, run `afmail skill uninstall`.
 
 ## Docs
 
-- [Connect a Mailbox](docs/setup.md) — workspace setup, credentials, Gmail / Fastmail / iCloud / generic IMAP
+- [File Channels](docs/channels.md) — exchanging messages through local JSON records instead of a mail server
+- [Connect a Mailbox](docs/setup.md) — workspace setup, credentials, IMAP providers, and Cloudflare
+- [Event-Driven Agent Work](docs/cloudflare-consumer.md) — queue consumption, durable triggers, and VPS deployment
 - [Core Design Principles](docs/design-principles.md) — what afmail guarantees, and why
 - [Authorization Contract](docs/authorization.md) — the permission line for reads, local changes, remote effects, deletion
 - [Workspace Model](docs/workspace.md) — the folder layout and what each part is for
@@ -248,6 +255,7 @@ To remove it, run `afmail skill uninstall`.
 - [Templates](docs/templates.md) — the Markdown and Review template contract
 - [CLI Contract](docs/cli.md) — every command and flag for the `afmail` binary
 - [Code Structure](docs/code-structure.md) — where crate responsibilities live
+- [Cloudflare Live Testing](docs/cloudflare-live-testing.md) — the opt-in gate against real Cloudflare resources
 - [Agent Skill](skills/agent-first-mail/SKILL.md) — the behavior contract agents follow
 
 ## License

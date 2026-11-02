@@ -181,7 +181,7 @@ pub(crate) fn registrable_domain(host: &str) -> Option<String> {
         return Some(host.to_ascii_lowercase());
     }
     let ascii = idna::domain_to_ascii(host).ok()?.to_ascii_lowercase();
-    Some(psl::domain_str(&ascii).map_or(ascii.clone(), str::to_string))
+    Some(psl::domain_str(&ascii).unwrap_or(&ascii).to_owned())
 }
 
 fn safe_link_target(url: &str) -> Option<String> {

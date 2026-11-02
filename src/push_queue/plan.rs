@@ -71,6 +71,9 @@ struct PushPlanOutbound {
     draft_hash: Option<String>,
     draft_size_bytes: Option<u64>,
     mime_hash: Option<String>,
+    content_hash: Option<String>,
+    reply_route: Option<crate::channels::ReplyRoute>,
+    output_path: Option<String>,
     identity: Option<PushPlanIdentity>,
     identity_placeholder: bool,
     warnings: Vec<&'static str>,
@@ -149,7 +152,14 @@ pub(super) fn build_push_plan(root: &Path, config: &MailConfig) -> Result<Resolv
     let mut items = Vec::new();
     let mut skipped_items = Vec::new();
     let mut skipped_views = Vec::new();
-    for mut item in sorted_items(root)? {
+    let queued = sorted_items(root)?;
+    let workspace = crate::store::Workspace::at(root);
+    let workspace = if queued.is_empty() {
+        workspace
+    } else {
+        workspace.read_snapshot()?
+    };
+    for mut item in queued {
         let queue_item_hash = queue_hashes
             .get(item.push_id.as_str())
             .copied()
@@ -159,7 +169,7 @@ pub(super) fn build_push_plan(root: &Path, config: &MailConfig) -> Result<Resolv
                     format!("queue snapshot is missing push item {}", item.push_id),
                 )
             })?;
-        if plan_item(root, config, &mut item)? {
+        if plan_item(&workspace, config, &mut item)? {
             items.push(item);
         } else {
             skipped_views.push(PushPlanSkippedItem {
@@ -334,6 +344,12 @@ fn config_effect_id(config: &MailConfig, workspace_uid: &str) -> Result<String> 
             object.remove("password_secret");
         }
     }
+    if let Some(sending) = value
+        .pointer_mut("/cloudflare/sending")
+        .and_then(Value::as_object_mut)
+    {
+        sending.remove("api_token_secret");
+    }
     crate::plan_id::canonical_plan_id("push_effect_config", workspace_uid, &value)
 }
 
@@ -416,6 +432,9 @@ fn push_plan_outbound(
             draft_hash: None,
             draft_size_bytes: None,
             mime_hash: None,
+            content_hash: None,
+            reply_route: None,
+            output_path: None,
             identity: None,
             identity_placeholder: false,
             warnings: Vec::new(),
@@ -432,8 +451,9 @@ fn push_plan_outbound(
         .map_err(|err| AppError::new("draft_invalid", format!("draft is not UTF-8: {err}")))?;
     let (frontmatter, _) = crate::markdown::read_doc::<DraftFrontmatter>(draft_text)?;
     let identity = config.resolve_identity(root, frontmatter.identity.as_deref())?;
-    let identity_placeholder = identity.email.eq_ignore_ascii_case("me@example.com")
-        || (identity.identity == "me" && identity.name == "Me");
+    let identity_placeholder = frontmatter.reply_route.is_none()
+        && (identity.email.eq_ignore_ascii_case("me@example.com")
+            || (identity.identity == "me" && identity.name == "Me"));
     let mut attachments = Vec::new();
     for attachment in &frontmatter.attachments {
         let open = crate::attachments::open_draft_attachment(&case_path, attachment)?;
@@ -457,7 +477,21 @@ fn push_plan_outbound(
         review_path: Some(relative_path(root, &draft_path)),
         draft_hash: Some(crate::util::blake3_fingerprint(&draft_bytes)),
         draft_size_bytes: Some(draft_bytes.len() as u64),
-        mime_hash: Some(crate::util::blake3_fingerprint(&prepared.raw)),
+        mime_hash: matches!(prepared.delivery, crate::types::OutboundDelivery::Email(_))
+            .then(|| crate::util::blake3_fingerprint(&prepared.raw)),
+        content_hash: Some(crate::util::blake3_fingerprint(&prepared.raw)),
+        reply_route: frontmatter.reply_route.clone(),
+        output_path: frontmatter
+            .reply_route
+            .as_ref()
+            .and_then(|route| config.files.sources.get(&route.source_id))
+            .map(|source| {
+                source
+                    .outbox_path
+                    .join(format!("{}.json", prepared.message_id))
+                    .to_string_lossy()
+                    .into_owned()
+            }),
         identity: Some(identity.into()),
         identity_placeholder,
         warnings: if identity_placeholder {

@@ -128,10 +128,14 @@ and it has no claim/assign or multi-editor coordination. `cases/`, `drafts/`, an
 `triage/` are personal working memory, not shared state.
 
 The IMAP account is the only shared source of truth. Several personal workspaces
-may point at one account; coordination between them happens through IMAP itself
-(flags such as `\Seen`/`\Answered` and folder moves, reconciled on `pull`), not
-through afmail. Nothing prevents two such workspaces from independently drafting
-and sending, so concurrent operators on one account is out of scope by design.
+may point at one IMAP account; coordination between them happens through IMAP
+itself (flags such as `\Seen`/`\Answered` and folder moves, reconciled on
+`pull`), not through afmail. Nothing prevents two such workspaces from
+independently drafting and sending, so concurrent operators on one account is
+out of scope by design. A Cloudflare spool cannot be shared this way: a pull
+deletes or archives each object it imports, so workspaces sharing an R2 bucket
+prefix or Queue split the mail between them. One spool prefix and Queue serve
+exactly one workspace.
 
 The workspace lock is stored at `.afmail/cache/workspace.lock`, independent of
 each process's temporary directory. The ignored cache keeps shared reads from

@@ -120,18 +120,20 @@
     if (separator < 1) return !input.checked;
     const name = condition.slice(0, separator);
     const expected = condition.slice(separator + 1);
-    const controller = form.querySelector(`[name="${CSS.escape(name)}"]`);
+    // `elements.namedItem` reads a radio group as its checked value.
+    const controller = form.elements.namedItem(name);
     return controller?.value === expected && !input.checked;
   }
 
   function bindSettler(form) {
     form.addEventListener('submit', event => event.preventDefault());
 
-    const decisionField = form.querySelector('[data-afmail-decision]');
+    const decisionGroup = form.querySelector('[data-afmail-decision]');
     const decideGroups = [...form.querySelectorAll('[data-afmail-decide-fields]')];
-    const reasonField = form.elements.namedItem('reason');
+    const reasonField = form.querySelector('[data-afmail-reason]');
+    const decisionOf = () => form.elements.namedItem('decision')?.value || '';
     function syncDecideFields() {
-      const decision = decisionField?.value || '';
+      const decision = decisionOf();
       const activeGroup = decideFieldsGroup(decision);
       for (const group of decideGroups) {
         const active = group.dataset.afmailDecideFields === activeGroup;
@@ -142,17 +144,26 @@
         }
       }
       if (reasonField instanceof HTMLTextAreaElement) {
-        const accepts = decision === 'accept';
-        reasonField.disabled = accepts;
-        reasonField.required = decision === 'reject' || decision.startsWith('override_');
-        const label = reasonField.closest('label');
-        if (label) label.hidden = accepts;
+        // One reason field, inside whichever card is chosen: required when
+        // refusing or changing the suggestion, an optional note on accepting.
+        const chosen = form.querySelector('[data-afmail-decision-choice]:has(input:checked)');
+        const required = decision === 'reject' || decision.startsWith('override_');
+        reasonField.hidden = !chosen;
+        reasonField.disabled = !chosen;
+        reasonField.required = required;
+        const label = required ? reasonField.dataset.afmailReasonLabel : reasonField.dataset.afmailNoteLabel;
+        reasonField.setAttribute('aria-label', label || '');
+        reasonField.placeholder = required ? (reasonField.dataset.afmailReasonPlaceholder || label || '') : (label || '');
+        if (chosen && reasonField.parentNode !== chosen) chosen.appendChild(reasonField);
+      }
+      if (button && form.dataset.afmailSettlementPersisted !== 'true') {
+        button.disabled = Boolean(decisionGroup) && !decision;
       }
     }
-    decisionField?.addEventListener('change', syncDecideFields);
+    const button = form.querySelector('[data-afmail-settle-button]');
+    decisionGroup?.addEventListener('change', syncDecideFields);
     syncDecideFields();
 
-    const button = form.querySelector('[data-afmail-settle-button]');
     const status = form.querySelector('[data-afmail-settle-status]');
     button?.addEventListener('click', async () => {
       if (!form.reportValidity()) return;
@@ -194,7 +205,7 @@
           );
         }
       } finally {
-        button.disabled = form.dataset.afmailSettlementPersisted === 'true';
+        button.disabled = form.dataset.afmailSettlementPersisted === 'true' || !decisionOf();
       }
     });
   }

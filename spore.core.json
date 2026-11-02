@@ -2,41 +2,35 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-mail",
   "name": "Agent-First Mail",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Let your AI agent work your inbox the way it works a git checkout — mail pulled into local files it reads, sorts, and drafts on your machine, and nothing reaches your real mailbox until you confirm the push.",
   "intent": [
     "Give AI agents a local-first email workspace where pulled messages become editable case files rather than a traditional inbox app",
     "Preserve raw RFC822 mail while exposing mechanically cleaned text, message metadata, active cases, archived cases, contacts, notification collections, send identities, drafts, notes, and files through stable filesystem conventions, with human-readable Markdown rendered in the workspace language",
-    "Keep the CLI focused on read-only remote inspection and pull, explicit local triage/case/notification/contact organization, Chrome-based human review sessions for typed decisions and hash-checked local notes/draft editing, attachment fetches, reply draft scaffolding and validation, local push queuing, confirmed remote push effects, audit log inspection, and push queue visibility",
+    "Keep the CLI focused on source inspection, read-only IMAP pulls, acknowledged Cloudflare R2 imports and Worker scaffolding, explicit local triage/case/notification/contact organization, Chrome-based human review sessions for typed decisions and hash-checked local notes/draft editing, attachment fetches, reply draft scaffolding and validation, local push queuing, confirmed remote push effects, audit log inspection, and push queue visibility",
     "Expose the same domain core to trusted Agent runtimes and applications through a bearer-protected OpenAPI 3.2 HTTP API with standalone JSON Schemas, persistent idempotency, transaction guards, and unchanged push plan confirmation"
   ],
   "license": "MIT",
   "mutations": [
-    "Read HTML mail through a Markdown copy so links keep their targets",
-    "Show each link's domain and whether it is the sender's, and open it in the system browser",
-    "Show times as the workspace's local clock time",
-    "Actually remove Cc and Bcc from a draft when they are cleared",
-    "Reconcile locations on every pull and take move targets from COPYUID",
-    "Move messages that have no Message-ID, and resume pushes stalled on that refusal",
-    "Fail and allow retry when the server explicitly rejects a send, append or move",
-    "Restore a remotely deleted message that reappears on the server",
-    "Fetch headers in windows of 25 UIDs and time out each IMAP connect after 30 seconds",
-    "Validate case create before consuming its request id, and stop echoing rejected values in API errors",
-    "Keep the workspace lock in .afmail/cache and let doctor repair invalid message caches",
-    "Upgrade to Agent-First UI 0.6.1, Agent-First Data 0.35.0, Agent-First Slug 0.8.0 and minijinja 3"
+    "Receive mail through Cloudflare Email Routing and R2, and send through Cloudflare's API.",
+    "Exchange native JSON messages through file channels.",
+    "Wake an agent only when mail arrives with afmail cloudflare watch.",
+    "Let a person settle an uncertain send with push recover --sent or --not-sent.",
+    "Pull and purge large workspaces in seconds instead of minutes.",
+    "Upgrade v0.12.0 workspaces once with afmail init."
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.DfMUqiQWZqqo1YkmzSwxZuG75PLy6dRGMQmuNrSiEidg",
+      "uri": "cmn://agentfirstkit.com/b3.7nTogcFe2QTWBm8jmVvpGJnWdcokqaKyP9KT9FC8PngS",
       "id": "agent-first-data",
       "reason": "All structured output, field suffixes, secret handling, and JSONL events follow Agent-First Data conventions"
     },
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.76pbFk2NcMUqayLeiYUt8xWdHfnGkAr1eQzxsKCSXtL3",
+      "uri": "cmn://agentfirstkit.com/b3.AYBamr1F2NmDfTq2vtt9K92Udsy5qKmUMFvy6hNNx7Yp",
       "id": "agent-first-slug",
       "reason": "Path/URL slug generation and path-segment validation use Agent-First Slug"
     }

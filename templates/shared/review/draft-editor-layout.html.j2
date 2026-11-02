@@ -13,6 +13,10 @@
     <input type="hidden" name="base_hash" value="{{ draft_state.base_hash }}" data-afmail-base-hash>
     <input type="hidden" name="draft_name" value="{{ locator.draft_name }}">
     <p class="muted">{{ i18n.t('autosave_workspace') }} {{ i18n.t('quote_unchanged') }}</p>
+    {% if frontmatter.reply_route %}
+    <p class="muted">{{ i18n.t('channel_conversation') }}: {{ frontmatter.reply_route.source_id }} / {{ frontmatter.reply_route.conversation_id }}</p>
+    <label><span>{{ i18n.t('recipient_ids_one_per_line') }}</span><textarea name="to" rows="2" autocomplete="off">{{ frontmatter.to | join('\n') }}</textarea></label>
+    {% else %}
     <label><span>{{ i18n.t('to') }}</span><input name="to" value="{{ frontmatter.to | join(', ') }}" autocomplete="off" inputmode="email"></label>
     <details class="draft-recipient-details"{% if frontmatter.cc %} open{% endif %}>
       <summary>{{ i18n.t('cc') }}</summary>
@@ -22,6 +26,7 @@
       <summary>{{ i18n.t('bcc') }}</summary>
       <input name="bcc" value="{{ frontmatter.bcc | join(', ') }}" autocomplete="off" aria-label="{{ i18n.t('bcc') }}">
     </details>
+    {% endif %}
     <label><span>{{ i18n.t('subject') }}</span><input name="subject" value="{{ frontmatter.subject or '' }}"></label>
     <label><span>{{ i18n.t('message_editor') }}</span><textarea class="editor-body" name="body">{{ source.body_markdown | text_range(analysis.authored_body_range.start_bytes, analysis.authored_body_range.end_bytes) }}</textarea></label>
     {% if frontmatter.attachments %}<div class="attachment-list" aria-label="{{ i18n.t('draft_attachments') }}">{% for attachment_path in frontmatter.attachments %}{% set attachment = analysis.attachments[loop.index0] %}<div class="attachment"><span>{{ attachment_path }}</span><span class="message-address">{% if attachment.exists %}{{ attachment.size_bytes | bytes }}{% else %}{{ i18n.t('missing_attachment') }}{% endif %}</span></div>{% endfor %}</div>{% endif %}

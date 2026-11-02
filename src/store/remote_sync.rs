@@ -20,13 +20,146 @@ impl Workspace {
     }
 
     pub fn pull(&self, ids: &[String]) -> Result<Value> {
-        self.pull_with_progress(ids, crate::imap_pull::PullOptions::default(), None)
+        self.pull_sources_with_progress(
+            ids,
+            false,
+            false,
+            crate::sources::imap::PullOptions::default(),
+            None,
+        )
+    }
+
+    pub(crate) fn pull_sources_with_progress(
+        &self,
+        ids: &[String],
+        cloudflare: bool,
+        files: bool,
+        options: crate::sources::imap::PullOptions,
+        progress: Option<&mut crate::progress::ProgressCallback<'_>>,
+    ) -> Result<Value> {
+        self.require_workspace()?;
+        let config = MailConfig::load(&self.root)?;
+        if (cloudflare || files) && (options.since_days.is_some() || options.all_history) {
+            return Err(AppError::new(
+                "invalid_request",
+                "--cloudflare/--files cannot be combined with --since-days or --all-history",
+            ));
+        }
+        let default_sources = ids.is_empty() && !cloudflare && !files;
+        let pull_imap = !ids.is_empty() || (default_sources && config.imap.host.is_some());
+        let pull_cloudflare = cloudflare || (default_sources && config.cloudflare.is_configured());
+        let pull_files = files || (default_sources && !config.files.sources.is_empty());
+        if pull_imap {
+            // Validate selected mailboxes before any source performs work.
+            config.selected_pull_ids(ids)?;
+        }
+        if !pull_imap && !pull_cloudflare && !pull_files {
+            return Err(AppError::new(
+                "config_missing",
+                "configure IMAP (imap.host, imap.username, imap.password_secret), Cloudflare (cloudflare.account_id, cloudflare.r2.bucket, cloudflare.r2.access_key_id, cloudflare.r2.secret_access_key_secret), or files.sources",
+            ));
+        }
+        if files && config.files.sources.is_empty() {
+            return Err(AppError::new(
+                "config_missing",
+                "configure files.sources before pulling file messages",
+            ));
+        }
+        #[cfg(not(feature = "cloudflare"))]
+        if pull_cloudflare {
+            return crate::sources::cloudflare::pull(&self.root, &config, options, progress);
+        }
+        if pull_files {
+            crate::channels::require_files()?;
+        }
+        let mut progress = progress;
+        let mut result = if pull_imap {
+            self.pull_with_progress(ids, options, progress.as_deref_mut())?
+        } else {
+            json!({"dry_run":options.dry_run})
+        };
+        for (enabled, source_name) in [(pull_cloudflare, "cloudflare"), (pull_files, "files")] {
+            if !enabled {
+                continue;
+            }
+            let mut remaining = options;
+            remaining.max_new_messages = result["remaining_message_budget"]
+                .as_u64()
+                .map(|value| value as usize)
+                .unwrap_or(options.max_new_messages);
+            remaining.max_total_bytes = result["remaining_bytes_budget"]
+                .as_u64()
+                .unwrap_or(options.max_total_bytes);
+            let additional = if source_name == "files" {
+                crate::channels::pull(&self.root, &config, remaining)?
+            } else {
+                crate::sources::cloudflare::pull(
+                    &self.root,
+                    &config,
+                    remaining,
+                    progress.as_deref_mut(),
+                )?
+            };
+            for key in [
+                "new_message_count",
+                "triage_created_count",
+                "spam_message_count",
+                "trashed_message_count",
+                "stored_new_message_bytes",
+                "candidate_count",
+            ] {
+                let total =
+                    result[key].as_u64().unwrap_or(0) + additional[key].as_u64().unwrap_or(0);
+                result[key] = json!(total);
+            }
+            let existing_count = result["new_message_ids_count"].as_u64().unwrap_or_else(|| {
+                result["new_message_ids"]
+                    .as_array()
+                    .map_or(0, |items| items.len() as u64)
+            });
+            let additional_ids = additional["new_message_ids"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let count = existing_count + additional_ids.len() as u64;
+            if result["new_message_ids_truncated"].as_bool() == Some(true) || count > 50 {
+                if let Some(map) = result.as_object_mut() {
+                    map.remove("new_message_ids");
+                }
+                result["new_message_ids_truncated"] = json!(true);
+                result["new_message_ids_count"] = json!(count);
+            } else {
+                let mut ids = result["new_message_ids"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                ids.extend(additional_ids);
+                result["new_message_ids"] = json!(ids);
+            }
+            result["remaining_message_budget"] = additional["remaining_message_budget"].clone();
+            result["remaining_bytes_budget"] = additional["remaining_bytes_budget"].clone();
+            result["budget_limited"] = json!(
+                result["budget_limited"].as_bool().unwrap_or(false)
+                    || additional["budget_limited"].as_bool().unwrap_or(false)
+            );
+            if options.dry_run {
+                result["candidate_declared_bytes"] = json!(
+                    result["candidate_declared_bytes"].as_u64().unwrap_or(0)
+                        + additional["candidate_declared_bytes"].as_u64().unwrap_or(0)
+                );
+            }
+            result[source_name] = additional[source_name].clone();
+            if options.dry_run {
+                result["candidate_count_is_upper_bound"] = json!(true);
+            }
+        }
+        Ok(result)
     }
 
     pub(crate) fn pull_with_progress(
         &self,
         ids: &[String],
-        options: crate::imap_pull::PullOptions,
+        options: crate::sources::imap::PullOptions,
         progress: Option<&mut crate::progress::ProgressCallback<'_>>,
     ) -> Result<Value> {
         self.require_workspace()?;
@@ -35,7 +168,7 @@ impl Workspace {
         // Validate mailbox ids before requiring network credentials so typos fail clearly.
         mail_config.selected_pull_ids(ids)?;
         let imap_base = mail_config.require_imap()?;
-        let targets = crate::imap_pull::resolve_pull_targets(&mail_config, &imap_base, ids)?;
+        let targets = crate::sources::imap::resolve_pull_targets(&mail_config, &imap_base, ids)?;
         crate::progress::emit(
             &mut progress,
             "pull_resolve_targets",
@@ -53,7 +186,7 @@ impl Workspace {
                 .collect(),
         )?;
         if options.dry_run {
-            return crate::imap_pull::pull_workspace(
+            return crate::sources::imap::pull_workspace(
                 &self.root,
                 &mail_config,
                 &imap,
@@ -62,7 +195,7 @@ impl Workspace {
                 progress.as_deref_mut(),
             );
         }
-        let mut result = crate::imap_pull::pull_workspace(
+        let mut result = crate::sources::imap::pull_workspace(
             &self.root,
             &mail_config,
             &imap,
@@ -70,7 +203,8 @@ impl Workspace {
             options,
             progress.as_deref_mut(),
         )?;
-        let all_targets_used_incremental = crate::imap_pull::pull_used_incremental_cursors(&result);
+        let all_targets_used_incremental =
+            crate::sources::imap::pull_used_incremental_cursors(&result);
         crate::progress::emit(
             &mut progress,
             "pull_reconcile_start",
@@ -86,8 +220,12 @@ impl Workspace {
         // location being reconciled as missing. The incremental flag still
         // decides the periodic full header rescan below.
         let reconciliation = self.reconcile_remote_missing(&imap)?;
-        crate::imap_pull::commit_pull_cursors(&self.root, &result, !all_targets_used_incremental)?;
-        crate::imap_pull::remove_internal_pull_fields(&mut result);
+        crate::sources::imap::commit_pull_cursors(
+            &self.root,
+            &result,
+            !all_targets_used_incremental,
+        )?;
+        crate::sources::imap::remove_internal_pull_fields(&mut result);
         let mut reconcile_progress = reconciliation.clone();
         if let Some(map) = reconcile_progress.as_object_mut() {
             map.insert("mailbox_count".to_string(), json!(imap.mailboxes.len()));
@@ -309,7 +447,7 @@ impl Workspace {
 
     fn reconcile_remote_missing(&self, config: &crate::config::ImapConfig) -> Result<Value> {
         let started = Instant::now();
-        let snapshots = crate::imap_pull::fetch_uid_snapshots(config)?;
+        let snapshots = crate::sources::imap::fetch_uid_snapshots(config)?;
         let snapshot_by_folder = snapshots
             .iter()
             .map(|snapshot| (snapshot.mailbox.clone(), snapshot))
@@ -321,6 +459,9 @@ impl Workspace {
         let mut deleted_remote_message_ids = Vec::new();
         let mut tombstoned_message_ids = Vec::new();
         let mut kept_message_ids = Vec::new();
+        // Messages with no active remote location left; whether each is still
+        // referenced is answered for all of them at once below.
+        let mut gone = Vec::new();
         for path in message_json_paths(&self.root)? {
             let mut message = read_message(&path)?;
             let active_locations = active_remote_locations(&message, &selected_folders);
@@ -345,8 +486,17 @@ impl Workspace {
                 continue;
             }
 
+            gone.push(message);
+        }
+
+        let gone_ids = gone
+            .iter()
+            .map(|message| message.message_id.clone())
+            .collect::<Vec<_>>();
+        let referenced = self.referenced_message_ids(&gone_ids)?;
+        for mut message in gone {
             let id = message.message_id.clone();
-            if self.message_id_is_referenced(&id)? {
+            if referenced.contains(&id) {
                 self.persist_message_metadata(&message)?;
                 self.write_message_materialized_cache(&message)?;
                 tombstoned_message_ids.push(id);
@@ -502,7 +652,7 @@ pub(super) fn push_unique_location(
 
 pub(super) fn remote_location_missing(
     location: &LocalRemoteLocation,
-    snapshots: &BTreeMap<String, &crate::imap_pull::FolderUidSnapshot>,
+    snapshots: &BTreeMap<String, &crate::sources::imap::FolderUidSnapshot>,
 ) -> bool {
     let Some(snapshot) = snapshots.get(&location.mailbox) else {
         return false;
@@ -829,9 +979,13 @@ impl Workspace {
         message_ids: &[String],
     ) -> Result<Vec<MailboxIdLocation>> {
         let mut locations = Vec::new();
+        if message_ids.is_empty() {
+            return Ok(locations);
+        }
+        let reader = self.message_reader()?;
         for message_id in message_ids {
             validate_id("message_id", message_id)?;
-            let message = self.read_message_by_id(message_id)?;
+            let message = reader.read(message_id)?;
             if let Some(remote) = message.remote {
                 for location in remote.locations {
                     if location.missing_rfc3339.is_some() {
@@ -1003,14 +1157,16 @@ impl Workspace {
         let ids = [message_id.to_string()]
             .into_iter()
             .collect::<BTreeSet<_>>();
-        self.collect_active_case_references(&ids, &mut blockers)?;
-        self.collect_draft_references_except_case(&ids, archiving_case_uid, &mut blockers)?;
+        let mut references = Vec::new();
+        self.collect_active_case_references(&ids, &mut references)?;
+        self.collect_draft_references_except_case(&ids, archiving_case_uid, &mut references)?;
         self.collect_push_references_except_case(
             &ids,
             allowed_push_path,
             archiving_case_uid,
-            &mut blockers,
+            &mut references,
         )?;
+        blockers.extend(reference_paths(references));
         Ok(ArchiveEligibility {
             eligible: blockers.is_empty(),
             blockers,
@@ -1047,9 +1203,13 @@ impl Workspace {
         inbound_only: bool,
     ) -> Result<Vec<PushLocation>> {
         let mut locations = Vec::new();
+        if message_ids.is_empty() {
+            return Ok(locations);
+        }
+        let reader = self.message_reader()?;
         for message_id in message_ids {
             validate_id("message_id", message_id)?;
-            let message = self.read_message_by_id(message_id)?;
+            let message = reader.read(message_id)?;
             if inbound_only && message.direction.as_deref() != Some("inbound") {
                 continue;
             }
@@ -1086,10 +1246,15 @@ impl Workspace {
         flags: &[String],
         add: bool,
     ) -> Result<()> {
+        if locations.is_empty() {
+            return Ok(());
+        }
         let flags = canonical_flags(flags.iter().cloned());
+        // Writes below touch only remote metadata, which no overlay reads.
+        let reader = self.message_reader()?;
         for location in locations {
             validate_id("message_id", &location.message_id)?;
-            let mut message = self.read_message_by_id(&location.message_id)?;
+            let mut message = reader.read(&location.message_id)?;
             let state = message.remote.get_or_insert_with(|| RemoteState {
                 locations: Vec::new(),
             });
@@ -1126,12 +1291,39 @@ impl Workspace {
         Ok(())
     }
 
-    pub(super) fn message_id_is_referenced(&self, message_id: &str) -> Result<bool> {
-        match self.ensure_message_ids_unreferenced(&[message_id.to_string()], None) {
-            Ok(()) => Ok(false),
-            Err(err) if err.error_code == "message_referenced" => Ok(true),
-            Err(err) => Err(err),
+    /// Which of `message_ids` anything still refers to, from one pass over
+    /// every case, draft, push and notification.
+    pub(super) fn referenced_message_ids(
+        &self,
+        message_ids: &[String],
+    ) -> Result<BTreeSet<String>> {
+        if message_ids.is_empty() {
+            return Ok(BTreeSet::new());
         }
+        let ids = message_ids.iter().cloned().collect::<BTreeSet<_>>();
+        Ok(self
+            .message_references(&ids, None, &[])?
+            .into_iter()
+            .flat_map(|reference| reference.message_ids)
+            .collect())
+    }
+
+    fn message_references(
+        &self,
+        ids: &BTreeSet<String>,
+        allowed_push_path: Option<&Path>,
+        allowed_push_actions: &[crate::types::MessagePushAction],
+    ) -> Result<Vec<Reference>> {
+        let mut references = Vec::new();
+        self.collect_case_references(ids, &mut references)?;
+        self.collect_push_references_except_message_pushes(
+            ids,
+            allowed_push_path,
+            allowed_push_actions,
+            &mut references,
+        )?;
+        self.collect_notification_references(ids, &mut references)?;
+        Ok(references)
     }
 
     pub(crate) fn ensure_message_ids_unreferenced(
@@ -1153,15 +1345,11 @@ impl Workspace {
         allowed_push_actions: &[crate::types::MessagePushAction],
     ) -> Result<()> {
         let ids = message_ids.iter().cloned().collect::<BTreeSet<_>>();
-        let mut references = Vec::new();
-        self.collect_case_references(&ids, &mut references)?;
-        self.collect_push_references_except_message_pushes(
+        let references = reference_paths(self.message_references(
             &ids,
             allowed_push_path,
             allowed_push_actions,
-            &mut references,
-        )?;
-        self.collect_notification_references(&ids, &mut references)?;
+        )?);
         if references.is_empty() {
             Ok(())
         } else {
@@ -1190,7 +1378,7 @@ impl Workspace {
     pub(super) fn collect_case_references(
         &self,
         ids: &BTreeSet<String>,
-        references: &mut Vec<String>,
+        references: &mut Vec<Reference>,
     ) -> Result<()> {
         self.collect_any_case_message_references(ids, references)?;
         self.collect_draft_references(ids, references)
@@ -1199,19 +1387,20 @@ impl Workspace {
     pub(super) fn collect_any_case_message_references(
         &self,
         ids: &BTreeSet<String>,
-        references: &mut Vec<String>,
+        references: &mut Vec<Reference>,
     ) -> Result<()> {
         for (_, case_path) in self.all_case_entries()? {
             let data_path = case_json_path(&case_path);
             if data_path.exists() {
                 let data = read_to_string(&data_path, "read case metadata")?;
-                if json_contains_any_id(
-                    &serde_json::from_str::<Value>(&data)
-                        .map_err(|e| AppError::json("parse case metadata", &e))?,
-                    ids,
-                ) {
-                    references.push(rel_path(&self.root, &data_path));
-                }
+                references.extend(Reference::new(
+                    rel_path(&self.root, &data_path),
+                    json_matching_ids(
+                        &serde_json::from_str::<Value>(&data)
+                            .map_err(|e| AppError::json("parse case metadata", &e))?,
+                        ids,
+                    ),
+                ));
             }
         }
         Ok(())
@@ -1220,7 +1409,7 @@ impl Workspace {
     pub(super) fn collect_active_case_references(
         &self,
         ids: &BTreeSet<String>,
-        references: &mut Vec<String>,
+        references: &mut Vec<Reference>,
     ) -> Result<()> {
         for (_, case_path) in self.case_entries()? {
             let data_path = case_json_path(&case_path);
@@ -1230,9 +1419,10 @@ impl Workspace {
             let data = read_to_string(&data_path, "read case metadata")?;
             let value = serde_json::from_str::<Value>(&data)
                 .map_err(|e| AppError::json("parse case metadata", &e))?;
-            if json_contains_any_id(&value, ids) {
-                references.push(rel_path(&self.root, &data_path));
-            }
+            references.extend(Reference::new(
+                rel_path(&self.root, &data_path),
+                json_matching_ids(&value, ids),
+            ));
         }
         Ok(())
     }
@@ -1240,7 +1430,7 @@ impl Workspace {
     pub(super) fn collect_draft_references(
         &self,
         ids: &BTreeSet<String>,
-        references: &mut Vec<String>,
+        references: &mut Vec<Reference>,
     ) -> Result<()> {
         self.collect_draft_references_except_case(ids, None, references)
     }
@@ -1249,7 +1439,7 @@ impl Workspace {
         &self,
         ids: &BTreeSet<String>,
         ignored_case_uid: Option<&str>,
-        references: &mut Vec<String>,
+        references: &mut Vec<Reference>,
     ) -> Result<()> {
         for (case_uid, case_path) in self.all_case_entries()? {
             if ignored_case_uid.is_some_and(|ignored| ignored == case_uid) {
@@ -1264,13 +1454,13 @@ impl Workspace {
                     }
                     let text = read_to_string(&path, "read draft")?;
                     let (fm, _) = read_doc::<DraftFrontmatter>(&text)?;
-                    if fm
-                        .reply_to_message_id
-                        .as_ref()
-                        .is_some_and(|id| ids.contains(id))
-                    {
-                        references.push(rel_path(&self.root, &path));
-                    }
+                    references.extend(Reference::new(
+                        rel_path(&self.root, &path),
+                        fm.reply_to_message_id
+                            .into_iter()
+                            .filter(|id| ids.contains(id))
+                            .collect(),
+                    ));
                 }
             }
         }
@@ -1282,7 +1472,7 @@ impl Workspace {
         ids: &BTreeSet<String>,
         allowed_push_path: Option<&Path>,
         ignored_case_uid: Option<&str>,
-        references: &mut Vec<String>,
+        references: &mut Vec<Reference>,
     ) -> Result<()> {
         let push_dir = self
             .root
@@ -1309,9 +1499,14 @@ impl Workspace {
             {
                 continue;
             }
-            if item.message_ids().iter().any(|id| ids.contains(id)) {
-                references.push(rel_path(&self.root, &path));
-            }
+            references.extend(Reference::new(
+                rel_path(&self.root, &path),
+                item.message_ids()
+                    .iter()
+                    .filter(|id| ids.contains(*id))
+                    .cloned()
+                    .collect(),
+            ));
         }
         Ok(())
     }
@@ -1321,7 +1516,7 @@ impl Workspace {
         ids: &BTreeSet<String>,
         allowed_push_path: Option<&Path>,
         allowed_push_actions: &[crate::types::MessagePushAction],
-        references: &mut Vec<String>,
+        references: &mut Vec<Reference>,
     ) -> Result<()> {
         let push_dir = self
             .root
@@ -1343,9 +1538,10 @@ impl Workspace {
             }
             let value = serde_json::from_str::<Value>(&data)
                 .map_err(|e| AppError::json("parse push item", &e))?;
-            if json_contains_any_id(&value, ids) {
-                references.push(rel_path(&self.root, &path));
-            }
+            references.extend(Reference::new(
+                rel_path(&self.root, &path),
+                json_matching_ids(&value, ids),
+            ));
         }
         Ok(())
     }
@@ -1353,15 +1549,22 @@ impl Workspace {
     pub(super) fn collect_notification_references(
         &self,
         ids: &BTreeSet<String>,
-        references: &mut Vec<String>,
+        references: &mut Vec<Reference>,
     ) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let reader = self.message_reader()?;
         for message_id in ids {
             let path = self.message_path(message_id);
-            let Ok(message) = self.read_message_by_id(message_id) else {
+            let Ok(message) = reader.read(message_id) else {
                 continue;
             };
             if message.workspace.notification_uid.is_some() {
-                references.push(format!("{}:notification_uid", rel_path(&self.root, &path)));
+                references.extend(Reference::new(
+                    format!("{}:notification_uid", rel_path(&self.root, &path)),
+                    BTreeSet::from([message_id.clone()]),
+                ));
             }
         }
         Ok(())
@@ -1453,6 +1656,25 @@ fn message_push_action_is_allowed(
     })
 }
 
+/// A file that refers to messages, and which of the asked-about ids it names.
+pub(super) struct Reference {
+    path: String,
+    message_ids: BTreeSet<String>,
+}
+
+impl Reference {
+    fn new(path: String, message_ids: BTreeSet<String>) -> Option<Self> {
+        (!message_ids.is_empty()).then_some(Self { path, message_ids })
+    }
+}
+
+pub(super) fn reference_paths(references: Vec<Reference>) -> Vec<String> {
+    references
+        .into_iter()
+        .map(|reference| reference.path)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1461,7 +1683,7 @@ mod tests {
 
     #[test]
     fn uidvalidity_mismatch_marks_remote_location_missing() {
-        let snapshot = crate::imap_pull::FolderUidSnapshot {
+        let snapshot = crate::sources::imap::FolderUidSnapshot {
             mailbox: "INBOX".to_string(),
             uid_validity: 99,
             uids: BTreeSet::from([7u64]),
@@ -1480,6 +1702,7 @@ mod tests {
             schema_name: "message".to_string(),
             schema_version: MESSAGE_SCHEMA_VERSION,
             message_id: "message_uidvalidity".to_string(),
+            origin: None,
             rfc822_message_id: Some("<message_uidvalidity@example.com>".to_string()),
             in_reply_to: None,
             references: Vec::new(),

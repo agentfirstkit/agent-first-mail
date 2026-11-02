@@ -73,6 +73,8 @@ pub struct PushStepState {
     pub completed_rfc3339: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_receipt: Option<crate::senders::SendReceipt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -357,12 +359,34 @@ pub struct OutboundPush {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedOutbound {
     pub message_id: String,
-    /// Private mailbox evidence, including Bcc when present.
+    /// Immutable canonical evidence: MIME for email, native JSON for file channels.
     pub raw: Vec<u8>,
-    /// SMTP DATA bytes. Bcc recipients remain in `envelope_to`, never here.
+    pub delivery: OutboundDelivery,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutboundDelivery {
+    Email(PreparedEmail),
+    File(crate::channels::ReplyRoute),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedEmail {
+    /// Transmission MIME, with Bcc omitted.
     pub delivery_raw: Vec<u8>,
     pub envelope_from: String,
     pub envelope_to: Vec<String>,
+}
+impl PreparedOutbound {
+    pub fn email(&self) -> crate::error::Result<&PreparedEmail> {
+        match &self.delivery {
+            OutboundDelivery::Email(email) => Ok(email),
+            OutboundDelivery::File(_) => Err(crate::error::AppError::new(
+                "channel_operation_unsupported",
+                "email transport cannot deliver a file-channel message",
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

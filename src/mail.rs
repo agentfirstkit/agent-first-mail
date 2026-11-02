@@ -6,7 +6,7 @@ use crate::types::{
     AttachmentRef, AuthAlignment, AuthVerdict, ImapRef, MessageAuthentication, MessageFile,
     RemoteLocation, RemoteState, WorkspaceState,
 };
-use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders};
+use mail_parser::{AddressList, MessageParser, PartKind, TextList};
 
 #[derive(Clone, Debug)]
 pub struct ParsedMail {
@@ -79,11 +79,9 @@ pub fn parse_message_with_options(
     // that back would just be `body_text` with Markdown escaping in it.
     // `html_body` lists a text part too when the mail has no HTML, so the
     // part type is what says whether there is anything to convert.
-    let has_html_part = parsed.html_body.iter().any(|part_id| {
-        parsed
-            .part(*part_id)
-            .is_some_and(|part| matches!(part.body, mail_parser::PartType::Html(_)))
-    });
+    let has_html_part = parsed
+        .html_body()
+        .any(|part| matches!(part.kind(), PartKind::Html));
     let body_markdown = if has_html_part {
         parsed
             .body_html(0)
@@ -91,10 +89,21 @@ pub fn parse_message_with_options(
     } else {
         None
     };
+    // Persist root-local part ordinals, as older workspaces do. The parser's
+    // global IDs also include parts inside attached messages.
     let mut attachments = parsed
-        .attachments
-        .iter()
-        .filter_map(|part_id| parsed.part(*part_id).map(|part| (*part_id, part)))
+        .root()
+        .parts()
+        .enumerate()
+        .filter(|(_, part)| {
+            // Keep inline media available to the attachment/preview surface,
+            // even when the parser also includes it in both body lists.
+            part.is_attachment()
+                || matches!(
+                    part.kind(),
+                    PartKind::Binary | PartKind::InlineBinary | PartKind::Message(_)
+                )
+        })
         .map(|(part_id, part)| AttachmentRef {
             part_id: part_id.to_string(),
             filename: part
@@ -102,7 +111,7 @@ pub fn parse_message_with_options(
                 .map(ToString::to_string)
                 .unwrap_or_else(|| format!("part-{part_id}")),
             content_type: content_type_string(part.content_type()),
-            size_bytes: part.len() as u64,
+            size_bytes: attachment_size(part) as u64,
             file_path: None,
             source_path: None,
         })
@@ -131,6 +140,7 @@ pub fn parse_message_with_options(
         )
     };
     let message = MessageFile {
+        origin: None,
         schema_name: "message".to_string(),
         schema_version: crate::types::MESSAGE_SCHEMA_VERSION,
         message_id: message_id.clone(),
@@ -241,16 +251,38 @@ pub fn attachment_bytes(raw_eml: &[u8], part_id: &str) -> Result<Vec<u8>> {
             format!("invalid part id: {part_id}"),
         )
     })?;
-    let part = parsed.part(id).ok_or_else(|| {
+    let part = parsed.root().parts().nth(id as usize).ok_or_else(|| {
         AppError::new(
             "attachment_not_found",
             format!("attachment not found: part {part_id}"),
         )
     })?;
-    Ok(part.contents().to_vec())
+    Ok(attachment_contents(part).into_owned())
 }
 
-fn content_type_string(content_type: Option<&mail_parser::ContentType<'_>>) -> String {
+fn attachment_size(part: mail_parser::MessagePart<'_>) -> usize {
+    if part.is_text() {
+        attachment_contents(part).len()
+    } else {
+        // The parser counts decoded binary bytes without allocating a body.
+        part.decoded_len()
+    }
+}
+
+fn attachment_contents(part: mail_parser::MessagePart<'_>) -> std::borrow::Cow<'_, [u8]> {
+    if let Some(text) = part.text() {
+        return match text {
+            std::borrow::Cow::Borrowed(text) => std::borrow::Cow::Borrowed(text.as_bytes()),
+            std::borrow::Cow::Owned(text) => std::borrow::Cow::Owned(text.into_bytes()),
+        };
+    }
+    if matches!(part.kind(), PartKind::Multipart) {
+        return std::borrow::Cow::Borrowed(b"");
+    }
+    part.decoded()
+}
+
+fn content_type_string(content_type: Option<mail_parser::ContentType<'_>>) -> String {
     match content_type {
         Some(ct) => match ct.subtype() {
             Some(subtype) => format!("{}/{}", ct.ctype(), subtype),
@@ -265,46 +297,59 @@ fn content_type_string(content_type: Option<&mail_parser::ContentType<'_>>) -> S
 /// angle brackets already stripped. Stored bracket-less to match how
 /// `rfc822_message_id` is recorded; brackets are re-added when a header is
 /// emitted.
-fn header_id_list(value: &HeaderValue<'_>) -> Vec<String> {
-    match value {
-        HeaderValue::Text(s) => vec![s.trim().to_string()],
-        HeaderValue::TextList(list) => list.iter().map(|s| s.trim().to_string()).collect(),
-        _ => Vec::new(),
-    }
+fn header_id_list(value: Option<TextList<'_>>) -> Vec<String> {
+    value
+        .into_iter()
+        .flat_map(|list| list.iter())
+        .map(|id| id.trim().to_string())
+        .collect()
 }
 
-fn format_first_address(address: &Address<'_>) -> Option<String> {
+fn format_first_address(address: AddressList<'_>) -> Option<String> {
     address.first().and_then(|addr| {
         let email = addr.address()?;
-        Some(match addr.name() {
-            Some(name) if !name.is_empty() => format!("{name} <{email}>"),
-            _ => email.to_string(),
-        })
+        Some(format_named_address(addr.name(), email))
     })
 }
 
-fn format_addresses(address: &Address<'_>) -> Vec<String> {
+fn format_addresses(address: AddressList<'_>) -> Vec<String> {
     address
-        .iter()
+        .mailboxes()
         .filter_map(|addr| {
             let email = addr.address()?;
-            Some(match addr.name() {
-                Some(name) if !name.is_empty() => format!("{name} <{email}>"),
-                _ => email.to_string(),
-            })
+            Some(format_named_address(addr.name(), email))
         })
         .collect()
+}
+
+fn format_named_address(name: Option<&str>, email: &str) -> String {
+    let Some(name) = name.filter(|name| !name.is_empty()) else {
+        return email.to_string();
+    };
+    if name.contains([
+        '(', ')', '<', '>', '@', ',', ';', ':', '\\', '"', '[', ']', '.',
+    ]) {
+        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\" <{email}>")
+    } else {
+        format!("{name} <{email}>")
+    }
 }
 
 fn raw_header_values(message: &mail_parser::Message<'_>, name: &str) -> Vec<String> {
     message
-        .headers_raw()
-        .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.trim().to_string())
+        .headers()
+        .iter()
+        .filter(|header| header.raw_name().eq_ignore_ascii_case(name))
+        .map(|header| {
+            String::from_utf8_lossy(header.raw_value())
+                .trim()
+                .to_string()
+        })
         .collect()
 }
 
-fn first_address_domain(address: &Address<'_>) -> Option<String> {
+fn first_address_domain(address: AddressList<'_>) -> Option<String> {
     address
         .first()
         .and_then(|addr| addr.address())
@@ -536,20 +581,79 @@ fn mailing_list_headers(message: &mail_parser::Message<'_>) -> Vec<String> {
     out
 }
 
-pub fn slugify(value: &str) -> String {
-    let config = SlugConfig {
+const MESSAGE_SLUG_FALLBACK: &str = "message";
+
+fn message_slug_config() -> SlugConfig {
+    SlugConfig {
         allowed_character_set: AllowedCharacterSet::AsciiAlphanumericCharacters,
-        empty_output_policy: EmptyOutputPolicy::UseFallbackSlug("message".to_string()),
+        empty_output_policy: EmptyOutputPolicy::UseFallbackSlug(MESSAGE_SLUG_FALLBACK.to_string()),
         ..SlugConfig::default()
-    };
-    agent_first_slug::slugify(value, &config)
+    }
+}
+
+/// agent-first-slug fails only on a configuration error, which it reports for
+/// every input; `message_slug_config_is_accepted` pins that this one has none,
+/// so the fallback below never stands in for a slug.
+pub fn slugify(value: &str) -> String {
+    agent_first_slug::slugify(value, &message_slug_config())
         .map(|result| result.slug)
-        .unwrap_or_else(|_| "message".to_string())
+        .unwrap_or_else(|_| MESSAGE_SLUG_FALLBACK.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_slug_config_is_accepted() {
+        // A rejected configuration would turn every subject into the fallback.
+        assert_eq!(
+            agent_first_slug::slugify("", &message_slug_config()).map(|result| result.slug),
+            Ok(MESSAGE_SLUG_FALLBACK.to_string())
+        );
+        assert_eq!(slugify("Re: Ubuntu 16.04 世界"), "re-ubuntu-16-04");
+    }
+
+    #[test]
+    fn quoted_display_names_remain_valid_reply_mailboxes_after_ingestion() {
+        let raw = concat!(
+            "From: \"Doe, Jane\" <jane@example.com>\r\n",
+            "To: \"Team; East\" <team@example.com>\r\n",
+            "Reply-To: \"Agent \\\"Q\\\"\" <reply@example.com>\r\n",
+            "Subject: Reply addresses\r\n\r\nHello\r\n",
+        );
+        let parsed = parse_inbound_message(
+            "quoted-addresses".into(),
+            raw.as_bytes(),
+            ImapRef {
+                mailbox_name: "INBOX".into(),
+                uid_validity: 1,
+                uid: 1,
+            },
+        )
+        .expect("message");
+        for (value, name, email) in [
+            (
+                parsed.message.from.as_deref().expect("sender"),
+                "Doe, Jane",
+                "jane@example.com",
+            ),
+            (
+                parsed.message.to[0].as_str(),
+                "Team; East",
+                "team@example.com",
+            ),
+            (
+                parsed.message.reply_to[0].as_str(),
+                "Agent \"Q\"",
+                "reply@example.com",
+            ),
+        ] {
+            let mailbox: lettre::message::Mailbox = value.parse().expect("reusable reply address");
+            assert_eq!(mailbox.name.as_deref(), Some(name));
+            assert_eq!(mailbox.email.to_string(), email);
+        }
+    }
 
     #[test]
     fn parses_plain_message_and_attachment_metadata() {
@@ -761,6 +865,103 @@ mod tests {
             .unwrap_or_default();
         let bytes = attachment_bytes(raw.as_bytes(), &part_id);
         assert_eq!(bytes, Ok(b"Attached".to_vec()));
+    }
+
+    #[test]
+    fn attachment_ids_remain_root_local_after_a_nested_message() {
+        let raw = concat!(
+            "From: sender@example.com\r\n",
+            "Content-Type: multipart/mixed; boundary=outer\r\n\r\n",
+            "--outer\r\nContent-Type: text/plain\r\n\r\nBody\r\n",
+            "--outer\r\nContent-Type: message/rfc822\r\n",
+            "Content-Disposition: attachment; filename=forward.eml\r\n\r\n",
+            "From: nested@example.com\r\nSubject: Nested\r\n\r\nNested body\r\n",
+            "--outer\r\nContent-Type: application/octet-stream\r\n",
+            "Content-Disposition: attachment; filename=last.bin\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\nAAEC/w==\r\n",
+            "--outer--\r\n",
+        );
+        let parsed = parse_inbound_message(
+            "nested-parts".into(),
+            raw.as_bytes(),
+            ImapRef {
+                mailbox_name: "INBOX".into(),
+                uid_validity: 1,
+                uid: 1,
+            },
+        )
+        .expect("nested message");
+        let attachments = parsed.message.attachments;
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].part_id, "2");
+        assert_eq!(attachments[1].part_id, "3");
+        let nested = attachment_bytes(raw.as_bytes(), "2").expect("forwarded message");
+        assert!(nested.starts_with(b"From: nested@example.com"));
+        assert_eq!(
+            attachment_bytes(raw.as_bytes(), "3").unwrap(),
+            [0, 1, 2, 255]
+        );
+        assert_eq!(attachments[1].size_bytes, 4);
+    }
+
+    #[test]
+    fn inline_images_remain_available_for_attachment_previews() {
+        let raw = concat!(
+            "From: sender@example.com\r\n",
+            "Content-Type: multipart/mixed; boundary=outer\r\n\r\n",
+            "--outer\r\nContent-Type: text/plain\r\n\r\nBody\r\n",
+            "--outer\r\nContent-Type: image/jpeg; name=preview.jpg\r\n",
+            "Content-Disposition: inline; filename=preview.jpg\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\naW1hZ2UtYnl0ZXM=\r\n",
+            "--outer--\r\n",
+        );
+        let parsed = parse_inbound_message(
+            "inline-preview".into(),
+            raw.as_bytes(),
+            ImapRef {
+                mailbox_name: "INBOX".into(),
+                uid_validity: 1,
+                uid: 1,
+            },
+        )
+        .expect("inline image");
+        let attachment = &parsed.message.attachments[0];
+        assert_eq!(attachment.part_id, "2");
+        assert_eq!(attachment.content_type, "image/jpeg");
+        assert_eq!(attachment.size_bytes, 11);
+        assert_eq!(
+            attachment_bytes(raw.as_bytes(), "2").unwrap(),
+            b"image-bytes"
+        );
+    }
+
+    #[test]
+    fn text_attachments_keep_charset_decoded_bytes_and_sizes() {
+        let raw = concat!(
+            "From: sender@example.com\r\n",
+            "Content-Type: multipart/mixed; boundary=outer\r\n\r\n",
+            "--outer\r\nContent-Type: text/plain\r\n\r\nBody\r\n",
+            "--outer\r\nContent-Type: text/plain; charset=iso-8859-1\r\n",
+            "Content-Disposition: attachment; filename=note.txt\r\n",
+            "Content-Transfer-Encoding: quoted-printable\r\n\r\ncaf=E9\r\n",
+            "--outer--\r\n",
+        );
+        let parsed = parse_inbound_message(
+            "charset-attachment".into(),
+            raw.as_bytes(),
+            ImapRef {
+                mailbox_name: "INBOX".into(),
+                uid_validity: 1,
+                uid: 1,
+            },
+        )
+        .expect("charset message");
+        let attachment = &parsed.message.attachments[0];
+        assert_eq!(attachment.size_bytes, "café".len() as u64);
+        assert_eq!(
+            attachment_bytes(raw.as_bytes(), &attachment.part_id).unwrap(),
+            "café".as_bytes()
+        );
     }
 
     #[test]

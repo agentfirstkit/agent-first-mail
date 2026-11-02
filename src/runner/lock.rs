@@ -31,6 +31,8 @@ pub(super) fn command_lock(command: &Command, cwd: &Path) -> Result<CommandLock>
 
 fn lock_mode(command: &Command) -> LockMode {
     match command {
+        Command::CloudflareScaffold { .. } => LockMode::Exclusive,
+        Command::CloudflareConsume { .. } | Command::CloudflareWatch => LockMode::Exclusive,
         Command::Api { .. } => LockMode::Shared,
         Command::Demo { action } => match action {
             DemoAction::Init { .. } => LockMode::Exclusive,
@@ -70,6 +72,10 @@ fn lock_mode(command: &Command) -> LockMode {
             action,
         } => match action {
             Some(PushAction::List) => LockMode::Shared,
+            Some(PushAction::Recover {
+                confirm: Some(_), ..
+            }) => LockMode::Exclusive,
+            Some(PushAction::Recover { .. }) => LockMode::Shared,
             None if confirm.is_some() => LockMode::Exclusive,
             None => LockMode::Shared,
         },

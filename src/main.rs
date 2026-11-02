@@ -11,7 +11,7 @@
 
 use agent_first_data::{
     BoundOutcome, CliEmitter, Event, OutputFormat, OutputPlan, OutputTo, ResolvedInvocation,
-    cli_error_event, cli_help_event, cli_parse_output, cli_version_event, render_cli_reference,
+    cli_error_event, cli_help_event, cli_version_event, render_cli_reference,
 };
 use agent_first_mail::cli::{self, ArgumentError, Command};
 use agent_first_mail::runner::output_write_failed_exit_code;
@@ -135,14 +135,8 @@ fn display_path(path: &Path) -> String {
 }
 
 fn plan_output(plan: &OutputPlan) -> (OutputFormat, OutputTo) {
-    let format = plan
-        .format()
-        .and_then(|format| cli_parse_output(format).ok())
-        .unwrap_or(OutputFormat::Json);
-    let output_to = plan
-        .destination()
-        .and_then(|destination| OutputTo::parse(destination).ok())
-        .unwrap_or(OutputTo::Split);
+    let format = plan.output_format().unwrap_or(OutputFormat::Json);
+    let output_to = plan.output_to().unwrap_or(OutputTo::Split);
     (format, output_to)
 }
 

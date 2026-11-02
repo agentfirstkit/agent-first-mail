@@ -9,13 +9,16 @@ impl Workspace {
         validate_id("message_id", message_id)?;
         let config = MailConfig::load(&self.root)?;
         let message = self.read_message_by_id(message_id)?;
-        let related_message_ids = self.related_message_ids(message_id)?;
+        let index = MessageRelationIndex::build(self)?;
+        let related_message_ids = index.related_message_ids(message_id);
         let related_messages =
-            self.related_message_documents(&related_message_ids, &config, None)?;
-        Ok(triage_render_document(
+            self.related_message_documents(related_message_ids, &config, None)?;
+        let mut document = triage_render_document(
             self.message_render_document_from_parts(&message, &config)?,
             related_messages,
-        ))
+        );
+        document.context.related_message_issues = index.issues;
+        Ok(document)
     }
 
     /// Message ids currently in triage, newest first, capped at `limit`.
@@ -58,6 +61,7 @@ impl Workspace {
         let triage_dir = self.root.join(layout::TRIAGE);
         let mut items = Vec::new();
         let mut total_count = 0usize;
+        let mut related_message_issues = Vec::new();
         if triage_dir.exists() {
             let mut paths: Vec<PathBuf> = read_dir(&triage_dir, "read triage directory")?
                 .into_iter()
@@ -80,19 +84,30 @@ impl Workspace {
             } else {
                 None
             };
+            if let Some(index) = &relation_index {
+                related_message_issues = index.issues.clone();
+            }
+            let reader = if details {
+                Some(self.message_reader()?)
+            } else {
+                None
+            };
             for path in limited {
                 let message_id = path
                     .file_stem()
                     .map(|stem| stem.to_string_lossy().to_string())
                     .unwrap_or_default();
-                if details {
-                    let message = self.read_message_by_id(&message_id)?;
+                if let Some(reader) = &reader {
+                    let message = reader.read(&message_id)?;
                     let related_message_ids = relation_index
                         .as_ref()
                         .map(|index| index.related_message_ids(&message.message_id).to_vec())
                         .unwrap_or_default();
-                    let related_messages =
-                        self.related_message_meta_rows(&related_message_ids, cases.as_ref())?;
+                    let related_messages = self.related_message_meta_rows(
+                        reader,
+                        &related_message_ids,
+                        cases.as_ref(),
+                    )?;
                     items.push(json!({
                         "message_id": message_id,
                         "from": message.from.as_deref(),
@@ -126,6 +141,7 @@ impl Workspace {
             "limited": limit.is_some_and(|limit| total_count > limit),
             "limit": limit,
             "details": details,
+            "related_message_issues": related_message_issues,
             "push_status": push_status,
             "path_templates": {
                 "view_path": pt_view_path,
@@ -675,14 +691,20 @@ impl Workspace {
             .root
             .join(layout::TRIAGE)
             .join(format!("{}.md", message.message_id));
-        let related_message_ids = match relation_index {
-            Some(index) => index.related_message_ids(&message.message_id).to_vec(),
-            None => self.related_message_ids(&message.message_id)?,
+        let owned_index;
+        let index = match relation_index {
+            Some(index) => index,
+            None => {
+                owned_index = MessageRelationIndex::build(self)?;
+                &owned_index
+            }
         };
+        let related_message_ids = index.related_message_ids(&message.message_id);
         let related_messages =
-            self.related_message_documents(&related_message_ids, config, render_context)?;
+            self.related_message_documents(related_message_ids, config, render_context)?;
         let message = self.message_render_document_with_context(message, config, render_context)?;
-        let document = triage_render_document(message, related_messages);
+        let mut document = triage_render_document(message, related_messages);
+        document.context.related_message_issues = index.issues.clone();
         if let Some(cache) = cache {
             let input_hash =
                 self.render_input_hash_cached(cache, "triage_view", &path, &document)?;
@@ -714,12 +736,13 @@ impl Workspace {
 
     pub(super) fn related_message_meta_rows(
         &self,
+        reader: &MessageReader<'_>,
         related_message_ids: &[String],
         cases: Option<&CaseIndex>,
     ) -> Result<Vec<Value>> {
         let mut out = Vec::new();
         for related_message_id in related_message_ids {
-            let related = self.read_message_by_id(related_message_id)?;
+            let related = reader.read(related_message_id)?;
             out.push(json!({
                 "message_id": related.message_id.as_str(),
                 "from": related.from.as_deref(),

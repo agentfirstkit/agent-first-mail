@@ -136,11 +136,18 @@ pub(crate) fn open_draft_attachment(case_path: &Path, attachment: &str) -> Resul
 pub(crate) fn read_attachment(open: &OpenAttachment) -> Result<Vec<u8>> {
     use std::io::Read as _;
 
-    let mut bytes = Vec::with_capacity(open.metadata.len() as usize);
-    let mut handle = &open.file;
+    let expected_bytes = open.metadata.len();
+    let mut bytes = Vec::new();
+    let mut handle = (&open.file).take(expected_bytes.saturating_add(1));
     handle
         .read_to_end(&mut bytes)
         .map_err(|err| AppError::io("read draft attachment", &err))?;
+    if bytes.len() as u64 != expected_bytes {
+        return Err(AppError::new(
+            "draft_invalid",
+            "draft attachment changed size while being read; review the file and retry",
+        ));
+    }
     Ok(bytes)
 }
 
@@ -182,6 +189,20 @@ mod tests {
 
     fn message(error: &AppError) -> String {
         format!("{error:?}")
+    }
+
+    #[test]
+    fn attachments_that_grow_or_shrink_after_open_are_refused() {
+        for contents in [b"larger than expected".as_slice(), b"x".as_slice()] {
+            let root = case("changed-size");
+            let path = root.join("files/report.txt");
+            std::fs::write(&path, b"original").expect("original");
+            let open = open_draft_attachment(&root, "files/report.txt").expect("open");
+            std::fs::write(&path, contents).expect("external edit");
+            let error = read_attachment(&open).expect_err("changed evidence");
+            assert_eq!(error.error_code, "draft_invalid");
+            std::fs::remove_dir_all(root).expect("cleanup");
+        }
     }
 
     #[test]

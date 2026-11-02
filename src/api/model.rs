@@ -21,6 +21,10 @@ use crate::error::{AppError, Result};
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PullRequest {
+    /// Select Cloudflare R2 ingestion explicitly.
+    pub cloudflare: bool,
+    /// Select native file-channel ingestion explicitly.
+    pub files: bool,
     /// Configured mailbox ids. Empty uses actions.pull.default_mailbox_ids.
     pub mailbox_ids: Vec<String>,
     /// Estimate candidates and budgets without downloading or writing.
@@ -44,6 +48,8 @@ impl PullRequest {
             ));
         }
         Ok(Command::Pull {
+            cloudflare: self.cloudflare,
+            files: self.files,
             ids: self.mailbox_ids,
             dry_run: self.dry_run,
             since_days: self.since_days,
@@ -904,6 +910,85 @@ pub struct HealthResult {
 pub enum PullResult {
     Applied(Box<PullAppliedResult>),
     DryRun(PullDryRunResult),
+    Cloudflare(CloudflarePullResult),
+    Files(FilesPullResult),
+}
+
+/// A pull that selected only native file channels (no IMAP, no Cloudflare).
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct FilesPullResult {
+    pub files: FilesPullSummary,
+    pub dry_run: bool,
+    pub new_message_count: usize,
+    pub triage_created_count: usize,
+    pub spam_message_count: usize,
+    pub trashed_message_count: usize,
+    pub stored_new_message_bytes: u64,
+    pub candidate_count: usize,
+    pub remaining_message_budget: usize,
+    pub remaining_bytes_budget: u64,
+    pub budget_limited: bool,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct FilesPullSummary {
+    pub merged_count: usize,
+    pub skipped_input_count: usize,
+    /// Inputs left unimported because the pull budget ran out; they remain for
+    /// a later pull and must not be retired.
+    pub skipped_inputs: Vec<FileSkippedInput>,
+    /// Per-input and per-source problems; each names its `source_id` and `code`.
+    pub warnings: Vec<Value>,
+    pub capabilities: FileChannelCapabilities,
+}
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct FileSkippedInput {
+    pub source_id: String,
+    pub input_path: String,
+    pub reason: String,
+    pub size_bytes: u64,
+}
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct FileChannelCapabilities {
+    pub reply: bool,
+    pub attachments: bool,
+    pub acknowledge_input: bool,
+    pub remote_mailboxes: bool,
+    pub idempotent_publish: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct CloudflarePullResult {
+    pub cloudflare: CloudflarePullSummary,
+    pub dry_run: bool,
+    pub new_message_count: usize,
+    pub triage_created_count: usize,
+    pub spam_message_count: usize,
+    pub trashed_message_count: usize,
+    pub stored_new_message_bytes: u64,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct CloudflarePullSummary {
+    pub bucket: String,
+    pub prefix: String,
+    pub listed_object_count: usize,
+    pub imported_count: usize,
+    pub merged_count: usize,
+    pub deleted_object_count: usize,
+    pub moved_object_count: usize,
+    pub skipped_object_count: usize,
+    pub skipped_objects: Vec<CloudflareSkippedObject>,
+    pub warnings: Vec<Value>,
+    pub duration_ms: u64,
+}
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct CloudflareSkippedObject {
+    pub key: String,
+    pub reason: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -1396,7 +1481,12 @@ pub struct PushConfirmResult {
     pub partially_applied_count: usize,
     pub audit_pending_count: usize,
     pub stopped_after_failure: bool,
-    pub remaining_count: usize,
+    /// Items after the stopping item that were not attempted in this batch.
+    pub unattempted_count: usize,
+    /// Items from this plan still queued: unattempted + failed + audit-pending.
+    pub pending_queue_count: usize,
+    /// Partially applied/uncertain failures plus audit-pending successes.
+    pub recovery_required_count: usize,
     pub succeeded_items: Vec<PushSucceededItemResult>,
     pub failures: Vec<Value>,
     pub audit_warnings: Vec<Value>,

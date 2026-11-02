@@ -249,7 +249,7 @@ pub fn cli_spec() -> Result<BuiltCliSpec, CliSpecError> {
         .display_name(env!("DISPLAY_NAME"))
         .lifecycle_output(finite())
         // Declared so `--docs` documents what the binary actually returns.
-        // AFDATA's table covers its own 0/1/2; without these two the published
+        // AFDATA supplies 0/1/2/4; the published
         // reference would omit 3 — the code that decides whether a confirmed
         // push may be repeated — and disagree with the skill file that has it.
         .exit_code(
@@ -257,10 +257,6 @@ pub fn cli_spec() -> Result<BuiltCliSpec, CliSpecError> {
             "Some items in a batch succeeded and some failed. The remote effects that landed \
              stay landed, so re-running the same call is not safe; read `failures` and re-queue \
              from there.",
-        )
-        .exit_code(
-            4,
-            "The command ran, but its output could not be written to the requested destination.",
         )
         .command(CommandSpec::root());
     for command in commands() {
@@ -303,6 +299,15 @@ fn top_level_commands() -> Vec<CommandSpec> {
         )
         .one("init"),
         pull_command(),
+        CommandSpec::new(["cloudflare"]).about("Configure Cloudflare mail ingestion."),
+        Leaf::creating(["cloudflare", "scaffold"], "Write an Email Worker project into an absent or empty directory.")
+            .req(ArgSpec::positional("path", 0, "DIR").about("Worker project directory"))
+            .one("cloudflare_scaffold"),
+        Leaf::new(["cloudflare", "consume"], "Consume one Queue batch, import mail, and dispatch durable agent work.")
+            .opt(ArgSpec::flag("--reconcile").about("Also scan the R2 pending prefix to recover missing or expired notifications"))
+            .one("cloudflare_consume"),
+        Leaf::new(["cloudflare", "watch"], "Watch Queue events and periodically reconcile R2, waking an agent only for durable new work.")
+            .stream().one("cloudflare_watch"),
         Leaf::new(
             ["status"],
             "Report workspace health, counts, and latest pull/push progress.",
@@ -314,6 +319,29 @@ fn top_level_commands() -> Vec<CommandSpec> {
             "Preview the complete resolved push plan without writing.",
         )
         .one("push_list"),
+        Leaf::new(
+            ["push", "recover"],
+            "Check the evidence for an uncertain Drafts APPEND or send step; optionally repair or settle local state.",
+        )
+        .req(ArgSpec::positional("push_id", 0, "PUSH_ID").about("Queued push item to inspect"))
+        .arg(ArgSpec::option("--confirm", "PLAN_ID").about(
+            "Apply exactly the recovery plan returned by the check; local queue state only, never mail",
+        ))
+        .arg(ArgSpec::flag("--sent").about(
+            "Assert an uncertain send was delivered; later steps run on the next confirmed push",
+        ))
+        .arg(ArgSpec::flag("--not-sent").about(
+            "Assert an uncertain send was not delivered; it is sent only by a newly confirmed push",
+        ))
+        .shapes([
+            shape("push_recover_check", "push_recover", "Read-only evidence check returning a recovery plan_id"),
+            shape("push_recover_confirm", "push_recover", "Recheck an uncertain Drafts APPEND and repair local queue state")
+                .required(["confirm"]),
+            shape("push_recover_sent", "push_recover", "Settle an uncertain send as sent")
+                .required(["confirm", "sent"]),
+            shape("push_recover_not_sent", "push_recover", "Settle an uncertain send as not sent")
+                .required(["confirm", "not_sent"]),
+        ]),
         Leaf::new(
             ["doctor"],
             "Check afmail workspace consistency without inspecting Git.",
@@ -351,27 +379,32 @@ fn top_level_commands() -> Vec<CommandSpec> {
 fn pull_command() -> CommandSpec {
     Leaf::new(
         ["pull"],
-        "Read configured IMAP mailbox ids into local message files without changing remote mail.",
+        "Import messages from configured IMAP, Cloudflare and file sources.",
     )
     .opt(
         ArgSpec::positional("ids", 0, "MAILBOX_ID")
             .repeatable()
             .about(
-                "Configured mailbox ids to pull. With none, pulls \
-                 actions.pull.default_mailbox_ids.",
+                "IMAP mailbox ids to pull. With none and no --cloudflare or --files, pulls \
+                 every configured source.",
             ),
     )
+    .arg(
+        ArgSpec::flag("--cloudflare")
+            .about("Pull Cloudflare R2 objects; with mailbox ids, also pull those IMAP mailboxes"),
+    )
+    .arg(ArgSpec::flag("--files").about("Pull native JSON from every configured file source"))
     .opt(
         ArgSpec::flag("--dry-run")
-            .about("Estimate remote candidates and budgets without downloading or writing locally"),
+            .about("Estimate source candidates and budgets without downloading or writing locally"),
     )
     .opt(
         ArgSpec::option_i64("--max-new-messages", "COUNT")
-            .about("Maximum number of new messages stored across all selected mailboxes"),
+            .about("Maximum number of new messages stored across all selected sources"),
     )
     .opt(
         ArgSpec::option_i64("--max-total-bytes", "BYTES")
-            .about("Maximum new raw message bytes stored across all selected mailboxes"),
+            .about("Maximum new raw message bytes stored across all selected sources"),
     )
     .arg(
         ArgSpec::option_i64("--since-days", "DAYS")
@@ -394,6 +427,19 @@ fn pull_command() -> CommandSpec {
             "Pull every remote message; no window applies, so --since-days is absent here",
         )
         .required(["all_history"]),
+        shape(
+            "pull-cloudflare",
+            "pull",
+            "Select Cloudflare R2, optionally with file sources; time windows apply only to IMAP",
+        )
+        .required(["cloudflare"])
+        .optional(["files"]),
+        shape(
+            "pull-files",
+            "pull",
+            "Select file sources; time windows apply only to IMAP",
+        )
+        .required(["files"]),
     ])
 }
 
@@ -489,7 +535,7 @@ fn remote_commands() -> Vec<CommandSpec> {
         CommandSpec::new(["remote"]).about("Inspect remote IMAP state for configuring mailboxes."),
         Leaf::new(
             ["remote", "test"],
-            "Test configured IMAP and SMTP access without sending mail.",
+            "Test configured IMAP, Cloudflare R2, and SMTP access without sending mail.",
         )
         .one("remote_test"),
         Leaf::new(["remote", "folders"], "List IMAP folders/mailboxes.").one("remote_folders"),

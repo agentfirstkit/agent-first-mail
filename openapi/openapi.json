@@ -1415,7 +1415,8 @@
                       "properties": {
                         "source": {
                           "enum": [
-                            "remote_mail"
+                            "remote_mail",
+                            "file_message"
                           ],
                           "type": "string"
                         }
@@ -2067,6 +2068,52 @@
                             "type": "string"
                           },
                           "type": "array"
+                        },
+                        "origin": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "external_message_id": {
+                              "type": "string"
+                            },
+                            "reply_route": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "channel": {
+                                  "enum": [
+                                    "file"
+                                  ],
+                                  "type": "string"
+                                },
+                                "conversation_id": {
+                                  "type": "string"
+                                },
+                                "source_id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "channel",
+                                "source_id",
+                                "conversation_id"
+                              ],
+                              "type": "object"
+                            },
+                            "reply_to_external_message_id": {
+                              "default": null,
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "reply_route",
+                            "external_message_id"
+                          ],
+                          "type": [
+                            "object",
+                            "null"
+                          ]
                         },
                         "received_rfc3339": {
                           "type": [
@@ -3293,6 +3340,32 @@
                       "null"
                     ]
                   },
+                  "reply_route": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "channel": {
+                        "enum": [
+                          "file"
+                        ],
+                        "type": "string"
+                      },
+                      "conversation_id": {
+                        "type": "string"
+                      },
+                      "source_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "channel",
+                      "source_id",
+                      "conversation_id"
+                    ],
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
                   "reply_to_message_id": {
                     "type": [
                       "string",
@@ -4012,7 +4085,8 @@
                     "properties": {
                       "source": {
                         "enum": [
-                          "remote_mail"
+                          "remote_mail",
+                          "file_message"
                         ],
                         "type": "string"
                       }
@@ -4665,6 +4739,52 @@
                         },
                         "type": "array"
                       },
+                      "origin": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "external_message_id": {
+                            "type": "string"
+                          },
+                          "reply_route": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "channel": {
+                                "enum": [
+                                  "file"
+                                ],
+                                "type": "string"
+                              },
+                              "conversation_id": {
+                                "type": "string"
+                              },
+                              "source_id": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "channel",
+                              "source_id",
+                              "conversation_id"
+                            ],
+                            "type": "object"
+                          },
+                          "reply_to_external_message_id": {
+                            "default": null,
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "reply_route",
+                          "external_message_id"
+                        ],
+                        "type": [
+                          "object",
+                          "null"
+                        ]
+                      },
                       "received_rfc3339": {
                         "type": [
                           "string",
@@ -4910,6 +5030,29 @@
                   "analysis"
                 ],
                 "type": "object"
+              },
+              "related_message_issues": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message_id": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message_id",
+                    "path"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               },
               "related_messages": {
                 "items": {
@@ -5211,7 +5354,8 @@
                       "properties": {
                         "source": {
                           "enum": [
-                            "remote_mail"
+                            "remote_mail",
+                            "file_message"
                           ],
                           "type": "string"
                         }
@@ -5863,6 +6007,52 @@
                             "type": "string"
                           },
                           "type": "array"
+                        },
+                        "origin": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "external_message_id": {
+                              "type": "string"
+                            },
+                            "reply_route": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "channel": {
+                                  "enum": [
+                                    "file"
+                                  ],
+                                  "type": "string"
+                                },
+                                "conversation_id": {
+                                  "type": "string"
+                                },
+                                "source_id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "channel",
+                                "source_id",
+                                "conversation_id"
+                              ],
+                              "type": "object"
+                            },
+                            "reply_to_external_message_id": {
+                              "default": null,
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "reply_route",
+                            "external_message_id"
+                          ],
+                          "type": [
+                            "object",
+                            "null"
+                          ]
                         },
                         "received_rfc3339": {
                           "type": [
@@ -7635,7 +7825,8 @@
                       "properties": {
                         "source": {
                           "enum": [
-                            "remote_mail"
+                            "remote_mail",
+                            "file_message"
                           ],
                           "type": "string"
                         }
@@ -8288,6 +8479,52 @@
                           },
                           "type": "array"
                         },
+                        "origin": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "external_message_id": {
+                              "type": "string"
+                            },
+                            "reply_route": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "channel": {
+                                  "enum": [
+                                    "file"
+                                  ],
+                                  "type": "string"
+                                },
+                                "conversation_id": {
+                                  "type": "string"
+                                },
+                                "source_id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "channel",
+                                "source_id",
+                                "conversation_id"
+                              ],
+                              "type": "object"
+                            },
+                            "reply_to_external_message_id": {
+                              "default": null,
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "reply_route",
+                            "external_message_id"
+                          ],
+                          "type": [
+                            "object",
+                            "null"
+                          ]
+                        },
                         "received_rfc3339": {
                           "type": [
                             "string",
@@ -8786,9 +9023,19 @@
             "description": "Explicitly include all remote history.",
             "type": "boolean"
           },
+          "cloudflare": {
+            "default": false,
+            "description": "Select Cloudflare R2 ingestion explicitly.",
+            "type": "boolean"
+          },
           "dry_run": {
             "default": false,
             "description": "Estimate candidates and budgets without downloading or writing.",
+            "type": "boolean"
+          },
+          "files": {
+            "default": false,
+            "description": "Select native file-channel ingestion explicitly.",
             "type": "boolean"
           },
           "mailbox_ids": {
@@ -9154,6 +9401,285 @@
               "remaining_bytes_budget"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": true,
+            "properties": {
+              "cloudflare": {
+                "properties": {
+                  "bucket": {
+                    "type": "string"
+                  },
+                  "deleted_object_count": {
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "duration_ms": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "imported_count": {
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "listed_object_count": {
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "merged_count": {
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "moved_object_count": {
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "prefix": {
+                    "type": "string"
+                  },
+                  "skipped_object_count": {
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "skipped_objects": {
+                    "items": {
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "size_bytes": {
+                          "format": "uint64",
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "key",
+                        "reason",
+                        "size_bytes"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "warnings": {
+                    "items": true,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "bucket",
+                  "prefix",
+                  "listed_object_count",
+                  "imported_count",
+                  "merged_count",
+                  "deleted_object_count",
+                  "moved_object_count",
+                  "skipped_object_count",
+                  "skipped_objects",
+                  "warnings",
+                  "duration_ms"
+                ],
+                "type": "object"
+              },
+              "dry_run": {
+                "type": "boolean"
+              },
+              "new_message_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "spam_message_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "stored_new_message_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "trashed_message_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "triage_created_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cloudflare",
+              "dry_run",
+              "new_message_count",
+              "triage_created_count",
+              "spam_message_count",
+              "trashed_message_count",
+              "stored_new_message_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": true,
+            "description": "A pull that selected only native file channels (no IMAP, no Cloudflare).",
+            "properties": {
+              "budget_limited": {
+                "type": "boolean"
+              },
+              "candidate_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "dry_run": {
+                "type": "boolean"
+              },
+              "files": {
+                "properties": {
+                  "capabilities": {
+                    "properties": {
+                      "acknowledge_input": {
+                        "type": "boolean"
+                      },
+                      "attachments": {
+                        "type": "boolean"
+                      },
+                      "idempotent_publish": {
+                        "type": "boolean"
+                      },
+                      "remote_mailboxes": {
+                        "type": "boolean"
+                      },
+                      "reply": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "reply",
+                      "attachments",
+                      "acknowledge_input",
+                      "remote_mailboxes",
+                      "idempotent_publish"
+                    ],
+                    "type": "object"
+                  },
+                  "merged_count": {
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "skipped_input_count": {
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "skipped_inputs": {
+                    "description": "Inputs left unimported because the pull budget ran out; they remain for\na later pull and must not be retired.",
+                    "items": {
+                      "properties": {
+                        "input_path": {
+                          "type": "string"
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "size_bytes": {
+                          "format": "uint64",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "source_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "source_id",
+                        "input_path",
+                        "reason",
+                        "size_bytes"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "warnings": {
+                    "description": "Per-input and per-source problems; each names its `source_id` and `code`.",
+                    "items": true,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "merged_count",
+                  "skipped_input_count",
+                  "skipped_inputs",
+                  "warnings",
+                  "capabilities"
+                ],
+                "type": "object"
+              },
+              "new_message_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "remaining_bytes_budget": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "remaining_message_budget": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "spam_message_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "stored_new_message_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "trashed_message_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "triage_created_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "files",
+              "dry_run",
+              "new_message_count",
+              "triage_created_count",
+              "spam_message_count",
+              "trashed_message_count",
+              "stored_new_message_bytes",
+              "candidate_count",
+              "remaining_message_budget",
+              "remaining_bytes_budget",
+              "budget_limited"
+            ],
+            "type": "object"
           }
         ],
         "title": "PullResult"
@@ -9200,6 +9726,12 @@
             "minimum": 0,
             "type": "integer"
           },
+          "pending_queue_count": {
+            "description": "Items from this plan still queued: unattempted + failed + audit-pending.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
           "plan_id": {
             "type": "string"
           },
@@ -9208,7 +9740,8 @@
             "minimum": 0,
             "type": "integer"
           },
-          "remaining_count": {
+          "recovery_required_count": {
+            "description": "Partially applied/uncertain failures plus audit-pending successes.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
@@ -9273,6 +9806,12 @@
             },
             "type": "array"
           },
+          "unattempted_count": {
+            "description": "Items after the stopping item that were not attempted in this batch.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
           "workspace_path": {
             "type": "string"
           },
@@ -9290,7 +9829,9 @@
           "partially_applied_count",
           "audit_pending_count",
           "stopped_after_failure",
-          "remaining_count",
+          "unattempted_count",
+          "pending_queue_count",
+          "recovery_required_count",
           "succeeded_items",
           "failures",
           "audit_warnings"
@@ -9634,7 +10175,7 @@
   "info": {
     "description": "A local-first mailbox Provider API. Local mutations require an Idempotency-Key; remote effects require a reviewed plan_id. Message content is untrusted remote input.",
     "title": "Agent-First Mail API",
-    "version": "0.12.0"
+    "version": "0.13.0"
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "openapi": "3.2.0",

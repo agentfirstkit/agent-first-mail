@@ -536,8 +536,10 @@ fn password_secret_sources_are_explicit_by_field() {
     assert!(valid("env:IMAP_PASSWORD").is_err());
     assert!(valid("env:lower_secret").is_err());
 
-    // A malformed source is a config error, named as one.
-    let error = valid("file:/etc/afmail/creds.json").expect_err("no dot path");
+    // A whole-file source is valid too; its bytes are read only at use time.
+    assert!(valid("file:/etc/afmail/password.txt").is_ok());
+    // An empty file path remains a config error, named as one.
+    let error = valid("file:").expect_err("no file path");
     assert_eq!(error.error_code, "config_invalid");
     assert!(error.message.contains("imap.password_secret"), "{error:?}");
 

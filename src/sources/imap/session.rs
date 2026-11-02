@@ -288,12 +288,20 @@ fn select_mailbox_header_uids<T: std::io::Read + std::io::Write>(
     })
 }
 
+struct HeaderFetchBatch {
+    envelopes: Vec<RemoteEnvelope>,
+    // Requested UIDs the server answered without a usable header. The caller
+    // must not let the cursor pass them: if the message was expunged, the next
+    // search no longer returns it and the cursor moves on by itself.
+    missing_uids: Vec<u64>,
+}
+
 fn fetch_header_batch<T: std::io::Read + std::io::Write>(
     session: &mut imap::Session<T>,
     mailbox: &str,
     uid_validity: u64,
     uids: &[u64],
-) -> Result<Vec<RemoteEnvelope>> {
+) -> Result<HeaderFetchBatch> {
     let requested = uids.iter().copied().collect::<BTreeSet<_>>();
     let sequence = uids
         .iter()
@@ -313,7 +321,7 @@ fn fetch_header_batch<T: std::io::Read + std::io::Write>(
         }
         // rust-imap exposes BODY[HEADER] via header(); BODY[HEADER.FIELDS ...]
         // is parsed as a section the public Fetch API does not return.
-        let Some(header) = fetch.header().or_else(|| fetch.body()) else {
+        let Some(_header) = fetch.header().or_else(|| fetch.body()) else {
             continue;
         };
         out.push(RemoteEnvelope {
@@ -322,12 +330,21 @@ fn fetch_header_batch<T: std::io::Read + std::io::Write>(
             uid: uid as u64,
             flags: canonical_flags(fetch.flags().iter().map(ToString::to_string)),
             size_bytes: fetch.size.map(u64::from),
-            header: header.to_vec(),
         });
     }
     out.sort_unstable_by_key(|envelope| envelope.uid);
     out.dedup_by_key(|envelope| envelope.uid);
-    Ok(out)
+    let missing_uids = requested
+        .into_iter()
+        .filter(|uid| {
+            out.binary_search_by_key(uid, |envelope| envelope.uid)
+                .is_err()
+        })
+        .collect();
+    Ok(HeaderFetchBatch {
+        envelopes: out,
+        missing_uids,
+    })
 }
 
 struct BodyFetchBatch {
@@ -360,12 +377,13 @@ fn fetch_current_mailbox_uid_batch<T: std::io::Read + std::io::Write>(
     let mut out = Vec::new();
     let mut skipped = Vec::new();
     let max_message_bytes = max_message_bytes();
+    let mut answered = BTreeSet::new();
     for fetch in metadata.iter() {
         let Some(uid) = fetch.uid else {
             continue;
         };
         let uid = uid as u64;
-        if !uid_set.contains(&uid) {
+        if !uid_set.contains(&uid) || !answered.insert(uid) {
             continue;
         }
         if let Some(size) = fetch.size
@@ -411,6 +429,15 @@ fn fetch_current_mailbox_uid_batch<T: std::io::Read + std::io::Write>(
             flags: response_flags,
             raw_eml,
         });
+    }
+    // A UID the metadata response left out was never fetched; report it like
+    // an empty body so it blocks the cursor instead of being stepped over.
+    for uid in uid_set.difference(&answered) {
+        skipped.push(json!({
+            "reason": "body_missing",
+            "mailbox_name": mailbox,
+            "uid": uid,
+        }));
     }
     Ok(BodyFetchBatch {
         messages: out,
@@ -575,9 +602,8 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
     progress: &mut Option<&mut ProgressCallback<'_>>,
 ) -> Result<Value> {
     let started = Instant::now();
-    let offset = mail_config.resolved_timezone_offset();
     let mut existing = load_existing_remote_index(root)?;
-    let ingest_render_context = PullIngestRenderContext::new(root, mail_config)?;
+    let ingest_render_context = IngestRenderContext::new(root, mail_config)?;
     let mut new_message_count = 0usize;
     let mut triage_created_count = 0usize;
     let mut spam_message_count = 0usize;
@@ -593,9 +619,11 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
     let mut budget_skipped_count = 0usize;
     let mut skipped_messages = Vec::new();
     let mut stored_new_message_bytes = 0u64;
+    let mut warnings = Vec::new();
     let (cursors, cursor_warning) = load_pull_cursors(root)?;
     if let Some(warning) = &cursor_warning {
         crate::progress::emit(progress, "pull_cursor_warning", warning.clone());
+        warnings.push(warning.clone());
     }
     let mut cursor_updates = Vec::new();
     let mut uid_validity_reset_mailbox_ids = Vec::new();
@@ -631,7 +659,19 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
         let mut new_uids = BTreeSet::new();
         let mut new_envelopes = BTreeMap::new();
         for batch in envelope_fetch.uids.chunks(BODY_FETCH_BATCH_SIZE) {
-            let envelopes = fetch_header_batch(session, &target.mailbox, uid_validity, batch)?;
+            let HeaderFetchBatch {
+                envelopes,
+                missing_uids,
+            } = fetch_header_batch(session, &target.mailbox, uid_validity, batch)?;
+            for uid in missing_uids {
+                skipped_messages.push(json!({
+                    "reason": "header_missing",
+                    "mailbox_name": target.mailbox.as_str(),
+                    "uid": uid,
+                }));
+                mailbox_blocked_cursor_uid =
+                    Some(mailbox_blocked_cursor_uid.unwrap_or(uid).min(uid));
+            }
             envelope_count += envelopes.len();
             // Only candidates admitted by the global budget survive this
             // batch. Known-location flags still reconcile after budget expiry.
@@ -780,65 +820,44 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
                 } else {
                     remaining_total_bytes += reserved_bytes - actual_bytes;
                 }
-                let key = ImapKey {
-                    mailbox: remote.mailbox.clone(),
-                    uid_validity: remote.uid_validity,
-                    uid: remote.uid,
-                };
-                let content_key = message_content_key(&remote.raw_eml);
-                if let Some(existing_message_id) = existing.content_ids.get(&content_key) {
-                    // Identical bytes already stored: this is a second location
-                    // for a message we have, not a new message. Refund what the
-                    // header stage reserved for it — the dedup is only knowable
-                    // after the body arrives, and without the refund a mailbox
-                    // that mirrors another (Gmail's All Mail beside Inbox)
-                    // spends the whole `--max-new-messages` / `--max-total-bytes`
-                    // budget on copies it then discards.
+                let outcome = ingest_message(
+                    root,
+                    &mut existing,
+                    &ingest_render_context,
+                    mail_config,
+                    IngestMessage {
+                        raw_eml: remote.raw_eml,
+                        remote_location: Some(RemoteLocation {
+                            mailbox_id: Some(target.id.clone()),
+                            mailbox_name: remote.mailbox,
+                            uid_validity: Some(remote.uid_validity),
+                            uid: Some(remote.uid),
+                            flags: remote.flags,
+                            observed_rfc3339: crate::store::now_rfc3339(),
+                            missing_rfc3339: None,
+                        }),
+                        delivery: None,
+                        import_as: target.import_as,
+                        direction: target.direction,
+                    },
+                )?;
+                let saved_message_id = outcome.message_id().to_string();
+                if let Some(warning) = outcome.duplicate_candidate_warning() {
+                    warnings.push(warning);
+                }
+                if let IngestOutcome::Merged { flags_updated, .. } = outcome {
                     remaining_message_count += 1;
                     remaining_total_bytes += actual_bytes;
-                    let update = add_remote_location_parts(
-                        root,
-                        existing_message_id,
-                        &remote.mailbox,
-                        remote.uid_validity,
-                        remote.uid,
-                        &remote.flags,
-                        Some(target.id.as_str()),
-                    )?;
                     if crate::store::Workspace::at(root).restore_remote_deleted_message(
-                        existing_message_id,
+                        &saved_message_id,
                         MessageStatus::parse(target.import_as.as_str())?,
                     )? {
                         reclassified_message_count += 1;
                     }
-                    existing.imap_keys.insert(key.clone());
-                    existing
-                        .imap_locations
-                        .insert(key, existing_message_id.clone());
                     updated_location_count += 1;
-                    if update.flags_updated {
-                        flags_updated_count += 1;
-                    }
+                    flags_updated_count += usize::from(flags_updated);
                     continue;
                 }
-                let suggestion = existing.suggest_case(&envelope.header);
-                let saved = save_remote_message(
-                    root,
-                    remote,
-                    &suggestion,
-                    target,
-                    offset,
-                    mail_config,
-                    &ingest_render_context,
-                )?;
-                existing.imap_keys.insert(key.clone());
-                let saved_message_id = saved.message_id.clone();
-                existing
-                    .imap_locations
-                    .insert(key, saved_message_id.clone());
-                existing
-                    .content_ids
-                    .insert(content_key, saved_message_id.clone());
                 new_message_ids.push(saved_message_id.clone());
                 new_message_count += 1;
                 stored_new_message_bytes += actual_bytes;
@@ -942,11 +961,11 @@ pub(super) fn pull_workspace_session<T: std::io::Read + std::io::Write>(
         "mailbox_count": targets.len(),
         "duration_ms": started.elapsed().as_millis() as u64
     });
-    if let Some(warning) = cursor_warning
+    if !warnings.is_empty()
         && let Some(map) = result.as_object_mut()
     {
-        map.insert("warning_count".to_string(), json!(1));
-        map.insert("warnings".to_string(), json!([warning]));
+        map.insert("warning_count".to_string(), json!(warnings.len()));
+        map.insert("warnings".to_string(), json!(warnings));
     }
     if let Value::Object(map) = &mut result {
         map.insert(
@@ -989,7 +1008,8 @@ pub(super) fn estimate_pull_workspace_session<T: std::io::Read + std::io::Write>
         )?;
         for batch in selected.uids.chunks(BODY_FETCH_BATCH_SIZE) {
             let envelopes =
-                fetch_header_batch(session, &target.mailbox, selected.uid_validity, batch)?;
+                fetch_header_batch(session, &target.mailbox, selected.uid_validity, batch)?
+                    .envelopes;
             remote_envelope_count += envelopes.len();
             for envelope in envelopes {
                 let key = ImapKey {

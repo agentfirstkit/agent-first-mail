@@ -42,6 +42,12 @@ pub(crate) fn execute_command_at(
         Command::Skill { action } => {
             crate::skill_admin::handle_action(action).map(CommandResult::succeeded)
         }
+        Command::CloudflareScaffold { path } => {
+            crate::sources::cloudflare::scaffold(&cwd.join(path)).map(CommandResult::succeeded)
+        }
+        Command::CloudflareConsume { reconcile } => {
+            crate::sources::cloudflare::consume(cwd, reconcile).map(CommandResult::succeeded)
+        }
         Command::Status => execute_status(cwd).map(CommandResult::succeeded),
         Command::Api { .. } => Err(AppError::new(
             "api_dispatch_error",
@@ -187,17 +193,28 @@ fn execute_command_unlocked(
                     smtp_port,
                 },
         } => crate::demo::init(cwd, &path, scenario, imap_port, smtp_port),
+        Command::CloudflareScaffold { path } => {
+            crate::sources::cloudflare::scaffold(&cwd.join(path))
+        }
+        Command::CloudflareConsume { .. } | Command::CloudflareWatch => Err(AppError::new(
+            "consumer_dispatch_error",
+            "Cloudflare consumer must manage its own workspace lock",
+        )),
         Command::Init { path } => Workspace::init_command(cwd, path.as_deref()),
         Command::Pull {
+            cloudflare,
+            files,
             ids,
             dry_run,
             since_days,
             max_new_messages,
             max_total_bytes,
             all_history,
-        } => Workspace::discover(cwd)?.pull_with_progress(
+        } => Workspace::discover(cwd)?.pull_sources_with_progress(
             &ids,
-            crate::imap_pull::PullOptions::new(
+            cloudflare,
+            files,
+            crate::sources::imap::PullOptions::new(
                 since_days,
                 max_new_messages,
                 max_total_bytes,
@@ -231,6 +248,11 @@ fn execute_command_unlocked(
             let ws = Workspace::discover(cwd)?;
             match action {
                 Some(PushAction::List) => ws.push_list(),
+                Some(PushAction::Recover {
+                    push_id,
+                    confirm,
+                    settle,
+                }) => ws.push_recover(&push_id, confirm.as_deref(), settle),
                 // `--dry-run` and `--confirm` are separate registered shapes, so
                 // a plan id here always means "apply exactly this plan".
                 None => take_command_result(

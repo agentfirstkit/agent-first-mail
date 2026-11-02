@@ -26,6 +26,8 @@ where
 #[serde(deny_unknown_fields)]
 pub struct DraftFrontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_route: Option<crate::channels::ReplyRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub case_uid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

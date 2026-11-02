@@ -1,12 +1,18 @@
 mod access;
 mod actions;
+mod cloudflare;
 mod defaults;
+pub use cloudflare::{
+    CloudflareSection, CloudflareSendingSection, ConsumerSection, QueueSection, R2Section,
+    SpoolControlSection,
+};
+pub(crate) use validation::resolve_password_secret;
 mod identity;
 mod mailbox;
 mod validation;
 mod workspace;
+pub(crate) use workspace::{missing_smtp_auth_config, validate_smtp_auth};
 
-pub(crate) use actions::default_draft_send_steps;
 pub use actions::{
     ActionRule, ActionStep, ActionStepOn, ActionsSection, CaseActions, DraftActions, MailDirection,
     MessageActions, MessageNotificationAction, PullActionSection, PullImportAs, PullMailboxAction,
@@ -43,6 +49,10 @@ pub struct MailConfig {
     #[serde(default)]
     pub review: ReviewSection,
     pub imap: ImapSection,
+    #[serde(default)]
+    pub cloudflare: CloudflareSection,
+    #[serde(default)]
+    pub files: crate::channels::FilesSection,
     pub mailboxes: BTreeMap<String, ImapMailboxConfig>,
     pub actions: ActionsSection,
     pub identities: Vec<IdentityConfig>,
@@ -62,6 +72,8 @@ impl Default for MailConfig {
             workspace: WorkspaceSection::default(),
             review: ReviewSection::default(),
             imap: ImapSection::default(),
+            cloudflare: CloudflareSection::default(),
+            files: crate::channels::FilesSection::default(),
             mailboxes: default_mailbox_configs(),
             actions: ActionsSection::default(),
             identities: default_identities(),
@@ -180,6 +192,8 @@ impl MailConfig {
         }
         self.workspace.validate()?;
         self.review.validate()?;
+        self.cloudflare.validate()?;
+        self.files.validate()?;
         self.actions.validate(self)?;
         self.validate_identities()?;
         validate_password_secret_source(
@@ -222,6 +236,10 @@ impl MailConfig {
     }
 
     pub fn require_smtp(&self) -> Result<SmtpConfig> {
+        validate_smtp_auth(
+            self.smtp.username.as_deref(),
+            self.smtp.password_secret.as_deref(),
+        )?;
         Ok(SmtpConfig {
             host: self
                 .smtp

@@ -44,6 +44,10 @@ jobs:
       - name: Validate Agent Skill
         run: afdata skill validate skills/agent-first-mail
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+
       - name: Test
         run: ./scripts/test.sh all
 
@@ -65,12 +69,17 @@ jobs:
             target
           key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: GreenMail container e2e
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.24.8'
+          cache: false
+
+      - name: Mail source container e2e
         env:
           AFMAIL_TEST_CONTAINER_RUNTIME: docker
         run: |
           docker version
-          docker pull greenmail/standalone:2.1.14
+          docker pull greenmail/standalone:2.1.15
           ./scripts/test.sh e2e
 
   # This spore ships a Windows binary in every release and, until now, tested it

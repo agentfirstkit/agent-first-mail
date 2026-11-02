@@ -9,6 +9,7 @@ mod migration;
 mod notification;
 mod purge;
 mod push_state;
+mod readiness;
 mod refs;
 mod remote_sync;
 mod render;
@@ -66,10 +67,10 @@ use crate::render_document::{
     EmptyRenderDocument, MessageBodyAnalysis, MessageBodySegment, MessageBodySegmentKind,
     MessageContextDocument, MessageRenderAnalysis, MessageRenderDocument, MessageSecurityAnalysis,
     MessageShowDocument, NotesMergeRenderDocument, NotesRenderDocument,
-    RENDER_DOCUMENT_SCHEMA_VERSION, RenderMessageAction, RenderMessageDirection, TextRange,
-    TriageRenderDocument, collection_document_schema_name, collection_message_document_schema_name,
-    draft_document_schema_name, message_document_schema_name, notes_document_schema_name,
-    triage_document_schema_name,
+    RENDER_DOCUMENT_SCHEMA_VERSION, RelatedMessageIssue, RenderMessageAction,
+    RenderMessageDirection, TextRange, TriageRenderDocument, collection_document_schema_name,
+    collection_message_document_schema_name, draft_document_schema_name,
+    message_document_schema_name, notes_document_schema_name, triage_document_schema_name,
 };
 use crate::templates::{
     TemplateKey, TemplateRenderOptions, TemplateRenderer, ensure_template_path_safe,
@@ -462,6 +463,7 @@ fn reserved_init_conflicts(root: &Path) -> Vec<String> {
 #[derive(Clone, Debug)]
 pub struct Workspace {
     root: PathBuf,
+    read_snapshot: Option<ReadSnapshot>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -554,7 +556,10 @@ fn render_notification_done_fields(totals: &RenderRefreshTotals) -> Value {
 
 impl Workspace {
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self { root: path.into() }
+        Self {
+            root: path.into(),
+            read_snapshot: None,
+        }
     }
 
     pub fn discover(start: impl AsRef<Path>) -> Result<Self> {
@@ -779,48 +784,6 @@ impl Workspace {
         self.require_workspace()?;
         let workspace_identity = crate::workspace_identity::load_workspace_identity(&self.root)?;
         let config = MailConfig::load(&self.root)?;
-        // One key now, whether it holds the secret or names where it is.
-        let imap_credentials_configured = config.imap.password_secret.is_some();
-        let smtp_credentials_configured = config.smtp.password_secret.is_some();
-        let imap_ready = config.imap.host.is_some()
-            && config.imap.username.is_some()
-            && imap_credentials_configured;
-        let smtp_ready = config.smtp.host.is_some()
-            && config.smtp.username.is_some()
-            && smtp_credentials_configured;
-        let placeholder_identity = config.identities.iter().any(|identity| {
-            identity.email.eq_ignore_ascii_case("me@example.com")
-                || (identity.identity == "me" && identity.name == "Me")
-        });
-        let required_special_use = ["sent", "archive", "junk", "trash", "drafts"];
-        let missing_special_use_mailbox_ids = required_special_use
-            .iter()
-            .filter(|id| !config.mailboxes.contains_key(**id))
-            .copied()
-            .collect::<Vec<_>>();
-        let special_use_mapping_complete = missing_special_use_mailbox_ids.is_empty();
-        let mut missing_config = Vec::new();
-        if config.imap.host.is_none() {
-            missing_config.push("imap.host");
-        }
-        if config.imap.username.is_none() {
-            missing_config.push("imap.username");
-        }
-        if !imap_credentials_configured {
-            missing_config.push("imap.password_secret");
-        }
-        if config.smtp.host.is_none() {
-            missing_config.push("smtp.host");
-        }
-        if config.smtp.username.is_none() {
-            missing_config.push("smtp.username");
-        }
-        if !smtp_credentials_configured {
-            missing_config.push("smtp.password_secret");
-        }
-        if placeholder_identity {
-            missing_config.push("identities (replace Me <me@example.com>)");
-        }
         let cases = self.active_case_items()?;
         let mut cases_by_group: BTreeMap<String, usize> = BTreeMap::new();
         for case in &cases {
@@ -857,6 +820,8 @@ impl Workspace {
             .count();
         let archived_case_count = archived_cases.len() - archiving_case_count;
         let storage = workspace_storage_usage(&self.root)?;
+        let consumer = crate::sources::cloudflare_journal::Journal::snapshot(&self.root)
+            .unwrap_or_else(|error| error.to_error_value());
         Ok(json!({
             "workspace_uid": workspace_identity.workspace_uid,
             "workspace_path": path_to_string(&self.root),
@@ -874,17 +839,8 @@ impl Workspace {
             "push_count": count_files_with_ext(&self.root.join(crate::layout::afmail_path(crate::layout::AFMAIL_PUSH)), "json")?,
             "push_status": push_status,
             "storage": storage,
-            "readiness": {
-                "ready_for_pull": imap_ready,
-                "ready_for_send": smtp_ready && !placeholder_identity,
-                "imap_configured": imap_ready,
-                "smtp_configured": smtp_ready,
-                "placeholder_identity": placeholder_identity,
-                "missing_special_use_mailbox_ids": missing_special_use_mailbox_ids,
-                "special_use_mapping_complete": special_use_mapping_complete,
-                "missing_config": missing_config,
-                "remote_validation_command": "afmail remote test"
-            }
+            "cloudflare_consumer": consumer,
+            "readiness": readiness::readiness(&config)
         }))
     }
 
@@ -974,30 +930,49 @@ impl Workspace {
     pub fn remote_test(&self) -> Result<Value> {
         self.require_workspace()?;
         let config = crate::config::MailConfig::load(&self.root)?;
-        let imap = crate::imap_pull::remote_test(&config.require_imap()?)?;
-        let smtp = if config.smtp.host.is_some() {
-            crate::smtp_send::remote_test(&config.require_smtp()?)?
+        let sending_configured = config.cloudflare.sending.api_token_secret.is_some();
+        if crate::sources::configured(&config).is_empty()
+            && config.smtp.host.is_none()
+            && !sending_configured
+        {
+            return Err(AppError::new(
+                "config_missing",
+                "configure IMAP, Cloudflare R2, Cloudflare sending, or SMTP before remote test",
+            ));
+        }
+        let imap = if config.imap.host.is_some() {
+            let mut value = crate::sources::imap::remote_test(&config.require_imap()?)?;
+            value["status"] = json!("succeeded");
+            value
         } else {
-            json!({
-                "status": "skipped",
-                "reason": "smtp_not_configured",
-                "message_sent": false
-            })
+            json!({"status":"skipped","reason":"imap_not_configured"})
         };
-        let mut output = imap;
-        let object = output.as_object_mut().ok_or_else(|| {
-            AppError::new("internal_error", "IMAP remote test returned a non-object")
-        })?;
-        object.insert("imap".to_string(), json!({"status": "succeeded"}));
-        object.insert("smtp".to_string(), smtp);
-        Ok(output)
+        let cloudflare = if config.cloudflare.is_configured() {
+            crate::sources::cloudflare::remote_test(&config)?
+        } else {
+            json!({"status":"skipped","reason":"cloudflare_not_configured"})
+        };
+        let smtp = if config.smtp.host.is_some() {
+            crate::senders::smtp::remote_test(&config.require_smtp()?)?
+        } else {
+            json!({"status":"skipped","reason":"smtp_not_configured","message_sent":false})
+        };
+        let mut result = json!({"imap":imap,"cloudflare":cloudflare,"smtp":smtp});
+        if sending_configured {
+            result["cloudflare_sending"] = crate::senders::cloudflare::check_config(&config)?;
+        }
+        Ok(result)
     }
 
     pub fn remote_folders(&self) -> Result<Value> {
         self.require_workspace()?;
         let config = crate::config::MailConfig::load(&self.root)?;
-        let imap = config.require_imap()?;
-        crate::imap_pull::remote_folders(&config, &imap)
+        let imap = config.require_imap().map_err(|error| {
+            error.with_hint(
+                "Cloudflare sources have no folders; configure IMAP to list remote folders.",
+            )
+        })?;
+        crate::sources::imap::remote_folders(&config, &imap)
     }
 
     pub fn push_with_progress(
@@ -1007,6 +982,16 @@ impl Workspace {
     ) -> Result<crate::types::CommandResult> {
         self.require_workspace()?;
         crate::push_queue::push_with_progress(&self.root, confirm_plan_id, progress)
+    }
+
+    pub fn push_recover(
+        &self,
+        push_id: &str,
+        confirm_plan_id: Option<&str>,
+        settle: Option<crate::cli::SendSettlement>,
+    ) -> Result<Value> {
+        self.require_workspace()?;
+        crate::push_queue::recovery::recover(&self.root, push_id, confirm_plan_id, settle)
     }
 
     pub fn push_list(&self) -> Result<Value> {

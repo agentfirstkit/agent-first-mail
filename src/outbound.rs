@@ -1,4 +1,4 @@
-use crate::config::{MailConfig, ResolvedIdentity, SmtpConfig};
+use crate::config::{MailConfig, ResolvedIdentity};
 use crate::draft_content::outbound_body;
 use crate::error::{AppError, Result};
 use crate::frontmatter::DraftFrontmatter;
@@ -11,12 +11,10 @@ use crate::util::write_bytes_atomic;
 #[cfg(test)]
 use crate::util::write_json_pretty;
 use chrono::DateTime;
-use lettre::address::{Address, Envelope};
+use lettre::address::Address;
 #[cfg(feature = "review")]
 use lettre::message::Mailboxes;
 use lettre::message::{Attachment, Mailbox, Message, MultiPart, SinglePart, header};
-use lettre::transport::smtp::authentication::Credentials;
-use lettre::{SmtpTransport, Transport};
 use sanitize_filename::{Options as SanitizeFilenameOptions, sanitize_with_options};
 use std::fs;
 use std::path::Path;
@@ -33,6 +31,21 @@ pub fn prepare_outbound(
     let message_id = existing_message_id
         .map(ToString::to_string)
         .unwrap_or_else(|| unique_outbound_id(root));
+    let text = fs::read_to_string(case_path.join("drafts").join(draft_name))
+        .map_err(|e| AppError::io("read draft", &e))?;
+    let (fm, body) = read_doc::<DraftFrontmatter>(&text)?;
+    if let Some(route) = &fm.reply_route {
+        return crate::channels::prepare(
+            root,
+            case_path,
+            &fm,
+            &body,
+            config,
+            route,
+            &message_id,
+            message_date_rfc3339,
+        );
+    }
     let message = build_draft_message(
         root,
         case_path,
@@ -48,10 +61,14 @@ pub fn prepare_outbound(
         .from()
         .map(ToString::to_string)
         .ok_or_else(|| AppError::new("draft_invalid", "draft envelope from is required"))?;
+    // lettre keeps an address named in more than one of To/Cc/Bcc once per
+    // header; a sender that echoes recipients back must see each mailbox once.
+    let mut seen = std::collections::BTreeSet::new();
     let envelope_to = envelope
         .to()
         .iter()
         .map(ToString::to_string)
+        .filter(|address| seen.insert(address.to_lowercase()))
         .collect::<Vec<_>>();
     let mut delivery_message = message;
     delivery_message.headers_mut().remove::<header::Bcc>();
@@ -59,9 +76,11 @@ pub fn prepare_outbound(
     Ok(PreparedOutbound {
         message_id,
         raw,
-        delivery_raw,
-        envelope_from,
-        envelope_to,
+        delivery: crate::types::OutboundDelivery::Email(crate::types::PreparedEmail {
+            delivery_raw,
+            envelope_from,
+            envelope_to,
+        }),
     })
 }
 
@@ -141,60 +160,6 @@ fn sent_message_id_conflict(message_id: &str) -> AppError {
     .with_details(serde_json::json!({
         "message_id": message_id,
     }))
-}
-
-/// Everything a send needs before anything can leave the machine.
-///
-/// The relay configuration, the transport and the envelope are all built from
-/// local state, and every way they can fail is a mistake that delivered
-/// nothing. Doing it here lets the caller find those out while the step is
-/// still plainly retryable, instead of after it has written down that this
-/// step's outcome is unknown — which is a state a queue cannot recover from on
-/// its own.
-pub fn prepare_send(
-    config: &MailConfig,
-    envelope_from: &str,
-    envelope_to: &[String],
-) -> Result<(lettre::SmtpTransport, Envelope)> {
-    let smtp = config.require_smtp()?;
-    let sender = build_transport(&smtp)?;
-    let from = envelope_from
-        .parse::<Address>()
-        .map_err(|e| AppError::new("smtp_send_failed", format!("invalid envelope from: {e}")))?;
-    let mut to = Vec::new();
-    for address in envelope_to {
-        to.push(address.parse::<Address>().map_err(|e| {
-            AppError::new(
-                "smtp_send_failed",
-                format!("invalid envelope recipient: {e}"),
-            )
-        })?);
-    }
-    let envelope = Envelope::new(Some(from), to)
-        .map_err(|e| AppError::new("smtp_send_failed", e.to_string()))?;
-    Ok((sender, envelope))
-}
-
-pub fn send_raw_message(
-    config: &MailConfig,
-    envelope_from: &str,
-    envelope_to: &[String],
-    raw: &[u8],
-) -> Result<()> {
-    let (sender, envelope) = prepare_send(config, envelope_from, envelope_to)?;
-    // From here on the outcome genuinely can be unknown: the connection, the
-    // handshake, the envelope exchange and DATA all happen inside this call.
-    // A negative SMTP reply is different: the server explicitly rejected it.
-    sender.send_raw(&envelope, raw).map_err(|error| {
-        let rejected = error.is_permanent() || error.is_transient();
-        let app_error = AppError::new("smtp_send_failed", error.to_string());
-        if rejected {
-            app_error.with_details(serde_json::json!({"remote_effect_rejected": true}))
-        } else {
-            app_error
-        }
-    })?;
-    Ok(())
 }
 
 fn build_draft_message(
@@ -345,69 +310,6 @@ fn safe_outbound_attachment_filename(filename: &str) -> String {
     }
 }
 
-fn build_transport(config: &SmtpConfig) -> Result<SmtpTransport> {
-    let mut builder = if config.tls_wrapper {
-        SmtpTransport::relay(&config.host)
-            .map_err(|e| AppError::new("smtp_connect_failed", e.to_string()))?
-            .port(config.port)
-    } else if config.starttls {
-        SmtpTransport::starttls_relay(&config.host)
-            .map_err(|e| AppError::new("smtp_connect_failed", e.to_string()))?
-            .port(config.port)
-    } else {
-        crate::util::ensure_plaintext_credentials_allowed(
-            "SMTP",
-            &config.host,
-            config.username.is_some() && config.password_secret.is_some(),
-        )?;
-        SmtpTransport::builder_dangerous(&config.host).port(config.port)
-    };
-    if let (Some(username), Some(password)) = (&config.username, &config.password_secret) {
-        builder = builder.credentials(Credentials::new(username.clone(), password.clone()));
-    }
-    Ok(builder.build())
-}
-
-pub(crate) fn remote_test(config: &SmtpConfig) -> Result<serde_json::Value> {
-    let started = std::time::Instant::now();
-    let transport = build_transport(config)?;
-    let connected = transport
-        .test_connection()
-        .map_err(|error| retryable_smtp_test_error(config, "connect", error.to_string()))?;
-    if !connected {
-        return Err(retryable_smtp_test_error(
-            config,
-            "connect",
-            "SMTP server closed the test connection".to_string(),
-        ));
-    }
-    Ok(serde_json::json!({
-        "status": "succeeded",
-        "host": config.host,
-        "port": config.port,
-        "starttls": config.starttls,
-        "tls_wrapper": config.tls_wrapper,
-        "authenticated": config.username.is_some(),
-        "message_sent": false,
-        "duration_ms": started.elapsed().as_millis() as u64
-    }))
-}
-
-fn retryable_smtp_test_error(
-    config: &SmtpConfig,
-    phase: &'static str,
-    message: String,
-) -> AppError {
-    AppError::retryable("smtp_test_failed", message).with_details(serde_json::json!({
-        "protocol": "smtp",
-        "phase": phase,
-        "host": config.host,
-        "port": config.port,
-        "starttls": config.starttls,
-        "tls_wrapper": config.tls_wrapper
-    }))
-}
-
 pub(crate) fn normalize_recipient_address(value: &str, field: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.parse::<Mailbox>().is_ok() {
@@ -540,148 +442,6 @@ mod tests {
     }
 
     #[test]
-    fn everything_that_cannot_have_sent_mail_fails_before_the_send() {
-        // The queue writes "outcome unknown" immediately before the send and
-        // cannot recover from it on its own, so a failure that plainly
-        // delivered nothing has to surface earlier than that. These are all
-        // local construction, and `prepare_send` is where they now happen.
-        let mut config = MailConfig::default();
-        config.smtp.host = Some("smtp.example.com".to_string());
-        config.smtp.port = 587;
-        config.smtp.starttls = true;
-
-        // A recipient the envelope will not accept.
-        assert!(
-            prepare_send(&config, "me@example.com", &["not an address".to_string()]).is_err(),
-            "an unusable recipient must fail before anything is sent"
-        );
-        // A sender the envelope will not accept.
-        assert!(prepare_send(&config, "@", &["you@example.com".to_string()]).is_err());
-        // No relay host at all.
-        let unconfigured = MailConfig::default();
-        assert!(
-            prepare_send(
-                &unconfigured,
-                "me@example.com",
-                &["you@example.com".to_string()]
-            )
-            .is_err()
-        );
-
-        // A usable configuration builds a transport and an envelope without
-        // opening a connection — this must not touch the network.
-        assert!(
-            prepare_send(&config, "me@example.com", &["you@example.com".to_string()]).is_ok(),
-            "preparation must not require the server to be reachable"
-        );
-    }
-
-    #[derive(Clone, Copy)]
-    enum SmtpScript {
-        RejectRecipient,
-        DeferSender,
-        CloseAfterData,
-    }
-
-    /// One-connection SMTP server on a loopback port that follows `script`.
-    fn scripted_smtp_server(script: SmtpScript) -> (u16, std::thread::JoinHandle<()>) {
-        use std::io::{BufRead, BufReader, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind SMTP listener");
-        let port = listener.local_addr().expect("SMTP listener address").port();
-        let handle = std::thread::spawn(move || {
-            let Ok((stream, _)) = listener.accept() else {
-                return;
-            };
-            let Ok(mut writer) = stream.try_clone() else {
-                return;
-            };
-            let mut reader = BufReader::new(stream);
-            let _ = writer.write_all(b"220 localhost ESMTP\r\n");
-            let mut line = String::new();
-            loop {
-                line.clear();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                    return;
-                }
-                let upper = line.to_ascii_uppercase();
-                let reply: &[u8] = if upper.starts_with("MAIL FROM") {
-                    match script {
-                        SmtpScript::DeferSender => b"451 4.3.0 try again later\r\n",
-                        _ => b"250 OK\r\n",
-                    }
-                } else if upper.starts_with("RCPT TO") {
-                    match script {
-                        SmtpScript::RejectRecipient => b"550 5.1.1 no such user\r\n",
-                        _ => b"250 OK\r\n",
-                    }
-                } else if upper.starts_with("DATA") {
-                    let _ = writer.write_all(b"354 end with <CRLF>.<CRLF>\r\n");
-                    loop {
-                        line.clear();
-                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                            return;
-                        }
-                        if line == ".\r\n" {
-                            break;
-                        }
-                    }
-                    match script {
-                        // The whole message arrived and the server said
-                        // nothing: it may or may not have accepted it.
-                        SmtpScript::CloseAfterData => return,
-                        _ => b"250 OK\r\n",
-                    }
-                } else if upper.starts_with("QUIT") {
-                    let _ = writer.write_all(b"221 bye\r\n");
-                    return;
-                } else {
-                    b"250 OK\r\n"
-                };
-                if writer.write_all(reply).is_err() {
-                    return;
-                }
-            }
-        });
-        (port, handle)
-    }
-
-    fn send_to_scripted_server(script: SmtpScript) -> AppError {
-        let (port, server) = scripted_smtp_server(script);
-        let mut config = MailConfig::default();
-        config.smtp.host = Some("127.0.0.1".to_string());
-        config.smtp.port = port;
-        config.smtp.starttls = false;
-        config.smtp.tls_wrapper = false;
-        let result = send_raw_message(
-            &config,
-            "me@example.com",
-            &["you@example.com".to_string()],
-            b"Subject: test\r\n\r\nbody\r\n",
-        );
-        assert!(server.join().is_ok());
-        result.expect_err("the scripted server never accepts a message")
-    }
-
-    #[test]
-    fn a_negative_smtp_reply_is_rejected_and_a_dropped_connection_is_unknown() {
-        for script in [SmtpScript::RejectRecipient, SmtpScript::DeferSender] {
-            let error = send_to_scripted_server(script);
-            assert_eq!(error.error_code, "smtp_send_failed");
-            assert_eq!(
-                error
-                    .details
-                    .as_ref()
-                    .and_then(|details| details.get("remote_effect_rejected")),
-                Some(&serde_json::json!(true)),
-                "{error:?}"
-            );
-        }
-        let error = send_to_scripted_server(SmtpScript::CloseAfterData);
-        assert_eq!(error.error_code, "smtp_send_failed");
-        assert!(error.details.is_none(), "{error:?}");
-    }
-
-    #[test]
     fn sent_message_record_is_idempotent_but_never_overwrites_different_raw() {
         let root = temp_root("sent-message-conflict");
         assert!(crate::store::Workspace::at(&root).init().is_ok());
@@ -807,19 +567,30 @@ mod tests {
         let prepared = prepared.unwrap_or_else(|_| PreparedOutbound {
             message_id: String::new(),
             raw: Vec::new(),
-            delivery_raw: Vec::new(),
-            envelope_from: String::new(),
-            envelope_to: Vec::new(),
+            delivery: crate::types::OutboundDelivery::Email(crate::types::PreparedEmail {
+                delivery_raw: Vec::new(),
+                envelope_from: String::new(),
+                envelope_to: Vec::new(),
+            }),
         });
         assert_eq!(
-            prepared.envelope_to,
+            prepared
+                .email()
+                .map(|email| email.envelope_to.clone())
+                .unwrap_or_default(),
             vec![
                 "hidden-one@example.com".to_string(),
                 "hidden-two@example.com".to_string()
             ]
         );
-        let private_raw = String::from_utf8(prepared.raw).unwrap_or_default();
-        let delivery_raw = String::from_utf8(prepared.delivery_raw).unwrap_or_default();
+        let private_raw = String::from_utf8(prepared.raw.clone()).unwrap_or_default();
+        let delivery_raw = String::from_utf8(
+            prepared
+                .email()
+                .map(|email| email.delivery_raw.clone())
+                .unwrap_or_default(),
+        )
+        .unwrap_or_default();
         assert!(private_raw.contains("Bcc:"));
         assert!(private_raw.contains("hidden-one@example.com"));
         assert!(private_raw.contains("hidden-two@example.com"));
@@ -828,6 +599,39 @@ mod tests {
         assert!(!delivery_raw.contains("hidden-one@example.com"));
         assert!(!delivery_raw.contains("hidden-two@example.com"));
         assert!(delivery_raw.contains("Private body"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_mailbox_named_in_several_headers_is_in_the_envelope_once() {
+        let root = temp_root("duplicate-envelope");
+        let case_uid = "c20260521001";
+        let case_path = root.join(format!("cases/support/{case_uid}"));
+        let drafts_path = case_path.join("drafts");
+        assert!(fs::create_dir_all(&drafts_path).is_ok());
+        let draft_name = "new-duplicate.md";
+        let draft_text = format!(
+            "---\nkind: draft\ncase_uid: {case_uid}\nsend_intent: new\nsubject: Update\nto:\n  - Ann <ann@example.com>\ncc:\n  - ANN@example.com\n  - bob@example.com\nbcc:\n  - ann@example.com\nattachments: []\n---\n<!-- afmail:compose:start -->\nBody\n<!-- afmail:compose:end -->\n"
+        );
+        assert!(fs::write(drafts_path.join(draft_name), draft_text).is_ok());
+
+        let prepared = prepare_outbound(
+            &root,
+            &case_path,
+            case_uid,
+            draft_name,
+            &MailConfig::default(),
+            Some("message_sent_duplicate"),
+            Some("2026-05-21T10:00:00Z"),
+        );
+        assert!(prepared.is_ok(), "{prepared:?}");
+        assert_eq!(
+            prepared
+                .ok()
+                .and_then(|prepared| prepared.email().ok().map(|email| email.envelope_to.clone()))
+                .unwrap_or_default(),
+            vec!["ann@example.com".to_string(), "bob@example.com".to_string()]
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -870,6 +674,7 @@ mod tests {
             schema_name: "message".to_string(),
             schema_version: crate::types::MESSAGE_SCHEMA_VERSION,
             message_id: message_id.to_string(),
+            origin: None,
             rfc822_message_id: Some(rfc822_id.to_string()),
             in_reply_to: None,
             references: references.iter().map(|s| s.to_string()).collect(),

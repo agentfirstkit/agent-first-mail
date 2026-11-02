@@ -327,6 +327,14 @@ impl Workspace {
         })?;
         let config = MailConfig::load(&self.root)?;
         validate_id("group", group)?;
+        if let Some(message_id) = message_id {
+            crate::push_queue::ensure_message_action_can_queue(
+                &self.root,
+                "case.add",
+                &[message_id.to_string()],
+                &config.actions.case.add.steps,
+            )?;
+        }
         let date = if let Some(message_id) = message_id {
             self.first_related_message_date(message_id)?
         } else {
@@ -468,14 +476,20 @@ impl Workspace {
         let case_path = existing.ok_or_else(|| {
             AppError::new("case_not_found", format!("case not found: {case_uid}"))
         })?;
+        let config = MailConfig::load(&self.root)?;
+        let message_ids = vec![message_id.to_string()];
+        crate::push_queue::ensure_message_action_can_queue(
+            &self.root,
+            "case.add",
+            &message_ids,
+            &config.actions.case.add.steps,
+        )?;
         let mut result = self.add_message_to_existing_case(
             &case_uid,
             message_id,
             summary.or(reason),
             &case_path,
         )?;
-        let config = MailConfig::load(&self.root)?;
-        let message_ids = vec![message_id.to_string()];
         let locations = self.message_remote_locations_any(&message_ids)?;
         let item = crate::push_queue::queue_action_steps(
             &self.root,
@@ -855,18 +869,20 @@ impl Workspace {
             let data = read_to_string(&data_path, "read case metadata")?;
             let value = serde_json::from_str::<Value>(&data)
                 .map_err(|e| AppError::json("parse case metadata", &e))?;
-            if json_contains_any_id(&value, &ids) {
+            if !json_matching_ids(&value, &ids).is_empty() {
                 references.push(rel_path(&self.root, &data_path));
             }
         }
-        self.collect_draft_references(&ids, &mut references)?;
+        let mut others = Vec::new();
+        self.collect_draft_references(&ids, &mut others)?;
         self.collect_push_references_except_message_pushes(
             &ids,
             None,
             &[MessagePushAction::CaseAdd, MessagePushAction::Notification],
-            &mut references,
+            &mut others,
         )?;
-        self.collect_notification_references(&ids, &mut references)?;
+        self.collect_notification_references(&ids, &mut others)?;
+        references.extend(reference_paths(others));
         if references.is_empty() {
             return Ok(());
         }

@@ -16,8 +16,8 @@ use super::{
     MessageListScope, MessageSuggestionAction, NotificationCommand, NotificationCreateArgs,
     NotificationNotesAction, NotificationSuggestionAction, NotificationSuggestionActionKind,
     NotificationSuggestionSetArgs, PurgeAction, PushAction, RemoteAction, RenderAction,
-    SkillAction, SkillAgentSelection, SkillScope, SkillTargetArgs, SkillWriteArgs, TriageAction,
-    TriageSuggestionAction, TriageSuggestionSetArgs,
+    SendSettlement, SkillAction, SkillAgentSelection, SkillScope, SkillTargetArgs, SkillWriteArgs,
+    TriageAction, TriageSuggestionAction, TriageSuggestionSetArgs,
 };
 use agent_first_data::{BuiltCliSpec, CliValue, LogFilters, ResolvedInvocation};
 use agent_first_ui::UiDeliveryMode;
@@ -336,7 +336,16 @@ pub fn build_command(invocation: &ResolvedInvocation) -> Result<Command, Argumen
         "init" => Command::Init {
             path: opt_text(invocation, "path"),
         },
+        "cloudflare_scaffold" => Command::CloudflareScaffold {
+            path: text(invocation, "path"),
+        },
+        "cloudflare_consume" => Command::CloudflareConsume {
+            reconcile: flag(invocation, "reconcile"),
+        },
+        "cloudflare_watch" => Command::CloudflareWatch,
         "pull" => Command::Pull {
+            cloudflare: flag(invocation, "cloudflare"),
+            files: flag(invocation, "files"),
             ids: strings(invocation, "ids"),
             dry_run: flag(invocation, "dry_run"),
             since_days: bounded(
@@ -360,6 +369,21 @@ pub fn build_command(invocation: &ResolvedInvocation) -> Result<Command, Argumen
             dry_run: true,
             confirm: None,
             action: Some(PushAction::List),
+        },
+        "push_recover" => Command::Push {
+            dry_run: false,
+            confirm: None,
+            action: Some(PushAction::Recover {
+                push_id: text(invocation, "push_id"),
+                confirm: opt_text(invocation, "confirm"),
+                settle: if flag(invocation, "sent") {
+                    Some(SendSettlement::Sent)
+                } else if flag(invocation, "not_sent") {
+                    Some(SendSettlement::NotSent)
+                } else {
+                    None
+                },
+            }),
         },
         "doctor" => Command::Doctor { action: None },
         "doctor_repair" => Command::Doctor {

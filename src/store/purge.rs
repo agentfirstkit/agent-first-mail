@@ -175,16 +175,19 @@ impl Workspace {
             .collect::<BTreeMap<_, _>>();
         let mut candidates = Vec::new();
         let mut skipped = Vec::new();
+        let mut aged = Vec::new();
+        let reader = self.message_reader()?;
+        let dispositions = self.disposition_state_by_message()?;
         for path in message_json_paths(&self.root)? {
             let Some(message_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            let message = self.read_message_by_id(message_id)?;
+            let message = reader.read(message_id)?;
             let status = MessageStatus::parse(&message.workspace.status)?;
             let Some(disposition) = by_status.get(&status).copied() else {
                 continue;
             };
-            let age_basis = self.message_purge_age_time(&message)?;
+            let age_basis = message_purge_age_time(&message, dispositions.get(message_id))?;
             if age_basis > cutoff {
                 skipped.push(PurgeSkipped {
                     message_id: message.message_id,
@@ -193,18 +196,26 @@ impl Workspace {
                 });
                 continue;
             }
-            if self.message_id_is_referenced(&message.message_id)? {
+            aged.push((message.message_id, disposition, age_basis));
+        }
+        let aged_ids = aged
+            .iter()
+            .map(|(message_id, _, _)| message_id.clone())
+            .collect::<Vec<_>>();
+        let referenced = self.referenced_message_ids(&aged_ids)?;
+        for (message_id, disposition, age_basis) in aged {
+            if referenced.contains(&message_id) {
                 skipped.push(PurgeSkipped {
-                    message_id: message.message_id,
+                    message_id,
                     disposition,
                     reason: "referenced",
                 });
                 continue;
             }
-            let artifacts = purge_artifacts(&self.root, &message.message_id)?;
+            let artifacts = purge_artifacts(&self.root, &message_id)?;
             let size_bytes = artifacts.iter().map(|artifact| artifact.size_bytes).sum();
             candidates.push(PurgeCandidate {
-                message_id: message.message_id,
+                message_id,
                 disposition,
                 age_basis_rfc3339: age_basis.to_rfc3339_opts(SecondsFormat::Secs, true),
                 size_bytes,
@@ -238,32 +249,35 @@ impl Workspace {
             skipped,
         })
     }
+}
 
-    fn message_purge_age_time(&self, message: &MessageFile) -> Result<DateTime<Utc>> {
-        let status = MessageStatus::parse(&message.workspace.status)?;
-        let value = self
-            .disposition_state_for_message(&message.message_id)?
-            .and_then(|(found, added)| (found == status).then_some(added))
-            .or_else(|| message.received_rfc3339.clone())
-            .or_else(|| message.sent_rfc3339.clone())
-            .ok_or_else(|| {
-                AppError::new(
-                    "purge_age_unknown",
-                    format!("message {} has no purge age", message.message_id),
-                )
-            })?;
-        DateTime::parse_from_rfc3339(&value)
-            .map(|time| time.with_timezone(&Utc))
-            .map_err(|error| {
-                AppError::new(
-                    "purge_age_invalid",
-                    format!(
-                        "message {} has invalid purge age {value:?}: {error}",
-                        message.message_id
-                    ),
-                )
-            })
-    }
+fn message_purge_age_time(
+    message: &MessageFile,
+    disposition: Option<&(MessageStatus, String)>,
+) -> Result<DateTime<Utc>> {
+    let status = MessageStatus::parse(&message.workspace.status)?;
+    let value = disposition
+        .filter(|(found, _)| *found == status)
+        .map(|(_, added)| added.clone())
+        .or_else(|| message.received_rfc3339.clone())
+        .or_else(|| message.sent_rfc3339.clone())
+        .ok_or_else(|| {
+            AppError::new(
+                "purge_age_unknown",
+                format!("message {} has no purge age", message.message_id),
+            )
+        })?;
+    DateTime::parse_from_rfc3339(&value)
+        .map(|time| time.with_timezone(&Utc))
+        .map_err(|error| {
+            AppError::new(
+                "purge_age_invalid",
+                format!(
+                    "message {} has invalid purge age {value:?}: {error}",
+                    message.message_id
+                ),
+            )
+        })
 }
 
 fn purge_plan_value(plan: &PurgePlan, confirmed: bool) -> Value {
@@ -282,7 +296,7 @@ fn purge_plan_value(plan: &PurgePlan, confirmed: bool) -> Value {
         "candidates": plan.candidates,
         "skipped_count": plan.skipped.len(),
         "skipped": plan.skipped,
-        "hint": format!("Review this plan, then run purge with --confirm {}", plan.plan_id),
+        "hint": purge_confirm_hint(plan),
     })
 }
 
@@ -293,6 +307,7 @@ fn purge_artifacts(root: &Path, message_id: &str) -> Result<Vec<PurgeArtifact>> 
             .join(format!("{message_id}.json")),
         base.join(format!("{message_id}.json")),
         base.join(format!("{message_id}.eml")),
+        base.join(format!("{message_id}.message")),
         base.join(format!("{message_id}.state.json")),
         base.join(format!("{message_id}.txt")),
     ];
@@ -357,6 +372,19 @@ fn verify_purge_artifacts(root: &Path, artifacts: &[PurgeArtifact]) -> Result<()
         }
     }
     Ok(())
+}
+
+// The confirm command must rebuild the same plan, so it repeats the target
+// and the age window rather than leaving them to defaults.
+fn purge_confirm_hint(plan: &PurgePlan) -> String {
+    let target = match plan.target {
+        "discards" => String::new(),
+        target => format!(" {target}"),
+    };
+    format!(
+        "Review this plan, then run `afmail purge{target} --older-than-days {} --confirm {}`.",
+        plan.older_than_days, plan.plan_id
+    )
 }
 
 fn purge_target_name(targets: &[PurgeDisposition]) -> &'static str {

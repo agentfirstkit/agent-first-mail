@@ -84,7 +84,7 @@ pub(super) fn resolve_optional_password_secret(
         .map_err(|error| AppError::new("config_missing", format!("{label} {error}")))
 }
 
-pub(super) fn resolve_password_secret(label: &str, value: Option<&str>) -> Result<String> {
+pub(crate) fn resolve_password_secret(label: &str, value: Option<&str>) -> Result<String> {
     resolve_optional_password_secret(label, value)?
         .ok_or_else(|| AppError::new("config_missing", format!("{label} is required")))
 }
@@ -108,6 +108,14 @@ pub(super) fn validate_secret_env_name(label: &str, name: &str) -> Result<()> {
 }
 
 pub(super) fn validate_steps(config: &MailConfig, label: &str, steps: &[ActionStep]) -> Result<()> {
+    if label == "actions.draft.send.steps"
+        && steps.iter().filter(|step| step.is_send()).count() != 1
+    {
+        return Err(AppError::new(
+            "config_invalid",
+            "actions.draft.send.steps must contain exactly one send step (smtp_send or cloudflare_send)",
+        ));
+    }
     for (index, step) in steps.iter().enumerate() {
         let mut op_count = 0;
         if !step.add_flags.is_empty() {
@@ -122,10 +130,41 @@ pub(super) fn validate_steps(config: &MailConfig, label: &str, steps: &[ActionSt
         if step.smtp_send.is_some() {
             op_count += 1;
         }
+        if step.file_send.is_some() {
+            op_count += 1;
+        }
+        // A draft with a file reply route always sends through file_send alone,
+        // whatever is configured; no configured step list ever reaches a file
+        // destination, so accepting one would only fail mid-push.
+        if step.file_send.is_some() {
+            return Err(AppError::new(
+                "config_invalid",
+                format!(
+                    "{label}[{index}].file_send cannot be configured; drafts with a file reply route use it automatically"
+                ),
+            ));
+        }
+        if step.cloudflare_send.is_some() {
+            op_count += 1;
+        }
         if op_count != 1 {
             return Err(AppError::new(
                 "config_invalid",
                 format!("{label}[{index}] must define exactly one operation"),
+            ));
+        }
+        if step.is_send() && step.on.is_some() {
+            return Err(AppError::new(
+                "config_invalid",
+                format!("{label}[{index}] send operation cannot be conditional"),
+            ));
+        }
+        if let Some(params) = &step.cloudflare_send
+            && !params.is_empty()
+        {
+            return Err(AppError::new(
+                "config_invalid",
+                format!("{label}[{index}].cloudflare_send must be an empty object"),
             ));
         }
         if let Some(params) = &step.smtp_send
@@ -240,4 +279,23 @@ pub(super) fn validate_language_bcp47(
 /// bound so a pathological tag cannot ride along in every rendered path.
 pub(super) fn is_bcp47_like(value: &str) -> bool {
     value.trim() == value && value.len() <= 64 && agent_first_data::is_valid_bcp47(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_send_is_never_a_configured_step() {
+        let config = MailConfig::default();
+        let steps = [ActionStep {
+            file_send: Some(BTreeMap::new()),
+            ..ActionStep::default()
+        }];
+        for label in ["actions.draft.send.steps", "actions.draft.save.steps"] {
+            let error = validate_steps(&config, label, &steps).unwrap_err();
+            assert_eq!(error.error_code, "config_invalid");
+            assert!(error.message.contains("file_send cannot be configured"));
+        }
+    }
 }

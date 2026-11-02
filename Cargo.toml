@@ -1,7 +1,8 @@
 [package]
 name = "agent-first-mail"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
+rust-version = "1.99"
 description = "Let your AI agent work your inbox the way it works a git checkout — mail pulled into local files it reads, sorts, and drafts on your machine, and nothing reaches your real mailbox until you confirm the push."
 license = "MIT"
 repository = "https://github.com/agentfirstkit/agent-first-mail"
@@ -22,7 +23,10 @@ include = [
 ]
 
 [features]
-default = ["api", "demo", "review"]
+files = []
+default = ["api", "demo", "review", "cloudflare", "smtp", "files"]
+smtp = ["lettre/smtp-transport", "lettre/rustls-tls", "lettre/pool"]
+cloudflare = ["dep:rusty-s3", "dep:ureq", "dep:url", "dep:base64", "dep:signal-hook"]
 api = [
     "dep:axum",
     "dep:tokio",
@@ -32,6 +36,7 @@ api = [
     "tokio/signal",
 ]
 demo = [
+    "smtp",
     "dep:base64",
     "dep:tokio",
     "tokio/macros",
@@ -56,8 +61,8 @@ path = "src/main.rs"
 [dependencies]
 # Local monorepo development uses sibling crates where needed; version keys keep
 # packaging tied to the matching published crates.
-agent-first-data = { version = "0.35.0", default-features = false, features = ["cli", "skill-admin", "stream-redirect", "yaml", "toml", "dotenv", "ini"] }
-agent-first-slug = { version = "0.8.0", default-features = false }
+agent-first-data = { version = "0.36.1", default-features = false, features = ["cli", "skill-admin", "stream-redirect", "yaml", "toml", "dotenv", "ini"] }
+agent-first-slug = { version = "0.9.0", default-features = false }
 # Not optional, and not behind `review`. The template loader has to refuse a
 # smuggled `<script>` in every build, including the one with the Review UI
 # compiled out, and that guard is AFUI's — one copy, so it cannot drift. The
@@ -66,7 +71,7 @@ agent-first-slug = { version = "0.8.0", default-features = false }
 # `cli` in every build, not just the ones with a UI: afmail declares the same
 # CLI surface whether or not the Review UI is compiled in, so the delivery flag
 # has to be declarable without a server behind it.
-agent-first-ui = { version = "0.6.1", default-features = false, features = ["cli"] }
+agent-first-ui = { version = "0.9.0", default-features = false, features = ["cli"] }
 axum = { version = "0.8", optional = true }
 base64 = { version = "0.23", optional = true }
 blake3 = "1.8.7"
@@ -75,41 +80,43 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 imap = { version = "3.0.0-alpha.15", default-features = false }
 imap-proto = "0.17"
-lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls", "pool"] }
-mail-parser = { version = "0.11", features = ["full_encoding"] }
-rustls-pemfile = "2.2.0"
+lettre = { version = "0.11", default-features = false, features = ["builder"] }
+mail-parser = { version = "1.0", features = ["full_encoding"] }
 rustls-connector = { version = "0.23", default-features = false, features = ["webpki-root-certs", "rustls--ring"] }
-noyalib = "0.0.57"
+noyalib = "0.0.58"
 minijinja = { version = "3", features = ["serde"] }
 include_dir = "0.7"
 mime_guess = { version = "2", default-features = false }
 fs4 = "1.1"
-atomic-write-file = "0.3"
 ring = "0.17.14"
+rusty-s3 = { version = "0.11.0", optional = true }
+ureq = { version = "3.5.0", default-features = false, features = ["rustls"], optional = true }
+url = { version = "2", optional = true }
 sanitize-filename = "0.6"
 schemars = "1.2"
 tokio = { version = "1", optional = true }
-htmd = { version = "0.5.5", default-features = false }
+htmd = { version = "0.5.6", default-features = false }
 pulldown-cmark = { version = "0.13", default-features = false }
 psl = "2"
 idna = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-xattr = "1.6.1"
+xattr = "1.7.0"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_Shell"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+signal-hook = { version = "0.4.6", default-features = false, optional = true }
 
 [dev-dependencies]
 # `test-support` rather than a second copy of AFUI's fingerprint, trust store,
 # stub browser, WebSocket framing, or runtime envelope in this spore's tests.
-agent-first-ui = { version = "0.6.1", default-features = false, features = ["test-support"] }
+agent-first-ui = { version = "0.9.0", default-features = false, features = ["test-support"] }
 imap-codec = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
-
-[target.'cfg(unix)'.dev-dependencies]
-libc = "0.2"
 
 [lints.clippy]
 unwrap_used = "deny"

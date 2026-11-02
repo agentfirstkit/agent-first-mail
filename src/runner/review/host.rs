@@ -782,7 +782,15 @@ fn review_message<'a>(
         super::ReviewContents::Triage(contents) => contents
             .items
             .iter()
-            .map(|item| &item.document.context.message.message)
+            .flat_map(|item| {
+                std::iter::once(&item.document.context.message.message).chain(
+                    item.document
+                        .context
+                        .related_messages
+                        .iter()
+                        .map(|document| &document.message),
+                )
+            })
             .find(|message| message.message_id == message_id),
         super::ReviewContents::Case(contents) => contents
             .collection

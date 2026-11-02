@@ -2,6 +2,7 @@ mod execute;
 mod io;
 mod plan;
 mod preview;
+pub(crate) mod recovery;
 
 use execute::*;
 use io::*;
@@ -160,6 +161,64 @@ pub(crate) fn find_outbound_for_draft(
     find_draft_item(root, case_uid, draft_name)
 }
 
+/// Refuse to queue a message action before any local write when the message
+/// already has a started push item for a different action: the caller would
+/// otherwise change local state and then fail at the queue.
+pub(crate) fn ensure_message_action_can_queue(
+    root: &Path,
+    kind: &str,
+    message_ids: &[String],
+    steps: &[ActionStep],
+) -> Result<()> {
+    if steps.is_empty() {
+        return Ok(());
+    }
+    let Some(action) = MessagePushAction::from_kind(kind) else {
+        return Ok(());
+    };
+    for message_id in message_ids {
+        if let Some(existing) = find_message_item(root, message_id)?
+            && existing
+                .message()
+                .is_some_and(|message| message.action != action)
+        {
+            ensure_started_action_unchanged(&existing, message_id, action)?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_started_action_unchanged(
+    existing: &PushItem,
+    message_id: &str,
+    action: MessagePushAction,
+) -> Result<()> {
+    if !existing.has_started_effects() {
+        return Ok(());
+    }
+    Err(AppError::new(
+        "push_already_started",
+        format!(
+            "message push item already started and cannot change action from {} to {}: {}",
+            existing
+                .message()
+                .map(|message| message.action.kind())
+                .unwrap_or("unknown"),
+            action.kind(),
+            existing.push_id
+        ),
+    )
+    .with_details(json!({
+        "push_id": existing.push_id,
+        "message_id": message_id,
+        "previous_action": existing.message().map(|message| message.action.kind()),
+        "requested_action": action.kind(),
+        "step_states": existing.step_states,
+        "local_stage": existing.local_stage.map(local_stage_name),
+        "audit_pending": existing.audit_pending.is_some(),
+    })))
+}
+
 pub fn queue_action_steps(
     root: &Path,
     kind: &str,
@@ -197,31 +256,8 @@ pub fn queue_action_steps(
             .as_ref()
             .and_then(PushItem::message)
             .is_some_and(|message| message.action != action);
-        if action_changed
-            && let Some(existing) = existing.as_ref()
-            && existing.has_started_effects()
-        {
-            return Err(AppError::new(
-                "push_already_started",
-                format!(
-                    "message push item already started and cannot change action from {} to {}: {}",
-                    existing
-                        .message()
-                        .map(|message| message.action.kind())
-                        .unwrap_or("unknown"),
-                    action.kind(),
-                    existing.push_id
-                ),
-            )
-            .with_details(json!({
-                "push_id": existing.push_id,
-                "message_id": message_id,
-                "previous_action": existing.message().map(|message| message.action.kind()),
-                "requested_action": action.kind(),
-                "step_states": existing.step_states,
-                "local_stage": existing.local_stage.map(local_stage_name),
-                "audit_pending": existing.audit_pending.is_some(),
-            })));
+        if action_changed && let Some(existing) = existing.as_ref() {
+            ensure_started_action_unchanged(existing, message_id, action)?;
         }
         let preserved = existing.as_ref().filter(|_| !action_changed);
         let enqueue_seq = match &existing {
@@ -325,6 +361,13 @@ pub fn push_with_progress(
     let mut progress = progress;
     let config = MailConfig::load(root)?;
     let plan = build_push_plan(root, &config)?;
+    // Queueing a send is local; offering or running a plan whose send step this
+    // build cannot perform is refused here, before any remote effect.
+    for item in &plan.items {
+        if let Some(outbound) = item.outbound() {
+            require_compiled_send_features(&outbound.steps)?;
+        }
+    }
     if confirm_plan_id.is_none() {
         crate::progress::emit(
             &mut progress,
@@ -351,7 +394,7 @@ pub fn push_with_progress(
     let mut partially_applied = 0usize;
     let mut audit_pending_count = 0usize;
     let mut stopped_after_failure = false;
-    let mut remaining_count = 0usize;
+    let mut unattempted_count = 0usize;
     let mut succeeded_items = Vec::new();
     let mut failures = Vec::new();
     let mut audit_warnings: Vec<Value> = Vec::new();
@@ -431,7 +474,7 @@ pub fn push_with_progress(
                 );
                 if item.audit_pending.is_some() {
                     stopped_after_failure = true;
-                    remaining_count = item_count.saturating_sub(index + 1);
+                    unattempted_count = item_count.saturating_sub(index + 1);
                     break;
                 }
             }
@@ -479,7 +522,7 @@ pub fn push_with_progress(
                     push_item_progress_fields(&item, index, item_count, Some(&err)),
                 );
                 stopped_after_failure = true;
-                remaining_count = item_count.saturating_sub(index + 1);
+                unattempted_count = item_count.saturating_sub(index + 1);
                 break;
             }
         }
@@ -494,7 +537,9 @@ pub fn push_with_progress(
             "partially_applied_count": partially_applied,
             "audit_pending_count": audit_pending_count,
             "stopped_after_failure": stopped_after_failure,
-            "remaining_count": remaining_count,
+            "unattempted_count": unattempted_count,
+            "pending_queue_count": unattempted_count + failed + audit_pending_count,
+            "recovery_required_count": partially_applied + audit_pending_count,
             "audit_warning_count": audit_warnings.len(),
         }),
     );
@@ -510,7 +555,9 @@ pub fn push_with_progress(
             "partially_applied_count": partially_applied,
             "audit_pending_count": audit_pending_count,
             "stopped_after_failure": stopped_after_failure,
-            "remaining_count": remaining_count,
+            "unattempted_count": unattempted_count,
+            "pending_queue_count": unattempted_count + failed + audit_pending_count,
+            "recovery_required_count": partially_applied + audit_pending_count,
             "succeeded_items": succeeded_items,
             "failures": failures,
             "audit_warnings": audit_warnings
@@ -522,7 +569,7 @@ pub fn push_with_progress(
 
 fn push_success_value(item: &PushItem) -> Value {
     let outbound = item.outbound();
-    json!({
+    let mut value = json!({
         "push_id": item.push_id.as_str(),
         "kind": item.kind(),
         "display_kind": item.display_kind(),
@@ -532,7 +579,20 @@ fn push_success_value(item: &PushItem) -> Value {
         "message_ids": item.message_ids(),
         "succeeded_step_count": item.succeeded_step_count(),
         "audit_pending": item.audit_pending.is_some(),
-    })
+    });
+    include_send_receipts(&mut value, item);
+    value
+}
+
+fn include_send_receipts(value: &mut Value, item: &PushItem) {
+    let receipts = item
+        .step_states
+        .iter()
+        .filter_map(|state| state.send_receipt.as_ref())
+        .collect::<Vec<_>>();
+    if !receipts.is_empty() {
+        value["send_receipts"] = json!(receipts);
+    }
 }
 
 fn push_failure_value(
@@ -554,6 +614,7 @@ fn push_failure_value(
             json!(state_persistence_failures),
         );
     }
+    include_send_receipts(&mut value, item);
     value
 }
 
@@ -829,6 +890,7 @@ fn audit_push(root: &Path, kind: &str, item: &PushItem, err: Option<&AppError>) 
         map.insert("retryable".to_string(), json!(err.retryable));
     }
     let workspace = crate::store::Workspace::at(root);
+    include_send_receipts(&mut fields, item);
     if kind == "push_succeeded" {
         let pending = item.audit_pending.as_ref().ok_or_else(|| {
             AppError::new(
@@ -850,7 +912,7 @@ fn audit_push(root: &Path, kind: &str, item: &PushItem, err: Option<&AppError>) 
                     .map(|message_id| json!({"kind": "message", "id": message_id})),
             );
         }
-        let durable_fields = json!({
+        let mut durable_fields = json!({
             "push_id": item.push_id.as_str(),
             "push_kind": pending.push_kind.as_str(),
             "succeeded_step_count": pending.succeeded_step_count,
@@ -859,6 +921,7 @@ fn audit_push(root: &Path, kind: &str, item: &PushItem, err: Option<&AppError>) 
             "draft_name": pending.draft_name.as_deref(),
             "action": pending.action.as_deref(),
         });
+        include_send_receipts(&mut durable_fields, item);
         return workspace
             .append_audit_event_with_identity(
                 &pending.event_id,
@@ -981,7 +1044,14 @@ fn removable_message_pushes(root: &Path, message_id: &str, kind: &str) -> Result
     Ok(items)
 }
 
-fn plan_item(root: &Path, config: &MailConfig, item: &mut PushItem) -> Result<bool> {
+/// Plans one queued item. Pass a `Workspace::read_snapshot` when planning many:
+/// planning reads messages but writes nothing their overlays are built from.
+fn plan_item(
+    workspace: &crate::store::Workspace,
+    config: &MailConfig,
+    item: &mut PushItem,
+) -> Result<bool> {
+    let root = workspace.root();
     if item.audit_pending.is_some() {
         hydrate_audit_pending_plan(item)?;
         return Ok(true);
@@ -989,7 +1059,6 @@ fn plan_item(root: &Path, config: &MailConfig, item: &mut PushItem) -> Result<bo
     match &item.payload {
         PushPayload::Message(message) => {
             let message = message.clone();
-            let workspace = crate::store::Workspace::at(root);
             let current_push_path = push_path(root, &item.push_id);
             item.planned_message_action = if item.has_started_effects() {
                 match message.message_action_snapshot.clone() {
@@ -1205,13 +1274,7 @@ fn hydrate_audit_pending_plan(item: &mut PushItem) -> Result<()> {
 
 fn configured_outbound_steps(config: &MailConfig, action: OutboundAction) -> Vec<ActionStep> {
     match action {
-        OutboundAction::SaveDraft if config.actions.draft.save.steps.is_empty() => {
-            vec![ActionStep::append_to_mailbox_id("drafts")]
-        }
         OutboundAction::SaveDraft => config.actions.draft.save.steps.clone(),
-        OutboundAction::Send if config.actions.draft.send.steps.is_empty() => {
-            crate::config::default_draft_send_steps()
-        }
         OutboundAction::Send => config.actions.draft.send.steps.clone(),
     }
 }

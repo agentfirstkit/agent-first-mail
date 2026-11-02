@@ -1339,6 +1339,47 @@ fn draft_save_send_validate_current_content_without_freshness_gate() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Queueing a send is local and works in any build; offering a plan whose send
+/// step this build cannot perform is refused before anything reaches a server.
+#[cfg(not(feature = "smtp"))]
+#[test]
+fn a_send_this_build_cannot_perform_queues_but_is_never_offered_as_a_plan() {
+    let root = temp_root("draft-send-feature-missing");
+    fs::create_dir_all(&root).unwrap();
+    assert_eq!(run(&root, &["init"]).0, 0);
+    let (case_uid, _) = create_case(&root, "feature-thread", "feature missing");
+    let (status, stdout) = run(
+        &root,
+        &[
+            "case",
+            "draft",
+            "new",
+            &case_uid,
+            "--to",
+            "alice@example.com",
+            "--subject",
+            "Subject",
+            "--body",
+            "Body",
+        ],
+    );
+    assert_eq!(status, 0, "{stdout}");
+    let draft_name = parse_one(&stdout)["draft_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, stdout) = run(&root, &["case", "draft", "send", &case_uid, &draft_name]);
+    assert_eq!(status, 0, "{stdout}");
+    let (status, stdout) = run(&root, &["push"]);
+    assert_eq!(status, 1, "{stdout}");
+    let error = parse_one(&stdout);
+    assert_eq!(error["code"], "feature_disabled", "{error}");
+    assert_eq!(error["feature"], "smtp");
+    assert_eq!(error["remote_calls_started"], false);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(feature = "smtp")]
 #[test]
 fn draft_clear_recipients_without_body_change_preserves_comments() {
     let root = temp_root("draft-clear-recipients");
@@ -1404,5 +1445,28 @@ fn draft_clear_recipients_without_body_change_preserves_comments() {
     let preview = parse_one(&stdout);
     assert_eq!(preview["items"][0]["outbound"]["cc"], json!([]));
     assert_eq!(preview["items"][0]["outbound"]["bcc"], json!([]));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn empty_save_steps_disable_upload() {
+    let root = temp_root("upload-unavailable");
+    fs::create_dir_all(&root).unwrap();
+    assert_eq!(run(&root, &["init"]).0, 0);
+    assert_eq!(
+        run(&root, &["config", "set", "actions.draft.save.steps", "[]"]).0,
+        0
+    );
+    let (case_uid, _) = create_case(&root, "No upload", "test");
+    let (status, stdout) = run(&root, &["case", "draft", "upload", &case_uid, "new.md"]);
+    assert_eq!(status, 1, "{stdout}");
+    let error = parse_one(&stdout);
+    assert_eq!(error["code"], "draft_upload_unavailable");
+    assert!(
+        error["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("actions.draft.save.steps")
+    );
     let _ = fs::remove_dir_all(root);
 }

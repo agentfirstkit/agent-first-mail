@@ -50,7 +50,7 @@ separate boundaries:
 - Local mutation: permitted when the requested task entails organizing or
   preparing mail; report any queued remote effect. Persistent notes require an
   explicit request.
-- Remote mutation: requires previewing the bare `afmail push` plan and
+- Remote mailbox mutation and sending: require previewing the bare `afmail push` plan and
   authorization of that exact `afmail push --confirm PLAN_ID` plan.
 - Permanent local deletion: requires previewing the bare `afmail purge` plan
   and authorization of that exact `afmail purge --confirm PLAN_ID` plan.
@@ -65,6 +65,9 @@ separate boundaries:
 - Multiple afmail workspaces pointed at the same IMAP account only reconcile
   through later IMAP pulls of remote folder/flag state. Do not promise
   exactly-once handling, claim/assign semantics, or cross-agent exclusion.
+- A Cloudflare R2 spool prefix or Queue serves exactly one workspace: each pull
+  deletes or archives the objects it imports, so workspaces sharing one split
+  the mail.
 - If the user asks for team helpdesk behavior, shared assignment, or multiple
   agents working one mailbox, state this boundary before acting and keep changes
   local unless the user explicitly authorizes the exact remote push plan.
@@ -97,8 +100,8 @@ separate boundaries:
 - Run `afmail pull` only when the user explicitly asks to receive/sync/check
   latest remote mail, or when the requested local evidence is missing or stale;
   explain why before pulling.
-- No-arg `afmail pull` uses `actions.pull.default_mailbox_ids`, which defaults
-  to inbox/sent/archive/junk/trash. Junk and Trash imports are retained locally
+- No-arg `afmail pull` reads all configured sources. For IMAP it uses
+  `actions.pull.default_mailbox_ids`, which defaults to inbox/sent/archive/junk/trash. Junk and Trash imports are retained locally
   as `spam`/`trashed` and shown in generated `spam/`/`trash/` views, not triage.
 - A normal pull uses the safe initial history/count/bytes budgets reported in
   its result. For a large or unfamiliar mailbox, run `afmail pull --dry-run`
@@ -113,10 +116,28 @@ separate boundaries:
   bytes match: a mailing-list copy that differs by one added header is stored
   as a second message, and copies that do match are stored once with several
   remote locations. Never assume a `Message-ID` seen remotely maps to exactly
-  one local message.
+  one local message. Pull can emit `duplicate_candidate` warnings when distinct
+  raw messages share that header; this is weak evidence, never permission to
+  discard or merge their original bytes. Real multi-address deliveries can
+  acquire different transport and authentication headers.
 - Remote-deleted unreferenced mail is retained locally as `deleted_remote` and
   shown in generated `deleted/` views until the user asks to purge it.
-- Pull is read-only IMAP and must not mark, move, tag, delete, append, or create
+- A workspace can receive solely through Cloudflare. Missing IMAP configuration
+  from remote folders is normal there; do not add IMAP settings to repair it.
+  Messages without IMAP locations have local spam/trash/archive state and do not
+  produce remote push items for those actions.
+- Cloudflare pulls acknowledge R2 spool objects after durable import or merging
+  identical bytes. Rerunning after interruption or cleanup warnings retries the
+  remaining objects without duplicating stored content. A receiving request
+  authorizes this normal spool acknowledgement; it does not authorize sends.
+- Sending uses exactly one `smtp_send` or `cloudflare_send` action step;
+  Cloudflare sending needs neither SMTP settings nor an IMAP Sent mailbox (see
+  `docs/setup.md`). Successful push output and audit events retain
+  `send_receipts` with per-recipient outcomes. Inspect queued, bounced, and
+  suppressed recipients: submission success does not prove final delivery.
+  Never resend a partially accepted message to all recipients, or
+  automatically retry a send with `remote_outcome_unknown`.
+- Pull through IMAP is read-only and must not mark, move, tag, delete, append, or create
   remote mailboxes. For long pulls or confirmed pushes, poll `afmail status`
   every few seconds when the command is still running; use
   `afmail <command> ... --output-to stdout --log progress` only when one
@@ -155,7 +176,8 @@ separate boundaries:
   the reported workspace migration guidance or report the specific blocker;
   do not infer that an old generated cache requires manual metadata migration.
 - After a partial push, inspect `failures`, `partially_applied_count`,
-  `remaining_count`, `audit_pending_count`, and `audit_warnings`, then compare `afmail push list` with
+  `unattempted_count`, `pending_queue_count`, `recovery_required_count`,
+  `audit_pending_count`, and `audit_warnings`, then compare `afmail push list` with
   `afmail status`. Never automatically retry `remote_outcome_unknown`; an audit
   warning may follow a successful remote effect and does not mean that sending
   the effect again is safe. A send whose relay configuration or envelope was
@@ -167,6 +189,36 @@ separate boundaries:
   then preview and confirm again. An `audit_pending` preview with
   `effect_scope: local_recovery` is different: after inspecting its new plan ID,
   confirmation only repairs audit/queue state and never replays remote steps.
+- `unattempted_count` counts items after the stopping item that this batch
+  never attempted; `pending_queue_count` includes failed and audit-pending items too.
+  `recovery_required_count` includes uncertain/partially applied failures and
+  audit-pending successes. For 9 successes followed by 1 failure in 31 items,
+  `failed_count` is 1, `unattempted_count` is 21 and `pending_queue_count` is 22.
+- For an uncertain first Drafts APPEND with every later step (including SMTP)
+  explicitly pending and unstarted, run `afmail push recover PUSH_ID`. This
+  reads the configured Drafts and Sent mailboxes by the stable Message-ID and
+  leaves local state untouched. Inspect its `resolution` and `evidence`, then
+  run `afmail push recover PUSH_ID --confirm PLAN_ID` with its `plan_id` for
+  explicit local recovery. It
+  repeats the remote checks: a Drafts-only match marks APPEND succeeded; no
+  match in either mailbox returns APPEND to pending and retryable, allowing
+  normal local draft cancellation/requeueing again. A Sent match, ambiguous
+  result, failed query, changed step plan or started SMTP refuses recovery.
+  Absence is point-in-time evidence, not a guarantee against another client or
+  later server visibility. The original diagnostics and checked evidence are
+  retained in the audit log. Recovery sends nothing; preview and authorize a
+  fresh `afmail push --confirm PLAN_ID` separately to resume the queue. Never
+  hand-edit push metadata or remove/recreate a started draft to bypass this.
+- A send step (`smtp_send`, `cloudflare_send`, or a file reply) whose outcome is
+  unknown is never retried automatically, because the mail may already have
+  gone out. `afmail push recover PUSH_ID` shows its `evidence` (provider message
+  id, recipients, whether a file output exists) and a `plan_id`. Only a person
+  who has checked reality — the provider's log, the recipient, the output
+  file — can settle it: `--sent --confirm PLAN_ID` records the send as done and
+  lets the remaining steps run on the next confirmed push; `--not-sent --confirm
+  PLAN_ID` returns it to pending, so sending again needs a new preview and
+  confirmation. Show the person the evidence and run the one they state; never
+  choose either yourself, and never treat missing evidence as "not sent".
 - If MOVE completed without returning a target UID, run `afmail pull` before
   previewing again. Recovery never replays MOVE and succeeds only when the
   target is present and every planned source location is no longer active.
@@ -178,7 +230,8 @@ separate boundaries:
 - `afmail message show MESSAGE_ID` returns the exact typed message render
   document used by Markdown and Review. Read canonical mail fields under
   `context.message.message`, render analysis under `context.message.analysis`,
-  RFC-header-confirmed related documents under `context.related_messages`,
+  explicitly referenced related documents under `context.related_messages`
+  (RFC reply headers for email, scoped external reply ids for native channels),
   operational paths under `locator`, and the optimistic-concurrency token at
   `review_base_hash`. When `body_markdown` is present the mail had an HTML
   part; read that copy — links keep their text and target there — and treat
@@ -210,9 +263,9 @@ separate boundaries:
   `.afmail/transactions/*.json`, `.afmail/logs/events.jsonl`,
   `.afmail/workspace.json`, `.afmail/cache/progress.json`, or other `.afmail` machine state unless the
   user explicitly asks for metadata repair.
-- `templates/` is user-editable workspace content for generated Markdown and
-  Review MiniJinja overrides; it is intentionally outside `.afmail/`. Review
-  overrides may provide HTML/CSS but never JavaScript.
+- `templates/` is user-editable workspace content for generated Markdown;
+  it is intentionally outside `.afmail/`. Review UI overrides belong only in
+  the trusted AFUI frontend described below, never in this tree.
 - Do not manually edit case, notification, spam, trash, or deleted
   `data/*.json`; it is canonical afmail-managed object state. Use afmail
   commands for local state changes.
@@ -441,7 +494,9 @@ separate boundaries:
   is still complete. Map any of these three to the corresponding canonical
   case, notification, spam, or trash command; a human_suggestion explains a
   decision but never proves the domain command succeeded and never authorizes
-  remote push. `rejected` performs no domain mutation.
+  remote push. `rejected` performs no domain mutation. A `reason` on
+  `accepted` is the person's note on the action they approved — read it before
+  running the command; it often narrows how to carry the action out.
 - Silence is not a decision. An item in `unsettled` just has not been looked
   at yet: propose it again, or open review on it again, whenever useful. To
   ask an agent to stop proposing something for one item, a person has to say
@@ -485,9 +540,14 @@ separate boundaries:
 
 ## Triage Decisions
 
+- If `context.related_message_issues` is non-empty, the relationship check is
+  incomplete. Read the available message, inspect `afmail doctor`, and repair
+  the reported evidence/cache issues before choosing a disposition. Do not
+  interpret an empty `related_messages` list as proof that the message is
+  unrelated while issues remain.
 - Before choosing between case and notification, check
   `afmail message show MESSAGE_ID`. If `context.related_messages` is non-empty,
-  the messages share an RFC-header-confirmed conversation and must be grouped
+  the messages share an explicitly referenced conversation and must be grouped
   into a case — a notification filing will be rejected by afmail. Read each
   related ID from `context.related_messages[].message.message_id`, then add it
   with `afmail case add REF MESSAGE_ID --reason TEXT`.
@@ -752,3 +812,40 @@ separate boundaries:
   archiving or archived work. Active-work commands such as `case add`,
   `case tag`, and `case draft ...` require
   `afmail case unarchive REF --group GROUP --reason TEXT` first.
+
+
+## Native file channels
+
+A workspace can receive non-email messages through `files.sources`. Use
+`afmail pull --files` to select them explicitly, then the normal case, draft,
+Review, and confirmed push commands. Replies inherit a typed source/conversation
+route; inspect that route and the output path in the push plan. Do not convert
+participant ids into email addresses or add SMTP/IMAP steps. File channels
+currently support text replies, without attachment transfer, cc, bcc, reply-all,
+or remote draft upload. Input records remain producer-owned; never retire an
+input listed in `files.skipped_inputs` or `files.warnings`. An interrupted
+publication with missing output is uncertain; never requeue it just because a
+consumer might have removed the file. See `docs/channels.md` for contracts.
+
+## Event-driven Cloudflare receipt
+
+- `afmail cloudflare watch` is a background program that polls Queue events and
+  periodically reconciles R2. It requires an explicit request to receive/watch
+  mail. Do not start it as a prelude to inspecting local mail.
+- Configure the trusted executable/argv array in `cloudflare.consumer.command`.
+  The handler receives `AFMAIL_TASK_PATH` and stable `AFMAIL_TASK_ID`; deduplicate
+  scheduler acceptance by that ID and exit zero only after durable acceptance.
+  Read only the listed new messages when starting the agent, rather than
+  repeatedly scanning an idle mailbox with a model.
+- A nonzero exit or timeout retains the local batch for retry; remote cleanup
+  and Queue acknowledgement are separate from agent execution. Idle ticks and
+  duplicate events do not launch a handler. This does not authorize sending or
+  bypass any push plan confirmation.
+- Preserve `.afmail/cloudflare-consumer/` with the private workspace. It holds
+  durable notification intent and import receipts, not disposable cache files.
+  `afmail cloudflare consume` runs one `watch` tick with the same effects:
+  it acknowledges Queue events, deletes or archives imported R2 objects, and
+  may launch the handler. It needs the same explicit receive request as
+  `watch`; it is not an inspection command. Its warnings can report pending
+  work even when it exits zero. See
+  `docs/cloudflare-consumer.md` for deployment and recovery.

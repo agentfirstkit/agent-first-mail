@@ -219,7 +219,11 @@ pub(super) fn build_message_render_document(
         schema_version: RENDER_DOCUMENT_SCHEMA_VERSION,
         content_trust: ContentTrust::UntrustedRemote,
         content_provenance: ContentProvenance {
-            source: ContentSource::RemoteMail,
+            source: if canonical_message.origin.is_some() {
+                ContentSource::FileMessage
+            } else {
+                ContentSource::RemoteMail
+            },
         },
         analysis: MessageRenderAnalysis {
             direction: match direction {
@@ -234,7 +238,8 @@ pub(super) fn build_message_render_document(
             body,
             body_markdown,
             security: MessageSecurityAnalysis {
-                authentication_warning: authentication_check
+                authentication_warning: canonical_message.origin.is_none()
+                    && authentication_check
                     && canonical_message.authentication.is_warning(),
                 possible_bcc,
                 reply_to_differs,
@@ -414,6 +419,7 @@ pub(super) fn triage_render_document(
         context: MessageContextDocument {
             message,
             related_messages,
+            related_message_issues: Vec::new(),
         },
     }
 }

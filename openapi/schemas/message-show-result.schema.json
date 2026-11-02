@@ -328,7 +328,8 @@
               "properties": {
                 "source": {
                   "enum": [
-                    "remote_mail"
+                    "remote_mail",
+                    "file_message"
                   ],
                   "type": "string"
                 }
@@ -981,6 +982,52 @@
                   },
                   "type": "array"
                 },
+                "origin": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "external_message_id": {
+                      "type": "string"
+                    },
+                    "reply_route": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "channel": {
+                          "enum": [
+                            "file"
+                          ],
+                          "type": "string"
+                        },
+                        "conversation_id": {
+                          "type": "string"
+                        },
+                        "source_id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "channel",
+                        "source_id",
+                        "conversation_id"
+                      ],
+                      "type": "object"
+                    },
+                    "reply_to_external_message_id": {
+                      "default": null,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "reply_route",
+                    "external_message_id"
+                  ],
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
                 "received_rfc3339": {
                   "type": [
                     "string",
@@ -1226,6 +1273,29 @@
             "analysis"
           ],
           "type": "object"
+        },
+        "related_message_issues": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message_id": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message_id",
+              "path"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         },
         "related_messages": {
           "items": {
@@ -1527,7 +1597,8 @@
                 "properties": {
                   "source": {
                     "enum": [
-                      "remote_mail"
+                      "remote_mail",
+                      "file_message"
                     ],
                     "type": "string"
                   }
@@ -2179,6 +2250,52 @@
                       "type": "string"
                     },
                     "type": "array"
+                  },
+                  "origin": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "external_message_id": {
+                        "type": "string"
+                      },
+                      "reply_route": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "channel": {
+                            "enum": [
+                              "file"
+                            ],
+                            "type": "string"
+                          },
+                          "conversation_id": {
+                            "type": "string"
+                          },
+                          "source_id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "channel",
+                          "source_id",
+                          "conversation_id"
+                        ],
+                        "type": "object"
+                      },
+                      "reply_to_external_message_id": {
+                        "default": null,
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "reply_route",
+                      "external_message_id"
+                    ],
+                    "type": [
+                      "object",
+                      "null"
+                    ]
                   },
                   "received_rfc3339": {
                     "type": [

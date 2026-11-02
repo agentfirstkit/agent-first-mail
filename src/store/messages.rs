@@ -85,9 +85,16 @@ impl LegacyMessageRemoteFile {
     }
 }
 
-fn message_eml_path(root: &Path, message_id: &str) -> PathBuf {
-    root.join(".afmail/messages")
-        .join(format!("{message_id}.eml"))
+pub(super) fn message_eml_path(root: &Path, message_id: &str) -> PathBuf {
+    let native = root
+        .join(".afmail/messages")
+        .join(format!("{message_id}.message"));
+    if native.is_file() {
+        native
+    } else {
+        root.join(".afmail/messages")
+            .join(format!("{message_id}.eml"))
+    }
 }
 
 fn message_state_path(root: &Path, message_id: &str) -> PathBuf {
@@ -157,8 +164,23 @@ pub(super) fn read_message_metadata_file(
             format!("parse message metadata {}: {error}", rel_path(root, &path)),
         )
     })?;
+    if metadata.schema_name == "message_metadata"
+        && metadata.schema_version < 3
+        && metadata.message_id == message_id
+    {
+        return Err(AppError::new(
+            "workspace_upgrade_required",
+            "workspace message metadata must be upgraded before this command can run",
+        )
+        .with_hint("Run `afmail init` once from this workspace root, then retry the command.")
+        .with_details(json!({
+            "message_metadata_path": rel_path(root, &path),
+            "schema_version_before": metadata.schema_version,
+            "schema_version_after": 3,
+        })));
+    }
     if metadata.schema_name != "message_metadata"
-        || metadata.schema_version != 2
+        || metadata.schema_version != 3
         || metadata.message_id != message_id
     {
         return Err(AppError::new(
@@ -190,7 +212,7 @@ pub(super) fn write_message_metadata_file(root: &Path, metadata: &MessageMetadat
     }
     let mut normalized = metadata.clone();
     normalized.schema_name = "message_metadata".to_string();
-    normalized.schema_version = 2;
+    normalized.schema_version = 3;
     super::suggestions::validate_message_suggestion_pair(
         normalized.agent_suggestion.as_ref(),
         normalized.human_suggestion.as_ref(),
@@ -242,6 +264,7 @@ pub(super) fn purge_message_artifacts(root: &Path, message_id: &str) -> Result<(
     // gone. A failed purge can then rediscover the disposition and resume.
     for path in [
         message_dir.join(format!("{message_id}.eml")),
+        message_dir.join(format!("{message_id}.message")),
         message_dir.join(format!("{message_id}.state.json")),
         message_dir.join(format!("{message_id}.txt")),
         message_dir.join(format!("{message_id}.json")),
@@ -276,6 +299,10 @@ pub(super) fn read_message(path: &Path) -> Result<MessageFile> {
             format!("parse message json {}: {e}", path_to_string(path)),
         )
     })?;
+    validate_message_cache(message, path)
+}
+
+fn validate_message_cache(message: MessageFile, path: &Path) -> Result<MessageFile> {
     if message.schema_name != "message" || message.schema_version != MESSAGE_SCHEMA_VERSION {
         return Err(AppError::new(
             "message_cache_invalid",
@@ -344,6 +371,7 @@ pub(super) fn message_reply_header_ids(message: &MessageFile) -> Vec<String> {
 #[derive(Clone, Debug, Default)]
 pub(super) struct MessageRelationIndex {
     related_by_message: BTreeMap<String, Vec<String>>,
+    pub(super) issues: Vec<RelatedMessageIssue>,
 }
 
 pub(super) struct MaterializedOverlayIndex {
@@ -364,6 +392,65 @@ pub(super) struct MaterializationContext {
     overlays: MaterializedOverlayIndex,
 }
 
+/// A read-only pass over many messages; see `Workspace::message_reader`.
+pub(crate) struct MessageReader<'a> {
+    workspace: &'a Workspace,
+    context: Arc<MaterializationContext>,
+}
+
+/// Case, notification, disposition and push overlays frozen for a read-only
+/// pass; see `Workspace::read_snapshot`.
+#[derive(Clone)]
+pub(super) struct ReadSnapshot(Arc<MaterializationContext>);
+
+impl std::fmt::Debug for ReadSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ReadSnapshot")
+    }
+}
+
+impl MessageReader<'_> {
+    pub(crate) fn read(&self, message_id: &str) -> Result<MessageFile> {
+        validate_id("message_id", message_id)?;
+        if message_eml_path(&self.workspace.root, message_id).is_file() {
+            return self.workspace.read_message_from_eml_with_context(
+                message_id,
+                MessageCacheReadMode::Strict,
+                &self.context,
+            );
+        }
+        let mut message = read_message(&self.workspace.message_path(message_id))?;
+        self.workspace
+            .apply_materialized_workspace_overlays_with_index(
+                &mut message,
+                &self.context.overlays,
+            )?;
+        self.workspace.apply_identity_match_with_profiles(
+            &mut message,
+            &self.context.static_inputs.resolved_identities,
+        )?;
+        self.workspace
+            .apply_contact_link(&mut message, &self.context.static_inputs.contact_map);
+        Ok(message)
+    }
+}
+
+/// Where a loop over many messages reads them: the render pass's context when
+/// one is running, otherwise a reader built once for the loop.
+pub(super) enum MessageSource<'a> {
+    Render(&'a RenderContext),
+    Reader(MessageReader<'a>),
+}
+
+impl MessageSource<'_> {
+    pub(super) fn read(&self, workspace: &Workspace, message_id: &str) -> Result<MessageFile> {
+        match self {
+            Self::Render(context) => context.read_message(workspace, message_id),
+            Self::Reader(reader) => reader.read(message_id),
+        }
+    }
+}
+
 pub(super) struct RenderContext {
     materialization: MaterializationContext,
     message_relations: MessageRelationIndex,
@@ -376,16 +463,38 @@ pub(super) struct RenderPreparation {
 
 impl MessageRelationIndex {
     pub(super) fn build(workspace: &Workspace) -> Result<Self> {
-        let messages = message_json_paths(&workspace.root)?
-            .into_iter()
-            .map(|path| read_message(&path))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self::from_messages(&messages))
+        let mut messages = Vec::new();
+        let mut issues = Vec::new();
+        for path in message_json_paths(&workspace.root)? {
+            let result = (|| -> Result<MessageFile> {
+                let bytes =
+                    fs::read(&path).map_err(|e| AppError::io("read message relation cache", &e))?;
+                validate_message_cache(
+                    serde_json::from_slice(&bytes)
+                        .map_err(|e| AppError::json("parse message relation cache", &e))?,
+                    &path,
+                )
+            })();
+            match result {
+                Ok(message) => messages.push(message),
+                Err(error) => issues.push(RelatedMessageIssue {
+                    code: error.error_code.to_string(),
+                    message_id: path
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    path: rel_path(&workspace.root, &path),
+                }),
+            }
+        }
+        let mut index = Self::from_messages(&messages);
+        index.issues = issues;
+        Ok(index)
     }
 
     pub(super) fn from_messages(messages: &[MessageFile]) -> Self {
         let mut index = Self::default();
-        let mut rfc822_ids = BTreeMap::new();
+        let mut rfc822_ids: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut replies_by_parent: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut reply_headers = BTreeMap::new();
         for message in messages {
@@ -396,7 +505,8 @@ impl MessageRelationIndex {
             {
                 rfc822_ids
                     .entry(normalized)
-                    .or_insert_with(|| message.message_id.clone());
+                    .or_default()
+                    .push(message.message_id.clone());
             }
             let headers = message_reply_header_ids(message);
             for header_id in &headers {
@@ -414,10 +524,12 @@ impl MessageRelationIndex {
                 .cloned()
                 .unwrap_or_default();
             for header_id in headers.iter().rev() {
-                if let Some(local_message_id) = rfc822_ids.get(header_id)
-                    && local_message_id != &message.message_id
-                {
-                    related.insert(local_message_id.clone());
+                if let Some(local_message_ids) = rfc822_ids.get(header_id) {
+                    for local_message_id in local_message_ids {
+                        if local_message_id != &message.message_id {
+                            related.insert(local_message_id.clone());
+                        }
+                    }
                 }
             }
             if let Some(current_rfc822_id) = message
@@ -435,6 +547,50 @@ impl MessageRelationIndex {
             index
                 .related_by_message
                 .insert(message.message_id.clone(), related.into_iter().collect());
+        }
+        let mut native_ids = BTreeMap::new();
+        for message in messages {
+            if let Some(origin) = &message.origin {
+                let route = &origin.reply_route;
+                native_ids.insert(
+                    (
+                        route.channel,
+                        &route.source_id,
+                        &route.conversation_id,
+                        &origin.external_message_id,
+                    ),
+                    &message.message_id,
+                );
+            }
+        }
+        for message in messages {
+            if let Some(origin) = &message.origin
+                && let Some(parent) = &origin.reply_to_external_message_id
+            {
+                let route = &origin.reply_route;
+                if let Some(parent_id) = native_ids.get(&(
+                    route.channel,
+                    &route.source_id,
+                    &route.conversation_id,
+                    parent,
+                )) && *parent_id != &message.message_id
+                {
+                    index
+                        .related_by_message
+                        .entry(message.message_id.clone())
+                        .or_default()
+                        .push((*parent_id).clone());
+                    index
+                        .related_by_message
+                        .entry((*parent_id).clone())
+                        .or_default()
+                        .push(message.message_id.clone());
+                }
+            }
+        }
+        for related in index.related_by_message.values_mut() {
+            related.sort();
+            related.dedup();
         }
         index
     }
@@ -490,13 +646,68 @@ impl RenderContext {
 }
 
 impl Workspace {
+    pub(crate) fn merge_message_delivery(
+        &self,
+        message_id: &str,
+        incoming: crate::types::DeliveryEnvelope,
+    ) -> Result<()> {
+        let mut metadata =
+            read_message_metadata_file(&self.root, message_id)?.ok_or_else(|| {
+                AppError::new("message_metadata_missing", "message metadata is missing")
+            })?;
+        let delivery = metadata.delivery.get_or_insert_with(Default::default);
+        if delivery.envelope_from.is_none() {
+            delivery.envelope_from = incoming.envelope_from;
+        }
+        for recipient in incoming.envelope_to {
+            if !delivery
+                .envelope_to
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(&recipient))
+            {
+                delivery.envelope_to.push(recipient);
+            }
+        }
+        for source in incoming.sources {
+            if !delivery.sources.contains(&source) {
+                delivery.sources.push(source);
+            }
+        }
+        if let Some(received) = incoming.received_rfc3339 {
+            let incoming_date = chrono::DateTime::parse_from_rfc3339(&received).map_err(|_| {
+                AppError::new(
+                    "message_metadata_invalid",
+                    "delivery.received_rfc3339 must be an RFC3339 timestamp",
+                )
+            })?;
+            let prior_date = delivery
+                .received_rfc3339
+                .as_deref()
+                .map(chrono::DateTime::parse_from_rfc3339)
+                .transpose()
+                .map_err(|_| {
+                    AppError::new(
+                        "message_metadata_invalid",
+                        "delivery.received_rfc3339 must be an RFC3339 timestamp",
+                    )
+                })?;
+            if prior_date.is_none_or(|prior| incoming_date < prior) {
+                delivery.received_rfc3339 = Some(received);
+            }
+        }
+        write_message_metadata_file(&self.root, &metadata)
+    }
+
     pub(crate) fn persist_message_metadata(&self, message: &MessageFile) -> Result<()> {
         let prior = read_message_metadata_file(&self.root, &message.message_id)?;
         let metadata = MessageMetadata {
             schema_name: "message_metadata".to_string(),
-            schema_version: 2,
+            schema_version: 3,
             message_id: message.message_id.clone(),
             remote: message.remote.clone(),
+            delivery: prior
+                .as_ref()
+                .and_then(|metadata| metadata.delivery.clone()),
             agent_suggestion: message.agent_suggestion.clone().or_else(|| {
                 prior
                     .as_ref()
@@ -535,7 +746,7 @@ impl Workspace {
             message.human_suggestion = metadata.human_suggestion;
             message.case_relationship_suggestion = metadata.case_relationship_suggestion;
         }
-        if message.eml_path.is_none() {
+        if message.origin.is_none() && message.eml_path.is_none() {
             message.eml_path = Some(format!(".afmail/messages/{}.eml", message.message_id));
         }
         let deprecated_state = message_state_path(&self.root, &message.message_id);
@@ -599,15 +810,6 @@ impl Workspace {
         })
     }
 
-    fn read_message_from_eml(
-        &self,
-        message_id: &str,
-        cache_read_mode: MessageCacheReadMode,
-    ) -> Result<MessageFile> {
-        let context = self.materialization_context()?;
-        self.read_message_from_eml_with_context(message_id, cache_read_mode, &context)
-    }
-
     pub(super) fn validate_message_cache_rebuild(
         &self,
         message_id: &str,
@@ -649,42 +851,75 @@ impl Workspace {
             .with_hint("Run `afmail init` to migrate an older workspace, or `afmail doctor repair --confirm` to repair generated metadata.")
         })?;
         let remote = metadata.remote.clone();
-        let direction = self.infer_materialized_direction(
-            &raw,
-            prior.as_ref(),
-            remote.as_ref(),
-            &context.static_inputs.config,
-        );
-        let mut parsed = crate::mail::parse_message_with_options(
-            message_id.to_string(),
-            &raw,
-            crate::mail::MessageParseOptions {
-                direction,
-                workspace: prior
-                    .as_ref()
-                    .map(|message| message.workspace.clone())
-                    .unwrap_or_else(default_message_workspace),
-                remote,
-                received_rfc3339: prior
-                    .as_ref()
-                    .and_then(|message| message.received_rfc3339.clone()),
-                sent_rfc3339: prior
-                    .as_ref()
-                    .and_then(|message| message.sent_rfc3339.clone()),
-                attachments: prior
-                    .as_ref()
-                    .map(|message| message.attachments.clone())
-                    .unwrap_or_default(),
-            },
-        )
-        .map_err(|mut error| {
-            error.message = format!(
-                "parse message eml {}: {}",
-                rel_path(&self.root, &eml_path),
-                error.message
-            );
-            error
-        })?;
+        let direction = if prior.is_none()
+            && remote.is_none()
+            && metadata.delivery.as_ref().is_some_and(|delivery| {
+                delivery.sources.iter().any(|source| {
+                    matches!(source, crate::types::DeliverySource::CloudflareR2 { .. })
+                })
+            }) {
+            Some(
+                context
+                    .static_inputs
+                    .config
+                    .cloudflare
+                    .direction
+                    .as_str()
+                    .into(),
+            )
+        } else {
+            self.infer_materialized_direction(
+                &raw,
+                prior.as_ref(),
+                remote.as_ref(),
+                &context.static_inputs.config,
+            )
+        };
+        let mut parsed = if eml_path.extension().is_some_and(|ext| ext == "message") {
+            crate::mail::ParsedMail {
+                message: crate::channels::materialize(message_id, &raw)?,
+            }
+        } else {
+            crate::mail::parse_message_with_options(
+                message_id.to_string(),
+                &raw,
+                crate::mail::MessageParseOptions {
+                    direction,
+                    workspace: prior
+                        .as_ref()
+                        .map(|message| message.workspace.clone())
+                        .unwrap_or_else(default_message_workspace),
+                    remote,
+                    received_rfc3339: prior
+                        .as_ref()
+                        .and_then(|message| message.received_rfc3339.clone())
+                        .or_else(|| {
+                            metadata
+                                .delivery
+                                .as_ref()
+                                .and_then(|delivery| delivery.received_rfc3339.clone())
+                        }),
+                    sent_rfc3339: prior
+                        .as_ref()
+                        .and_then(|message| message.sent_rfc3339.clone()),
+                    attachments: prior
+                        .as_ref()
+                        .map(|message| message.attachments.clone())
+                        .unwrap_or_default(),
+                },
+            )
+            .map_err(|mut error| {
+                error.message = format!(
+                    "parse message eml {}: {}",
+                    rel_path(&self.root, &eml_path),
+                    error.message
+                );
+                error
+            })?
+        };
+        if let Some(delivery) = &metadata.delivery {
+            crate::ingest::merge_envelope_to(&mut parsed.message, delivery);
+        }
         self.apply_fetched_attachment_files(message_id, &mut parsed.message.attachments);
         self.apply_materialized_workspace_overlays_with_index(
             &mut parsed.message,
@@ -759,7 +994,7 @@ impl Workspace {
             }
         }
         let local_message_id = mail_parser::MessageParser::default()
-            .parse(raw)
+            .parse_headers(raw)
             .and_then(|message| message.message_id().map(ToString::to_string))
             .is_some_and(|message_id| {
                 message_id
@@ -804,11 +1039,17 @@ impl Workspace {
         &self,
         message: &mut MessageFile,
     ) -> Result<()> {
+        if let Some(ReadSnapshot(context)) = &self.read_snapshot {
+            return self
+                .apply_materialized_workspace_overlays_with_index(message, &context.overlays);
+        }
         let index = self.materialized_overlay_index()?;
         self.apply_materialized_workspace_overlays_with_index(message, &index)
     }
 
     pub(super) fn materialized_overlay_index(&self) -> Result<MaterializedOverlayIndex> {
+        #[cfg(test)]
+        overlay_builds::record();
         let mut pending_push: BTreeMap<String, Vec<WorkspacePendingPush>> = BTreeMap::new();
         for item in crate::push_queue::pending_items(&self.root)? {
             if item
@@ -832,7 +1073,11 @@ impl Workspace {
         for pending in pending_push.values_mut() {
             pending.sort_by(|a, b| a.push_id.cmp(&b.push_id));
         }
-        let dispositions = self.disposition_state_by_message()?;
+        let dispositions = self
+            .disposition_state_by_message()?
+            .into_iter()
+            .map(|(message_id, (status, _))| (message_id, status))
+            .collect::<BTreeMap<_, _>>();
         let notifications = self.notification_state_by_message()?;
         if let Some((message_id, status)) = dispositions
             .iter()
@@ -942,6 +1187,9 @@ impl Workspace {
         message: &mut MessageFile,
         profiles: &[ResolvedIdentity],
     ) -> Result<()> {
+        if message.origin.is_some() {
+            return Ok(());
+        }
         if message
             .direction
             .as_deref()
@@ -973,7 +1221,12 @@ impl Workspace {
         let mut eml_paths = read_dir(&messages_dir, "read message eml cache")?
             .into_iter()
             .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("eml"))
+            .filter(|path| {
+                matches!(
+                    path.extension().and_then(|s| s.to_str()),
+                    Some("eml" | "message")
+                )
+            })
             .collect::<Vec<_>>();
         eml_paths.sort();
         let context = if eml_paths.is_empty() {
@@ -1052,7 +1305,12 @@ impl Workspace {
         let mut eml_paths = read_dir(&messages_dir, "read message eml cache")?
             .into_iter()
             .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("eml"))
+            .filter(|path| {
+                matches!(
+                    path.extension().and_then(|s| s.to_str()),
+                    Some("eml" | "message")
+                )
+            })
             .collect::<Vec<_>>();
         eml_paths.sort();
         for eml_path in eml_paths {
@@ -1228,7 +1486,8 @@ impl Workspace {
         validate_id("message_id", message_id)?;
         let config = MailConfig::load(&self.root)?;
         let message = self.read_message_by_id(message_id)?;
-        let related_message_ids = self.related_message_ids(message_id)?;
+        let index = MessageRelationIndex::build(self)?;
+        let related_message_ids = index.related_message_ids(message_id);
         let related_messages = related_message_ids
             .iter()
             .map(|related_message_id| {
@@ -1243,6 +1502,7 @@ impl Workspace {
             context: MessageContextDocument {
                 message: self.message_render_document_from_parts(&message, &config)?,
                 related_messages,
+                related_message_issues: index.issues,
             },
             case_refs: cases.case_refs_for_message(message_id),
             locator: crate::render_document::MessageShowLocator {
@@ -1552,6 +1812,11 @@ impl Workspace {
         validate_id("message_id", message_id)?;
         let current = self.read_message_by_id(message_id)?;
         let index = MessageRelationIndex::build(self)?;
+        if !index.issues.is_empty() {
+            return Err(AppError::new("message_relation_index_incomplete", "Message relationships could not be checked completely")
+                .with_hint("Run `afmail doctor` and repair the reported canonical evidence or generated caches before changing message disposition.")
+                .with_details(json!({"related_message_issues": index.issues})));
+        }
         Ok(index.related_message_ids(&current.message_id).to_vec())
     }
 
@@ -1572,7 +1837,7 @@ impl Workspace {
         suggested_commands.push("afmail case trash CASE_REF --reason TEXT".to_string());
         Err(AppError::new(
             "message_has_related_conversation_use_case",
-            "message has RFC-header-confirmed related conversation",
+            "message has an explicitly referenced related conversation",
         )
         .with_hint(
             "Create a case for the conversation, add the related messages, then archive or trash the case.",
@@ -1767,19 +2032,45 @@ impl Workspace {
         Ok(())
     }
 
-    pub(crate) fn read_message_by_id(&self, message_id: &str) -> Result<MessageFile> {
-        validate_id("message_id", message_id)?;
-        let eml_path = message_eml_path(&self.root, message_id);
-        if eml_path.is_file() {
-            return self.read_message_from_eml(message_id, MessageCacheReadMode::Strict);
+    /// Reads many messages against one snapshot of case and notification
+    /// overlays. `read_message_by_id` rebuilds that snapshot per call, which
+    /// turns a loop over every message into a scan of the workspace per message.
+    pub(crate) fn message_reader(&self) -> Result<MessageReader<'_>> {
+        Ok(MessageReader {
+            workspace: self,
+            context: self.shared_materialization_context()?,
+        })
+    }
+
+    /// This workspace with its overlays read once and frozen, for a pass that
+    /// reads many messages and writes nothing an overlay is built from. Every
+    /// message read through the returned workspace reuses that one scan.
+    pub(crate) fn read_snapshot(&self) -> Result<Self> {
+        Ok(Self {
+            root: self.root.clone(),
+            read_snapshot: Some(ReadSnapshot(Arc::new(self.materialization_context()?))),
+        })
+    }
+
+    fn shared_materialization_context(&self) -> Result<Arc<MaterializationContext>> {
+        match &self.read_snapshot {
+            Some(ReadSnapshot(context)) => Ok(Arc::clone(context)),
+            None => Ok(Arc::new(self.materialization_context()?)),
         }
-        let mut message = read_message(&self.message_path(message_id))?;
-        self.apply_materialized_workspace_overlays(&mut message)?;
-        let config = MailConfig::load(&self.root)?;
-        self.apply_identity_match(&mut message, &config)?;
-        let contact_map = self.contact_email_map()?;
-        self.apply_contact_link(&mut message, &contact_map);
-        Ok(message)
+    }
+
+    pub(super) fn message_source<'a>(
+        &'a self,
+        render_context: Option<&'a RenderContext>,
+    ) -> Result<MessageSource<'a>> {
+        Ok(match render_context {
+            Some(context) => MessageSource::Render(context),
+            None => MessageSource::Reader(self.message_reader()?),
+        })
+    }
+
+    pub(crate) fn read_message_by_id(&self, message_id: &str) -> Result<MessageFile> {
+        self.message_reader()?.read(message_id)
     }
 
     pub(crate) fn relocate_message(
@@ -1857,4 +2148,21 @@ fn message_list_sender_text(message: &MessageFile) -> String {
         parts.push(contact.display_name.as_str());
     }
     parts.join(" ")
+}
+
+/// Counts whole-workspace overlay scans on this thread, so a test can pin
+/// that a loop over many messages scans once rather than once per message.
+#[cfg(test)]
+pub(super) mod overlay_builds {
+    use std::cell::Cell;
+
+    thread_local!(static BUILDS: Cell<usize> = const { Cell::new(0) });
+
+    pub(super) fn record() {
+        BUILDS.with(|builds| builds.set(builds.get() + 1));
+    }
+
+    pub(in crate::store) fn take() -> usize {
+        BUILDS.with(|builds| builds.replace(0))
+    }
 }

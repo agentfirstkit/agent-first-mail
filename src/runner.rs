@@ -137,6 +137,65 @@ pub fn run_command(
                 }
             },
         }
+    } else if matches!(
+        command,
+        Command::CloudflareWatch | Command::CloudflareConsume { .. }
+    ) && let Err(error) = crate::sources::consumer_shutdown::install()
+    {
+        Err(error)
+    } else if matches!(command, Command::CloudflareWatch) {
+        let mut last_reconcile = None;
+        let mut ready = false;
+        loop {
+            if crate::sources::consumer_shutdown::requested() {
+                break Err(crate::sources::consumer_shutdown::interrupted());
+            }
+            let cwd = match std::env::current_dir() {
+                Ok(path) => path,
+                Err(error) => break Err(crate::error::AppError::io("current dir", &error)),
+            };
+            let config = match crate::store::Workspace::discover(&cwd)
+                .and_then(|ws| crate::config::MailConfig::load(ws.root()))
+            {
+                Ok(config) => config,
+                Err(error) => break Err(error),
+            };
+            let reconcile = last_reconcile.is_none_or(|last: Instant| {
+                last.elapsed().as_secs() >= config.cloudflare.consumer.reconcile_interval_s
+            });
+            let value = match crate::sources::cloudflare::consume(&cwd, reconcile) {
+                Ok(value) => value,
+                Err(error) if error.retryable => json!({"warnings":[error.to_error_value()]}),
+                Err(error) => break Err(error),
+            };
+            if reconcile && value["reconciled"] == true {
+                last_reconcile = Some(Instant::now());
+            }
+            let has_work = value["received_event_count"].as_u64().unwrap_or(0) > 0
+                || value["imported_count"].as_u64().unwrap_or(0) > 0
+                || value["dispatched"] == true
+                || value["warnings"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty());
+            if !ready || has_work {
+                let phase = if ready {
+                    "cloudflare_consumer_tick"
+                } else {
+                    "cloudflare_consumer_ready"
+                };
+                if let Err(error) = emit_progress_event(
+                    &mut emitter,
+                    progress_event(redact_log_fields(object_with_phase(phase, value))),
+                    json!({"duration_ms":started.elapsed().as_millis() as u64}),
+                ) {
+                    return output_write_failed_exit_code(&error);
+                }
+                ready = true;
+            }
+            crate::sources::consumer_shutdown::wait(std::time::Duration::from_secs(
+                config.cloudflare.consumer.poll_interval_s,
+            ));
+        }
     } else {
         let mut emit_progress = |phase: &str, fields: Value| {
             if progress_write_error.is_some() {

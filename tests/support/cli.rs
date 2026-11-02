@@ -128,7 +128,7 @@ pub fn write_message(root: &Path, message_id: &str, uid: u64, source_path: Optio
         &root.join(format!(".afmail/messages/{message_id}.json")),
         &json!({
             "schema_name": "message_metadata",
-            "schema_version": 2,
+            "schema_version": 3,
             "message_id": message_id,
             "remote": msg["remote"].clone()
         }),
@@ -163,7 +163,7 @@ pub fn update_message_json(root: &Path, message_id: &str, update: impl FnOnce(&m
         if !metadata.is_object() {
             metadata = json!({
                 "schema_name": "message_metadata",
-                "schema_version": 2,
+                "schema_version": 3,
                 "message_id": message_id,
             });
         }

@@ -57,6 +57,7 @@ impl Workspace {
                 "repairable_count": repairable_count,
                 "checks": {
                     "git_checked": false,
+                    "mail_source_configured": true,
                     "messages": true,
                     "contacts": true,
                     "cases": true,
@@ -65,6 +66,7 @@ impl Workspace {
                     "templates": true,
                     "transactions": true,
                     "state_layout": true,
+                    "cloudflare_consumer": true,
                 },
                 "issues": issues,
             }),
@@ -113,6 +115,16 @@ impl Workspace {
 
     fn doctor_issues(&self) -> Result<Vec<DoctorIssue>> {
         let mut issues = Vec::new();
+        if let Ok(config) = MailConfig::load(&self.root)
+            && crate::sources::configured(&config).is_empty()
+        {
+            issues.push(DoctorIssue::warning(
+                "no_mail_source",
+                "No IMAP, Cloudflare, or file mail source is configured",
+                Some(".afmail/config.json".into()),
+                false,
+            ));
+        }
         self.check_state_layout(&mut issues)?;
         self.check_transactions(&mut issues)?;
         self.check_idempotency_requests(&mut issues)?;
@@ -122,8 +134,70 @@ impl Workspace {
         self.check_notification_refs(&mut issues)?;
         self.check_push_overlay(&mut issues)?;
         self.check_draft_queue_state(&mut issues)?;
+        self.check_cloudflare_consumer(&mut issues)?;
         self.check_templates(&mut issues)?;
         Ok(issues)
+    }
+
+    fn check_cloudflare_consumer(&self, issues: &mut Vec<DoctorIssue>) -> Result<()> {
+        use crate::sources::cloudflare_journal::{self as journal, Journal, TaskStatus};
+        let path = ".afmail/cloudflare-consumer/journal.json";
+        let mut state = match Journal::load(&self.root) {
+            Ok(state) => state,
+            Err(error) => {
+                issues.push(DoctorIssue::error(
+                    error.error_code,
+                    error.message,
+                    Some(path.into()),
+                ));
+                return Ok(());
+            }
+        };
+        if let Err(error) = journal::apply_completed(&self.root, &mut state) {
+            let issue_path = error
+                .details
+                .as_ref()
+                .and_then(|details| details["path"].as_str())
+                .unwrap_or(path);
+            issues.push(DoctorIssue::error(
+                error.error_code,
+                &error.message,
+                Some(issue_path.to_string()),
+            ));
+        }
+        for task in state
+            .tasks
+            .values()
+            .filter(|task| task.status == TaskStatus::Pending)
+        {
+            if !self
+                .root
+                .join(format!(".afmail/messages/{}.eml", task.message_id))
+                .is_file()
+            {
+                let mut issue = DoctorIssue::warning(
+                    "consumer_message_missing",
+                    "Pending consumer task has no raw mail evidence; the next consume tick will drop it",
+                    Some(path.into()),
+                    false,
+                );
+                issue.refs.push(task.message_id.clone());
+                issues.push(issue);
+            }
+        }
+        if let Some(batch) = state.active
+            && batch.last_error_code.is_some()
+        {
+            let mut issue = DoctorIssue::warning(
+                "consumer_batch_failed",
+                "The active consumer batch failed and blocks later batches; inspect status.cloudflare_consumer and fix the configured handler before retrying",
+                Some(path.into()),
+                false,
+            );
+            issue.refs.push(batch.task_id);
+            issues.push(issue);
+        }
+        Ok(())
     }
 
     fn require_workspace_directory(&self) -> Result<()> {
@@ -218,13 +292,24 @@ impl Workspace {
                 }
             };
             ids.insert(message.message_id.clone());
-            let eml = self
-                .root
-                .join(format!(".afmail/messages/{}.eml", message.message_id));
+            let eml = if message.origin.is_some() {
+                self.root
+                    .join(".afmail/messages")
+                    .join(format!("{}.message", message.message_id))
+            } else {
+                super::messages::message_eml_path(&self.root, &message.message_id)
+            };
             if !eml.is_file() {
                 issues.push(DoctorIssue::error(
-                    "message_eml_missing",
-                    format!("missing raw .eml for {}", message.message_id),
+                    if message.origin.is_some() {
+                        "message_evidence_missing"
+                    } else {
+                        "message_eml_missing"
+                    },
+                    format!(
+                        "missing canonical message evidence for {}",
+                        message.message_id
+                    ),
                     Some(rel_path(&self.root, &eml)),
                 ));
             }
@@ -258,11 +343,18 @@ impl Workspace {
                 && !ids.contains(message_id)
                 && !self.message_path(message_id).is_file()
             {
+                // Repair rebuilds the cache from the raw message; without one
+                // there is nothing to rebuild from, and the metadata may be the
+                // only record left, so repair must not claim or delete it.
+                let raw_present = ["eml", "message"].iter().any(|extension| {
+                    path.with_file_name(format!("{message_id}.{extension}"))
+                        .is_file()
+                });
                 issues.push(DoctorIssue::warning(
                     "message_metadata_orphaned",
                     format!("metadata has no materialized message cache: {message_id}"),
                     Some(rel_path(&self.root, &path)),
-                    true,
+                    raw_present,
                 ));
             }
         }
@@ -631,6 +723,7 @@ fn doctor_message(status: &str, message_id: &str, body_text: &str) -> MessageFil
         schema_name: "message".to_string(),
         schema_version: MESSAGE_SCHEMA_VERSION,
         message_id: message_id.to_string(),
+        origin: None,
         rfc822_message_id: Some(format!("<{message_id}@example.com>")),
         in_reply_to: None,
         references: Vec::new(),
@@ -796,6 +889,7 @@ fn doctor_draft_document() -> DraftRenderDocument {
         },
         draft: DraftSourceDocument {
             frontmatter: DraftFrontmatter {
+                reply_route: None,
                 kind: Some("draft".to_string()),
                 case_uid: DOCTOR_SMOKE_CASE_UID.to_string(),
                 send_intent: None,

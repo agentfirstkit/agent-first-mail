@@ -8,8 +8,25 @@ use std::cell::RefCell;
 /// Remote mail side effects used by push/pull code.
 ///
 /// Workspace code depends on this trait so retry/state-machine tests can use a
-/// fake provider without reaching IMAP or SMTP.
+/// fake provider without network access.
 pub trait MailRemote {
+    fn prepare_cloudflare_send(&self, _: &crate::types::PreparedOutbound) -> Result<()> {
+        Err(AppError::new(
+            "remote_operation_unsupported",
+            "Cloudflare sending is not supported by this provider",
+        ))
+    }
+
+    fn send_cloudflare_raw_message(
+        &self,
+        _: &crate::types::PreparedOutbound,
+    ) -> Result<crate::senders::SendReceipt> {
+        Err(AppError::new(
+            "remote_operation_unsupported",
+            "Cloudflare sending is not supported by this provider",
+        ))
+    }
+
     fn list_mailboxes(&self) -> Result<Value>;
     fn action_mailbox_folder(&self, mailbox_id: &str) -> Result<String>;
     fn append_message(&self, folder: &str, raw_eml: &[u8], draft: bool) -> Result<()>;
@@ -110,15 +127,26 @@ impl<'a> ImapSmtpRemote<'a> {
 }
 
 impl MailRemote for ImapSmtpRemote<'_> {
+    fn prepare_cloudflare_send(&self, prepared: &crate::types::PreparedOutbound) -> Result<()> {
+        crate::senders::cloudflare::prepare_send(self.config, prepared)
+    }
+
+    fn send_cloudflare_raw_message(
+        &self,
+        prepared: &crate::types::PreparedOutbound,
+    ) -> Result<crate::senders::SendReceipt> {
+        crate::senders::cloudflare::send_raw_message(self.config, prepared)
+    }
+
     fn list_mailboxes(&self) -> Result<Value> {
         let imap = self.imap()?;
-        crate::imap_pull::remote_folders(self.config, &imap)
+        crate::sources::imap::remote_folders(self.config, &imap)
     }
 
     fn action_mailbox_folder(&self, mailbox_id: &str) -> Result<String> {
         let mailbox = self.config.mailbox(mailbox_id)?;
         let mailboxes = self.cached_mailboxes()?;
-        crate::imap_pull::resolve_configured_mailbox(mailbox_id, mailbox, &mailboxes)
+        crate::sources::imap::resolve_configured_mailbox(mailbox_id, mailbox, &mailboxes)
     }
 
     fn append_message(&self, folder: &str, raw_eml: &[u8], draft: bool) -> Result<()> {
@@ -158,7 +186,7 @@ impl MailRemote for ImapSmtpRemote<'_> {
     }
 
     fn prepare_send(&self, envelope_from: &str, envelope_to: &[String]) -> Result<()> {
-        crate::smtp_send::prepare_send(self.config, envelope_from, envelope_to).map(|_| ())
+        crate::senders::smtp::prepare_send(self.config, envelope_from, envelope_to).map(|_| ())
     }
 
     fn send_raw_message(
@@ -167,7 +195,7 @@ impl MailRemote for ImapSmtpRemote<'_> {
         envelope_to: &[String],
         raw: &[u8],
     ) -> Result<()> {
-        crate::smtp_send::send_raw_message(self.config, envelope_from, envelope_to, raw)
+        crate::senders::smtp::send_raw_message(self.config, envelope_from, envelope_to, raw)
     }
 
     fn find_by_message_id(
@@ -186,6 +214,9 @@ type AddFlagsRequest = (String, u64, u64, Vec<String>);
 #[cfg(test)]
 #[derive(Default)]
 pub struct FakeMailRemote {
+    pub cloudflare_send_results:
+        std::cell::RefCell<std::collections::VecDeque<Result<crate::senders::SendReceipt>>>,
+    pub cloudflare_send_requests: std::cell::RefCell<Vec<crate::types::PreparedOutbound>>,
     pub append_results: std::cell::RefCell<std::collections::VecDeque<Result<()>>>,
     pub move_results: std::cell::RefCell<std::collections::VecDeque<Result<MoveOutcome>>>,
     pub add_flags_results: std::cell::RefCell<std::collections::VecDeque<Result<()>>>,
@@ -201,6 +232,31 @@ pub struct FakeMailRemote {
 
 #[cfg(test)]
 impl MailRemote for FakeMailRemote {
+    fn prepare_cloudflare_send(&self, _: &crate::types::PreparedOutbound) -> Result<()> {
+        self.prepare_send_results
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(Ok(()))
+    }
+
+    fn send_cloudflare_raw_message(
+        &self,
+        prepared: &crate::types::PreparedOutbound,
+    ) -> Result<crate::senders::SendReceipt> {
+        self.cloudflare_send_requests
+            .borrow_mut()
+            .push(prepared.clone());
+        self.cloudflare_send_results
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| {
+                Err(AppError::new(
+                    "fake_send_missing",
+                    "Cloudflare fake requires an explicit result",
+                ))
+            })
+    }
+
     fn list_mailboxes(&self) -> Result<Value> {
         Ok(serde_json::json!({"code": "remote_folders", "folders": []}))
     }

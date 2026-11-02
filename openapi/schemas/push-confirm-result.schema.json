@@ -28,6 +28,12 @@
       "minimum": 0,
       "type": "integer"
     },
+    "pending_queue_count": {
+      "description": "Items from this plan still queued: unattempted + failed + audit-pending.",
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
     "plan_id": {
       "type": "string"
     },
@@ -36,7 +42,8 @@
       "minimum": 0,
       "type": "integer"
     },
-    "remaining_count": {
+    "recovery_required_count": {
+      "description": "Partially applied/uncertain failures plus audit-pending successes.",
       "format": "uint",
       "minimum": 0,
       "type": "integer"
@@ -101,6 +108,12 @@
       },
       "type": "array"
     },
+    "unattempted_count": {
+      "description": "Items after the stopping item that were not attempted in this batch.",
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
     "workspace_path": {
       "type": "string"
     },
@@ -118,7 +131,9 @@
     "partially_applied_count",
     "audit_pending_count",
     "stopped_after_failure",
-    "remaining_count",
+    "unattempted_count",
+    "pending_queue_count",
+    "recovery_required_count",
     "succeeded_items",
     "failures",
     "audit_warnings"

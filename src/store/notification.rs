@@ -1,5 +1,32 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NOTIFICATION_CREATE_AFTER_LOCAL_WRITES: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn set_notification_create_after_local_writes_failure(enabled: bool) {
+    FAIL_NOTIFICATION_CREATE_AFTER_LOCAL_WRITES.with(|fail| fail.set(enabled));
+}
+
+#[cfg(test)]
+fn maybe_fail_notification_create_after_local_writes() -> Result<()> {
+    if FAIL_NOTIFICATION_CREATE_AFTER_LOCAL_WRITES.with(std::cell::Cell::get) {
+        return Err(AppError::new(
+            "notification_create_test_failure",
+            "forced notification create failure after local writes",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn maybe_fail_notification_create_after_local_writes() -> Result<()> {
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 struct NotificationRenderRow {
     item: NotificationMessageItem,
@@ -137,6 +164,20 @@ impl Workspace {
             "message_count": 0,
             "path": rel_path(&self.root, &notification_dir),
         });
+        // Filing the message changes it before the steps below can fail; the
+        // marker makes such a failure visible to `doctor` instead of leaving a
+        // message that points at a notification the guard then deleted.
+        let transaction = match message_id {
+            Some(message_id) => Some(self.begin_transaction(
+                "notification_create",
+                vec![
+                    rel_path(&self.root, &notification_dir),
+                    format!("messages/{message_id}.json"),
+                    ".afmail/push".to_string(),
+                ],
+            )?),
+            None => None,
+        };
         if let Some(message_id) = message_id {
             let notification_rfc3339 =
                 self.set_direct_message_notification(message_id, &notification_uid)?;
@@ -166,6 +207,11 @@ impl Workspace {
         } else {
             self.refresh_notification(&notification_uid)?;
         }
+        maybe_fail_notification_create_after_local_writes()?;
+        if let Some(transaction) = transaction {
+            transaction.commit()?;
+        }
+        guard.commit();
         self.append_audit_event(
             "notification_created",
             vec![audit_target("notification", &notification_uid)],
@@ -178,7 +224,6 @@ impl Workspace {
                 "path": rel_path(&self.root, &notification_dir),
             }),
         )?;
-        guard.commit();
         Ok(result)
     }
 
@@ -342,13 +387,22 @@ impl Workspace {
                 )
             })?;
         let item = old_data.items.remove(pos);
+        // Everything that can fail on input is read before the first write.
+        let mut message = self.read_message_by_id(message_id)?;
+        let transaction = self.begin_transaction(
+            "notification_message_move",
+            vec![
+                format!("messages/{message_id}.json"),
+                format!("{}/{notification_uid}", layout::NOTIFICATIONS),
+                format!("{}/{new_notification_uid}", layout::NOTIFICATIONS),
+            ],
+        )?;
         old_data.updated_rfc3339 = Some(now_rfc3339());
         self.write_notifications(&notification_uid, &old_data)?;
         let old_view = self.notification_view_path(&notification_uid, message_id);
         if old_view.exists() {
             remove_file(&old_view)?;
         }
-        let mut message = self.read_message_by_id(message_id)?;
         message.workspace.status = MessageStatus::Notification.as_str().to_string();
         message.workspace.notification_uid = Some(new_notification_uid.to_string());
         message.workspace.notification_rfc3339 = Some(item.added_rfc3339.clone());
@@ -362,6 +416,7 @@ impl Workspace {
         )?;
         self.refresh_notification(&notification_uid)?;
         self.refresh_notification(&new_notification_uid)?;
+        transaction.commit()?;
         self.append_audit_event(
             "notification_message_moved",
             vec![
@@ -1083,15 +1138,13 @@ impl Workspace {
         data_items: &[NotificationMessageItem],
         render_context: Option<&RenderContext>,
     ) -> Result<Vec<NotificationRenderRow>> {
+        let source = self.message_source(render_context)?;
         data_items
             .iter()
             .map(|item| {
                 Ok(NotificationRenderRow {
                     item: item.clone(),
-                    message: match render_context {
-                        Some(context) => context.read_message(self, &item.message_id)?,
-                        None => self.read_message_by_id(&item.message_id)?,
-                    },
+                    message: source.read(self, &item.message_id)?,
                 })
             })
             .collect()

@@ -12,26 +12,22 @@ pub(super) fn actions_for(
         if !outbound.steps.is_empty() {
             return Ok(outbound.steps.iter().map(step_label).collect());
         }
+        // Remote steps already ran; the draft that resolved them may be gone.
+        if item.local_stage.is_some() {
+            return Ok(item
+                .step_states
+                .iter()
+                .map(|state| state.label.clone())
+                .collect());
+        }
         let steps = match outbound.action {
             OutboundAction::SaveDraft => &config.actions.draft.save.steps,
             OutboundAction::Send => &config.actions.draft.send.steps,
         };
-        if !steps.is_empty() {
-            return Ok(filter_reply_to_steps(root, item, steps.clone())?
-                .iter()
-                .map(step_label)
-                .collect());
-        }
-        return Ok(match outbound.action {
-            OutboundAction::Send => {
-                vec![
-                    "append_to_mailbox_id_drafts".to_string(),
-                    "smtp_send".to_string(),
-                    "append_to_mailbox_id_sent".to_string(),
-                ]
-            }
-            OutboundAction::SaveDraft => vec!["append_to_mailbox_id_drafts".to_string()],
-        });
+        return Ok(filter_reply_to_steps(root, item, steps.clone())?
+            .iter()
+            .map(step_label)
+            .collect());
     }
     Ok(Vec::new())
 }
@@ -60,8 +56,14 @@ pub(super) fn step_label(step: &ActionStep) -> String {
     if let Some(mailbox_id) = &step.append_to_mailbox_id {
         return format!("append_to_mailbox_id_{mailbox_id}");
     }
+    if step.file_send.is_some() {
+        return "file_send".into();
+    }
     if step.smtp_send.is_some() {
         return "smtp_send".to_string();
+    }
+    if step.cloudflare_send.is_some() {
+        return "cloudflare_send".to_string();
     }
     "noop".to_string()
 }

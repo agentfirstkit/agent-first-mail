@@ -327,25 +327,48 @@ impl TemplateKey {
     }
 }
 
-/// The whole `templates/` tree, embedded at compile time. Language-specific
-/// templates live in `templates/<bcp47>/`; non-linguistic shared assets live
-/// in `templates/shared/` and are exported once.
-static BUILTIN_TEMPLATES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates");
+/// Built-in language packs live in `templates/<bcp47>/`; non-linguistic shared
+/// assets live in `templates/shared/` and are exported once. Each pack is
+/// embedded on its own: `templates/` also holds the Worker project, whose
+/// dependency installs must never be compiled into the binary.
+static SHARED_TEMPLATES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates/shared");
 
-fn lookup_builtin(language: &str, key: TemplateKey) -> Option<&'static str> {
-    let path = if key.is_language_scoped() {
-        format!("{language}/{}", key.as_str())
+fn language_templates(language: TemplateLanguage) -> &'static Dir<'static> {
+    static ENUS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates/en-US");
+    static DEDE: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates/de-DE");
+    static ESES: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates/es-ES");
+    static FRFR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates/fr-FR");
+    static JAJP: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates/ja-JP");
+    static KOKR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates/ko-KR");
+    static PTBR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates/pt-BR");
+    static ZHCN: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates/zh-CN");
+    static ZHTW: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/templates/zh-TW");
+    match language {
+        TemplateLanguage::EnUs => &ENUS,
+        TemplateLanguage::DeDe => &DEDE,
+        TemplateLanguage::EsEs => &ESES,
+        TemplateLanguage::FrFr => &FRFR,
+        TemplateLanguage::JaJp => &JAJP,
+        TemplateLanguage::KoKr => &KOKR,
+        TemplateLanguage::PtBr => &PTBR,
+        TemplateLanguage::ZhCn => &ZHCN,
+        TemplateLanguage::ZhTw => &ZHTW,
+    }
+}
+
+fn lookup_builtin(language: TemplateLanguage, key: TemplateKey) -> Option<&'static str> {
+    let dir = if key.is_language_scoped() {
+        language_templates(language)
     } else {
-        format!("shared/{}", key.as_str())
+        &SHARED_TEMPLATES
     };
-    BUILTIN_TEMPLATES
-        .get_file(path)
+    dir.get_file(key.as_str())
         .and_then(|file| file.contents_utf8())
 }
 
 fn builtin_template_text(language: TemplateLanguage, key: TemplateKey) -> &'static str {
-    lookup_builtin(language.as_str(), key)
-        .or_else(|| lookup_builtin(TemplateLanguage::EnUs.as_str(), key))
+    lookup_builtin(language, key)
+        .or_else(|| lookup_builtin(TemplateLanguage::EnUs, key))
         .unwrap_or("")
 }
 
@@ -1264,7 +1287,7 @@ mod tests {
                 .filter(|key| key.is_language_scoped())
             {
                 assert!(
-                    lookup_builtin(language.as_str(), key).is_some(),
+                    lookup_builtin(language, key).is_some(),
                     "missing builtin template {}/{}",
                     language.as_str(),
                     key.as_str()
@@ -1276,7 +1299,7 @@ mod tests {
             .filter(|key| !key.is_language_scoped())
         {
             assert!(
-                lookup_builtin(TemplateLanguage::EnUs.as_str(), key).is_some(),
+                lookup_builtin(TemplateLanguage::EnUs, key).is_some(),
                 "missing shared builtin template {}",
                 key.as_str()
             );

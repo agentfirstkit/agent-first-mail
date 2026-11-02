@@ -12,6 +12,8 @@
 {%- if analysis.direction == 'inbound' %}{% set message_time = mail.received_rfc3339 or mail.sent_rfc3339 %}{% else %}{% set message_time = mail.sent_rfc3339 or mail.received_rfc3339 %}{% endif -%}
 ### {% if analysis.direction == 'inbound' %}{{ i18n.t('received_from') }}{% else %}{{ i18n.t('sent_to') }}{% endif %} {% if analysis.direction == 'inbound' %}{% if mail.from %}{{ mail.from | inline }}{% else %}{{ i18n.t('unknown') }}{% endif %}{% else %}{% if mail.to %}{{ mail.to | map("inline") | join(", ") }}{% else %}{{ i18n.t('unknown') }}{% endif %}{% endif %} - {% if message_time %}{{ message_time | datetime }}{% else %}{{ i18n.t('unknown_time') }}{% endif %}
 
+{% if mail.origin %}- {{ i18n.t('channel_conversation') }}: `{{ mail.origin.reply_route.source_id | markdown_code }}` / `{{ mail.origin.reply_route.conversation_id | markdown_code }}`
+{% endif %}
 {% if analysis.security.authentication_warning %}- {{ i18n.t('warnings') }}:
 {% if auth.spf != "pass" %}  - {{ i18n.t('authentication') }}: SPF {% if auth.spf == "missing" %}{{ i18n.t('missing') }}{% else %}{{ i18n.t('did_not_pass') }} ({{ auth.spf }}){% endif %}
 {% endif %}{% if auth.dkim != "pass" %}  - {{ i18n.t('authentication') }}: DKIM {% if auth.dkim == "missing" %}{{ i18n.t('missing') }}{% else %}{{ i18n.t('did_not_pass') }} ({{ auth.dkim }}){% endif %}

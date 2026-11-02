@@ -86,6 +86,28 @@ pub enum MessageSuggestionAction {
 pub enum PushAction {
     /// Preview the complete resolved push plan without writing.
     List,
+    /// Check an uncertain push step; a confirmed plan only changes local state.
+    Recover {
+        push_id: String,
+        confirm: Option<String>,
+        settle: Option<SendSettlement>,
+    },
+}
+
+/// What a person asserts about an uncertain send after checking reality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendSettlement {
+    Sent,
+    NotSent,
+}
+
+impl SendSettlement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sent => "sent",
+            Self::NotSent => "not_sent",
+        }
+    }
 }
 
 #[derive(Debug)]

@@ -13,37 +13,31 @@ pub struct MarkdownDoc {
 }
 
 pub fn split_frontmatter(input: &str) -> Result<MarkdownDoc> {
-    let mut lines = input.lines();
-    if lines.next() != Some("---") {
+    let mut lines = input.split_inclusive('\n');
+    let opening = lines.next().unwrap_or_default();
+    if opening.trim_end_matches(['\r', '\n']) != "---" {
         return Err(AppError::new(
             "invalid_request",
             "markdown file is missing frontmatter",
         ));
     }
     let mut frontmatter_lines = Vec::new();
-    let mut body_lines = Vec::new();
-    let mut in_frontmatter = true;
+    let mut offset = opening.len();
     for line in lines {
-        if in_frontmatter && line == "---" {
-            in_frontmatter = false;
-            continue;
+        offset += line.len();
+        let content = line.trim_end_matches(['\r', '\n']);
+        if content == "---" {
+            return Ok(MarkdownDoc {
+                frontmatter: frontmatter_lines.join("\n"),
+                body: input[offset..].to_owned(),
+            });
         }
-        if in_frontmatter {
-            frontmatter_lines.push(line);
-        } else {
-            body_lines.push(line);
-        }
+        frontmatter_lines.push(content);
     }
-    if in_frontmatter {
-        return Err(AppError::new(
-            "invalid_request",
-            "markdown frontmatter is not closed",
-        ));
-    }
-    Ok(MarkdownDoc {
-        frontmatter: frontmatter_lines.join("\n"),
-        body: body_lines.join("\n"),
-    })
+    Err(AppError::new(
+        "invalid_request",
+        "markdown frontmatter is not closed",
+    ))
 }
 
 /// Deserialize a YAML frontmatter block into a typed struct.
@@ -138,16 +132,32 @@ pub fn edit_frontmatter<T: Serialize>(source: &str, frontmatter: &T, body: &str)
 pub fn render_frontmatter<T: Serialize>(frontmatter: &T, body: &str) -> Result<String> {
     let yaml = yaml_to_string(frontmatter)
         .map_err(|e| AppError::new("internal", format!("serialize frontmatter: {e}")))?;
+    let body = body.trim_start();
+    let ending = if body.ends_with('\n') { "" } else { "\n" };
     Ok(format!(
-        "---\n{}\n---\n{}\n",
+        "---\n{}\n---\n{body}{ending}",
         yaml.trim_end_matches(['\r', '\n']),
-        body.trim_start()
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_frontmatter_preserves_exact_body_bytes() {
+        for body in ["", "正文", "\n  indented\n\n", "\r\n正文\r\n\r\n"] {
+            for newline in ["\n", "\r\n"] {
+                let source = format!("---{newline}title: Original{newline}---{newline}{body}");
+                let (mut metadata, read_body) = read_doc::<serde_json::Value>(&source).unwrap();
+                assert_eq!(read_body, body);
+                metadata["title"] = "Changed".into();
+                let edited = edit_frontmatter(&source, &metadata, &read_body).unwrap();
+                assert_eq!(split_frontmatter(&edited).unwrap().body, body);
+            }
+        }
+        assert_eq!(split_frontmatter("---\nkey: value\n---").unwrap().body, "");
+    }
 
     #[test]
     fn a_key_with_no_value_reads_as_null() {

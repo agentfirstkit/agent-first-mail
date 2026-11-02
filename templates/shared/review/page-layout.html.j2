@@ -41,6 +41,8 @@
     {% for item in contents.items %}
       {% set document = item.document %}
       {% with message_document = document.context.message, message_expanded = true %}{% include "review/message.html.j2" %}{% endwith %}
+      {% if document.context.related_message_issues %}<aside class="authentication-warning" role="alert" data-afmail-related-issues><p>{{ i18n.t('related_messages_incomplete') }}</p><ul>{% for issue in document.context.related_message_issues %}<li>{{ issue.message_id }} · {{ issue.code }}</li>{% endfor %}</ul></aside>{% endif %}
+      {% if document.context.related_messages %}<section class="review-section" data-afmail-related-messages><h2>{{ i18n.t('related_messages') }}</h2><p class="muted">{{ i18n.t('related_explainer') }}</p>{% for related in document.context.related_messages %}{% with message_document = related, message_expanded = false %}{% include "review/message.html.j2" %}{% endwith %}{% endfor %}</section>{% endif %}
     {% endfor %}
     {% include "review/agent-workbench-layout.html.j2" %}
     {% elif surface_kind == 'case_review' %}

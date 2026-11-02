@@ -607,13 +607,23 @@ pub(super) fn remove_flags(existing: &mut Vec<String>, flags: &[String]) -> bool
     true
 }
 
-pub(super) fn json_contains_any_id(value: &Value, ids: &BTreeSet<String>) -> bool {
-    match value {
-        Value::String(text) => ids.contains(text),
-        Value::Array(items) => items.iter().any(|item| json_contains_any_id(item, ids)),
-        Value::Object(map) => map.values().any(|item| json_contains_any_id(item, ids)),
-        _ => false,
+/// The members of `ids` that appear as a string anywhere in `value`.
+pub(super) fn json_matching_ids(value: &Value, ids: &BTreeSet<String>) -> BTreeSet<String> {
+    fn walk(value: &Value, ids: &BTreeSet<String>, found: &mut BTreeSet<String>) {
+        match value {
+            Value::String(text) => {
+                if ids.contains(text) {
+                    found.insert(text.clone());
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| walk(item, ids, found)),
+            Value::Object(map) => map.values().for_each(|item| walk(item, ids, found)),
+            _ => {}
+        }
     }
+    let mut found = BTreeSet::new();
+    walk(value, ids, &mut found);
+    found
 }
 
 pub(super) fn email_address(value: &str) -> String {
@@ -672,14 +682,22 @@ pub(super) fn notification_dir_name(notification_uid: &str, name: &str) -> Strin
     format!("{notification_uid}-{}", human_slug(name))
 }
 
-pub(super) fn human_slug(value: &str) -> String {
-    let config = SlugConfig {
-        empty_output_policy: EmptyOutputPolicy::UseFallbackSlug("untitled".to_string()),
+const HUMAN_SLUG_FALLBACK: &str = "untitled";
+
+fn human_slug_config() -> SlugConfig {
+    SlugConfig {
+        empty_output_policy: EmptyOutputPolicy::UseFallbackSlug(HUMAN_SLUG_FALLBACK.to_string()),
         ..SlugConfig::default()
-    };
-    agent_first_slug::slugify(value, &config)
+    }
+}
+
+/// agent-first-slug fails only on a configuration error, which it reports for
+/// every input; `human_slug_config_is_accepted` pins that this one has none,
+/// so the fallback below never stands in for a slug.
+pub(super) fn human_slug(value: &str) -> String {
+    agent_first_slug::slugify(value, &human_slug_config())
         .map(|result| result.slug)
-        .unwrap_or_else(|_| "untitled".to_string())
+        .unwrap_or_else(|_| HUMAN_SLUG_FALLBACK.to_string())
 }
 
 pub(super) fn validate_contact_uid(value: &str) -> Result<()> {
@@ -1177,7 +1195,17 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::human_slug;
+    use super::{HUMAN_SLUG_FALLBACK, human_slug, human_slug_config};
+
+    #[test]
+    fn human_slug_config_is_accepted() {
+        // A rejected configuration would turn every case and notification name
+        // into the fallback, and their directories would collide.
+        assert_eq!(
+            agent_first_slug::slugify("", &human_slug_config()).map(|result| result.slug),
+            Ok(HUMAN_SLUG_FALLBACK.to_string())
+        );
+    }
 
     #[test]
     fn human_slug_keeps_unicode_letters_and_digits() {

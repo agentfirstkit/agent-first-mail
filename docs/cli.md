@@ -59,6 +59,9 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 - [`afmail case trash`](#afmail-case-trash) — Move every message in this case to local trash and queue Trash moves.
 - [`afmail case unarchive`](#afmail-case-unarchive) — Move this archived case back to an active case group.
 - [`afmail case untag`](#afmail-case-untag) — Remove a case organization tag.
+- [`afmail cloudflare consume`](#afmail-cloudflare-consume) — Consume one Queue batch, import mail, and dispatch durable agent work.
+- [`afmail cloudflare scaffold`](#afmail-cloudflare-scaffold) — Write an Email Worker project into an absent or empty directory.
+- [`afmail cloudflare watch`](#afmail-cloudflare-watch) — Watch Queue events and periodically reconcile R2, waking an agent only for durable new work.
 - [`afmail config add`](#afmail-config-add) — Add an element to a keyed list such as `identities`.
 - [`afmail config get`](#afmail-config-get) — Get one config key.
 - [`afmail config remove`](#afmail-config-remove) — Remove a keyed-list element by its slug.
@@ -112,15 +115,16 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 - [`afmail notification show`](#afmail-notification-show) — Show the exact typed notification document used by Markdown and Review.
 - [`afmail notification suggestion clear`](#afmail-notification-suggestion-clear) — Clear exactly the current suggestion round.
 - [`afmail notification suggestion set`](#afmail-notification-suggestion-set) — Replace the current suggestion and clear any human review of the prior round.
-- [`afmail pull`](#afmail-pull) — Read configured IMAP mailbox ids into local message files without changing remote mail.
+- [`afmail pull`](#afmail-pull) — Import messages from configured IMAP, Cloudflare and file sources.
 - [`afmail purge`](#afmail-purge) — Permanently delete old local spam, trash, and remote-deleted records together.
 - [`afmail purge deleted`](#afmail-purge-deleted) — Permanently delete old local records whose remote message disappeared.
 - [`afmail purge spam`](#afmail-purge-spam) — Permanently delete old local spam records.
 - [`afmail purge trash`](#afmail-purge-trash) — Permanently delete old local trash records.
 - [`afmail push`](#afmail-push) — Push queued local work to IMAP and SMTP.
 - [`afmail push list`](#afmail-push-list) — Preview the complete resolved push plan without writing.
+- [`afmail push recover`](#afmail-push-recover) — Check the evidence for an uncertain Drafts APPEND or send step; optionally repair or settle local state.
 - [`afmail remote folders`](#afmail-remote-folders) — List IMAP folders/mailboxes.
-- [`afmail remote test`](#afmail-remote-test) — Test configured IMAP and SMTP access without sending mail.
+- [`afmail remote test`](#afmail-remote-test) — Test configured IMAP, Cloudflare R2, and SMTP access without sending mail.
 - [`afmail render refresh`](#afmail-render-refresh) — Rebuild generated case and notification read views.
 - [`afmail render templates`](#afmail-render-templates) — Export built-in language templates, keeping existing files unless forced.
 - [`afmail skill install`](#afmail-skill-install) — Install the Agent-First Mail skill.
@@ -163,7 +167,7 @@ Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-
 | `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
 | `--mode` | Network exposure mode |
 | `--port` | TCP port. Use 0 to let the operating system choose an available port. |
-| `--access-token-secret` | Bearer credential; falls back to AFMAIL_API_ACCESS_TOKEN_SECRET. (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
+| `--access-token-secret` | Bearer credential; falls back to AFMAIL_API_ACCESS_TOKEN_SECRET. (the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], literal:VALUE) |
 
 ### `afmail case add`
 
@@ -854,6 +858,48 @@ afmail case untag [--workspace <PATH>] [--log <startup|request|progress|retry>..
 | `CASE_REF` | Case ref: cYYYYMMDDNNN or cYYYYMMDDNNN-any-suffix |
 | `TAG` | Case organization tag |
 | `--reason` | Why this tag should be removed; required by default |
+
+### `afmail cloudflare consume`
+
+Consume one Queue batch, import mail, and dispatch durable agent work.
+
+```
+afmail cloudflare consume [--workspace <PATH>] [--log <startup|request|progress|retry>...] [--reconcile]
+```
+
+| Argument | Meaning |
+|---|---|
+| `--workspace` | Existing afmail workspace to operate on instead of discovering one from the current directory |
+| `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
+| `--reconcile` | Also scan the R2 pending prefix to recover missing or expired notifications |
+
+### `afmail cloudflare scaffold`
+
+Write an Email Worker project into an absent or empty directory.
+
+```
+afmail cloudflare scaffold [--log <startup|request|progress|retry>...] <DIR>
+```
+
+| Argument | Meaning |
+|---|---|
+| `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
+| `DIR` | Worker project directory |
+
+### `afmail cloudflare watch`
+
+Watch Queue events and periodically reconcile R2, waking an agent only for durable new work.
+
+```
+afmail cloudflare watch [--workspace <PATH>] [--log <startup|request|progress|retry>...]
+```
+
+Output: protocol events; `--output` json/yaml/plain (default `json`), `--output-to` stdout/stderr (default `stdout`); redirect with `--stdout-file` or `--stderr-file`.
+
+| Argument | Meaning |
+|---|---|
+| `--workspace` | Existing afmail workspace to operate on instead of discovering one from the current directory |
+| `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
 
 ### `afmail config add`
 
@@ -1736,7 +1782,7 @@ Arguments across every shape above:
 
 ### `afmail pull`
 
-Read configured IMAP mailbox ids into local message files without changing remote mail.
+Import messages from configured IMAP, Cloudflare and file sources.
 
 #### `pull-window` — Pull a bounded window: the default initial window, or --since-days
 
@@ -1750,16 +1796,30 @@ afmail pull [--workspace <PATH>] [--log <startup|request|progress|retry>...] [<M
 afmail pull [--workspace <PATH>] [--log <startup|request|progress|retry>...] [<MAILBOX_ID>...] [--dry-run] [--max-new-messages <COUNT>] [--max-total-bytes <BYTES>] --all-history
 ```
 
+#### `pull-cloudflare` — Select Cloudflare R2, optionally with file sources; time windows apply only to IMAP
+
+```
+afmail pull [--workspace <PATH>] [--log <startup|request|progress|retry>...] [<MAILBOX_ID>...] --cloudflare [--files] [--dry-run] [--max-new-messages <COUNT>] [--max-total-bytes <BYTES>]
+```
+
+#### `pull-files` — Select file sources; time windows apply only to IMAP
+
+```
+afmail pull [--workspace <PATH>] [--log <startup|request|progress|retry>...] [<MAILBOX_ID>...] --files [--dry-run] [--max-new-messages <COUNT>] [--max-total-bytes <BYTES>]
+```
+
 Arguments across every shape above:
 
 | Argument | Meaning |
 |---|---|
 | `--workspace` | Existing afmail workspace to operate on instead of discovering one from the current directory |
 | `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
-| `MAILBOX_ID` | Configured mailbox ids to pull. With none, pulls actions.pull.default_mailbox_ids. |
-| `--dry-run` | Estimate remote candidates and budgets without downloading or writing locally |
-| `--max-new-messages` | Maximum number of new messages stored across all selected mailboxes |
-| `--max-total-bytes` | Maximum new raw message bytes stored across all selected mailboxes |
+| `MAILBOX_ID` | IMAP mailbox ids to pull. With none and no --cloudflare or --files, pulls every configured source. |
+| `--cloudflare` | Pull Cloudflare R2 objects; with mailbox ids, also pull those IMAP mailboxes |
+| `--files` | Pull native JSON from every configured file source |
+| `--dry-run` | Estimate source candidates and budgets without downloading or writing locally |
+| `--max-new-messages` | Maximum number of new messages stored across all selected sources |
+| `--max-total-bytes` | Maximum new raw message bytes stored across all selected sources |
 | `--since-days` | Limit the remote candidate range to messages from the last DAYS days |
 | `--all-history` | Include all remote history instead of the default initial window |
 
@@ -1861,6 +1921,45 @@ afmail push list [--workspace <PATH>] [--log <startup|request|progress|retry>...
 | `--workspace` | Existing afmail workspace to operate on instead of discovering one from the current directory |
 | `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
 
+### `afmail push recover`
+
+Check the evidence for an uncertain Drafts APPEND or send step; optionally repair or settle local state.
+
+#### `push_recover_check` — Read-only evidence check returning a recovery plan_id
+
+```
+afmail push recover [--workspace <PATH>] [--log <startup|request|progress|retry>...] <PUSH_ID>
+```
+
+#### `push_recover_confirm` — Recheck an uncertain Drafts APPEND and repair local queue state
+
+```
+afmail push recover [--workspace <PATH>] [--log <startup|request|progress|retry>...] <PUSH_ID> --confirm <PLAN_ID>
+```
+
+#### `push_recover_sent` — Settle an uncertain send as sent
+
+```
+afmail push recover [--workspace <PATH>] [--log <startup|request|progress|retry>...] <PUSH_ID> --confirm <PLAN_ID> --sent
+```
+
+#### `push_recover_not_sent` — Settle an uncertain send as not sent
+
+```
+afmail push recover [--workspace <PATH>] [--log <startup|request|progress|retry>...] <PUSH_ID> --confirm <PLAN_ID> --not-sent
+```
+
+Arguments across every shape above:
+
+| Argument | Meaning |
+|---|---|
+| `--workspace` | Existing afmail workspace to operate on instead of discovering one from the current directory |
+| `--log` | Diagnostic category to emit. Repeat the flag for more than one. |
+| `PUSH_ID` | Queued push item to inspect |
+| `--confirm` | Apply exactly the recovery plan returned by the check; local queue state only, never mail |
+| `--sent` | Assert an uncertain send was delivered; later steps run on the next confirmed push |
+| `--not-sent` | Assert an uncertain send was not delivered; it is sent only by a newly confirmed push |
+
 ### `afmail remote folders`
 
 List IMAP folders/mailboxes.
@@ -1876,7 +1975,7 @@ afmail remote folders [--workspace <PATH>] [--log <startup|request|progress|retr
 
 ### `afmail remote test`
 
-Test configured IMAP and SMTP access without sending mail.
+Test configured IMAP, Cloudflare R2, and SMTP access without sending mail.
 
 ```
 afmail remote test [--workspace <PATH>] [--log <startup|request|progress|retry>...]
@@ -2121,7 +2220,7 @@ Arguments across every shape above:
 | 1 | The command ran and failed. The event carries a domain `error.code`. |
 | 2 | The invocation was rejected before anything ran. `error.code` is one of the `cli_*` codes below. |
 | 3 | Some items in a batch succeeded and some failed. The remote effects that landed stay landed, so re-running the same call is not safe; read `failures` and re-queue from there. |
-| 4 | The command ran, but its output could not be written to the requested destination. |
+| 4 | Output could not be written (`output_write_failed`); a closed reader is success. |
 
 The split is the useful one for a caller: exit 2 means the call was never made, so retrying it unchanged cannot help, while exit 1 means it was.
 
@@ -2129,6 +2228,8 @@ The split is the useful one for a caller: exit 2 means the call was never made, 
 
 Every structural failure emits one strict JSON `kind:"error"` event on stderr, leaves stdout empty, and exits 2. The `code` names the failure — `cli_unknown_argument` for an unknown spelling, `cli_unregistered_combination` for registered arguments in a mixture that is not, and one each for `cli_unknown_command`, `cli_missing_argument_value`, `cli_invalid_argument_value`, `cli_duplicate_argument`, `cli_unexpected_positional`, and `cli_invalid_utf8`. `message` identifies a safe argument spelling or the failure category and `hint` gives the command to run next; neither ever quotes a raw value, including secrets. These are decided before any config, secret source, filesystem, network, or domain I/O.
 
-Two exit-1 codes describe the tool itself rather than the call: `cli_invocation_invalid` means the program misread its own resolved invocation — an unknown action id, or an argument id the selected combination cannot produce — and `output_setup_failed` means an output sink (`--stdout-file`, `--stderr-file`, stream redirection) could not be established. Both are defects to report, not inputs to correct; retrying the same command cannot help.
+`cli_invocation_invalid` (exit 1) describes the tool itself rather than the call: the program misread its own resolved invocation — an unknown action id, or an argument id the selected combination cannot produce. It is a defect to report, not an input to correct; retrying the same command cannot help. `output_setup_failed` (exit 1) means an output sink (`--stdout-file`, `--stderr-file`, stream redirection) could not be established; the message names the flag and path, which is usually a missing directory or a permission to fix.
+
+A tool may also exit 2 with a code of its own for a usage error its argument grammar cannot express — two arguments that are each valid but cannot be combined, or a value whose meaning depends on the target. Such a call is likewise refused before anything is changed.
 
 Domain failures (exit 1) carry their own stable `error.code` instead, drawn from whatever this tool defines rather than from the `cli_*` set. Error events are routinely logged, so a message never quotes a value that came from an argument able to carry a credential — a header, a cookie, a token, a password, a proxy URL, an environment value, a form field. Such an error names the argument and the shape that was wrong, and stops there. A value that cannot be a secret — a path, a dot-path, a session name — is quoted, because an error that cannot say which one it means is not worth logging either.

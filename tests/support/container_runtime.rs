@@ -1,22 +1,34 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
+#[path = "runtime_selection.rs"]
+mod runtime_selection;
+
 use std::net::TcpListener;
 use std::process::{Command, Output};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestContainerRuntime {
     Apple,
+    Podman,
     Docker,
 }
 
 impl TestContainerRuntime {
     pub fn selected() -> Self {
-        match std::env::var("AFMAIL_TEST_CONTAINER_RUNTIME").as_deref() {
+        match std::env::var("AFMAIL_TEST_CONTAINER_RUNTIME")
+            .or_else(|_| std::env::var("AF_CONTAINER_RUNTIME"))
+            .as_deref()
+        {
             Ok("apple") => Self::Apple,
+            Ok("podman") => Self::Podman,
             Ok("docker") => Self::Docker,
-            Ok(_) => panic!("AFMAIL_TEST_CONTAINER_RUNTIME must be apple or docker"),
-            Err(_) if cfg!(target_os = "macos") => Self::Apple,
-            Err(_) => Self::Docker,
+            Ok(_) => panic!("AFMAIL_TEST_CONTAINER_RUNTIME must be apple, podman, or docker"),
+            Err(_) => match runtime_selection::detect_runtime() {
+                Some("apple") => Self::Apple,
+                Some("podman") => Self::Podman,
+                Some("docker") => Self::Docker,
+                _ => panic!("no container runtime found; use the fixed test entrypoint"),
+            },
         }
     }
 
@@ -27,6 +39,7 @@ impl TestContainerRuntime {
     fn bin(self) -> &'static str {
         match self {
             Self::Apple => "container",
+            Self::Podman => "podman",
             Self::Docker => "docker",
         }
     }
@@ -60,7 +73,7 @@ impl TestContainerRuntime {
     }
 
     pub fn published_ports(self, container_ports: &[u16]) -> Vec<PublishedPort> {
-        if self == Self::Docker {
+        if self != Self::Apple {
             return container_ports
                 .iter()
                 .copied()
@@ -123,7 +136,7 @@ impl TestContainerRuntime {
     pub fn delete(self, container: &str) {
         let args: &[&str] = match self {
             Self::Apple => &["delete", "--force", container],
-            Self::Docker => &["rm", "-f", container],
+            Self::Podman | Self::Docker => &["rm", "-f", container],
         };
         let _ = Command::new(self.bin()).args(args).status();
     }

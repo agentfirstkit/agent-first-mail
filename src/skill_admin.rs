@@ -141,11 +141,15 @@ mod tests {
             "Local read:",
             "Remote read:",
             "Local mutation:",
-            "Remote mutation:",
+            "Remote mailbox mutation and sending:",
             "Permanent local deletion:",
         ] {
             assert!(SPEC.source.contains(boundary), "missing {boundary}");
         }
+        assert!(
+            SPEC.source
+                .contains("authorizes this normal spool acknowledgement")
+        );
         assert!(SPEC.source.contains("push --confirm PLAN_ID"));
         assert!(SPEC.source.contains("purge --confirm PLAN_ID"));
         assert!(

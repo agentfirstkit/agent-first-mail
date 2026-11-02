@@ -8,9 +8,19 @@
       "description": "Explicitly include all remote history.",
       "type": "boolean"
     },
+    "cloudflare": {
+      "default": false,
+      "description": "Select Cloudflare R2 ingestion explicitly.",
+      "type": "boolean"
+    },
     "dry_run": {
       "default": false,
       "description": "Estimate candidates and budgets without downloading or writing.",
+      "type": "boolean"
+    },
+    "files": {
+      "default": false,
+      "description": "Select native file-channel ingestion explicitly.",
       "type": "boolean"
     },
     "mailbox_ids": {

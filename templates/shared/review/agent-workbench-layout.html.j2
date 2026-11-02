@@ -1,4 +1,13 @@
 {%- import "i18n/catalog.j2" as i18n -%}
+{#- One decision as a card. Nothing is preselected: settling an agent's
+    suggestion is an answer the person gives, never a default. The single
+    reason field is moved into the chosen card by the review runtime. -#}
+{%- macro decision_card(value, label) -%}
+<div class="decision-choice" data-afmail-decision-choice><label class="decision-head"><input type="radio" name="decision" value="{{ value }}" required><span>{{ label }}</span></label></div>
+{%- endmacro -%}
+{%- macro reason_field(placeholder) -%}
+<textarea name="reason" rows="1" hidden data-afmail-reason data-afmail-note-label="{{ i18n.t('note_optional') }}" data-afmail-reason-label="{{ i18n.t('reason_required') }}" data-afmail-reason-placeholder="{{ placeholder }}"></textarea>
+{%- endmacro -%}
 <section class="panel suggestion agent-workbench" aria-labelledby="agent-workbench-heading" data-afmail-agent-workbench>
   <div class="agent-workbench-heading">
     <div>
@@ -28,13 +37,13 @@
                 {% if agent_suggestion.confidence_percent is defined and agent_suggestion.confidence_percent is not none %}<p class="muted">{{ i18n.t('confidence') }}: {{ agent_suggestion.confidence_percent }}%</p>{% endif %}
                 <form data-afmail-settle="message">
                   <input type="hidden" name="message_id" value="{{ message_id }}">
-                  <label><span>{{ i18n.t('decision') }}</span><select name="decision" data-afmail-decision>
-                    <option value="accept">{{ i18n.t('accept_suggestion') }}</option>
-                    <option value="reject">{{ i18n.t('reject') }}</option>
-                    {% if action_kind != 'spam' %}<option value="override_spam">{{ i18n.t('mark_spam_instead') }}</option>{% endif %}
-                    {% if action_kind != 'trash' %}<option value="override_trash">{{ i18n.t('move_trash_instead') }}</option>{% endif %}
-                  </select></label>
-                  <label><span>{{ i18n.t('reason_reject_change') }}</span><textarea name="reason" placeholder="{{ i18n.t('tell_agent_change') }}"></textarea></label>
+                  <fieldset class="decision-choices" data-afmail-decision><legend>{{ i18n.t('decision') }}</legend>
+                    {{ decision_card('accept', i18n.t('accept_suggestion')) }}
+                    {{ decision_card('reject', i18n.t('reject')) }}
+                    {% if action_kind != 'spam' %}{{ decision_card('override_spam', i18n.t('mark_spam_instead')) }}{% endif %}
+                    {% if action_kind != 'trash' %}{{ decision_card('override_trash', i18n.t('move_trash_instead')) }}{% endif %}
+                  </fieldset>
+                  {{ reason_field(i18n.t('tell_agent_change')) }}
                   <div class="settle-row"><span class="save-state" data-afmail-settle-status aria-live="polite"></span><button type="button" class="primary-action" data-afmail-settle-button>{{ i18n.t('settle') }}</button></div>
                 </form>
               {% else %}
@@ -59,9 +68,11 @@
           <p><strong>{% if action_kind == 'case_archive' %}{{ i18n.t('archive_case') }}{% elif action_kind == 'case_unarchive' %}{{ i18n.t('restore_to') }} {{ suggestion.suggested_action.group }}{% elif action_kind == 'case_move' %}{{ i18n.t('move_to') }} {{ suggestion.suggested_action.group }}{% elif action_kind == 'case_rename' %}{{ i18n.t('rename_to') }} “{{ suggestion.suggested_action.case_name }}”{% elif action_kind == 'case_tag' %}{{ i18n.t('add_tag') }} {{ suggestion.suggested_action.tag }}{% elif action_kind == 'case_untag' %}{{ i18n.t('remove_tag') }} {{ suggestion.suggested_action.tag }}{% elif action_kind == 'case_trash' %}{{ i18n.t('trash_case_messages') }}{% elif action_kind == 'case_delete' %}{{ i18n.t('delete_case_permanently') }}{% endif %}</strong></p>
           <blockquote>{{ suggestion.reason }}</blockquote>
           <form data-afmail-settle="case">
-            <label><span>{{ i18n.t('decision') }}</span><select name="decision" data-afmail-decision><option value="accept">{{ i18n.t('accept_suggestion') }}</option><option value="reject">{{ i18n.t('reject') }}</option></select></label>
-            <label><span>{{ i18n.t('reason_reject') }}</span><textarea name="reason"></textarea></label>
-            {% if action_kind == 'case_delete' and suggestion.suggested_action.allow_notes %}<label class="destructive-confirmation"><span><input type="checkbox" name="allow_notes_confirmed" value="true" data-afmail-required-confirmation data-afmail-required-when="decision:accept"> {{ i18n.t('confirm_delete_case_notes') }}</span></label>{% endif %}
+            <fieldset class="decision-choices" data-afmail-decision><legend>{{ i18n.t('decision') }}</legend>
+              <div class="decision-choice" data-afmail-decision-choice><label class="decision-head"><input type="radio" name="decision" value="accept" required><span>{{ i18n.t('accept_suggestion') }}</span></label>{% if action_kind == 'case_delete' and suggestion.suggested_action.allow_notes %}<label class="destructive-confirmation"><span><input type="checkbox" name="allow_notes_confirmed" value="true" data-afmail-required-confirmation data-afmail-required-when="decision:accept"> {{ i18n.t('confirm_delete_case_notes') }}</span></label>{% endif %}</div>
+              {{ decision_card('reject', i18n.t('reject')) }}
+            </fieldset>
+            {{ reason_field(i18n.t('tell_agent_change')) }}
             <div class="settle-row"><span class="save-state" data-afmail-settle-status aria-live="polite"></span><button type="button" class="primary-action" data-afmail-settle-button>{{ i18n.t('settle') }}</button></div>
           </form>
         {% else %}
@@ -81,9 +92,11 @@
           <p><strong>{% if action_kind == 'notification_rename' %}{{ i18n.t('rename_to') }} “{{ suggestion.suggested_action.notification_name }}”{% elif action_kind == 'notification_delete' %}{{ i18n.t('delete_notification_permanently') }}{% endif %}</strong></p>
           <blockquote>{{ suggestion.reason }}</blockquote>
           <form data-afmail-settle="notification">
-            <label><span>{{ i18n.t('decision') }}</span><select name="decision" data-afmail-decision><option value="accept">{{ i18n.t('accept_suggestion') }}</option><option value="reject">{{ i18n.t('reject') }}</option></select></label>
-            <label><span>{{ i18n.t('reason_reject') }}</span><textarea name="reason"></textarea></label>
-            {% if action_kind == 'notification_delete' and suggestion.suggested_action.allow_notes %}<label class="destructive-confirmation"><span><input type="checkbox" name="allow_notes_confirmed" value="true" data-afmail-required-confirmation data-afmail-required-when="decision:accept"> {{ i18n.t('confirm_delete_notification_notes') }}</span></label>{% endif %}
+            <fieldset class="decision-choices" data-afmail-decision><legend>{{ i18n.t('decision') }}</legend>
+              <div class="decision-choice" data-afmail-decision-choice><label class="decision-head"><input type="radio" name="decision" value="accept" required><span>{{ i18n.t('accept_suggestion') }}</span></label>{% if action_kind == 'notification_delete' and suggestion.suggested_action.allow_notes %}<label class="destructive-confirmation"><span><input type="checkbox" name="allow_notes_confirmed" value="true" data-afmail-required-confirmation data-afmail-required-when="decision:accept"> {{ i18n.t('confirm_delete_notification_notes') }}</span></label>{% endif %}</div>
+              {{ decision_card('reject', i18n.t('reject')) }}
+            </fieldset>
+            {{ reason_field(i18n.t('tell_agent_change')) }}
             <div class="settle-row"><span class="save-state" data-afmail-settle-status aria-live="polite"></span><button type="button" class="primary-action" data-afmail-settle-button>{{ i18n.t('settle') }}</button></div>
           </form>
         {% else %}
