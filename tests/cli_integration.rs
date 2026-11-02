@@ -2834,7 +2834,7 @@ fn serve_smtp_connection(mut writer: TcpStream, data_tx: mpsc::Sender<String>) {
         Ok(stream) => stream,
         Err(_) => return,
     };
-    let _ = writer.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = writer.set_read_timeout(Some(Duration::from_secs(30)));
     let mut reader = BufReader::new(reader_stream);
     if write_smtp(&mut writer, b"220 afmail test smtp ready\r\n").is_err() {
         return;

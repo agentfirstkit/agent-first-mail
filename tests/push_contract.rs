@@ -433,8 +433,11 @@ fn start_imap_server_with_capabilities(
                     last = Instant::now();
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    // The first connection waits longer: the clock starts
+                    // before the test's `run` queues on the shared command
+                    // lock, which other tests can hold for many seconds.
                     let idle_limit = if served == 0 {
-                        Duration::from_secs(5)
+                        Duration::from_secs(60)
                     } else {
                         Duration::from_millis(800)
                     };
@@ -479,7 +482,9 @@ fn serve_imap_connection(
         Ok(stream) => stream,
         Err(_) => return,
     };
-    let _ = writer.set_read_timeout(Some(Duration::from_secs(5)));
+    // Only a client that stalls mid-session reaches this; a loaded parallel
+    // run can keep afmail busy between two commands for several seconds.
+    let _ = writer.set_read_timeout(Some(Duration::from_secs(30)));
     let mut reader = BufReader::new(reader_stream);
     if write_imap(&mut writer, b"* OK afmail test imap ready\r\n").is_err() {
         return;
@@ -863,7 +868,7 @@ fn serve_smtp_connection(mut writer: TcpStream, data_tx: mpsc::Sender<String>) {
         Ok(stream) => stream,
         Err(_) => return,
     };
-    let _ = writer.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = writer.set_read_timeout(Some(Duration::from_secs(30)));
     let mut reader = BufReader::new(reader_stream);
     if write_smtp(&mut writer, b"220 afmail test smtp ready\r\n").is_err() {
         return;

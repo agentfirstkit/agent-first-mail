@@ -74,6 +74,11 @@ jobs:
           go-version: '1.24.8'
           cache: false
 
+      # scripts/test.sh reads `go mod download -json` with afdata while
+      # preparing the MinIO image.
+      - name: Install afdata
+        run: cargo install --locked agent-first-data --version 0.36.1
+
       - name: Mail source container e2e
         env:
           AFMAIL_TEST_CONTAINER_RUNTIME: docker
